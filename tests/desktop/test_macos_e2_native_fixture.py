@@ -1862,6 +1862,10 @@ class BTMLogObservationTests(unittest.TestCase):
         self.assertEqual((parsed["eventCount"], parsed["ownEventCount"], parsed["unmatchedEventCount"]), (2, 1, 1))
         self.assertEqual(parsed["markerCounts"], {**{name: 1 for name, _ in fixture.BTM_MARKERS}, "other": 0})
         self.assertEqual(parsed["errorCodes"], [{"domain": "smappservice", "code": 3}])
+        self.assertEqual(parsed["ownEventDetails"], [{"ordinal": 0,
+            "messageSha256": fixture.digest(rows[0]["eventMessage"].encode("utf-8")),
+            "pathMask": 0, "markerMask": 1023, "codeMask": 1}])
+        self.assertEqual(parsed["ownEventDetailsOmitted"], 0)
         public = fixture.canonical(parsed)
         for private in (b"CANARY", b"/private/", b"processImagePath", b"eventMessage", b"arbitraryMetric"):
             self.assertNotIn(private, public)
@@ -1886,6 +1890,55 @@ class BTMLogObservationTests(unittest.TestCase):
                 fixture.btm_events(invalid)
         empty = fixture.btm_events(b"[]")
         self.assertEqual((empty["eventCount"], empty["ownEventCount"], empty["errorCodes"]), (0, 0, []))
+        self.assertEqual((empty["ownEventDetails"], empty["ownEventDetailsOmitted"]), ([], 0))
+        self.assertEqual(unknown["ownEventDetails"][0]["markerMask"], 1024)
+        self.assertEqual(unknown["ownEventDetails"][0]["codeMask"], 0)
+        self.assertEqual(fixture.BTM_DETAIL_LIMIT, 4)
+        outer = "/Library/Application Support/MobileReleaseKit-E2NativeFixture/MRK E2 Native Fixture.app"
+        client = outer + "/Contents/Helpers/MRK E2 Native Client.app"
+        paths = (client + "/Contents/Library/LaunchDaemons/dev.mobile-release-kit.fixture.e2.resident.plist",
+                 outer + "/Contents/Library/LaunchDaemons/dev.mobile-release-kit.fixture.e2.resident.plist",
+                 client, outer, client + "/Contents/MacOS/mrk-e2-native-client",
+                 outer + "/Contents/MacOS/mrk-e2-native-entry", client + "/Contents/Helpers/mrk-e2-native-resident",
+                 "Contents/Helpers/mrk-e2-native-resident")
+        self.assertEqual(fixture.BTM_PATHS, paths)
+        def event(message):
+            return {"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": message}
+        def messages(values):
+            return fixture.btm_events(fixture.canonical([event(item) for item in values]))
+        for bit, path in enumerate(paths):
+            spellings = [path] if bit == 7 else [path, "file://" + path.replace(" ", "%20")]
+            if bit in (2, 3):
+                spellings += [item + "/" for item in tuple(spellings)]
+            for spelling in spellings:
+                with self.subTest(fixed_role=bit, spelling=spelling):
+                    detail = messages([fixture.SERVICE + " NotFound plist '" + spelling + "'"])["ownEventDetails"][0]
+                    self.assertEqual((detail["pathMask"], detail["markerMask"]), (1 << bit, 3))
+                    for near in ("x" + spelling, "/alien" + spelling, spelling + ".foreign",
+                                 spelling + "/child", spelling + "//", spelling + "-wrong", spelling + "%20extra"):
+                        self.assertEqual(messages([fixture.SERVICE + " '" + near + "'"])["ownEventDetails"][0]["pathMask"], 0)
+        all_paths = fixture.SERVICE + " " + " ".join("'" + path + "'" for path in paths)
+        self.assertEqual(messages([all_paths])["ownEventDetails"][0]["pathMask"], 255)
+        for ambiguous in ("<private>", paths[0].replace(" ", "%20"),
+                          "file://" + paths[0], "file://" + paths[0].replace(" ", "%2520")):
+            self.assertEqual(messages([fixture.SERVICE + " '" + ambiguous + "'"])["ownEventDetails"][0]["pathMask"], 0)
+        correlated_rows = [event(fixture.IDENTIFIER + ".foreign signature " + paths[0]),
+            event(fixture.SERVICE + " NotFound plist '" + paths[0] + "' Domain=SMAppServiceErrorDomain Code=3"),
+            event("unrelated team id " + paths[5]),
+            event(fixture.SERVICE + " responsibility team id '" + paths[5] + "' Domain=NSOSStatusErrorDomain Code=-50"),
+            event(fixture.SERVICE + " <private>")]
+        correlated_body = fixture.canonical(correlated_rows)
+        correlated = fixture.btm_events(correlated_body)
+        self.assertEqual(correlated["errorCodes"], [{"domain": "osstatus", "code": -50}, {"domain": "smappservice", "code": 3}])
+        self.assertEqual([(row["ordinal"], row["pathMask"], row["markerMask"], row["codeMask"])
+                          for row in correlated["ownEventDetails"]], [(1, 1, 3, 2), (3, 32, 40, 1), (4, 0, 1024, 0)])
+        self.assertEqual([row["messageSha256"] for row in correlated["ownEventDetails"]],
+                         [fixture.digest(correlated_rows[i]["eventMessage"].encode("utf-8")) for i in (1, 3, 4)])
+        truncated = messages(["foreign"] + [fixture.SERVICE + " opaque-" + str(i) for i in range(7)])
+        self.assertEqual([row["ordinal"] for row in truncated["ownEventDetails"]], [1, 2, 3, 4])
+        self.assertEqual((truncated["ownEventCount"], truncated["ownEventDetailsOmitted"], truncated["markerCounts"]["other"]), (7, 3, 7))
+        with self.assertRaises(fixture.Refused):
+            messages([fixture.SERVICE + " \ud800"])
 
         calls = [{"role": "native-run", "entered": True, "returned": True},
                  {"role": fixture.BTM_ROLE, "entered": True, "returned": True, "returncode": 0,
@@ -1912,6 +1965,69 @@ class BTMLogObservationTests(unittest.TestCase):
                        [calls[0], {**calls[1], "workTimeoutSeconds": 11}]):
             with self.assertRaises(fixture.Refused):
                 fixture.btm_log_data(value, SOURCE, forged)
+        for mutation in ({"schemaVersion": 1}, {"schemaVersion": True},
+                         {"type": "mrk-e2-fixture-btm-log-observation-v1"},
+                         {"ownEventDetails": None}, {"ownEventDetails": ()}, {"ownEventDetails": []},
+                         {"ownEventDetails": value["ownEventDetails"] * 5},
+                         {"ownEventDetailsOmitted": True}, {"ownEventDetailsOmitted": -1}, {"ownEventDetailsOmitted": 1}):
+            changed = copy.deepcopy(value)
+            changed.update(mutation)
+            with self.subTest(detail_shape=list(mutation)), self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(changed, SOURCE, calls)
+        for mutation in ({"ordinal": True}, {"ordinal": -1}, {"ordinal": 256}, {"ordinal": 2},
+                         {"messageSha256": "A" * 64}, {"messageSha256": "0" * 63},
+                         {"pathMask": True}, {"pathMask": -1}, {"pathMask": 256},
+                         {"markerMask": True}, {"markerMask": 0}, {"markerMask": 2048},
+                         {"markerMask": 1025}, {"markerMask": 1},
+                         {"codeMask": True}, {"codeMask": -1}, {"codeMask": 2}, {"rawMessage": "CANARY"}):
+            changed = copy.deepcopy(value)
+            changed["ownEventDetails"][0].update(mutation)
+            with self.subTest(detail_value=mutation), self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(changed, SOURCE, calls)
+        changed = copy.deepcopy(value)
+        del changed["ownEventDetails"][0]["codeMask"]
+        with self.assertRaises(fixture.Refused):
+            fixture.btm_log_data(changed, SOURCE, calls)
+        def public_for(parsed_data, raw):
+            public_calls = copy.deepcopy(calls)
+            public_calls[1]["stdoutSha256"] = fixture.digest(raw)
+            public_value = fixture.btm_record(SOURCE)
+            public_value.update(parsed_data, state="observed" if parsed_data["ownEventCount"] else "empty",
+                                window=window, commandIndex=1, toolSha256="c" * 64,
+                                stdoutSha256=fixture.digest(raw), stderrSha256=fixture.digest(b""))
+            self.assertIs(fixture.btm_log_data(public_value, SOURCE, public_calls), public_value)
+            return public_value, public_calls
+        correlated_value, correlated_calls = public_for(correlated, correlated_body)
+        for ordinals in ([1, 1, 4], [3, 1, 4], [1, 3, 5]):
+            changed = copy.deepcopy(correlated_value)
+            for detail, ordinal in zip(changed["ownEventDetails"], ordinals):
+                detail["ordinal"] = ordinal
+            with self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(changed, SOURCE, correlated_calls)
+        changed = copy.deepcopy(correlated_value)
+        changed["markerCounts"]["mentions-plist"] = 0
+        with self.assertRaises(fixture.Refused):
+            fixture.btm_log_data(changed, SOURCE, correlated_calls)
+        public_for(truncated, fixture.canonical([event("foreign")] + [event(fixture.SERVICE + " opaque-" + str(i)) for i in range(7)]))
+        public_for(empty, b"[]")
+        all_markers = " ".join(words[0] for _name, words in fixture.BTM_MARKERS)
+        maximum_rows = [event(fixture.SERVICE + " " + all_markers
+                             + (" " + all_paths if i < 4 else "")
+                             + (" Domain=NSOSStatusErrorDomain Code=" + str(-2147483648 + i) if i < 8 else ""))
+                        for i in range(256)]
+        maximum_body = fixture.canonical(maximum_rows)
+        maximum_value, _ = public_for(fixture.btm_events(maximum_body), maximum_body)
+        self.assertEqual((len(maximum_value["ownEventDetails"]), maximum_value["ownEventDetailsOmitted"]), (4, 252))
+        self.assertEqual(len(maximum_value["errorCodes"]), 8)
+        self.assertLessEqual(len(fixture.canonical(maximum_value)), 4096)
+        self.assertNotIn(paths[0].encode(), fixture.canonical(maximum_value))
+        initial = fixture.btm_record(SOURCE)
+        self.assertEqual((initial["ownEventDetails"], initial["ownEventDetailsOmitted"]), (None, None))
+        self.assertIs(fixture.btm_log_data(initial, SOURCE, []), initial)
+        for key in ("ownEventDetails", "ownEventDetailsOmitted"):
+            changed = dict(initial, **{key: [] if key == "ownEventDetails" else 0})
+            with self.assertRaises(fixture.Refused):
+                fixture.btm_log_data(changed, SOURCE, [])
 
     def test_log_call_preserves_primary_failure_originals_and_native_acceptance(self):
         class UnknownOriginal(Exception):
@@ -1985,7 +2101,8 @@ class BTMLogObservationTests(unittest.TestCase):
                     if mode == "nonzero-log":
                         return subprocess.CompletedProcess(argv, 69, b"", b"PRIVATE-LOG-ERROR")
                     body = b"[]" if mode == "empty" else b"{" if mode == "unparseable" else fixture.canonical([
-                        {"subsystem": fixture.BTM_SUBSYSTEM, "eventMessage": fixture.SERVICE + " NotFound"}])
+                        {"subsystem": fixture.BTM_SUBSYSTEM,
+                         "eventMessage": fixture.SERVICE + " NotFound plist '" + fixture.BTM_PATHS[0] + "'"}])
                     return subprocess.CompletedProcess(argv, 0, body, b"")
                 op.owner = SimpleNamespace(run_owned=run_owned)
                 if mode == "call-cap":
@@ -2021,6 +2138,18 @@ class BTMLogObservationTests(unittest.TestCase):
                 self.assertFalse(receipt["actualAppIntegrationQualified"])
                 value = receipt["btmLogObservation"]
                 self.assertIs(fixture.btm_log_data(value, SOURCE, receipt["originalCalls"]), value)
+                self.assertEqual((value["schemaVersion"], value["type"]), (2, "mrk-e2-fixture-btm-log-observation-v2"))
+                self.assertFalse(value["absenceEstablished"])
+                self.assertFalse(value["ownershipEstablished"])
+                self.assertFalse(value["nativeLifecycleQualified"])
+                if value["state"] == "observed":
+                    self.assertEqual([(item["ordinal"], item["pathMask"], item["markerMask"], item["codeMask"])
+                                      for item in value["ownEventDetails"]], [(0, 1, 3, 0)])
+                    self.assertEqual(value["ownEventDetailsOmitted"], 0)
+                elif value["state"] == "empty":
+                    self.assertEqual((value["ownEventDetails"], value["ownEventDetailsOmitted"]), ([], 0))
+                else:
+                    self.assertEqual((value["ownEventDetails"], value["ownEventDetailsOmitted"]), (None, None))
                 if mode not in ("unknown-native", "native-data-refused"):
                     self.assertEqual(receipt["native"], expected_native)
                 else:

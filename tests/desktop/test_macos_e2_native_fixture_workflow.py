@@ -712,6 +712,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         btm = section(publish, "              btm_log = None", "              # This committed workflow selects the ordinary native fixture route.")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
+            fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 2
+                         and btm_record["type"] == "mrk-e2-fixture-btm-log-observation-v2", "summary-btm-version")
             if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                     and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
                 btm_log = btm_record"""))
@@ -721,6 +723,47 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn("installerContext contextReceiptDiagnostic serviceLayoutObservation btmLogObservation", publish)
         self.assertIn('"btmLogObservation": None,', publish)
         self.assertIn('btmLogObservation=btm_log,', publish)
+        # Execute only this pure projection block, with an already-validated
+        # record seam. The real parser/schema mutations run in the BTM group.
+        # No publication imports, originals, files or native entry are executed.
+        class ValidatedBTM:
+            def btm_log_data(_self, value, source, calls):
+                self.assertEqual(source, "a" * 40)
+                self.assertIs(value, original_record)
+                self.assertIs(calls, original_calls)
+                validations.append(value)
+                return value
+            @staticmethod
+            def need(value, label):
+                if not value:
+                    raise ValueError(label)
+        projection = compile(ast.parse(textwrap.dedent(btm)), "<fixed-btm-projection>", "exec")
+        original_record = {"schemaVersion": 2, "type": "mrk-e2-fixture-btm-log-observation-v2",
+                           "ownEventDetails": [{"ordinal": 1, "messageSha256": "c" * 64,
+                                                "pathMask": 1, "markerMask": 3, "codeMask": 0}],
+                           "ownEventDetailsOmitted": 0}
+        for refused in (None, "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "returned", "cleanup"):
+            validations = []
+            original_calls = [{"returned": refused != "returned"}]
+            original = {"btmLogObservation": original_record, "cleanupErrors": ["close-unknown"] if refused == "cleanup" else [],
+                        **{key: key != refused for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown")}}
+            namespace = {"fixture": ValidatedBTM(), "result": original, "source": "a" * 40,
+                         "calls": original_calls, "accepted": False}
+            exec(projection, namespace)
+            self.assertEqual(validations, [original_record])
+            self.assertIs(namespace["btm_log"], original_record if refused is None else None)
+            self.assertFalse(namespace["accepted"])
+        for mutation in ({"schemaVersion": 1}, {"schemaVersion": True}, {"type": "mrk-e2-fixture-btm-log-observation-v1"}):
+            good_record = original_record
+            original_record = dict(good_record, **mutation)
+            original_calls, validations = [{"returned": True}], []
+            namespace = {"fixture": ValidatedBTM(), "source": "a" * 40, "calls": original_calls,
+                         "result": {"btmLogObservation": original_record}, "accepted": False}
+            with self.assertRaisesRegex(ValueError, "^summary-btm-version$"):
+                exec(projection, namespace)
+            self.assertIsNone(namespace["btm_log"])
+            self.assertFalse(namespace["accepted"])
+            original_record = good_record
 
         diagnostic = section(publish, "              installer_worker_diagnostic = None", "              native = None")
         for required in (

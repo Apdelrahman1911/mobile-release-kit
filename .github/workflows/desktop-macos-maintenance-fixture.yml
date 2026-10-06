@@ -1105,9 +1105,12 @@ jobs:
                   context_distribution_diagnostic = distribution_candidate
               btm_log = None
               btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
+              fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 2
+                           and btm_record["type"] == "mrk-e2-fixture-btm-log-observation-v2", "summary-btm-version")
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
                       and all(call["returned"] for call in calls) and not result["cleanupErrors"]):
-                  # Filtered mentions are not causal findings, native finality or service authority.
+                  # Exact own-event masks/hashes are mentions, not path lookups,
+                  # causal findings, native finality or service authority.
                   btm_log = btm_record
               # This committed workflow selects the ordinary native fixture route.
               # The separate Context-only CLI remains explicit opt-in, not an

@@ -115,6 +115,11 @@ AUXILIARY_NS = 60_000_000_000
 BTM_ROLE, BTM_SUBSYSTEM = "fixture-btm-log", "com.apple.backgroundtaskmanagement"
 BTM_LIMIT, BTM_SECONDS = 262144, 10
 BTM_IDS = (IDENTIFIER, IDENTIFIER + ".client", SERVICE)
+# Literal log mentions only; these paths never nominate an open or an authority.
+BTM_PATHS = (str(ROOT / PLIST), str(ROOT / (APP + "/Contents/Library/LaunchDaemons/" + SERVICE + ".plist")),
+             str(ROOT / NESTED), str(ROOT / APP), str(ROOT / CLIENT), str(ROOT / ENTRY),
+             str(ROOT / RESIDENT), RESIDENT[len(NESTED) + 1:])
+BTM_DETAIL_LIMIT = 4
 BTM_STATES = ("not-requested", "window-unavailable", "tool-unavailable", "call-failed",
               "call-unknown", "unparseable", "empty", "observed")
 BTM_MARKERS = (
@@ -249,47 +254,73 @@ def btm_events(body):
     need(type(rows) is list and len(rows) <= 256, "btm-log-data")
     counts = {name: 0 for name, _words in BTM_MARKERS}
     counts["other"] = 0
-    codes, matched = set(), 0
+    codes, matched, details = set(), 0, []
     own = r"(?<![\w.-])(?:" + "|".join(re.escape(value) for value in BTM_IDS) + r")(?![\w.-])"
     domains = dict(BTM_DOMAINS)
     error_pattern = (r"(?<![\w])Domain=(SMAppServiceErrorDomain|NSOSStatusErrorDomain|NSCocoaErrorDomain)"
                      r" Code=(-?(?:0|[1-9][0-9]{0,9}))(?=$|[^\w.+-])")
-    for row in rows:
+    path_patterns = []
+    for bit, path in enumerate(BTM_PATHS):
+        spellings = (path, "file://" + path.replace(" ", "%20")) if bit < 7 else (path,)
+        if bit in (2, 3):
+            spellings += tuple(spelling + "/" for spelling in spellings)
+        # Only these literal token delimiters are understood. Never normalize
+        # an observed path/URL or mistake a bundle prefix for its child path.
+        path_patterns.append(r"(?<![^\s\"'(<\[{=])(?:" + "|".join(re.escape(item) for item in spellings)
+                             + r")(?![^\s\"')>\]},;])")
+    for ordinal, row in enumerate(rows):
         need(type(row) is dict and row.get("subsystem") == BTM_SUBSYSTEM
              and type(row.get("eventMessage")) is str and len(row["eventMessage"]) <= 8192, "btm-log-data")
         message = row["eventMessage"]
         if re.search(own, message) is None:
             continue  # Report only the count; never export or classify a foreign message.
         matched += 1
-        lower, found = message.lower(), False
-        for name, words in BTM_MARKERS:
+        lower, marker_mask = message.lower(), 0
+        for bit, (name, words) in enumerate(BTM_MARKERS):
             if any(word in lower for word in words):
                 counts[name] += 1
-                found = True
-        if not found:
+                marker_mask |= 1 << bit
+        if not marker_mask:
             counts["other"] += 1
+            marker_mask = 1 << len(BTM_MARKERS)
+        row_codes = set()
         for domain, raw in re.findall(error_pattern, message):
             code = int(raw)
             if str(code) == raw and -(1 << 31) <= code < 1 << 31:
+                row_codes.add((domains[domain], code))
                 codes.add((domains[domain], code))
         need(len(codes) <= 8, "btm-log-data")
+        if len(details) < BTM_DETAIL_LIMIT:
+            try:
+                message_bytes = message.encode("utf-8")
+            except UnicodeError as error:
+                raise Refused("btm-log-data") from error
+            details.append(({"ordinal": ordinal, "messageSha256": digest(message_bytes),
+                             "pathMask": sum(1 << bit for bit, pattern in enumerate(path_patterns)
+                                             if re.search(pattern, message) is not None),
+                             "markerMask": marker_mask}, row_codes))
+    ordered_codes = sorted(codes)
     return {"eventCount": len(rows), "ownEventCount": matched, "unmatchedEventCount": len(rows) - matched,
-            "markerCounts": counts, "errorCodes": [{"domain": domain, "code": code} for domain, code in sorted(codes)]}
+            "markerCounts": counts, "errorCodes": [{"domain": domain, "code": code} for domain, code in ordered_codes],
+            "ownEventDetails": [dict(detail, codeMask=sum(1 << bit for bit, code in enumerate(ordered_codes)
+                                                         if code in row_codes)) for detail, row_codes in details],
+            "ownEventDetailsOmitted": matched - len(details)}
 
 
 def btm_record(source):
-    return {"schemaVersion": 1, "type": "mrk-e2-fixture-btm-log-observation-v1", "sourceCommit": source,
+    return {"schemaVersion": 2, "type": "mrk-e2-fixture-btm-log-observation-v2", "sourceCommit": source,
             "diagnosticOnly": True, "state": "not-requested", "window": None, "commandIndex": None,
             "toolSha256": None, "stdoutSha256": None, "stderrSha256": None, "eventCount": None,
             "ownEventCount": None, "unmatchedEventCount": None, "markerCounts": None, "errorCodes": None,
+            "ownEventDetails": None, "ownEventDetailsOmitted": None,
             "rawOutputIncluded": False, "absenceEstablished": False, "ownershipEstablished": False,
             "nativeLifecycleQualified": False}
 
 
 def btm_log_data(value, source, calls):
     need(type(value) is dict and set(value) == set(btm_record(source))
-         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
-         and value["type"] == "mrk-e2-fixture-btm-log-observation-v1" and value["sourceCommit"] == source
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 2
+         and value["type"] == "mrk-e2-fixture-btm-log-observation-v2" and value["sourceCommit"] == source
          and identity(source, 40) and value["diagnosticOnly"] is True
          and all(value[key] is False for key in ("rawOutputIncluded", "absenceEstablished",
                                                 "ownershipEstablished", "nativeLifecycleQualified"))
@@ -324,7 +355,8 @@ def btm_log_data(value, source, calls):
         else:
             need(state == "call-unknown" and value["stdoutSha256"] is None
                  and value["stderrSha256"] is None, "btm-log-data")
-    fields = ("eventCount", "ownEventCount", "unmatchedEventCount", "markerCounts", "errorCodes")
+    fields = ("eventCount", "ownEventCount", "unmatchedEventCount", "markerCounts", "errorCodes",
+              "ownEventDetails", "ownEventDetailsOmitted")
     if state not in ("empty", "observed"):
         need(all(value[key] is None for key in fields), "btm-log-data")
     else:
@@ -347,6 +379,25 @@ def btm_log_data(value, source, calls):
                      and -(1 << 31) <= row["code"] < 1 << 31 for row in codes), "btm-log-data")
         need([(row["domain"], row["code"]) for row in codes]
              == sorted({(row["domain"], row["code"]) for row in codes}), "btm-log-data")
+        details, omitted = value["ownEventDetails"], value["ownEventDetailsOmitted"]
+        need(type(details) is list and len(details) == min(value["ownEventCount"], BTM_DETAIL_LIMIT)
+             and type(omitted) is int and omitted == value["ownEventCount"] - len(details), "btm-log-data")
+        names = (*(name for name, _words in BTM_MARKERS), "other")
+        projected, last = dict.fromkeys(names, 0), -1
+        for detail in details:
+            need(type(detail) is dict and set(detail) == {"ordinal", "messageSha256", "pathMask", "markerMask", "codeMask"}
+                 and type(detail["ordinal"]) is int and last < detail["ordinal"] < value["eventCount"]
+                 and identity(detail["messageSha256"], 64)
+                 and type(detail["pathMask"]) is int and 0 <= detail["pathMask"] < 1 << len(BTM_PATHS)
+                 and type(detail["markerMask"]) is int and 0 < detail["markerMask"] < 1 << len(names)
+                 and (not detail["markerMask"] & (1 << len(BTM_MARKERS))
+                      or detail["markerMask"] == 1 << len(BTM_MARKERS))
+                 and type(detail["codeMask"]) is int and 0 <= detail["codeMask"] < 1 << len(codes), "btm-log-data")
+            last = detail["ordinal"]
+            for bit, name in enumerate(names):
+                projected[name] += bool(detail["markerMask"] & (1 << bit))
+        need(all(markers[name] >= projected[name] and (omitted != 0 or markers[name] == projected[name])
+                 for name in names), "btm-log-data")
     need(len(canonical(value)) <= 4096, "btm-log-data")
     return value
 
