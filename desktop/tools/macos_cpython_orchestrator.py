@@ -107,6 +107,34 @@ def public_member_failure(error, phase):
               "signed-inventory", "sealed-inventory", "runtime-inventory", "expanded-retirement")
     if type(phase) is not str or phase not in phases or type(error) is not PreparationRefused:
         return None
+    if error.args == ("fat-slice-header",):
+        context = error.__dict__.get("_fat_slice_header")
+        member = error.__dict__.get("_image_member_context")
+        if (phase != "image-slicing" or type(context) is not tuple or len(context) != 11
+                or type(member) is not tuple or len(member) != 3
+                or any(type(value) is not int or not 0 <= value < 1 << 64 for value in context)):
+            return None
+        magic, count, index, cpu, subtype, offset, size, alignment, thin_magic, thin_cpu, thin_subtype = context
+        name, file_size, file_sha = member
+        if (magic not in (0xCAFEBABE, 0xCAFEBABF) or not 1 <= count <= 8 or not 0 <= index < count
+                or any(value >= 1 << 32 for value in (cpu, subtype, thin_magic, thin_cpu, thin_subtype))
+                or not 0 <= alignment <= 30 or type(file_size) is not int or not 32 <= file_size <= FILE_LIMIT
+                or size < 32 or offset + size > file_size
+                or type(name) is not str or not 0 < len(name) <= 4096 or name.startswith("/")
+                or "\\" in name or not all(32 <= ord(char) < 127 for char in name)
+                or any(part in ("", ".", "..") for part in name.split("/"))
+                or type(file_sha) is not str or re.fullmatch(r"[0-9a-f]{64}", file_sha) is None):
+            return None
+        spelling = json.dumps(name, ensure_ascii=True)
+        if len(spelling) > 4096:
+            return None
+        return {"phase": phase, "code": "fat-slice-header", "diagnosticOnly": True,
+                "representation": "public-package-member-and-observed-unsigned-header-fields",
+                "member": spelling, "fileSize": file_size, "fileSha256": file_sha,
+                "fatMagic": magic, "sliceCount": count, "sliceIndex": index,
+                "tableCpu": cpu, "tableSubtype": subtype, "sliceOffset": offset, "sliceSize": size,
+                "alignmentPower": alignment, "thinMagicLE": thin_magic,
+                "thinCpuLE": thin_cpu, "thinSubtypeLE": thin_subtype}
     if error.args == ("member-missing",):
         context = error.__dict__.get("_missing_member_context")
         if type(context) is not tuple or len(context) != 4:
@@ -278,8 +306,16 @@ def native_slice(body, machine):
             cpus.add(cpu)
             ranges.append((offset, offset + size))
             thin = body[offset:offset + size]
-            need(thin[:4] == b"\xcf\xfa\xed\xfe"
-                 and struct.unpack_from("<II", thin, 4) == (cpu, subtype), "fat-slice-header")
+            try:
+                need(thin[:4] == b"\xcf\xfa\xed\xfe"
+                     and struct.unpack_from("<II", thin, 4) == (cpu, subtype), "fat-slice-header")
+            except PreparationRefused as error:
+                try:
+                    error._fat_slice_header = (magic, count, number, cpu, subtype, offset, size, alignment,
+                                               *struct.unpack_from("<III", thin))
+                except BaseException:
+                    pass  # Optional public-input observation cannot replace the original refusal.
+                raise
             if cpu == CPUS[machine]:
                 selected = thin
         need(selected is not None, "fat-native-missing")
@@ -1267,7 +1303,15 @@ def prepare(ctx):
                 if row["kind"] != "file":
                     continue
                 path = framework / name
-                body = native_image_bytes(path, ctx["machine"])
+                try:
+                    body = native_image_bytes(path, ctx["machine"])
+                except PreparationRefused as error:
+                    if error.args == ("fat-slice-header",):
+                        try:
+                            error._image_member_context = (name, row["size"], row["sha256"])
+                        except BaseException:
+                            pass  # Diagnostic only; preserve this original failure and cleanup.
+                    raise
                 if body is not None:
                     images.add(name)
                     replace_owned_file(path, body)

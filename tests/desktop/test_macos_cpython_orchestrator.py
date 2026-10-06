@@ -395,6 +395,36 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
             invalid._missing_member_context = malformed
             self.assertIsNone(PREP.public_member_failure(invalid, phase))
 
+        # Finite universal-header facts are public INPUT diagnostics, not a
+        # loader grant. The real native failure's exact shape is still unknown.
+        original = PREP.PreparationRefused("fat-slice-header")
+        header = (0xCAFEBABE, 2, 0, ARM, 0, 64, 32, 6, 0x72613C21, 0x0A3E6863, 0)
+        member = ("Versions/3.14/lib/public-input.a", 128, "a" * 64)
+        original._fat_slice_header, original._image_member_context = header, member
+        facts = PREP.public_member_failure(original, "image-slicing")
+        self.assertEqual((facts["code"], facts["sliceIndex"], facts["thinMagicLE"]),
+                         ("fat-slice-header", 0, 0x72613C21))
+        self.assertEqual(PREP.json.loads(facts["member"]), member[0])
+        self.assertEqual((facts["fileSize"], facts["fileSha256"]), member[1:])
+        self.assertIs(facts["diagnosticOnly"], True)
+        self.assertEqual(original.args, ("fat-slice-header",))
+        for phase_value in (None, "framework-inventory", "image-relocation", "unrelated-task"):
+            self.assertIsNone(PREP.public_member_failure(original, phase_value))
+        for bad_header in (None, list(header), header[:-1], (True,) + header[1:],
+                           header[:5] + (-1,) + header[6:], header[:5] + (1 << 64,) + header[6:],
+                           header[:2] + (2,) + header[3:], header[:8] + (1 << 32,) + header[9:]):
+            original._fat_slice_header = bad_header
+            self.assertIsNone(PREP.public_member_failure(original, "image-slicing"))
+        original._fat_slice_header = header
+        for bad_member in (None, list(member), member[:2], ("/private/MRK-PATH-CANARY", *member[1:]),
+                           ("a/../MRK-PATH-CANARY", *member[1:]), ("a\\b", *member[1:]),
+                           ("a" * 4097, *member[1:]), (NoStringification(), *member[1:]),
+                           (member[0], True, member[2]), (member[0], 64, member[2]),
+                           (member[0], PREP.FILE_LIMIT + 1, member[2]), (member[0], 128, "bad")):
+            original._image_member_context = bad_member
+            self.assertIsNone(PREP.public_member_failure(original, "image-slicing"))
+        self.assertIsNone(PREP.public_member_failure(PREP.PreparationRefused("fat-slice-header"), "image-slicing"))
+
         # An unavailable diagnostic attribute must not replace the original.
         class AttributeUnavailable(PREP.PreparationRefused):
             def __setattr__(self, name, value):
@@ -511,6 +541,32 @@ class MacCPythonOrchestratorDataTests(unittest.TestCase):
         for number, body in enumerate(damaged):
             with self.subTest(native_slice_boundary=number), self.assertRaises(PREP.PreparationRefused):
                 PREP.native_slice(body, "arm64")
+        # Preserve the actual rejected header without assuming that every
+        # universal member contains a dynamic Mach-O image.
+        for prefix in (b"!<arch>\n" + bytes(4), struct.pack("<III", 0xFEEDFACF, ARM, 1)):
+            malformed = bytearray(fat); malformed[64:76] = prefix
+            with self.assertRaisesRegex(PREP.PreparationRefused, "^fat-slice-header$") as caught:
+                PREP.native_slice(bytes(malformed), "arm64")
+            self.assertEqual(caught.exception._fat_slice_header,
+                             (0xCAFEBABE, 2, 0, ARM, 0, 64, len(arm), 6, *struct.unpack("<III", prefix)))
+        class UnavailableHeader(PREP.PreparationRefused):
+            def __setattr__(self, name, value):
+                if name == "_fat_slice_header":
+                    raise MemoryError("inert diagnostic allocation failure")
+                return super().__setattr__(name, value)
+        original_error = UnavailableHeader("fat-slice-header")
+        original_need = PREP.need
+        def refuse_header(condition, code):
+            if code == "fat-slice-header":
+                raise original_error
+            return original_need(condition, code)
+        try:
+            PREP.need = refuse_header
+            with self.assertRaises(UnavailableHeader) as caught:
+                PREP.native_slice(fat, "arm64")
+            self.assertIs(caught.exception, original_error)
+        finally:
+            PREP.need = original_need
         with self.assertRaises(PREP.PreparationRefused):
             PREP.macho_records(fat, "arm64")
         records = PREP.macho_records(arm, "arm64")
