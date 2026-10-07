@@ -20,7 +20,7 @@ STEP_NAMES = (
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # This original owner alone compiles/signs/installs/observes the fixed\n          # fixture. Its 990s/993s native call covers ALL THREE cases, with one\n          # distinct aggregate 60s auxiliary ledger. Step timeout is no receipt.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Explicit diagnostic: compare standalone/nested byte-identical child\n          # apps through the same original owner. Context/Mac8/lifecycle cases\n          # stay unexecuted; a returned observation cannot grant qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-service-layout\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -161,7 +161,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         # Exact active entry prevents an extra native command or inherited env.
         self.assertEqual(active(native), active(EXPECTED_NATIVE))
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
-        self.assertEqual(active(native).count(" --observe-service-layout"), 0)
+        self.assertEqual(active(native).count(" --observe-service-layout"), 1)
         self.assertEqual(active(native).count(" --observe-context-receipts"), 0)
         self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
         self.assertEqual(active(prepare).count("owner.run_owned("), 1)
@@ -510,7 +510,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired",
             "protectedRetentionRequired")"""))
         self.assertIn('accepted=bool(known_pass)', active(publish))
-        route = section(publish, '              # This committed workflow selects the ordinary native fixture route.',
+        route = section(publish, '              # This committed workflow selects the observation-only physical-layout route.',
                         '              known_pass = (')
         self.assertIn('fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")', route)
         self.assertIn('context_receipt_diagnostic = None', route)
@@ -622,13 +622,35 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         layout = section(publish, "              service_layout = None", "              native_rust_tests = None")
         self.assertEqual(flat(layout), flat("""service_layout = None
             layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
-            fixture.need(not layout_record["selected"]
-                         and all(not call["role"].startswith("service-layout-") for call in calls),
-                         "summary-layout-route")
+            fixture.need(layout_record["selected"] and result["passed"] is False
+                         and result["native"] is None and not result["nativeEntered"] and not result["nativeOwnerReturned"]
+                         and not context_record["started"]
+                         and all(call["role"] != "native-run" and call["role"] not in fixture.CONTEXT_ROLES
+                                 for call in calls), "summary-layout-route")
+            if layout_record["observerSourceSha256"] is not None:
+                fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
+                             "summary-layout-source")
+            for case in layout_record["enteredCases"]:
+                layout_calls = [call for call in calls if call["role"] == "service-layout-" + case]
+                fixture.need(len(layout_calls) == 1, "summary-layout-entered-call")
+            for case in layout_record["cases"]:
+                layout_calls = [call for call in calls if call["role"] == "service-layout-" + case["case"]]
+                fixture.need(len(layout_calls) == 1 and layout_calls[0]["returned"]
+                             and layout_calls[0]["returncode"] == 0
+                             and layout_calls[0]["stdoutSha256"] == case["stdoutSha256"]
+                             and layout_calls[0]["stderrSha256"] == fixture.digest(b"")
+                             and type(layout_calls[0].get("workTimeoutSeconds")) is int
+                             and 0 < layout_calls[0]["workTimeoutSeconds"] <= 15
+                             and layout_calls[0].get("outputLimitBytes") == 2048,
+                             "summary-layout-original-call")
             if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
-                    and all(call["returned"] for call in calls)):
+                    and all(call["returned"] for call in calls) and not result["cleanupErrors"]
+                    and result["scratchRetired"] and result["installationReturnedSuccess"]):
+                # Factory/status results are useful diagnostic evidence only.
+                # Neither NotFound nor a complete comparison proves absence or ownership.
                 service_layout = layout_record"""))
-        self.assertNotIn('context_record["started"]', layout)  # Early bin refusal remains reportable.
+        self.assertIn('not context_record["started"]', layout)
+        self.assertNotIn("service_layout", gates)
         self.assertLess(publish.index('"summary-returned-call"'), publish.index(layout))
         self.assertLess(publish.index(layout), publish.index('              known_pass = ('))
         self.assertIn('serviceLayoutObservation=service_layout,', publish)
@@ -709,7 +731,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                       'and self.outputs_closed and self.protected_closed and native_finality and context_finality',
                       'and layout_finality and not self.cleanup_errors'):
             self.assertIn(token, finish)
-        btm = section(publish, "              btm_log = None", "              # This committed workflow selects the ordinary native fixture route.")
+        btm = section(publish, "              btm_log = None", "              # This committed workflow selects the observation-only physical-layout route.")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
             fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 3

@@ -544,10 +544,9 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # The same original owner runs the four fixed Mac8 DATA graphs,
-          # independent Native6/client compilation, then normal Context and
-          # the fixture. A DATA/compile pass alone never grants installation,
-          # signing, service, ordinary-entry or distribution qualification.
+          # Explicit diagnostic: compare standalone/nested byte-identical child
+          # apps through the same original owner. Context/Mac8/lifecycle cases
+          # stay unexecuted; a returned observation cannot grant qualification.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -559,7 +558,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-service-layout
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -983,12 +982,32 @@ jobs:
                   installer_context = context_record
               service_layout = None
               layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
-              fixture.need(not layout_record["selected"]
-                           and all(not call["role"].startswith("service-layout-") for call in calls),
-                           "summary-layout-route")
+              fixture.need(layout_record["selected"] and result["passed"] is False
+                           and result["native"] is None and not result["nativeEntered"] and not result["nativeOwnerReturned"]
+                           and not context_record["started"]
+                           and all(call["role"] != "native-run" and call["role"] not in fixture.CONTEXT_ROLES
+                                   for call in calls), "summary-layout-route")
+              if layout_record["observerSourceSha256"] is not None:
+                  fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
+                               "summary-layout-source")
+              for case in layout_record["enteredCases"]:
+                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case]
+                  fixture.need(len(layout_calls) == 1, "summary-layout-entered-call")
+              for case in layout_record["cases"]:
+                  layout_calls = [call for call in calls if call["role"] == "service-layout-" + case["case"]]
+                  fixture.need(len(layout_calls) == 1 and layout_calls[0]["returned"]
+                               and layout_calls[0]["returncode"] == 0
+                               and layout_calls[0]["stdoutSha256"] == case["stdoutSha256"]
+                               and layout_calls[0]["stderrSha256"] == fixture.digest(b"")
+                               and type(layout_calls[0].get("workTimeoutSeconds")) is int
+                               and 0 < layout_calls[0]["workTimeoutSeconds"] <= 15
+                               and layout_calls[0].get("outputLimitBytes") == 2048,
+                               "summary-layout-original-call")
               if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
-                      and all(call["returned"] for call in calls)):
-                  # The normal route reports unselected DATA, including an honest pre-Context failure.
+                      and all(call["returned"] for call in calls) and not result["cleanupErrors"]
+                      and result["scratchRetired"] and result["installationReturnedSuccess"]):
+                  # Factory/status results are useful diagnostic evidence only.
+                  # Neither NotFound nor a complete comparison proves absence or ownership.
                   service_layout = layout_record
               native_rust_tests = None
               if result["nativeRustTests"] is not None:
@@ -1112,9 +1131,9 @@ jobs:
                   # Exact own-event masks/hashes are mentions, not path lookups,
                   # causal findings, native finality or service authority.
                   btm_log = btm_record
-              # This committed workflow selects the ordinary native fixture route.
-              # The separate Context-only CLI remains explicit opt-in, not an
-              # alternative success condition for this workflow or native gate.
+              # This committed workflow selects the observation-only physical-layout route.
+              # The unchanged complete native gate below remains unsatisfied.
+              # Context-only completion is not an alternative acceptance condition.
               fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")
               context_receipt_diagnostic = None
               diagnostic_captured = False
