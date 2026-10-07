@@ -1210,6 +1210,96 @@ final class NormalAppUITests: XCTestCase {
                 && before == Self.named(original.fd, name), "fixed leaf changed during observation")
             return File(bytes: bytes, facts: before)
         }
+        // Fixed public XML prerequisite only. No current Profile calls these
+        // helpers, no generic JSON/leaf limit changes, and no Android UI claim.
+        // A future positive profile must admit the fixed bytes before creation
+        // and use the exact-path reader for every later XML original observation.
+        private static let androidVerificationResourceName = "android-positive-verification-v1"
+        private static let androidVerificationPath = "project/gradle/verification-metadata.xml"
+        private static let androidVerificationLength = 90_045
+        private static let androidVerificationSHA256 = "5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545"
+
+        private func androidVerificationResource() throws -> Data {
+            try Self.need(closeErrors.isEmpty, "an earlier consuming close failed")
+            let bundle = Bundle(for: NormalAppUITests.self)
+            guard let parentURL = bundle.resourceURL,
+                  let url = bundle.url(forResource: Self.androidVerificationResourceName, withExtension: "xml"),
+                  parentURL.isFileURL && url.isFileURL,
+                  url.lastPathComponent == Self.androidVerificationResourceName + ".xml",
+                  url.deletingLastPathComponent().path == parentURL.path else {
+                throw Refusal.condition("fixture: fixed Android XML resource absent or misplaced")
+            }
+            let name = Self.androidVerificationResourceName + ".xml"
+            let parent = open(parentURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            try Self.need(parent >= 0, "Android XML resource parent open failed")
+            var resource: Int32?
+            let data: Data
+            do {
+                let parentBefore = try Self.facts(parent)
+                var parentNamedBefore = stat()
+                try Self.need(lstat(parentURL.path, &parentNamedBefore) == 0
+                    && parentBefore == StatFacts(parentNamedBefore)
+                    && parentBefore.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                    && parentBefore.uid == getuid() && parentBefore.gid == getgid()
+                    && parentBefore.mode & 0o7022 == 0 && parentBefore.flags == 0,
+                    "Android XML resource parent shape or binding")
+                let fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                try Self.need(fd >= 0, "Android XML resource open failed")
+                resource = fd // Adopt before the first fallible leaf observation.
+                let before = try Self.facts(fd)
+                try Self.need(before == Self.named(parent, name)
+                    && before.mode & mode_t(S_IFMT) == mode_t(S_IFREG) && before.links == 1
+                    && before.uid == getuid() && before.gid == getgid()
+                    && before.mode & 0o7022 == 0 && before.flags == 0
+                    && before.device == parentBefore.device && before.bytes == Self.androidVerificationLength,
+                    "Android XML resource shape, binding or exact length")
+                var body = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
+                    try Self.need(count >= 0, "Android XML resource read failed")
+                    if count == 0 { break }
+                    try Self.need(body.count + count <= Self.androidVerificationLength, "Android XML resource read limit")
+                    body.append(contentsOf: buffer.prefix(count))
+                }
+                try Self.need(body.count == Self.androidVerificationLength
+                    && SHA256.hash(data: body).map({ String(format: "%02x", $0) }).joined() == Self.androidVerificationSHA256
+                    && before == Self.facts(fd) && before == Self.named(parent, name),
+                    "Android XML resource content or original changed")
+                var parentNamedAfter = stat()
+                try Self.need(lstat(parentURL.path, &parentNamedAfter) == 0
+                    && parentBefore == Self.facts(parent) && parentBefore == StatFacts(parentNamedAfter),
+                    "Android XML resource parent changed")
+                data = body
+            } catch {
+                if let fd = resource, Darwin.close(fd) != 0 { closeErrors.append("android-xml-resource-close") }
+                if Darwin.close(parent) != 0 { closeErrors.append("android-xml-parent-close") }
+                throw error // Consuming close failures cannot replace this primary failure.
+            }
+            if let fd = resource, Darwin.close(fd) != 0 { closeErrors.append("android-xml-resource-close") }
+            if Darwin.close(parent) != 0 { closeErrors.append("android-xml-parent-close") }
+            try Self.need(closeErrors.isEmpty, "Android XML resource consuming close failed")
+            return data
+        }
+
+        private func readAndroidVerificationOriginal() throws -> File {
+            try Self.need(closeErrors.isEmpty, "an earlier consuming close failed")
+            guard let expected = originals[Self.androidVerificationPath],
+                  let original = directories["project/gradle"] else {
+                throw Refusal.condition("fixture: fixed Android XML original was not admitted")
+            }
+            try Self.need(expected.count == Self.androidVerificationLength
+                && SHA256.hash(data: expected).map({ String(format: "%02x", $0) }).joined() == Self.androidVerificationSHA256,
+                "admitted Android XML pin differs")
+            let observed = try readLeaf(original, name: "verification-metadata.xml", privateOnly: true,
+                                        limit: Self.androidVerificationLength)
+            // readLeaf consumes its temporary FD, including when observation fails.
+            try Self.need(closeErrors.isEmpty, "Android XML original consuming close failed")
+            try checkDirectory(original)
+            try Self.need(observed.bytes.count == Self.androidVerificationLength && observed.bytes == expected,
+                          "Android XML original content differs")
+            return observed
+        }
+
         private func children(_ directory: Directory) throws -> Set<String> {
             try checkDirectory(directory)
             let before = try Self.facts(directory.fd)

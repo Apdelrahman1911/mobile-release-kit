@@ -102,6 +102,127 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Refused, "duplicate-plist-key"):
             MODULE.sandbox_entitlement(duplicate)
 
+    def test_android_verification_resource_is_fixed_without_widening_normal_fixture_limits(self):
+        # Actual public SOURCE/DATA only; this does not execute the Swift reader.
+        import base64
+        import xml.etree.ElementTree as ET
+        native = ROOT / "desktop/native/macos-normal-ui"
+        fixtures = native / "MRKNormalAppUITests/Fixtures"
+        name = "android-positive-verification-v1.xml"
+        xml = (fixtures / name).read_bytes()
+        digest = "5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545"
+        self.assertEqual((len(xml), hashlib.sha256(xml).hexdigest()), (90045, digest))
+        self.assertGreater(len(xml), 32 * 1024)
+        self.assertEqual(len(base64.b64encode(xml)), 120060)
+        self.assertGreater(len(base64.b64encode(xml)), 64 * 1024)
+        self.assertNotIn(b"<!DOCTYPE", xml)
+        self.assertNotIn(b"<!ENTITY", xml)
+        tree = ET.fromstring(xml)
+        ns = "{https://schema.gradle.org/dependency-verification}"
+        self.assertEqual(tree.tag, ns + "verification-metadata")
+        self.assertEqual(tree.findtext(ns + "configuration/" + ns + "verify-metadata"), "true")
+        components = tree.findall(ns + "components/" + ns + "component")
+        self.assertEqual(len(components), 234)
+        artifacts = [artifact for component in components for artifact in component.findall(ns + "artifact")]
+        self.assertEqual(len(artifacts), 386)
+        self.assertTrue(all(len(artifact.findall(ns + "sha256")) == 1
+                            and re.fullmatch(r"[0-9a-f]{64}", artifact.find(ns + "sha256").get("value", ""))
+                            for artifact in artifacts))
+        # Both old bundled JSON fixtures are unchanged, not repackaged with a
+        # larger decoder or a base64 copy of this XML.
+        for filename, length, expected in (
+            ("normal-project-v1.json", 19560, "ea9b004f0026c053bc1a12607cc70bd0a6f7e07afe9f33cf2a17506de62d512c"),
+            ("normal-persistence-v1.json", 10690, "99965739ae4dedf7de4dbc4c20d519eeea31e7a7eaab59484c5969f8cb03cce4"),
+        ):
+            with self.subTest(fixture=filename):
+                raw = (fixtures / filename).read_bytes()
+                self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (length, expected))
+                self.assertLessEqual(len(raw), 64 * 1024)
+                spec = json.loads(raw)
+                values = [*spec["files"].values(), *[value for stage in spec["stages"].values() for value in stage.values()]]
+                decoded = [base64.b64decode(value, validate=True) for value in values]
+                self.assertTrue(all(len(value) <= 32 * 1024 for value in decoded))
+                self.assertLessEqual(sum(map(len, decoded)), 256 * 1024)
+                self.assertNotIn("project/gradle/verification-metadata.xml", spec["files"])
+
+        project = (native / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        build = "A10000000000000000000014 = {isa = PBXBuildFile; fileRef = A10000000000000000000015; };"
+        reference = ('A10000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = text.xml; '
+                     'path = "Fixtures/' + name + '"; sourceTree = "<group>"; };')
+        self.assertEqual(project.count(build), 1)
+        self.assertEqual(project.count(reference), 1)
+        resources = re.findall(r"isa = PBXResourcesBuildPhase;[^\n]*files = \(([^)]*)\)", project)
+        self.assertEqual(resources, ["A10000000000000000000010, A10000000000000000000012, A10000000000000000000014"])
+        self.assertIn('children = (A10000000000000000000002, A10000000000000000000011, '
+                      'A10000000000000000000013, A10000000000000000000015); path = MRKNormalAppUITests;', project)
+        self.assertEqual(project.count("isa = PBXNativeTarget;"), 1)
+        self.assertNotIn("PBXShellScriptBuildPhase", project)
+
+        source = SWIFT.read_text(encoding="utf-8")
+        begin = "        // Fixed public XML prerequisite only."
+        end = "        private func children(_ directory: Directory) throws -> Set<String> {"
+        self.assertEqual(source.count(begin), 1)
+        added = source.split(begin, 1)[1].split(end, 1)[0]
+        resource = added.split("private func androidVerificationResource() throws -> Data {", 1)[1].split(
+            "private func readAndroidVerificationOriginal() throws -> File {", 1)[0]
+        readback = added.split("private func readAndroidVerificationOriginal() throws -> File {", 1)[1]
+        self.assertIn('private static let androidVerificationResourceName = "android-positive-verification-v1"', added)
+        self.assertIn('private static let androidVerificationPath = "project/gradle/verification-metadata.xml"', added)
+        self.assertIn("private static let androidVerificationLength = 90_045", added)
+        self.assertIn('private static let androidVerificationSHA256 = "' + digest + '"', added)
+        for required in (
+            "Bundle(for: NormalAppUITests.self)", "parentURL = bundle.resourceURL",
+            'bundle.url(forResource: Self.androidVerificationResourceName, withExtension: "xml")',
+            "url.deletingLastPathComponent().path == parentURL.path",
+            "open(parentURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)",
+            "openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)",
+            "resource = fd", "parentBefore == StatFacts(parentNamedBefore)",
+            "parentBefore.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)",
+            "before.mode & mode_t(S_IFMT) == mode_t(S_IFREG) && before.links == 1",
+            "before.bytes == Self.androidVerificationLength", "body.count + count <= Self.androidVerificationLength",
+            "body.count == Self.androidVerificationLength", "if count == 0 { break }",
+            "SHA256.hash(data: body)", "before == Self.facts(fd)",
+            "parentBefore == Self.facts(parent) && parentBefore == StatFacts(parentNamedAfter)",
+        ):
+            self.assertIn(required, resource)
+        self.assertEqual(resource.count("before == Self.named(parent, name)"), 2)
+        self.assertIn("lstat(parentURL.path, &parentNamedBefore) == 0", resource)
+        self.assertIn("lstat(parentURL.path, &parentNamedAfter) == 0", resource)
+        self.assertLess(resource.index("resource = fd"), resource.index("let before = try Self.facts(fd)"))
+        failure, success = resource.split("} catch {", 1)[1].split(
+            '\n            if let fd = resource, Darwin.close(fd)', 1)
+        self.assertLess(failure.index("Darwin.close(fd)"), failure.index("Darwin.close(parent)"))
+        self.assertLess(failure.index("Darwin.close(parent)"), failure.index("throw error"))
+        self.assertIn('closeErrors.append("android-xml-resource-close")', success)
+        self.assertLess(success.index("Darwin.close(parent)"), success.index("closeErrors.isEmpty"))
+        self.assertLess(success.index("closeErrors.isEmpty"), success.index("return data"))
+        self.assertEqual(resource.count("Darwin.close(fd)"), 2)
+        self.assertEqual(resource.count("Darwin.close(parent)"), 2)
+        self.assertIn("originals[Self.androidVerificationPath]", readback)
+        self.assertIn('directories["project/gradle"]', readback)
+        self.assertIn("expected.count == Self.androidVerificationLength", readback)
+        self.assertIn("SHA256.hash(data: expected)", readback)
+        self.assertIn('readLeaf(original, name: "verification-metadata.xml", privateOnly: true,', readback)
+        self.assertIn("limit: Self.androidVerificationLength)", readback)
+        self.assertIn("observed.bytes == expected", readback)
+        self.assertLess(readback.index("let observed = try readLeaf"), readback.index('closeErrors.isEmpty, "Android XML original'))
+        self.assertLess(readback.index("try checkDirectory(original)"), readback.index("return observed"))
+        # These are dormant fixed prerequisite readers, not an implicit larger
+        # limit in any current profile or an added Android-positive selection.
+        self.assertEqual(source.count("androidVerificationResource("), 1)
+        self.assertEqual(source.count("readAndroidVerificationOriginal("), 1)
+        self.assertIn("enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery }", source)
+        generic = source.split("private func read(_ path: String) throws -> File {", 1)[1].split("private func readLeaf(", 1)[0]
+        self.assertIn("return try readLeaf(original, name: name)", generic)
+        self.assertNotIn("androidVerification", generic)
+        self.assertIn("privateOnly: Bool = false, limit: Int = 32 * 1024)", source)
+        prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split("func admitDefaultVault()", 1)[0]
+        self.assertIn("before.bytes <= 64 * 1024", prepare)
+        self.assertIn("body.count + count <= 64 * 1024", prepare)
+        self.assertIn("bytes.count <= 32 * 1024", prepare)
+        self.assertIn("<= 256 * 1024", prepare)
+        self.assertNotIn("androidVerification", prepare)
+
     def test_ui_target_requests_boolean_false_sandbox_at_build_time(self):
         # Source intent only; the actual generated signature is admitted separately.
         project_root = ROOT / "desktop/native/macos-normal-ui"
