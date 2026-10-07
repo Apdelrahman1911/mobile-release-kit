@@ -242,6 +242,108 @@ ENGINEERING_SHARED_REGIONS = (('        private let clock: CaseClock\n        pr
   '                    "a new ordinary launch requires empty active custody and no engineering profile")'))
 
 
+# Exact new recovery regions only; all original source pins remain below.
+SAVED_VERSION_SWIFT_INSERTIONS = (('        // A one-case transfer of observation custody, never a product lease. The\n',
+  '        private func checkRoster() throws {',
+  '9439e8d33ab2ed2b14da38c9d5b214318d1a3baa74b29e2171ce255ebc976906'),
+ ("    // One real interrupted core process, then a fresh ordinary app's registered\n",
+  '    @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {',
+  '6042c9890e09977521ea14f7462a0c792e019417d40256b9c0ada6f23bc57c26'))
+SAVED_VERSION_SWIFT_REGIONS = (('        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal }\n',
+  '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, '
+  'savedVersionRecovery }\n'),
+ ('        private func readLeaf(_ original: Directory, name: String, privateOnly: Bool = false) throws -> File {\n',
+  '        private func readLeaf(_ original: Directory, name: String, privateOnly: Bool = false, limit: Int = 32 * '
+  '1024) throws -> File {\n'),
+ ('                && before.uid == getuid() && before.gid == getgid() && before.bytes >= 0 && before.bytes <= 32 * '
+  '1024\n',
+  '                && before.uid == getuid() && before.gid == getgid() && before.bytes >= 0 && before.bytes <= '
+  'limit\n'),
+ ('                try Self.need(bytes.count + count <= 32 * 1024, "fixed leaf read limit")\n',
+  '                try Self.need(bytes.count + count <= limit, "fixed leaf read limit")\n'),
+ ('', '                if savedVersionPending && name == ".mobile-release-version" { continue }\n'),
+ ('',
+  '            if profile == .savedVersionRecovery {\n'
+  '                guard let ignore = changes["config"]?["project/.gitignore"] else { throw '
+  'Refusal.condition("fixture: fixed recovery ignore DATA absent") }\n'
+  '                originals["project/.gitignore"] = ignore // Only before original admission; never after a '
+  'snapshot.\n'
+  '            }\n'),
+ ('',
+  '            if profile == .savedVersionRecovery {\n'
+  '                try adoptSavedVersion(data, temporary: temporary)\n'
+  '                return\n'
+  '            }\n'))
+SAVED_VERSION_BEFORE_SWIFT = 'a6d66a9b2de69c5f0a9b5ede463268272f8aeeee2dca1d554149ff59f37f3774'
+SAVED_VERSION_WORKFLOW_BLOCKS = (('normal_saved_version_recovery_ui_test', 'e63e1155efa9166c917507e26ada153771290a7adf1ee34306bba9dbf89b96a7'),
+ ('normal_saved_version_recovery_ui_result', 'ed519589f83d26474c8ccd5821c327aa0d0ed16a0e9ac785f589d885c4c5b42a'))
+SAVED_VERSION_WORKFLOW_REGIONS = (('    # Timed steps total359min, but the two refs are mutually exclusive:\n'
+  '    # preview345 / installed210, cleanup included in both, plus5min overhead.\n',
+  '    # Closed SOURCE selection, not additive UI work: default preview345,\n'
+  '    # recovery preview339 / installed210, cleanup included, plus5min overhead.\n'),
+ ('',
+  '      # A separate reviewed SOURCE change selects the targeted recovery run.\n'
+  '      # Default seven cases and the singleton are distinct native obligations.\n'
+  '      MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven\n'),
+ ('',
+  '          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n'
+  '            ordinary-seven) ;;\n'
+  '            saved-version-recovery) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'),
+ ("        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome "
+  "== 'success'\n",
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome "
+  "== 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'\n"),
+ ('',
+  '            {0}/normal-ui/saved-version-recovery-test-file-limit.status\n'
+  '            {0}/normal-ui/saved-version-recovery-test.status\n'
+  '            {0}/normal-ui/saved-version-recovery-test.runner-admission.json\n'
+  '            {0}/normal-ui/saved-version-recovery-test.failure-diagnostics.json\n'
+  '            {0}/normal-ui/saved-version-recovery-summary.status\n'
+  '            {0}/normal-ui/saved-version-recovery-summary.command-admission.json\n'
+  '            {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json\n'
+  '            {0}/normal-ui/saved-version-recovery-result.json\n'),
+ ("        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' "
+  "&& steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' "
+  "&& steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == "
+  "'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'\n",
+  "        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' "
+  "&& steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' "
+  "&& steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == "
+  "'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || "
+  "(env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' && "
+  "steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' "
+  "&& steps.evidence.outcome == 'success'\n"),
+ ('',
+  '          scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]\n'
+  '          if scope not in ("ordinary-seven", "saved-version-recovery"):\n'
+  '              raise ValueError("task cleanup SOURCE scope refused")\n'
+  '          test_stem, summary_stem = (("saved-checks-test", "saved-checks-summary") if scope == "ordinary-seven"\n'
+  '                                    else ("saved-version-recovery-test", "saved-version-recovery-summary"))\n'
+  '          # The skipped cohort supplies no finality or cleanup authority.\n'
+  '          saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")\n'
+  '          saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")\n'),
+ ('                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / '
+  '"normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / '
+  '"normal-ui/diagnostics-test.xcresult", root / "normal-ui/saved-checks-test.xcresult", root / "normal-ui/tmp",\n',
+  '                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / '
+  '"normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / '
+  '"normal-ui/diagnostics-test.xcresult", saved_directory, root / "normal-ui/tmp",\n'),
+ ('                       "saved-checks-test.log", "saved-checks-summary.raw.json", '
+  '"saved-checks-summary.stderr"):\n',
+  '                       *saved_logs):\n'))
+SAVED_VERSION_BEFORE_WORKFLOW = 'dbc8f93c8dced8bc1a0396bdf9a2d338828d7c48d97310ffd1e047be36f76fae'
+SAVED_VERSION_EVIDENCE = ('saved-version-recovery-test-file-limit.status',
+ 'saved-version-recovery-test.status',
+ 'saved-version-recovery-test.runner-admission.json',
+ 'saved-version-recovery-test.failure-diagnostics.json',
+ 'saved-version-recovery-summary.status',
+ 'saved-version-recovery-summary.command-admission.json',
+ 'saved-version-recovery-summary.failure-diagnostics.json',
+ 'saved-version-recovery-result.json')
+
+
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -276,6 +378,16 @@ def inline_python(block: str, marker: str) -> str:
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
     def restored_engineering_main(self, swift: str) -> str:
+        for begin, end, expected_hash in SAVED_VERSION_SWIFT_INSERTIONS:
+            self.assertEqual(swift.count(begin), 1)
+            self.assertEqual(swift.count(end), 1)
+            start, finish = swift.index(begin), swift.index(end, swift.index(begin))
+            self.assertEqual(digest(swift[start:finish].encode()), expected_hash)
+            swift = swift[:start] + swift[finish:]
+        for old, new in reversed(SAVED_VERSION_SWIFT_REGIONS):
+            self.assertEqual(swift.count(new), 1)
+            swift = swift.replace(new, old, 1)
+        self.assertEqual(digest(swift.encode()), SAVED_VERSION_BEFORE_SWIFT)
         self.assertEqual(swift.count(ENGINEERING_MAIN_BEGIN), 1)
         self.assertEqual(swift.count(ENGINEERING_MAIN_END), 1)
         begin = swift.index(ENGINEERING_MAIN_BEGIN)
@@ -649,6 +761,76 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertLess(finish.index('self.quiescence = "original"'), finish.index('self._checkpoint()'))
         self.assertNotIn('operator', block.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection()', 1)[1])
 
+        # Additional exact singleton, not a claim that idle build-input recovery
+        # above covered an interrupted saved-file transaction.
+        actual_swift = (ROOT / SWIFT).read_text()
+        journey = actual_swift.split('    @MainActor func testSyntheticProjectSavedVersionRecovery() throws {', 1)[1].split(
+            '    @MainActor func testSyntheticProjectManagedWorkflowRefusal()', 1)[0]
+        for token in ('try beginCase(seconds: 300)', 'fixture.prepare(.savedVersionRecovery)', 'try launchForJourney()',
+                      'try goToFolder(sheet, path: fixture.projectPath)', 'try nativeOpen(sheet)', 'let panel = try waitElement(named(editor, "Saved-version recovery inspection")',
+                      'try press(panel, "Close inspection, keep drafts"', 'Native: settled; reason: discarded.',
+                      'title == %@", "Roll back the interrupted save"', 'paths: ["release/version.properties"]',
+                      'SHA256 " + digest', 'bytes · mode 0600', '5 inspected owned files and 0 directories.',
+                      'fixture.savedVersionTransaction', 'Type RECOVER to confirm this one original plan',
+                      'Original effect: rolled_back; journal: clean; core resources: settled; core reason: none. Native: settled; reason: none.',
+                      'try fixture.acceptSavedVersionRollback()', 'try press(saved, "Read saved version"',
+                      'matching(identifier: "1.2.3")', 'matching(identifier: "Build number 7")',
+                      'try completeNormalQuit(app)', 'try fixture.closeOriginals()', 'try acceptFinalScenario()',
+                      'interruptedGuiSave=not-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable'):
+            self.assertIn(token, journey)
+        self.assertEqual(journey.count('try inspect()'), 2)
+        self.assertEqual(journey.count('try press(dialog, "Confirm recovery action"'), 1)
+        ordering = ('stage("saved-version-inspect-close")', 'try press(panel, "Close inspection, keep drafts"',
+                    'stage("saved-version-reinspect-confirm")', 'try replace(field(dialog, "Type RECOVER',
+                    'try press(dialog, "Confirm recovery action"', 'try fixture.acceptSavedVersionRollback()',
+                    'try press(saved, "Read saved version"', 'try completeNormalQuit(app)', 'try fixture.closeOriginals()', 'try acceptFinalScenario()')
+        self.assertEqual([journey.index(token) for token in ordering], sorted(journey.index(token) for token in ordering))
+        for token in ('try?', 'app.terminate()', 'forceTerminate', 'launchEnvironment', 'Inspect build-input state', 'Save version'):
+            self.assertNotIn(token, journey)
+        adoption = actual_swift.split('        private func adoptSavedVersion(', 1)[1].split('        private func checkRoster()', 1)[0]
+        for token in ('MRK_NORMAL_UI_SAVED_VERSION_FIXTURE', 'source == env["MRK_NORMAL_UI_HARNESS_SOURCE"]',
+                      'source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"]', 'canonicalObject["schemaVersion"] = 1',
+                      'limit: 16 * 1024', 'paths.count == 18', 'Set(fileFacts.keys) == paths',
+                      'expectedFacts == Self.wireFacts(observed.facts)', 'handoff bundled DATA differs',
+                      'Array(oldFacts.prefix(8)) == Array(backupFacts.prefix(8))', 'oldFacts[9] == backupFacts[9]',
+                      'original.bytes == observed.bytes && original.facts == observed.facts',
+                      'Self.sameSavedVersionMove(backup.facts, restored.facts)', 'directories.removeValue(forKey: Self.savedVersionJournal)'):
+            self.assertIn(token, adoption)
+        for token in ('mkdtemp', 'unlink(', 'rename(', 'FileManager', 'try?'):
+            self.assertNotIn(token, adoption)
+        self.assertIn('limit: Int = 32 * 1024', actual_swift) # All existing readers retain their original cap.
+        self.assertIn('if savedVersionPending && name == ".mobile-release-version" { continue }', actual_swift)
+        runner = (ROOT / 'desktop/tools/macos_normal_ui_runner.py').read_text()
+        fixed = runner.split('class SavedVersionFixture:', 1)[1].split('class NativeQueryFailure', 1)[0]
+        for token in ('"tests/desktop/test_saved_text_recovery.py"', '"-I", "-S", "-B"', '"release_version", "interrupt"], 20, 65536)',
+                      'original.returncode == 86 and original.stderr == b""', 'frames_digest = saved_version_producer_frames(original.stdout)',
+                      'sha(encoded([core[name] for name in sorted(core)])) == SAVED_VERSION_SOURCE',
+                      '"saved-version-no-shadow-imports"', '"saved-version-source-post"', '"saved-version-runtime-post"',
+                      'saved_version_same_move(self.originals[SAVED_VERSION_PATH][2], backup[2])',
+                      'self._recheck_leaf(path, self.originals[path])', 'self.check_roster(paths, moved=True)',
+                      'exclusive_output(self.handoff, encoded(handoff) + b"\\n", 16384)',
+                      'self.phase.environment = dict(old, **{SAVED_VERSION_ENV: str(self.handoff)})',
+                      'self.phase.environment = old', 'self.check_seed()', 'normal_saved_version_markers(self.original.stdout)',
+                      'self.dirs.pop(SAVED_VERSION_JOURNAL)', 'fd = self.fds.pop()', 'os.close(fd)'):
+            self.assertIn(token, runner)
+        self.assertEqual(fixed.count('self.phase.call("saved-version-core-interrupt"'), 1)
+        self.assertEqual(fixed.count('self._recheck_leaf(path, self.originals[path])'), 2)
+        recheck = fixed.split('    def _recheck_leaf(', 1)[1].split('    def check_roster(', 1)[0]
+        for token in ('saved_version_facts(os.fstat(fd)) == facts',
+                      'os.stat(name, dir_fd=parent_fd, follow_symlinks=False)',
+                      'observed == body and found == digest',
+                      '"saved-version-reused-original-pre"', '"saved-version-reused-original-post"',
+                      'return entry'):
+            self.assertIn(token, recheck)
+        self.assertNotIn('os.open(', recheck)
+        for token in ('subprocess.Popen', 'os.system', 'rmtree', 'unlink(', 'os.rename('): self.assertNotIn(token, fixed)
+        self.assertLess(fixed.index('original.returncode == 86'), fixed.index('exclusive_output(self.handoff'))
+        self.assertLess(fixed.index('frames_digest = saved_version_producer_frames'), fixed.index('exclusive_output(self.handoff'))
+        derived_ignore = base64.b64decode(fixture['stages']['config']['project/.gitignore'], validate=True)
+        self.assertNotEqual(files['project/.gitignore'], derived_ignore)
+        self.assertIn(".mobile-release-version/", derived_ignore.decode())
+        self.assertIn('files["project/.gitignore"] = decode(spec["stages"]["config"]["project/.gitignore"])', runner)
+
     def checked_diagnostics_source(self) -> tuple[str, str]:
         swift = self.restored_semantic_heading_queries(self.restored_engineering_main((ROOT / SWIFT).read_text()))
         # Require only the two accepted paired-host compile substitutions;
@@ -893,6 +1075,89 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
         workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        # Two mutually exclusive SOURCE scopes; no ninth-case additive budget,
+        # no unselected-cohort success or cleanup authority. No runtime exec here.
+        actual = workflow
+        current_ids, current = steps(actual)
+        scope_name = 'MRK_MACOS_SAVED_FILE_UI_SCOPE'
+        self.assertIn('      ' + scope_name + ': ordinary-seven\n', actual)
+        self.assertIn('case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in\n            ordinary-seven) ;;\n'
+                      '            saved-version-recovery) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n'
+                      '            *) exit 1 ;;\n          esac', actual)
+        self.assertIn(" && env." + scope_name + " == 'ordinary-seven'\n", current['normal_saved_checks_ui_test'])
+        new_test, new_result = (current[name] for name in ('normal_saved_version_recovery_ui_test', 'normal_saved_version_recovery_ui_result'))
+        test_condition = ("github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success'"
+                          " && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'")
+        result_condition = ("github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success'"
+                            " && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'")
+        self.assertIn('        if: ' + test_condition + '\n', new_test)
+        self.assertIn('        if: ' + result_condition + '\n', new_result)
+        self.assertLess(current_ids.index('normal_diagnostics_ui_result'), current_ids.index('normal_saved_version_recovery_ui_test'))
+        self.assertEqual(re.findall(r'-only-testing:MRKNormalAppUITests/NormalAppUITests/(test[A-Za-z0-9_]+)', new_test),
+                         ['testSyntheticProjectSavedVersionRecovery'])
+        for token in ('timeout-minutes: 11', 'ulimit -f 1048576', 'test-without-building', 'saved-version-recovery-test.xcresult',
+                      '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300',
+                      '[[ "$test_status" == 0 ]] || exit "$test_status"'):
+            self.assertIn(token, new_test)
+        self.assertNotIn('TEST_RUNNER_MRK_NORMAL_UI_SAVED_VERSION_FIXTURE=', new_test) # Only original owner creates this path.
+        self.assertIn('timeout-minutes: 3', new_result)
+        result_source = inline_python(new_result, 'PY_SAVED_VERSION_RECOVERY_RESULT')
+        for token in ('read("normal-ui/diagnostics-result.json", 65536)',
+                      'ordinary-ui-observed-original-diagnostics-report-and-settled-projection',
+                      'os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"] == "saved-version-recovery"',
+                      'digest(build_bytes) == prior.get("buildCommandAdmissionSha256")',
+                      'runner["sourceRosterSha256"] == summary_owner["sourceRosterSha256"] == decode(build_bytes)["sourceRosterSha256"]',
+                      'recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]',
+                      'recovery["runtimeResultSha256"] == digest(read("runtime-result.json", 65536))',
+                      'recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]',
+                      '"savedOfflineAndEmptyBuildInputCohortObserved": False', '"interruptedGuiSaveObserved": False',
+                      '"configurationTextImagesRecoveryObserved": False', '"independentOwnerResourceProof": False',
+                      '"productReady": False', 'clock["postCloseDeadlineRequired"] is True',
+                      'finally: os.close(fd)', 'os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC'):
+            self.assertIn(token, result_source)
+        self.assertNotIn('saved-checks-result.json', result_source)
+        program = ast.parse(result_source)
+        call = next(n.value for n in program.body if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call)
+                    and isinstance(n.value.func, ast.Name) and n.value.func.id == 'admitted' and ast.literal_eval(n.value.args[1]) == 'test')
+        self.assertEqual(ast.literal_eval(call.args[2]), 585)
+        self.assertEqual(ast.dump(call.args[3].elts[0]), ast.dump(ast.Name(id='roster', ctx=ast.Load())))
+        self.assertEqual(ast.dump(call.args[3].elts[-1]), ast.dump(ast.Name(id='roster', ctx=ast.Load())))
+        self.assertEqual([ast.literal_eval(n) for n in call.args[3].elts[1:-1]], [
+            ('saved-version-source-roster', 15, 65536, 0), ('saved-version-core-interrupt', 20, 65536, 86),
+            ('verify-generated-runner', 30, 1048576, 0), ('generated-runner-entitlements', 30, 1048576, 0),
+            ('one-admitted-ui-test', 420, 1048576, 0)])
+        self.assertIn('"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0', result_source)
+        actual_cleanup = actual.split("      - name: Remove only this completed preview build's disposable compiler outputs\n", 1)[1]
+        self.assertIn("((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || "
+                      "(env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' && steps.normal_saved_version_recovery_ui_result.outcome == 'success'))", actual_cleanup)
+        self.assertIn('if scope not in ("ordinary-seven", "saved-version-recovery"):', actual_cleanup)
+        self.assertIn('("saved-checks-test", "saved-checks-summary") if scope == "ordinary-seven"', actual_cleanup)
+        self.assertIn('else ("saved-version-recovery-test", "saved-version-recovery-summary")', actual_cleanup)
+        self.assertIn('saved_directory', actual_cleanup)
+        self.assertIn('*saved_logs)', actual_cleanup)
+        self.assertNotIn('rmtree("/private/tmp', actual_cleanup)
+        for name in SAVED_VERSION_EVIDENCE:
+            self.assertEqual(current['evidence'].count('            {0}/normal-ui/' + name + '\n'), 1)
+        for name in ('saved-version-recovery-fixture.json', 'saved-version-recovery-test.log', 'saved-version-recovery-test.xcresult',
+                     'saved-version-recovery-summary.raw.json', 'saved-version-recovery-summary.stderr'):
+            self.assertNotIn('/normal-ui/' + name, current['evidence'])
+        # Verify the two new blocks completely and invert ONLY reviewed changes
+        # before running every unchanged old assertion below. Scope predicates,
+        # same-scope cleanup, all new admission facts are checked above, not erased.
+        for name, expected_hash in SAVED_VERSION_WORKFLOW_BLOCKS:
+            self.assertEqual(digest(current[name].encode()), expected_hash)
+            self.assertEqual(workflow.count(current[name]), 1)
+            workflow = workflow.replace(current[name], '', 1)
+        for old, new in reversed(SAVED_VERSION_WORKFLOW_REGIONS):
+            self.assertEqual(workflow.count(new), 1)
+            workflow = workflow.replace(new, old, 1)
+        self.assertEqual(digest(workflow.encode()), SAVED_VERSION_BEFORE_WORKFLOW)
+        # Only these exact conditional substitutions affect the bound census.
+        old_caps = [int(n) for n in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
+        new_caps = [int(n) for n in re.findall(r'^        timeout-minutes: ([0-9]+)$', actual, re.M)]
+        self.assertEqual((len(old_caps), sum(old_caps), len(new_caps), sum(new_caps)), (40, 359, 42, 373))
+        self.assertEqual((345 + 5, 345 - (17 + 3) + (11 + 3) + 5), (350, 344))
+        self.assertIn('    timeout-minutes: 350\n', actual)
         ids, blocks = steps(workflow)
         order = ['normal_ui_result', 'normal_project_ui_test', 'normal_project_ui_result',
                  'normal_persistence_ui_test', 'normal_persistence_ui_result',

@@ -20,8 +20,8 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    # Timed steps total359min, but the two refs are mutually exclusive:
-    # preview345 / installed210, cleanup included in both, plus5min overhead.
+    # Closed SOURCE selection, not additive UI work: default preview345,
+    # recovery preview339 / installed210, cleanup included, plus5min overhead.
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -56,6 +56,9 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      # A separate reviewed SOURCE change selects the targeted recovery run.
+      # Default seven cases and the singleton are distinct native obligations.
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven
       # Final signed M comes only from the fixed configured SOURCE nomination.
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0
       # Independently accepted paired supplier six pins; each signed target requires a new final M.
@@ -102,6 +105,11 @@ jobs:
             *) exit 1 ;;
           esac
           [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]] || exit 1
+          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+            ordinary-seven) ;;
+            saved-version-recovery) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Fresh supplier pins never replace the separate current-core source binding.
@@ -2781,7 +2789,7 @@ jobs:
 
       - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
         id: normal_saved_checks_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'
         timeout-minutes: 17
         shell: bash
         env:
@@ -3137,6 +3145,209 @@ jobs:
           print("Two ordinary saved-check journeys observed complete negative offline findings and genuine Idle; mutation recovery, readiness and independent all-worker finality remain unproved.")
           PY_SAVED_CHECKS_RESULT
 
+      - name: Recover one real interrupted saved-version journal through the ordinary Mac UI
+        id: normal_saved_version_recovery_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'
+        timeout-minutes: 11
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
+          set +e
+          ulimit -f 1048576
+          file_limit_status=$?
+          set -e
+          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test-file-limit.status" || exit $?
+          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
+          # normal_context freshly verifies both actual RLIMIT_FSIZE values;
+          # its original receipt/status, not a prior budget report, gates acceptance.
+          clean() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
+              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
+          }
+          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
+          # One 300s recovery journey; unchanged420s command/585s phase, including the fixed20s producer.
+          set +e
+          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
+            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
+            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
+            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery \
+            -parallel-testing-enabled NO -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
+            -disableAutomaticPackageResolution \
+            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.log" 2>&1
+          test_status=$?
+          set -e
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.status"
+          [[ "$test_status" == 0 ]] || exit "$test_status"
+      - name: Bind the singleton saved-version recovery to original XCTest and the same ordinary package
+        id: normal_saved_version_recovery_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Each summary has its own finite one-GiB file limit and original owner phase.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary saved-version-recovery-test.xcresult \
+            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.stderr"
+          summary_status=$?
+          set -e
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.status"
+          [[ "$summary_status" == 0 ]] || exit "$summary_status"
+          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
+          import hashlib, json, os, re, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          source, target = os.environ["GITHUB_SHA"], os.environ["MRK_MACOS_TARGET"]
+          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
+              raise ValueError("saved-version result SOURCE differs")
+          def need(value):
+              if not value: raise ValueError("original saved-version recovery binding refused")
+          def read(name, limit):
+              path = root / name
+              fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+              try:
+                  facts = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                  before = os.fstat(fd)
+                  need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+                       and not before.st_mode & 0o022 and 0 <= before.st_size <= limit)
+                  with os.fdopen(fd, "rb", closefd=False) as stream: body = stream.read(limit + 1)
+                  need(len(body) == before.st_size and facts(before) == facts(os.fstat(fd)) == facts(os.stat(path, follow_symlinks=False)))
+                  return body
+              finally: os.close(fd)
+          def unique(rows):
+              result = {}
+              for key, value in rows:
+                  need(key not in result); result[key] = value
+              return result
+          def decode(body):
+              value = json.loads(body, object_pairs_hook=unique)
+              need(type(value) is dict)
+              return value
+          def digest(body): return hashlib.sha256(body).hexdigest()
+          def hex64(value): return type(value) is str and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+          preview = decode(read("preview/PREVIEW.json", 65536))
+          platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
+          need(target in platforms and preview.get("platform") == platforms[target]
+               and preview.get("scope") == "normal-macos-early-preview" and preview.get("instrumented") is False
+               and preview.get("sourceCommit") == source and preview.get("runId") == os.environ["GITHUB_RUN_ID"]
+               and preview.get("runAttempt") == os.environ["GITHUB_RUN_ATTEMPT"]
+               and all(preview.get(key) == "passed" for key in ("normalBuild", "packageAudit", "installationReadback")))
+          prior_bytes = read("normal-ui/diagnostics-result.json", 65536)
+          prior = decode(prior_bytes)
+          need(os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"] == "saved-version-recovery")
+          need(prior.get("scope") == "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
+               and prior.get("target") == target and prior.get("applicationSourceCommit") == prior.get("harnessSourceCommit") == source
+               and prior.get("workflow") == ".github/workflows/desktop-macos-installed.yml"
+               and all(prior.get(key) == preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize",
+                   "signedAppBinarySha256", "normalBinaryBeforeSigningSha256", "runtimeManifestSha256", "installerInventorySha256")))
+          # Reuse only this source-bound prerequisite's unchanged build/tool-version DATA.
+          # Its success is never a substitute for this case's fresh input/original owners.
+          build_bytes = read("normal-ui/build.command-admission.json", 32768)
+          need(digest(build_bytes) == prior.get("buildCommandAdmissionSha256") and type(prior.get("toolchain")) is dict)
+          for name in ("build", "saved-version-recovery-test-file-limit", "saved-version-recovery-test", "saved-version-recovery-summary"):
+              need(read("normal-ui/" + name + ".status", 16) == b"0\n")
+          roster = ("normal-ui-source-roster", 15, 1048576, 0)
+          def admitted(name, phase, seconds, roles):
+              raw = read("normal-ui/" + name, 32768); value = decode(raw)
+              need(value.get("schemaVersion") == 1 and type(value["schemaVersion"]) is int
+                   and value.get("scope") == ("actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only")
+                   and value.get("sourceCommit") == source and value.get("target") == target and value.get("resultBundle") == "saved-version-recovery-test.xcresult"
+                   and value.get("normalPhase" if phase == "test" else "phase") == phase
+                   and value.get("originalCommandReturned") is True and value.get("sourcePrePostMatched") is True
+                   and hex64(value.get("sourceRosterSha256")) and value.get("fileLimitBytes") == [1073741824, 1073741824]
+                   and all(type(n) is int for n in value["fileLimitBytes"]) and value.get("receiptPolicy") == "exclusive0600-readback-consuming-close"
+                   and type(value.get("originalTestReturncode" if phase == "test" else "originalReturncode")) is int
+                   and value["originalTestReturncode" if phase == "test" else "originalReturncode"] == 0)
+              clock = value.get("phaseClock")
+              need(type(clock) is dict and set(clock) == {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                   and clock["postCloseDeadlineRequired"] is True and all(type(clock[k]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k])
+                       for k in ("startNs", "deadlineNs", "beforePublicationNs")))
+              start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+              need(end - start == seconds * 1000000000 and start <= before_close < end)
+              commands = value.get("commands"); need(type(commands) is list and len(commands) == len(roles))
+              for row, (role, cap, limit, code) in zip(commands, roles):
+                  need(type(row) is dict and row.get("role") == role and type(row.get("returncode")) is int and row["returncode"] == code
+                       and type(row.get("roleCapSeconds")) is int and row["roleCapSeconds"] == cap
+                       and type(row.get("timeoutSeconds")) is int and 1 <= row["timeoutSeconds"] <= cap
+                       and type(row.get("outputLimitBytes")) is int and row["outputLimitBytes"] == limit
+                       and all(type(row.get(k)) is int and 0 <= row[k] <= limit for k in ("stdoutBytes", "stderrBytes"))
+                       and row["stdoutBytes"] + row["stderrBytes"] <= limit
+                       and all(hex64(row.get(k)) for k in ("argvSha256", "stdoutSha256", "stderrSha256")))
+              return value, raw
+          runner, runner_bytes = admitted("saved-version-recovery-test.runner-admission.json", "test", 585,
+              [roster, ("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, 86),
+               ("verify-generated-runner", 30, 1048576, 0), ("generated-runner-entitlements", 30, 1048576, 0),
+               ("one-admitted-ui-test", 420, 1048576, 0), roster])
+          summary_owner, summary_owner_bytes = admitted("saved-version-recovery-summary.command-admission.json", "summary", 90,
+              [roster, ("normal-ui-summary", 30, 262144, 0), roster])
+          need(summary_owner.get("originalCommandRole") == "normal-ui-summary"
+               and runner.get("appSandboxEntitlement") in ("absent", "false") and runner.get("strictCodesignOriginalZero") is True
+               and runner.get("originalProductsPrePostMatched") is True and runner.get("originalClosesCompleted") is True
+               and runner.get("reSignedOrRepaired") is False
+               and runner["sourceRosterSha256"] == summary_owner["sourceRosterSha256"] == decode(build_bytes)["sourceRosterSha256"])
+          summary_bytes = read("normal-ui/saved-version-recovery-summary.raw.json", 262144)
+          need(len(summary_bytes) == summary_owner["commands"][1]["stdoutBytes"] and digest(summary_bytes) == summary_owner["commands"][1]["stdoutSha256"])
+          summary = decode(summary_bytes)
+          counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+          need(all(type(summary.get(k)) is int and summary[k] == v for k, v in counts.items()))
+          recovery = runner.get("savedVersionRecovery")
+          digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")
+          positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")
+          need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", "publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}
+               and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)
+               and recovery["interruptedGuiSaveObserved"] is False
+               and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), ("publicOriginalCount", 13), ("readyJournalFileCount", 6)))
+               and recovery["sourceInputsSha256"] == os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]
+               and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]
+               and recovery["runtimeResultSha256"] == digest(read("runtime-result.json", 65536))
+               and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]
+               and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == digest(b""))
+          result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",
+              "applicationSourceCommit": source, "harnessSourceCommit": source, "workflow": ".github/workflows/desktop-macos-installed.yml",
+              **{key: preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize", "runtimeManifestSha256",
+                  "installerInventorySha256", "normalBinaryBeforeSigningSha256", "signedAppBinarySha256")}, "target": target,
+              "toolchain": prior["toolchain"], "buildCommandAdmissionSha256": digest(build_bytes), "priorResultSha256": digest(prior_bytes),
+              "generatedRunnerAdmissionSha256": digest(runner_bytes), "summaryCommandAdmissionSha256": digest(summary_owner_bytes),
+              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery", "testCounts": counts,
+              "nativeSummarySha256": digest(summary_bytes), "savedVersionRecoveryUI": "passed", "savedVersionRecovery": recovery,
+              "selectedSavedFileScope": "saved-version-recovery", "savedOfflineAndEmptyBuildInputCohortObserved": False,
+              "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"},
+              "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": {"name": "1.2.3", "build": "7"},
+              "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, "interruptedGuiSaveObserved": False,
+              "configurationTextImagesRecoveryObserved": False, "applicationStateAfterNormalQuit": "notRunning", "originalReferenceAndGateTerminalObserved": True,
+              "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,
+              "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+          body = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+          need(len(body) <= 65536)
+          fd = os.open(root / "normal-ui/saved-version-recovery-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, "wb", closefd=False) as output:
+                  output.write(body); output.flush(); os.fsync(fd)
+          finally: os.close(fd)
+          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, other domains and all-worker finality remain unproved.")
+          PY_SAVED_VERSION_RECOVERY_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''
@@ -3198,6 +3409,14 @@ jobs:
             {0}/normal-ui/saved-checks-test.failure-diagnostics.json
             {0}/normal-ui/saved-checks-summary.failure-diagnostics.json
             {0}/normal-ui/saved-checks-summary.command-admission.json
+            {0}/normal-ui/saved-version-recovery-test-file-limit.status
+            {0}/normal-ui/saved-version-recovery-test.status
+            {0}/normal-ui/saved-version-recovery-test.runner-admission.json
+            {0}/normal-ui/saved-version-recovery-test.failure-diagnostics.json
+            {0}/normal-ui/saved-version-recovery-summary.status
+            {0}/normal-ui/saved-version-recovery-summary.command-admission.json
+            {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json
+            {0}/normal-ui/saved-version-recovery-result.json
             {0}/normal-ui/build.status
             {0}/normal-ui/test.status
             {0}/normal-ui/test.runner-admission.json
@@ -3439,7 +3658,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == 'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -3472,8 +3691,16 @@ jobs:
                   or binding["source"] != os.environ["GITHUB_SHA"]
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
+          scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
+          if scope not in ("ordinary-seven", "saved-version-recovery"):
+              raise ValueError("task cleanup SOURCE scope refused")
+          test_stem, summary_stem = (("saved-checks-test", "saved-checks-summary") if scope == "ordinary-seven"
+                                    else ("saved-version-recovery-test", "saved-version-recovery-summary"))
+          # The skipped cohort supplies no finality or cleanup authority.
+          saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")
+          saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")
           for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
-                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", root / "normal-ui/saved-checks-test.xcresult", root / "normal-ui/tmp",
+                       root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", saved_directory, root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)
               except FileNotFoundError: continue
@@ -3484,7 +3711,7 @@ jobs:
                        "persistence-test.log", "persistence-summary.raw.json", "persistence-summary.stderr",
                        "project-test.log", "project-summary.raw.json", "project-summary.stderr",
                        "diagnostics-test.log", "diagnostics-summary.raw.json", "diagnostics-summary.stderr",
-                       "saved-checks-test.log", "saved-checks-summary.raw.json", "saved-checks-summary.stderr"):
+                       *saved_logs):
               path = root / "normal-ui" / name
               try: selected = os.lstat(path)
               except FileNotFoundError: continue

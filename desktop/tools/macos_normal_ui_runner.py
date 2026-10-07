@@ -2,7 +2,7 @@
 """Fixed generated Mac UI-runner admission; no application launch or repair here.
 
 Import is inert. The diagnostic uses its existing original-command owner; the
-normal workflow CLI admits fixed build/summary phases and six exact test selections.
+normal workflow CLI admits fixed build/summary phases and seven exact test selections.
 Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
 """
 from __future__ import annotations
@@ -46,6 +46,7 @@ NORMAL_SELECTIONS = {
     "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
                                   "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
     "workflow-refusal-test.xcresult": (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420),
+    "saved-version-recovery-test.xcresult": (("testSyntheticProjectSavedVersionRecovery",), 300, 420),
 }
 ORIGINAL_MARKER = ("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;"
     "payloadIdentity=1;originalTerminated=1;gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
@@ -521,7 +522,8 @@ def normal_cli_arguments(arguments, *, target=ARM_TARGET):
 SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-summary",
     "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
     "saved-checks-test.xcresult": "saved-checks-summary",
-    "workflow-refusal-test.xcresult": "workflow-refusal-summary"}
+    "workflow-refusal-test.xcresult": "workflow-refusal-summary",
+    "saved-version-recovery-test.xcresult": "saved-version-recovery-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -717,6 +719,411 @@ def normal_source_state(phase, source):
     return facts
 
 
+# One fixed real producer -> ordinary UI handoff. No journal is synthesized here,
+# no product recovery authority is exported, and no fixture is deleted by this owner.
+SAVED_VERSION_RESULT = "saved-version-recovery-test.xcresult"
+SAVED_VERSION_TEMPORARY = Path("/private/tmp")
+SAVED_VERSION_PRODUCER = "tests/desktop/test_saved_text_recovery.py"
+SAVED_VERSION_DATA = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json"
+SAVED_VERSION_SOURCE = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+SAVED_VERSION_PATH = "project/release/version.properties"
+SAVED_VERSION_JOURNAL = "project/.mobile-release-version"
+SAVED_VERSION_ENV = "TEST_RUNNER_MRK_NORMAL_UI_SAVED_VERSION_FIXTURE"
+SAVED_VERSION_MARKER = ("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI="
+    "original-core-interrupt86-fresh-ui-inspect-close-reinspect-confirm-rollback-reload;"
+    "interruptedGuiSave=not-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+SAVED_VERSION_CONTROLS = ("header.json", "plan.json", "commit.pending", "rollback.pending", "old-0", "new-0")
+SAVED_VERSION_BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
+    "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
+    "project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py", "github_release_bootstrap.py")
+
+
+def saved_version_facts(value):
+    return (*full9(value), getattr(value, "st_flags", 0))
+
+
+def saved_version_same_move(before, after):
+    # Only the actual version old->backup / backup->public rename can change ctime.
+    return before[:8] == after[:8] and before[9:] == after[9:]
+
+
+def saved_version_payload(body):
+    import base64
+    spec = document(body)
+    paths = {SAVED_VERSION_PATH, "project/release/mobile-release.json", "project/.gitignore",
+        "project/README-user.txt", "project/.github/workflows/keep-user.yml", "sources/01.png", "sources/02.png"}
+    paths.update("project/release/store/android/" + locale + "/" + leaf
+                 for locale in ("en-US", "fr-FR") for leaf in ("title.txt", "short_description.txt", "full_description.txt"))
+    need(set(spec) == {"schemaVersion", "files", "stages", "templateDataSHA256"}
+         and type(spec["schemaVersion"]) is int and spec["schemaVersion"] == 1
+         and type(spec["files"]) is dict and set(spec["files"]) == paths
+         and type(spec["stages"]) is dict and set(spec["stages"]) == {"config", "workflows", "text", "version", "images"},
+         "saved-version-fixed-data")
+    def decode(raw):
+        need(type(raw) is str, "saved-version-data-encoding")
+        value = base64.b64decode(raw, validate=True)
+        need(len(value) <= 32768, "saved-version-data-leaf-bound")
+        return value
+    files = {name: decode(raw) for name, raw in spec["files"].items()}
+    need(set(spec["stages"]["config"]) == {"project/release/mobile-release.json", "project/.gitignore"}
+         and set(spec["stages"]["version"]) == {SAVED_VERSION_PATH}, "saved-version-fixed-stage")
+    files["project/.gitignore"] = decode(spec["stages"]["config"]["project/.gitignore"])
+    after = decode(spec["stages"]["version"][SAVED_VERSION_PATH])
+    need(sum(map(len, files.values())) + len(after) <= 256 * 1024, "saved-version-data-total")
+    return files, after
+
+
+def saved_version_producer_frames(body):
+    need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n"), "saved-version-producer-output")
+    lines = body.splitlines()
+    need(len(lines) == 2, "saved-version-producer-two-frames")
+    frames = [document(line) for line in lines]
+    for sequence, (frame, kind) in enumerate(zip(frames, ("opened", "prepared"))):
+        need(set(frame) == {"protocol", "session", "seq", "kind", "result"}
+             and frame["protocol"] == "mrk-release-version/1"
+             and frame["session"] == "0123456789abcdef0123456789abcdef"
+             and type(frame["seq"]) is int and frame["seq"] == sequence and frame["kind"] == kind
+             and type(frame["result"]) is dict and frame["result"].get("scopeResources") == "settled",
+             "saved-version-producer-frame")
+    need(frames[0]["result"].get("source") == "release/version.properties"
+         and frames[0]["result"].get("values") == {"name": "1.2.3", "build": "7"}
+         and type(frames[1]["result"].get("view")) is dict, "saved-version-producer-original-checkout")
+    return sha(body)
+
+
+def normal_saved_version_markers(stdout):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024 and stdout.endswith(b"\n"),
+         "saved-version-ui-output")
+    lines = stdout.decode("utf-8", "strict").splitlines()
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedVersionRecovery]"
+    events = [line for line in lines if line.startswith("Test Case ")]
+    need(len(events) == 2 and events[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", events[1])
+         and lines.count(ORIGINAL_MARKER) == lines.count(SAVED_VERSION_MARKER) == 1
+         and sum(line.startswith("MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and sum(line.startswith("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI=") for line in lines) == 1
+         and not any(line.startswith("MRK_MACOS_UI_FAILURE_CLEANUP=") for line in lines)
+         and lines.index(events[0]) < lines.index(ORIGINAL_MARKER) < lines.index(SAVED_VERSION_MARKER) < lines.index(events[1]),
+         "saved-version-ui-one-original-terminal")
+    return True
+
+
+class SavedVersionFixture:
+    """Retained fixed SOURCE/fixture originals, borrowed by exactly one XCTest.
+
+    SOURCE is checked against the same Git commit and current runtime S; it is
+    not a serialized previous core lease. The fresh app registers its own root.
+    """
+    def __init__(self, phase, source, normal):
+        self.phase, self.source, self.normal = phase, source, Path(normal)
+        self.fds, self.sources, self.source_dirs, self.dirs = [], {}, {}, {}
+        self.root = None
+        self.originals, self.seed = {}, {}
+        self.handoff = self.normal / "saved-version-recovery-fixture.json"
+        self.handoff_original = None
+        self.receipt = None
+
+    def _adopt(self, fd):
+        self.fds.append(fd)
+        return fd
+
+    def _read(self, parent, name, limit):
+        fd = self._adopt(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent))
+        facts = saved_version_facts(os.fstat(fd))
+        body, _, digest = original_body(fd, limit, collect=True)
+        need(facts == saved_version_facts(os.fstat(fd))
+             == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False)), "saved-version-file-binding")
+        return fd, body, facts, digest
+
+    def _source_directory(self, name):
+        if name not in self.source_dirs:
+            path = self.phase.root / name
+            fd = self._adopt(open_directory(path))
+            self.source_dirs[name] = (fd, saved_version_facts(os.fstat(fd)))
+        return self.source_dirs[name][0]
+
+    def _sources(self):
+        fixed = {"desktop/" + name for name in SAVED_VERSION_BOOTSTRAPS}
+        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py"))
+        selected = sorted(fixed | {"src/mobile_release", SAVED_VERSION_PRODUCER, SAVED_VERSION_DATA})
+        args = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                "ls-tree", "-r", "-z", "--full-tree", self.source, "--", *selected]
+        original = self.phase.call("saved-version-source-roster", args, 15, 65536)
+        need(original.returncode == 0 and original.stderr == b"" and original.stdout.endswith(b"\0"), "saved-version-source-query")
+        rows = original.stdout[:-1].split(b"\0")
+        need(0 < len(rows) <= 256, "saved-version-source-count")
+        core, total = {}, 0
+        for row in rows:
+            header, raw = row.split(b"\t", 1)
+            mode, kind, blob = header.split(b" ")
+            name = raw.decode("ascii", "strict")
+            is_core = name.startswith("src/mobile_release/")
+            need(mode in (b"100644", b"100755") and kind == b"blob" and re.fullmatch(rb"[0-9a-f]{40}", blob)
+                 and all(part not in ("", ".", "..") for part in name.split("/")) and name not in self.sources
+                 and (name in fixed or name in (SAVED_VERSION_PRODUCER, SAVED_VERSION_DATA)
+                      or is_core and Path(name).suffix in (".py", ".json", ".pem")), "saved-version-source-row")
+            parent = self._source_directory(str(Path(name).parent))
+            entry = self._read(parent, Path(name).name, 1024 * 1024)
+            _, body, facts, digest = entry
+            total += len(body)
+            need(total <= 32 * 1024 * 1024 and hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest() == blob.decode()
+                 and not facts[2] & 0o022, "saved-version-source-bytes")
+            self.sources[name] = entry
+            if is_core or name in fixed:
+                core[name] = {"path": name, "size": len(body), "sha256": digest}
+        need(fixed | {SAVED_VERSION_PRODUCER, SAVED_VERSION_DATA, "src/mobile_release/__init__.py"} <= self.sources.keys()
+             and sha(encoded([core[name] for name in sorted(core)])) == SAVED_VERSION_SOURCE, "saved-version-current-s")
+        # No untracked Python or bytecode can be imported instead of the checked
+        # source. Only this package subtree is closed; unrelated repo files stay out.
+        names = {name for name in self.sources if name.startswith("src/mobile_release/")}
+        directories = {"src/mobile_release"}
+        for name in names:
+            directories.update(str(parent) for parent in Path(name).parents if str(parent).startswith("src/mobile_release"))
+        for name in sorted(directories):
+            fd = self._source_directory(name)
+            expected = {Path(item).name for item in names | directories if str(Path(item).parent) == name}
+            need(set(os.listdir(fd)) == expected, "saved-version-no-shadow-imports")
+        self.core_names, self.core_dirs = names, directories
+        runtime_parent = self._adopt(open_directory(self.normal.parent))
+        self.runtime = self._read(runtime_parent, "runtime-result.json", 65536)
+        runtime = document(self.runtime[1])
+        need(runtime.get("sourceInputsSha256") == SAVED_VERSION_SOURCE and runtime.get("sourceInputCount") == len(core)
+             and runtime.get("target") == self.phase_target
+             and runtime.get("qualification") == "current-source-staged-no-native-execution"
+             and type(runtime.get("successorManifestSha256")) is str
+             and re.fullmatch(r"[0-9a-f]{64}", runtime["successorManifestSha256"]), "saved-version-runtime-source-binding")
+        self.runtime_parent = runtime_parent
+        self.runtime_manifest = runtime["successorManifestSha256"]
+        self.source_digest = sha(encoded({name: [decimal(entry[2]), entry[3]] for name, entry in sorted(self.sources.items())}))
+        self.check_sources()
+
+    def check_sources(self):
+        for name, (fd, before) in self.source_dirs.items():
+            need(saved_version_facts(os.fstat(fd)) == before
+                 and saved_version_facts(os.stat(self.phase.root / name, follow_symlinks=False)) == before, "saved-version-source-directory-post")
+            if name in self.core_dirs:
+                expected = {Path(item).name for item in self.core_names | self.core_dirs if str(Path(item).parent) == name}
+                need(set(os.listdir(fd)) == expected, "saved-version-source-roster-post")
+        for name, (fd, body, facts, digest) in self.sources.items():
+            parent = self.source_dirs[str(Path(name).parent)][0]
+            actual, _, actual_digest = original_body(fd, 1024 * 1024, collect=True)
+            need(actual == body and actual_digest == digest and saved_version_facts(os.fstat(fd)) == facts
+                 and saved_version_facts(os.stat(Path(name).name, dir_fd=parent, follow_symlinks=False)) == facts, "saved-version-source-post")
+        fd, body, facts, digest = self.runtime
+        actual, _, actual_digest = original_body(fd, 65536, collect=True)
+        need(actual == body and actual_digest == digest and saved_version_facts(os.fstat(fd)) == facts
+             and saved_version_facts(os.stat("runtime-result.json", dir_fd=self.runtime_parent, follow_symlinks=False)) == facts,
+             "saved-version-runtime-post")
+
+    def _directory(self, path, parent, name):
+        fd = self._adopt(os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent))
+        facts = saved_version_facts(os.fstat(fd))
+        need(facts == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False))
+             and facts[2] == stat.S_IFDIR | 0o700 and facts[3:5] == (os.getuid(), os.getgid()) and facts[9] == 0,
+             "saved-version-private-directory")
+        self.dirs[path] = (fd, parent, name, facts)
+        return fd
+
+    def _leaf(self, path):
+        parent, name = posixpath.split(path)
+        entry = self._read(self.dirs[parent][0], name, 32768)
+        mode = 0o644 if path.startswith("sources/") else 0o600
+        need(entry[2][2] == stat.S_IFREG | mode and entry[2][3:5] == (os.getuid(), os.getgid())
+             and entry[2][9] == 0 and entry[2][0] == self.dirs[""][3][0], "saved-version-private-file")
+        return entry
+
+    def _recheck_leaf(self, path, entry):
+        # Same unchanged original descriptor and exact named location, never a
+        # replacement authority or a second retained copy of its observation.
+        parent, name = posixpath.split(path)
+        fd, body, facts, digest = entry
+        parent_fd = self.dirs[parent][0]
+        need(saved_version_facts(os.fstat(fd)) == facts
+             and saved_version_facts(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) == facts,
+             "saved-version-reused-original-pre")
+        observed, _, found = original_body(fd, 32768, collect=True)
+        need(observed == body and found == digest and saved_version_facts(os.fstat(fd)) == facts
+             and saved_version_facts(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) == facts,
+             "saved-version-reused-original-post")
+        return entry
+
+    def check_roster(self, paths, *, moved=False):
+        directories = {""}
+        for path in paths:
+            directories.update(str(parent) for parent in Path(path).parents if str(parent) != ".")
+        need(set(self.dirs) == directories, "saved-version-directory-roster")
+        for path, (fd, parent, name, before) in self.dirs.items():
+            actual = saved_version_facts(os.fstat(fd))
+            need(actual == saved_version_facts(os.stat(name, dir_fd=parent, follow_symlinks=False)), "saved-version-directory-binding")
+            if moved and path in ("project", "project/release"):
+                need(before[:5] == actual[:5] and before[9:] == actual[9:], "saved-version-owned-directory-transition")
+            else:
+                need(before == actual, "saved-version-directory-facts")
+            expected = {Path(item).name for item in set(paths) | directories if item and posixpath.dirname(item) == path}
+            need(set(os.listdir(fd)) == expected and saved_version_facts(os.fstat(fd)) == actual, "saved-version-exact-roster")
+        need(saved_version_facts(os.fstat(self.temporary)) == saved_version_facts(os.stat(SAVED_VERSION_TEMPORARY, follow_symlinks=False)),
+             "saved-version-temporary-binding")
+
+    def _stage(self):
+        import tempfile
+        self.files, self.after = saved_version_payload(self.sources[SAVED_VERSION_DATA][1])
+        self.temporary = self._adopt(open_directory(SAVED_VERSION_TEMPORARY))
+        self.root = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir=SAVED_VERSION_TEMPORARY))
+        need(self.root.parent == SAVED_VERSION_TEMPORARY and re.fullmatch(r"mrk-normal-project-[A-Za-z0-9_-]{6,16}", self.root.name), "saved-version-fresh-root")
+        self._directory("", self.temporary, self.root.name)
+        directories = set()
+        for path in self.files:
+            directories.update(str(parent) for parent in Path(path).parents if str(parent) != ".")
+        for path in sorted(directories, key=lambda value: (value.count("/"), value)):
+            parent, name = posixpath.split(path)
+            os.mkdir(name, 0o700, dir_fd=self.dirs[parent][0])
+            self._directory(path, self.dirs[parent][0], name)
+        for path, body in sorted(self.files.items()):
+            parent, name = posixpath.split(path)
+            parent_fd = self.dirs[parent][0]
+            mode = 0o644 if path.startswith("sources/") else 0o600
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=parent_fd)
+            try:
+                os.fchmod(fd, mode)  # Only this new fixture leaf, never a user file.
+                offset = 0
+                while offset < len(body):
+                    count = os.write(fd, body[offset:]); need(0 < count <= len(body) - offset, "saved-version-fixture-write")
+                    offset += count
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.fsync(parent_fd)
+            self.originals[path] = self._leaf(path)
+            need(self.originals[path][1] == body, "saved-version-fixture-readback")
+        # Capture only after all explicit creation, including the derived ignore bytes.
+        self.dirs = {path: (fd, parent, name, saved_version_facts(os.fstat(fd)))
+                     for path, (fd, parent, name, _) in self.dirs.items()}
+        self.check_roster(self.originals)
+
+    def interrupt(self, target):
+        self.phase_target = target
+        need(sys.flags.isolated == 1 and sys.flags.no_site == 1 and sys.flags.dont_write_bytecode == 1
+             and Path(sys.executable).is_absolute() and SAVED_VERSION_ENV not in self.phase.environment,
+             "saved-version-admitted-interpreter-environment")
+        self._sources(); self._stage(); self.check_sources()
+        original = self.phase.call("saved-version-core-interrupt", [sys.executable, "-I", "-S", "-B",
+            str(self.phase.root / SAVED_VERSION_PRODUCER), "--restart-child", str(self.root / "project"),
+            "release_version", "interrupt"], 20, 65536)
+        need(original.returncode == 86 and original.stderr == b"", "saved-version-original-interrupt86")
+        frames_digest = saved_version_producer_frames(original.stdout)
+        self.check_sources()
+        self._directory(SAVED_VERSION_JOURNAL, self.dirs["project"][0], ".mobile-release-version")
+        paths = set(self.originals) - {SAVED_VERSION_PATH}
+        paths.update(SAVED_VERSION_JOURNAL + "/" + name for name in SAVED_VERSION_CONTROLS)
+        for path in sorted(paths):
+            entry = (self._recheck_leaf(path, self.originals[path]) if path in self.originals
+                     else self._leaf(path))
+            self.seed[path] = entry
+        backup = self.seed[SAVED_VERSION_JOURNAL + "/old-0"]
+        need(backup[1] == self.files[SAVED_VERSION_PATH]
+             and saved_version_same_move(self.originals[SAVED_VERSION_PATH][2], backup[2])
+             and self.seed[SAVED_VERSION_JOURNAL + "/new-0"][1] == self.after, "saved-version-actual-rename-state")
+        header = document(self.seed[SAVED_VERSION_JOURNAL + "/header.json"][1])
+        plan = document(self.seed[SAVED_VERSION_JOURNAL + "/plan.json"][1])
+        need(header.get("schemaVersion") == 2 and header.get("domain") == "release_version"
+             and type(header.get("transactionId")) is str and re.fullmatch(r"[0-9a-f]{32}", header["transactionId"])
+             and plan.get("transactionId") == header["transactionId"] and type(plan.get("files")) is list
+             and len(plan["files"]) == 1 and plan["files"][0].get("path") == "release/version.properties",
+             "saved-version-actual-ready-journal")
+        self.check_roster(paths, moved=True)
+        self.dirs = {path: (fd, parent, name, saved_version_facts(os.fstat(fd)))
+                     for path, (fd, parent, name, _) in self.dirs.items()}
+        self.check_roster(paths)
+        handoff = {"schemaVersion": 1, "scope": "one-owned-saved-version-recovery-fixture", "sourceCommit": self.source,
+            "sourceInputsSha256": SAVED_VERSION_SOURCE, "runtimeManifestSha256": self.runtime_manifest,
+            "sourceClosureSha256": self.source_digest, "fixtureDataSha256": self.sources[SAVED_VERSION_DATA][3],
+            "producerSha256": self.sources[SAVED_VERSION_PRODUCER][3], "producerFramesSha256": frames_digest,
+            "root": str(self.root), "transactionId": header["transactionId"],
+            "originalVersionFacts": decimal(self.originals[SAVED_VERSION_PATH][2]),
+            "directories": {name: decimal(row[3]) for name, row in sorted(self.dirs.items())},
+            "files": {name: {"facts": decimal(row[2]), "sha256": row[3]} for name, row in sorted(self.seed.items())}}
+        exclusive_output(self.handoff, encoded(handoff) + b"\n", 16384)
+        parent = self._adopt(open_directory(self.normal))
+        self.handoff_original = (parent, self._read(parent, self.handoff.name, 16384))
+        self.receipt = {name: handoff[name] for name in ("sourceInputsSha256", "runtimeManifestSha256", "sourceClosureSha256",
+            "fixtureDataSha256", "producerSha256", "producerFramesSha256")}
+        self.receipt.update(runtimeResultSha256=self.runtime[3], handoffSha256=sha(encoded(handoff) + b"\n"), producerReturncode=86,
+            publicOriginalCount=13, readyJournalFileCount=6, interruptedGuiSaveObserved=False)
+
+    def ui_call(self, role, argv, seconds, limit=1024 * 1024):
+        need(self.handoff_original is not None, "saved-version-handoff-not-published")
+        self.check_sources()
+        if role != "one-admitted-ui-test":
+            return self.phase.call(role, argv, seconds, limit)
+        self.check_seed()
+        old = self.phase.environment
+        try:
+            self.phase.environment = dict(old, **{SAVED_VERSION_ENV: str(self.handoff)})
+            return self.phase.call(role, argv, seconds, limit)
+        finally:
+            self.phase.environment = old
+
+    def check_seed(self):
+        self.check_roster(self.seed)
+        for path, (fd, body, facts, digest) in self.seed.items():
+            parent, name = posixpath.split(path)
+            actual, _, found = original_body(fd, 32768, collect=True)
+            need(actual == body and found == digest and saved_version_facts(os.fstat(fd)) == facts
+                 and saved_version_facts(os.stat(name, dir_fd=self.dirs[parent][0], follow_symlinks=False)) == facts,
+                 "saved-version-seed-changed-before-ui")
+        parent, (fd, body, facts, digest) = self.handoff_original
+        actual, _, found = original_body(fd, 16384, collect=True)
+        need(actual == body and found == digest and saved_version_facts(os.fstat(fd)) == facts
+             and saved_version_facts(os.stat(self.handoff.name, dir_fd=parent, follow_symlinks=False)) == facts,
+             "saved-version-handoff-changed-before-ui")
+
+    def restored(self):
+        normal_saved_version_markers(self.original.stdout)
+        expected = {}
+        for path in sorted(self.originals):
+            observed = (self._leaf(path) if path == SAVED_VERSION_PATH
+                        else self._recheck_leaf(path, self.originals[path]))
+            if path == SAVED_VERSION_PATH:
+                backup = self.seed[SAVED_VERSION_JOURNAL + "/old-0"]
+                need(observed[1] == self.files[path] and saved_version_same_move(backup[2], observed[2]), "saved-version-restored-original")
+            else:
+                need(observed[1:] == self.originals[path][1:], "saved-version-restored-unrelated-original")
+            expected[path] = observed
+        # The held journal may now be unlinked. Remove only its roster entry,
+        # never the original FD or any filesystem object; close consumes it later.
+        self.dirs.pop(SAVED_VERSION_JOURNAL)
+        self.check_roster(expected, moved=True)
+        self.check_sources()
+        parent, (fd, body, facts, digest) = self.handoff_original
+        observed, _, found = original_body(fd, 16384, collect=True)
+        need(observed == body and found == digest and saved_version_facts(os.fstat(fd)) == facts
+             and saved_version_facts(os.stat(self.handoff.name, dir_fd=parent, follow_symlinks=False)) == facts,
+             "saved-version-handoff-post")
+        self.receipt.update(originalFixtureRestored=True, unrelatedOriginalsUnchanged=True, readyJournalRemoved=True,
+            sourcePrePostMatched=True, uiOriginalMarkersObserved=True)
+        return self.receipt
+
+    def close(self):
+        failure = None
+        while self.fds:
+            fd = self.fds.pop()
+            try:
+                os.close(fd)
+            except BaseException as error:
+                if failure is None: failure = error
+        if failure is not None: raise failure
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if kind is None: raise
+        return False
+
+
 class NativeQueryFailure(Exception):
     """One validated returned nonzero query; no later build/query is dispatched."""
     def __init__(self, original):
@@ -757,8 +1164,20 @@ def execute_normal_phase(phase, request, source, file_limit):
         receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
     else:
         need(mode == "test", "normal-phase-selection")
-        original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
-                                            request["allowance"], request["timeout"], target=target)
+        if result.name == SAVED_VERSION_RESULT:
+            with SavedVersionFixture(phase, source, derived.parent) as fixture:
+                fixture.interrupt(target)
+                original, facts = run_admitted_test(fixture.ui_call, derived, result, request["methods"],
+                    request["allowance"], request["timeout"], target=target)
+                fixture.original = original
+                fixture.check_sources()
+                if original.returncode == 0:
+                    facts["savedVersionRecovery"] = fixture.restored()
+            if original.returncode == 0:
+                facts["savedVersionRecovery"]["originalClosesCompleted"] = True
+        else:
+            original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
+                                                request["allowance"], request["timeout"], target=target)
         facts.update(originalTestReturncode=original.returncode, normalPhase="test", resultBundle=result.name)
         if original.returncode == 0 and result.name == "project-test.xcresult":
             project_markers = normal_project_markers(original.stdout)
@@ -1047,6 +1466,7 @@ ADMISSION_EXCEPTION_LABELS = tuple(kind.__name__ for kind in ADMISSION_EXCEPTION
 ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
                           "src/mobile_release/owned_process.py")
 ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+    "saved-version-source-roster", "saved-version-core-interrupt",
     "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test",
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
 

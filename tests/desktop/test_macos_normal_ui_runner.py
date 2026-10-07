@@ -255,7 +255,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                                           "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
         }
         result_name = "workflow-refusal-test.xcresult"
-        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name != result_name}, old)
+        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name not in (result_name, "saved-version-recovery-test.xcresult")}, old)
         self.assertEqual(MODULE.NORMAL_SELECTIONS[result_name],
                          (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420))
         arguments = normal_arguments(result_name)
@@ -282,6 +282,38 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         ):
             with self.subTest(selection=changed[15:18]), self.assertRaises(MODULE.Refused):
                 MODULE.normal_cli_arguments(changed)
+
+        # The new singleton adds no budget to or extra method in any old call.
+        selected = "saved-version-recovery-test.xcresult"
+        self.assertEqual(MODULE.NORMAL_SELECTIONS[selected], (("testSyntheticProjectSavedVersionRecovery",), 300, 420))
+        self.assertEqual(MODULE.SUMMARY_STEMS[selected], "saved-version-recovery-summary")
+        args = normal_arguments(selected)
+        request = MODULE.normal_request(args, str(Path(args[12]).parent / "tmp") + "/")
+        self.assertEqual((request["methods"], request["allowance"], request["timeout"], request["phaseSeconds"]),
+                         ((MODULE.CLASS + "testSyntheticProjectSavedVersionRecovery",), 300, 420, 585))
+        for changed in (args + ["-retry-tests-on-failure"], args + [args[15]],
+                        [v.replace("SavedVersionRecovery", "SavedOfflineChecks") for v in args]):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_cli_arguments(changed)
+        case = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedVersionRecovery]"
+        marker = ("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI=original-core-interrupt86-fresh-ui-inspect-close-reinspect-confirm-rollback-reload;"
+                  "interruptedGuiSave=not-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        output = ("\n".join(("Test Case '" + case + "' started.", MODULE.ORIGINAL_MARKER, marker,
+                            "Test Case '" + case + "' passed (1.000 seconds).", ""))).encode()
+        self.assertIs(MODULE.normal_saved_version_markers(output), True)
+        for wrong in (output + output, output.replace(marker.encode(), b"wrong"), output[:-1],
+                      output.replace(b"passed (", b"failed ("), output.replace(b"SavedVersionRecovery", b"SavedOfflineChecks"),
+                      output + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true\n",
+                      b"\n".join((output.splitlines()[0], marker.encode(), MODULE.ORIGINAL_MARKER.encode(), output.splitlines()[3], b""))):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_saved_version_markers(wrong)
+        frames = [dict(protocol="mrk-release-version/1", session="0123456789abcdef0123456789abcdef", seq=i,
+                       kind=kind, result=dict(scopeResources="settled", **result))
+                  for i, (kind, result) in enumerate((("opened", {"source": "release/version.properties", "values": {"name": "1.2.3", "build": "7"}}),
+                                                       ("prepared", {"view": {"synthetic": True}})))]
+        body = b"".join(json.dumps(row).encode() + b"\n" for row in frames)
+        self.assertEqual(MODULE.saved_version_producer_frames(body), hashlib.sha256(body).hexdigest())
+        for wrong in (body + b'{}\n', body.replace(b'"seq": 1', b'"seq": true'), body.replace(b'"prepared"', b'"terminal"'),
+                      body.replace(b'"settled"', b'"unknown"', 1), body.replace(b'"1.2.3"', b'"2.3.4"'), body[:-1]):
+            with self.assertRaises(MODULE.Refused): MODULE.saved_version_producer_frames(wrong)
 
     def test_workflow_refusal_output_requires_one_original_exact_final_case_and_scope(self):
         output = normal_workflow_refusal_output()
@@ -1080,10 +1112,10 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         source = SWIFT.read_text()
         custody = source.split("    private final class GateObservation {", 1)[0]
         self.assertEqual(source.count("try beginCase(seconds: 60)"), 2)
-        self.assertEqual(source.count("try beginCase(seconds: 300)"), 7)
-        self.assertEqual(source.count("try completeNormalQuit(app)"), 8)
+        self.assertEqual(source.count("try beginCase(seconds: 300)"), 8)
+        self.assertEqual(source.count("try completeNormalQuit(app)"), 9)
         self.assertEqual(source.count("try completeNormalQuit(restartedApp)"), 1)
-        self.assertEqual(source.count("try acceptFinalScenario()"), 7)
+        self.assertEqual(source.count("try acceptFinalScenario()"), 8)
         self.assertEqual(source.count("try acceptPersistenceRestart()"), 1)
         self.assertEqual(source.count("normalQuitObserved = true"), 2)
         for required in ("let deadline: TimeInterval", "value.isFinite, value >= last",
@@ -1131,6 +1163,13 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
         for forbidden in ("gate.probe(", "GateObservation(", "original.terminate()", "forceTerminate", "try?", "catch", "beginCase(seconds: 300)"):
             self.assertNotIn(forbidden, engineering)
+
+        recovery = source.split("func testSyntheticProjectSavedVersionRecovery() throws {", 1)[1].split(
+            "    @MainActor func testSyntheticProjectManagedWorkflowRefusal()", 1)[0]
+        for token in ("try beginCase(seconds: 300)", "try completeNormalQuit(app)", "try acceptFinalScenario()"):
+            self.assertEqual(recovery.count(token), 1)
+        self.assertLess(recovery.index("try completeNormalQuit(app)"), recovery.index("try fixture.closeOriginals()"))
+        self.assertLess(recovery.index("try fixture.closeOriginals()"), recovery.index("try acceptFinalScenario()"))
 
     def test_native_panels_display_fixed_purpose_without_relaxing_sheet_identity(self):
         native = (ROOT / "desktop/native/macos-installed-native/src/native.m").read_text()
@@ -2327,6 +2366,151 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual(len(consumed), 1)
             self.assertEqual((normal / "engineering-build.failure-diagnostics.json").read_bytes(), expected)
             self.assertFalse((normal / "engineering-smoke.json").exists())
+
+        # One additional fixture in this EXISTING real-FS group. The fake owner
+        # returns only inert frames and makes named fixture renames below; no
+        # producer, interpreter, signer, Xcode or application is executed here.
+        # Actual core interruption remains the unchanged joined-child test/native prerequisite.
+        fixture_data = (ROOT / MODULE.SAVED_VERSION_DATA).read_bytes()
+        for fault in (None, "producer-zero", "original-unknown", "seed-facts", "source-bytes", "consuming-close",
+                      "interrupt-named", "restored-facts"):
+            with self.subTest(saved_version_custody=fault), tempfile.TemporaryDirectory(prefix="mrk-saved-version-handoff-data-") as temporary:
+                base = Path(temporary)
+                source_root, work, parent = (base / value for value in ("source", "work", "temporary"))
+                for directory in (source_root, work, parent): directory.mkdir(mode=0o700)
+                normal = work / "normal-ui"; normal.mkdir(mode=0o700)
+                fixed = {"desktop/" + name for name in MODULE.SAVED_VERSION_BOOTSTRAPS}
+                fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"))
+                bodies = {name: b"inert admitted SOURCE, never imported or executed\n" for name in fixed | {MODULE.SAVED_VERSION_PRODUCER}}
+                bodies[MODULE.SAVED_VERSION_DATA] = fixture_data
+                rows, git_rows = [], []
+                for name, body in sorted(bodies.items()):
+                    path = source_root / name; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    path.write_bytes(body); path.chmod(0o600)
+                    if name in fixed: rows.append(dict(path=name, size=len(body), sha256=hashlib.sha256(body).hexdigest()))
+                    blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+                    git_rows.append(b"100644 blob " + blob.encode() + b"\t" + name.encode() + b"\0")
+                source_s = hashlib.sha256(MODULE.encoded(rows)).hexdigest()
+                runtime = dict(sourceInputsSha256=source_s, sourceInputCount=len(rows), target=MODULE.ARM_TARGET,
+                               qualification="current-source-staged-no-native-execution", successorManifestSha256="b" * 64)
+                (work / "runtime-result.json").write_bytes(json.dumps(runtime).encode())
+                owned, envs = [], []
+                fixture = None
+                case = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedVersionRecovery]"
+                ui_stdout = ("\n".join(("Test Case '" + case + "' started.", MODULE.ORIGINAL_MARKER, MODULE.SAVED_VERSION_MARKER,
+                                       "Test Case '" + case + "' passed (1.000 seconds).", ""))).encode()
+                def owned_fake(argv, **kwargs):
+                    owned.append(argv); envs.append(kwargs["environ"])
+                    if argv[0] == "/usr/bin/git": return subprocess.CompletedProcess(argv, 0, b"".join(git_rows), b"")
+                    if argv[0] == "/inert/python":
+                        self.assertEqual(argv, ["/inert/python", "-I", "-S", "-B", str(source_root / MODULE.SAVED_VERSION_PRODUCER),
+                                                "--restart-child", str(fixture.root / "project"), "release_version", "interrupt"])
+                        self.assertEqual((kwargs["timeout"], kwargs["output_limit"]), (20, 65536))
+                        self.assertNotIn(MODULE.SAVED_VERSION_ENV, kwargs["environ"])
+                        if fault == "original-unknown": raise MODULE.Refused("synthetic unreturned original")
+                        journal = fixture.root / MODULE.SAVED_VERSION_JOURNAL; journal.mkdir(mode=0o700)
+                        controls = {"header.json": {"schemaVersion": 2, "domain": "release_version", "transactionId": "d" * 32},
+                                    "plan.json": {"transactionId": "d" * 32, "files": [{"path": "release/version.properties"}]},
+                                    "commit.pending": {}, "rollback.pending": {}}
+                        for name, value in controls.items():
+                            path = journal / name; path.write_bytes(json.dumps(value).encode()); path.chmod(0o600)
+                        (journal / "new-0").write_bytes(fixture.after); (journal / "new-0").chmod(0o600)
+                        os.rename(fixture.root / MODULE.SAVED_VERSION_PATH, journal / "old-0")
+                        for directory in (journal, fixture.root / "project/release"):
+                            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                            try: os.fsync(fd)
+                            finally: os.close(fd)
+                        if fault == "interrupt-named":
+                            path = fixture.root / "project/README-user.txt"
+                            replacement = path.with_name("replacement-fixture-only")
+                            replacement.write_bytes(fixture.files["project/README-user.txt"]); replacement.chmod(0o600)
+                            os.replace(replacement, path)  # Same bytes/mode, different named original.
+                        frames = [dict(protocol="mrk-release-version/1", session="0123456789abcdef0123456789abcdef", seq=i,
+                            kind=kind, result=dict(scopeResources="settled", **value)) for i, (kind, value) in enumerate((
+                                ("opened", {"source": "release/version.properties", "values": {"name": "1.2.3", "build": "7"}}),
+                                ("prepared", {"view": {"synthetic": True}})))]
+                        return subprocess.CompletedProcess(argv, 0 if fault == "producer-zero" else 86,
+                            b"".join(json.dumps(row).encode() + b"\n" for row in frames), b"")
+                    self.assertEqual(argv, ["/inert/xcodebuild"])
+                    self.assertEqual(kwargs["environ"][MODULE.SAVED_VERSION_ENV], str(fixture.handoff))
+                    journal = fixture.root / MODULE.SAVED_VERSION_JOURNAL
+                    os.rename(journal / "old-0", fixture.root / MODULE.SAVED_VERSION_PATH)
+                    for path in journal.iterdir(): path.unlink()
+                    journal.rmdir()
+                    if fault == "restored-facts":
+                        path = fixture.root / "project/README-user.txt"; previous = path.stat()
+                        os.utime(path, ns=(previous.st_atime_ns, previous.st_mtime_ns + 1_000_000))
+                    return subprocess.CompletedProcess(argv, 0, ui_stdout, b"")
+                original_environment = {"PATH": "/inert", "HOME": "/inert"}
+                phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), original_environment, source_root,
+                                           MODULE.PhaseClock(585, now=lambda: 0))
+                fake_sys = SimpleNamespace(flags=SimpleNamespace(isolated=1, no_site=1, dont_write_bytecode=1), executable="/inert/python")
+                with patch.object(MODULE, "sys", fake_sys), patch.object(MODULE, "SAVED_VERSION_TEMPORARY", parent), \
+                        patch.object(MODULE, "SAVED_VERSION_SOURCE", source_s):
+                    fixture = MODULE.SavedVersionFixture(phase, "a" * 40, normal)
+                    try:
+                        if fault in ("producer-zero", "original-unknown", "interrupt-named"):
+                            with self.assertRaises(MODULE.Refused): fixture.interrupt(MODULE.ARM_TARGET)
+                            self.assertFalse(fixture.handoff.exists())
+                            self.assertEqual(len(owned), 2)
+                            self.assertLessEqual(len(fixture.fds), 54)
+                            continue
+                        fixture.interrupt(MODULE.ARM_TARGET)
+                        # 15SOURCE+6SOURCEparents+2runtime+1tmp+11fixture dirs+
+                        # 13public+6journal+2handoff =56 held; only the restored
+                        # version adds one later. The existing64-FD owner stays.
+                        self.assertEqual(len(fixture.fds), 56)
+                        self.assertEqual(len(set(fixture.fds)), 56)
+                        for path in fixture.originals.keys() - {MODULE.SAVED_VERSION_PATH}:
+                            self.assertIs(fixture.seed[path], fixture.originals[path])
+                        self.assertEqual([row["role"] for row in phase.records], ["saved-version-source-roster", "saved-version-core-interrupt"])
+                        self.assertEqual(phase.records[1]["returncode"], 86)
+                        self.assertEqual(stat.S_IMODE(fixture.handoff.stat().st_mode), 0o600)
+                        self.assertLessEqual(fixture.handoff.stat().st_size, 16384)
+                        handoff = json.loads(fixture.handoff.read_bytes())
+                        self.assertEqual((len(handoff["files"]), len(fixture.originals)), (18, 13))
+                        self.assertFalse((fixture.root / MODULE.SAVED_VERSION_PATH).exists())
+                        self.assertEqual(fixture.files["project/.gitignore"], MODULE.saved_version_payload(fixture_data)[0]["project/.gitignore"])
+                        fixture.check_seed()
+                        if fault == "seed-facts":
+                            path = fixture.root / "project/README-user.txt"; old = path.stat()
+                            os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000))
+                        elif fault == "source-bytes":
+                            (source_root / MODULE.SAVED_VERSION_PRODUCER).write_bytes(b"changed original source\n")
+                        if fault in ("seed-facts", "source-bytes"):
+                            with self.assertRaises(MODULE.Refused): fixture.ui_call("one-admitted-ui-test", ["/inert/xcodebuild"], 420)
+                            self.assertEqual(len(owned), 2)
+                            self.assertIs(phase.environment, original_environment)
+                            continue
+                        fixture.original = fixture.ui_call("one-admitted-ui-test", ["/inert/xcodebuild"], 420)
+                        self.assertIs(phase.environment, original_environment)
+                        if fault == "restored-facts":
+                            with self.assertRaises(MODULE.Refused): fixture.restored()
+                            self.assertNotIn("originalFixtureRestored", fixture.receipt)
+                            self.assertLessEqual(len(fixture.fds), 57)
+                            continue
+                        result = fixture.restored()
+                        self.assertEqual(len(fixture.fds), 57)
+                        self.assertEqual(len(set(fixture.fds)), 57)
+                        self.assertTrue(all(result[k] for k in ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved",
+                                                               "sourcePrePostMatched", "uiOriginalMarkersObserved")))
+                        self.assertFalse(result["interruptedGuiSaveObserved"])
+                        self.assertEqual((fixture.root / MODULE.SAVED_VERSION_PATH).read_bytes(), fixture.files[MODULE.SAVED_VERSION_PATH])
+                        self.assertFalse((fixture.root / MODULE.SAVED_VERSION_JOURNAL).exists())
+                        if fault == "consuming-close":
+                            close, first, closed = os.close, fixture.fds[-1], []
+                            def consuming(fd):
+                                close(fd); closed.append(fd)
+                                if fd == first: raise OSError("synthetic consumed recovery original close")
+                            owned_fds = set(fixture.fds)
+                            with patch.object(MODULE.os, "close", consuming), self.assertRaises(OSError): fixture.close()
+                            self.assertEqual(set(closed), owned_fds)
+                            self.assertEqual(len(closed), len(owned_fds))
+                    finally:
+                        held_count = len(fixture.fds)
+                        fixture.close()
+                        self.assertLessEqual(held_count, 57)
+                        self.assertEqual(fixture.fds, [])
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
         selected = "testLaunchCancelAndQuit"

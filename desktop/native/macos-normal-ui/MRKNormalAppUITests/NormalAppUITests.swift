@@ -1054,7 +1054,7 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -1186,7 +1186,7 @@ final class NormalAppUITests: XCTestCase {
             guard let original = directories[parent] else { throw Refusal.condition("fixture: missing fixed parent") }
             return try readLeaf(original, name: name)
         }
-        private func readLeaf(_ original: Directory, name: String, privateOnly: Bool = false) throws -> File {
+        private func readLeaf(_ original: Directory, name: String, privateOnly: Bool = false, limit: Int = 32 * 1024) throws -> File {
             try Self.need(closeErrors.isEmpty, "an earlier consuming close failed")
             try checkDirectory(original)
             let fd = openat(original.fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -1194,7 +1194,7 @@ final class NormalAppUITests: XCTestCase {
             defer { if Darwin.close(fd) != 0 { closeErrors.append("fixed-leaf-close") } }
             let before = try Self.facts(fd)
             try Self.need(before.mode & mode_t(S_IFMT) == mode_t(S_IFREG) && before.links == 1
-                && before.uid == getuid() && before.gid == getgid() && before.bytes >= 0 && before.bytes <= 32 * 1024
+                && before.uid == getuid() && before.gid == getgid() && before.bytes >= 0 && before.bytes <= limit
                 && before.mode & 0o7022 == 0
                 && (!privateOnly || before.mode & 0o7777 == 0o600 && before.flags == 0
                     && before.device == original.facts.device), "leaf shape/mode/limit")
@@ -1203,7 +1203,7 @@ final class NormalAppUITests: XCTestCase {
                 let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
                 try Self.need(count >= 0, "fixed leaf read failed")
                 if count == 0 { break }
-                try Self.need(bytes.count + count <= 32 * 1024, "fixed leaf read limit")
+                try Self.need(bytes.count + count <= limit, "fixed leaf read limit")
                 bytes.append(contentsOf: buffer.prefix(count))
             }
             try Self.need(bytes.count == before.bytes && before == Self.facts(fd)
@@ -1238,6 +1238,157 @@ final class NormalAppUITests: XCTestCase {
             try checkDirectory(directory)
             return result
         }
+        // A one-case transfer of observation custody, never a product lease. The
+        // original parent still holds these exact files throughout XCTest.
+        private var savedVersionPending = false
+        private var savedVersionBackup: File?
+        private var savedVersionDirectories: [String: StatFacts] = [:]
+        private(set) var savedVersionTransaction = ""
+        private static let savedVersionJournal = "project/.mobile-release-version"
+        private static let savedVersionControls: Set<String> = ["header.json", "plan.json", "commit.pending", "rollback.pending", "old-0", "new-0"]
+        private static func wireFacts(_ facts: StatFacts) -> [String] {
+            [String(facts.device), String(facts.inode), String(facts.mode), String(facts.uid), String(facts.gid),
+             String(facts.links), String(facts.bytes),
+             String(Int64(facts.modifiedSeconds) * 1_000_000_000 + Int64(facts.modifiedNanoseconds)),
+             String(Int64(facts.changedSeconds) * 1_000_000_000 + Int64(facts.changedNanoseconds)), String(facts.flags)]
+        }
+        private static func sameSavedVersionMove(_ before: StatFacts, _ after: StatFacts) -> Bool {
+            let a = wireFacts(before), b = wireFacts(after)
+            return Array(a.prefix(8)) == Array(b.prefix(8)) && a[9] == b[9]
+        }
+        private func adoptSavedVersion(_ data: Data, temporary: Directory) throws {
+            let env = ProcessInfo.processInfo.environment
+            guard let path = env["MRK_NORMAL_UI_SAVED_VERSION_FIXTURE"],
+                  path.range(of: #"^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui/saved-version-recovery-fixture\.json$"#,
+                             options: .regularExpression) != nil else {
+                throw Refusal.condition("fixture: fixed owner-derived recovery handoff missing")
+            }
+            // Hold every original handoff ancestor; never follow a path supplied
+            // by the renderer or use it as a normal-application environment override.
+            var parent = try adoptDirectory(open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: "/")
+            anchors.append(parent)
+            for name in path.split(separator: "/").dropLast().map(String.init) {
+                parent = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: parent.fd, name: name)
+                anchors.append(parent)
+                try Self.need((parent.facts.uid == 0 || parent.facts.uid == getuid()) && parent.facts.mode & 0o022 == 0,
+                              "recovery handoff ancestor policy")
+            }
+            let handoff = try readLeaf(parent, name: "saved-version-recovery-fixture.json", privateOnly: true, limit: 16 * 1024)
+            try Self.need(handoff.bytes.count <= 16 * 1024 && handoff.bytes.last == 10, "recovery handoff bound")
+            guard let raw = try JSONSerialization.jsonObject(with: handoff.bytes) as? [String: Any],
+                  Set(raw.keys) == Set(["schemaVersion", "scope", "sourceCommit", "sourceInputsSha256", "runtimeManifestSha256",
+                      "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "root",
+                      "transactionId", "originalVersionFacts", "directories", "files"]),
+                  let schema = raw["schemaVersion"] as? Int, schema == 1,
+                  let source = raw["sourceCommit"] as? String,
+                  source == env["MRK_NORMAL_UI_HARNESS_SOURCE"], source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
+                  raw["scope"] as? String == "one-owned-saved-version-recovery-fixture",
+                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",
+                  let root = raw["root"] as? String,
+                  root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
+                  let transaction = raw["transactionId"] as? String,
+                  transaction.range(of: #"^[0-9a-f]{32}$"#, options: .regularExpression) != nil,
+                  let oldFacts = raw["originalVersionFacts"] as? [String], oldFacts.count == 10,
+                  let directoryFacts = raw["directories"] as? [String: [String]],
+                  let fileFacts = raw["files"] as? [String: [String: Any]] else {
+                throw Refusal.condition("fixture: closed recovery handoff differs")
+            }
+            // Parent emits canonical ASCII JSON. Equality also rejects duplicate
+            // keys/coerced numeric spellings, without a second permissive parser.
+            var canonicalObject = raw
+            canonicalObject["schemaVersion"] = 1 // Reject JSON true coercing to NSNumber/Int one.
+            let canonical = try JSONSerialization.data(withJSONObject: canonicalObject, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
+            try Self.need(canonical == handoff.bytes, "recovery handoff is not the exact canonical document")
+            for key in ["runtimeManifestSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256"] {
+                guard let digest = raw[key] as? String,
+                      digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+                    throw Refusal.condition("fixture: recovery handoff digest unavailable")
+                }
+            }
+            let dataDigest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            try Self.need(raw["fixtureDataSha256"] as? String == dataDigest, "recovery handoff bundled DATA differs")
+            let paths = Set(originals.keys).subtracting([Self.version]).union(Self.savedVersionControls.map { Self.savedVersionJournal + "/" + $0 })
+            let expectedDirectories = Set(Self.ancestors(paths))
+            try Self.need(paths.count == 18 && Set(fileFacts.keys) == paths && Set(directoryFacts.keys) == expectedDirectories,
+                          "recovery handoff exact ready-journal roster")
+            rootPath = root
+            let name = String(root.dropFirst("/private/tmp/".count))
+            directories[""] = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: temporary.fd, name: name)
+            for path in Self.ancestors(paths) where !path.isEmpty {
+                let (parent, name) = Self.parts(path), original = directories[parent]!
+                directories[path] = try adoptDirectory(openat(original.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: original.fd, name: name)
+            }
+            for (path, directory) in directories {
+                try Self.need(directory.facts.uid == getuid() && directory.facts.gid == getgid()
+                    && directory.facts.mode & 0o7777 == 0o700 && directory.facts.flags == 0
+                    && directoryFacts[path] == Self.wireFacts(directory.facts), "recovery directory original differs")
+                savedVersionDirectories[path] = directory.facts
+            }
+            for path in paths.sorted() {
+                let observed = try read(path)
+                guard let row = fileFacts[path], Set(row.keys) == ["facts", "sha256"],
+                      let expectedFacts = row["facts"] as? [String], expectedFacts == Self.wireFacts(observed.facts),
+                      let digest = row["sha256"] as? String,
+                      digest == SHA256.hash(data: observed.bytes).map({ String(format: "%02x", $0) }).joined() else {
+                    throw Refusal.condition("fixture: recovery file original differs")
+                }
+                let mode: mode_t = path.hasPrefix("sources/") ? 0o644 : 0o600
+                try Self.need(observed.facts.mode & 0o7777 == mode && observed.facts.flags == 0
+                    && observed.facts.device == directories[""]!.facts.device, "recovery file mode/device differs")
+                if let expected = originals[path] { try Self.need(observed.bytes == expected, "recovery unrelated bundled DATA differs") }
+                current[path] = observed
+            }
+            let backup = current[Self.savedVersionJournal + "/old-0"]!
+            let backupFacts = Self.wireFacts(backup.facts)
+            try Self.need(backup.bytes == originals[Self.version] && Array(oldFacts.prefix(8)) == Array(backupFacts.prefix(8))
+                && oldFacts[9] == backupFacts[9]
+                && current[Self.savedVersionJournal + "/new-0"]!.bytes == changes["version"]?[Self.version],
+                "recovery handoff actual version rename differs")
+            savedVersionPending = true
+            savedVersionBackup = backup
+            savedVersionTransaction = transaction
+            try assertUnchanged()
+            // Recheck the actual handoff leaf after all admission reads; no reopen
+            // as a replacement authority and no permission to delete any fixture.
+            let after = try readLeaf(parent, name: "saved-version-recovery-fixture.json", privateOnly: true, limit: 16 * 1024)
+            try Self.need(after.bytes == handoff.bytes && after.facts == handoff.facts && closeErrors.isEmpty,
+                          "recovery handoff changed during admission")
+        }
+        func assertSavedVersionPending() throws {
+            try Self.need(savedVersionPending && savedVersionBackup != nil, "no original pending version journal")
+            try assertUnchanged()
+            for (path, original) in savedVersionDirectories {
+                try Self.need(original == Self.facts(directories[path]!.fd), "read-only inspection changed a directory")
+            }
+        }
+        func acceptSavedVersionRollback() throws {
+            try Self.need(savedVersionPending && acceptedStages.isEmpty, "recovery was repeated or mixed with a Save")
+            guard let backup = savedVersionBackup else { throw Refusal.condition("fixture: original backup absent") }
+            let restored = try read(Self.version)
+            try Self.need(restored.bytes == originals[Self.version] && Self.sameSavedVersionMove(backup.facts, restored.facts),
+                          "original version bytes/inode/owner/mode/mtime were not restored")
+            for (path, original) in current where !path.hasPrefix(Self.savedVersionJournal + "/") {
+                let observed = try read(path)
+                try Self.need(original.bytes == observed.bytes && original.facts == observed.facts, "recovery changed unrelated original")
+            }
+            for (path, original) in savedVersionDirectories where path != Self.savedVersionJournal {
+                let observed = try Self.facts(directories[path]!.fd)
+                try Self.need(path == "project" || path == "project/release" ? original.sameDirectory(observed) : original == observed,
+                              "recovery changed an unrelated directory")
+            }
+            // Keep the unlinked journal FD in descriptors until consuming close.
+            // Only the expected names disappear; no directory/leaf is deleted here.
+            current = current.filter { !$0.key.hasPrefix(Self.savedVersionJournal + "/") }
+            current[Self.version] = restored
+            directories.removeValue(forKey: Self.savedVersionJournal)
+            savedVersionPending = false
+            acceptedStages.insert("saved-version-rollback")
+            try assertUnchanged()
+        }
+        func savedVersionAfterDigest() throws -> String {
+            guard let bytes = changes["version"]?[Self.version] else { throw Refusal.condition("fixture: fixed version after DATA absent") }
+            return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        }
         private func checkRoster() throws {
             for value in anchors { try checkDirectory(value) }
             let leafPaths = Set(current.keys)
@@ -1255,6 +1406,7 @@ final class NormalAppUITests: XCTestCase {
             }
             let project = directories["project"]!
             for name in Self.controls + [".git"] {
+                if savedVersionPending && name == ".mobile-release-version" { continue }
                 var s = stat()
                 let returned = fstatat(project.fd, name, &s, AT_SYMLINK_NOFOLLOW)
                 let error = errno
@@ -1376,6 +1528,10 @@ final class NormalAppUITests: XCTestCase {
                     && originals.values.allSatisfy { $0.count <= 32 * 1024 },
                     "fixed managed workflow fixture census differs")
             }
+            if profile == .savedVersionRecovery {
+                guard let ignore = changes["config"]?["project/.gitignore"] else { throw Refusal.condition("fixture: fixed recovery ignore DATA absent") }
+                originals["project/.gitignore"] = ignore // Only before original admission; never after a snapshot.
+            }
             try Self.need(originals.values.reduce(0) { $0 + $1.count }
                 + changes.values.flatMap { $0.values }.reduce(0) { $0 + $1.count } <= 256 * 1024,
                 "whole fixture DATA limit")
@@ -1387,6 +1543,10 @@ final class NormalAppUITests: XCTestCase {
             let temporary = try adoptDirectory(openat(privateDirectory.fd, "tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                 parent: privateDirectory.fd, name: "tmp")
             anchors.append(temporary)
+            if profile == .savedVersionRecovery {
+                try adoptSavedVersion(data, temporary: temporary)
+                return
+            }
             var template = Array("/private/tmp/mrk-normal-project-XXXXXX".utf8CString)
             let made = template.withUnsafeMutableBufferPointer { mkdtemp($0.baseAddress!) != nil }
             try Self.need(made, "exclusive temporary parent creation failed")
@@ -2738,6 +2898,107 @@ final class NormalAppUITests: XCTestCase {
     }
 
     // Standalone opt-in preservation/refusal case; not an added project-batch case.
+    // One real interrupted core process, then a fresh ordinary app's registered
+    // project/recovery owner. This is not a crash during a GUI-originated Save.
+    @MainActor func testSyntheticProjectSavedVersionRecovery() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("saved-version-fixture") { try fixture.prepare(.savedVersionRecovery) }
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("saved-version-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary recovery launch returned no original") }
+        try stage("saved-version-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath)
+            try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery selected project differs")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertSavedVersionPending()
+        }
+        try press(renderer, "Dashboard", renderer: renderer)
+        let editor = try waitElement(named(renderer, "Edit or create saved version values"), in: renderer)
+        // No normal Open, placeholder baseline, or submitted draft is needed.
+        let panel = try waitElement(named(editor, "Saved-version recovery inspection"), in: renderer)
+        func inspect() throws {
+            try press(panel, "Inspect recovery", renderer: renderer)
+            _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
+                                enabled: true, timeout: 48)
+            _ = try unique(panel.staticTexts.matching(NSPredicate(format: "title == %@", "Roll back the interrupted save")), "exact rollback action absent")
+            try inventory(panel, caption: "Inspected journal files — not your current draft", paths: ["release/version.properties"])
+            _ = try unique(panel.staticTexts.matching(identifier: "restore original"), "version recovery effect differs")
+            for digest in [try fixture.digest(LocalFixture.version), try fixture.savedVersionAfterDigest()] {
+                _ = try unique(panel.staticTexts.matching(identifier: "SHA256 " + digest), "recovery review digest differs")
+            }
+            let beforeBytes = try fixture.text(LocalFixture.version).utf8.count
+            let afterBytes = try fixture.text(LocalFixture.version, stage: "version").utf8.count
+            for count in Set([beforeBytes, afterBytes]) {
+                try require(panel.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "\(count) bytes · mode 0600")).count >= 1,
+                            "recovery byte/mode facts unavailable")
+            }
+            _ = try unique(panel.staticTexts.matching(identifier:
+                "Private cleanup is limited to 5 inspected owned files and 0 directories. No other domain, current draft, Store state or build-input recovery is included."),
+                "recovery private cleanup scope differs")
+            try fixture.assertSavedVersionPending()
+        }
+        try stage("saved-version-inspect-close") {
+            try inspect()
+            try press(panel, "Close inspection, keep drafts", renderer: renderer)
+            _ = try waitElement(panel.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Native: settled; reason: discarded.")),
+                                in: panel, timeout: 48)
+            _ = try waitElement(panel.buttons.matching(identifier: "Inspect recovery"), in: panel, enabled: true, timeout: 48)
+            try require(panel.buttons.matching(identifier: "Review recovery confirmation…").count == 0,
+                        "closed original recovery review still permits Apply")
+            try fixture.assertSavedVersionPending()
+        }
+        try stage("saved-version-reinspect-confirm") {
+            try inspect()
+            try press(panel, "Review recovery confirmation…", renderer: renderer)
+            let dialog = try waitElement(renderer.dialogs.matching(identifier: "Roll back the interrupted save?"), in: renderer)
+            _ = try unique(dialog.staticTexts.matching(identifier: fixture.savedVersionTransaction), "confirmation journal is not the original")
+            let apply = try unique(dialog.buttons.matching(identifier: "Confirm recovery action"), "recovery Apply is ambiguous")
+            try require(!apply.isEnabled, "recovery Apply began enabled without consent")
+            let checkbox = try waitElement(dialog.checkBoxes.matching(NSPredicate(format: "title == %@",
+                "I reviewed the action, exact file effects, both byte/digest/mode summaries and private cleanup scope.")), in: dialog, enabled: true)
+            try require((checkbox.value as? String) == "0" || (checkbox.value as? NSNumber)?.intValue == 0, "recovery consent started checked")
+            try reveal(checkbox, in: renderer); checkbox.click()
+            try require(!apply.isEnabled, "recovery typed confirmation was not required")
+            try replace(field(dialog, "Type RECOVER to confirm this one original plan"), with: "RECOVER", renderer: renderer)
+            try fixture.assertSavedVersionPending()
+            try press(dialog, "Confirm recovery action", renderer: renderer) // Exactly one Apply.
+            try waitGone(dialog)
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Original recovery action completed; current draft kept."),
+                                in: panel, timeout: 48)
+            _ = try waitElement(panel.staticTexts.matching(identifier:
+                "Original effect: rolled_back; journal: clean; core resources: settled; core reason: none. Native: settled; reason: none."),
+                in: panel, timeout: 48)
+            try fixture.acceptSavedVersionRollback()
+        }
+        try stage("saved-version-reload") {
+            let saved = try waitElement(named(renderer, "Saved version and build"), in: renderer)
+            try press(saved, "Read saved version", renderer: renderer)
+            _ = try waitElement(saved.staticTexts.matching(identifier: "Observed from saved version file"), in: saved)
+            _ = try unique(saved.staticTexts.matching(identifier: "1.2.3"), "fresh saved version is not the restored original")
+            _ = try unique(saved.staticTexts.matching(identifier: "Build number 7"), "fresh saved build is not the restored original")
+            try fixture.assertUnchanged()
+        }
+        try stage("saved-version-readback-and-quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "normal affirmative Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        try acceptFinalScenario()
+        print("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI=original-core-interrupt86-fresh-ui-inspect-close-reinspect-confirm-rollback-reload;interruptedGuiSave=not-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
     @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
         continueAfterFailure = false
         executionTimeAllowance = 300
