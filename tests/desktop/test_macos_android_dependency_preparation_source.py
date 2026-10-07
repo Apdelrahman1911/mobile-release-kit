@@ -38,9 +38,14 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         tree = ast.parse(source)
         constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                     and n.targets[0].id in ('ARCHIVES', 'PINS', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE')}
-        self.assertIsNone(constants['SDK_CURRENT_USE'])
-        self.assertEqual(constants['RUN_SCOPE'], 'observe-sdk')
+                     and n.targets[0].id in ('ARCHIVES', 'PINS', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE', 'SDK_METADATA')}
+        self.assertEqual(constants['SDK_CURRENT_USE']['image'], {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'})
+        self.assertEqual(constants['SDK_CURRENT_USE']['productVersion'], '26.6.2')
+        self.assertEqual(len(constants['SDK_CURRENT_USE']['files']), 5)
+        self.assertEqual(constants['RUN_SCOPE'], 'prepare-a')
+        for entry in constants['SDK_METADATA']:
+            raw = (ROOT / entry['path']).read_bytes()
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (entry['bytes'], entry['sha256']))
         self.assertEqual([r['role'] for r in constants['ARCHIVES']], ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle', 'aapt2'])
         self.assertEqual(sum(r['bytes'] for r in constants['ARCHIVES']), 469391018)
         for path, pin in constants['RESOURCES'].items():
@@ -59,12 +64,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         workflow = (ROOT / '.github/workflows/desktop-macos-android-dependencies.yml').read_text()
         self.assertIn('branches: [verify/desktop-macos-android-dependencies]', workflow)
         self.assertIn('runs-on: macos-26', workflow)
-        self.assertIn('timeout-minutes: 14', workflow)
-        self.assertIn('2+3+3+1+1+2=12', workflow)
+        self.assertIn('timeout-minutes: 53', workflow)
+        self.assertIn('2+3+3+1+37+2+2=50', workflow)
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('python-version: \'3.14.7\'', workflow)
-        self.assertIn("macos_android_dependency_preparation.py observe-sdk", workflow)
-        self.assertNotIn("macos_android_dependency_preparation.py prepare-a", workflow)
+        self.assertNotIn("macos_android_dependency_preparation.py observe-sdk", workflow)
+        self.assertIn("macos_android_dependency_preparation.py prepare-a", workflow)
         self.assertIn("MRK_PREPARATION_EVIDENCE_UPLOAD", source)
         self.assertNotIn('secrets.', workflow)
         self.assertNotIn('workflow_dispatch:', workflow)
@@ -176,8 +181,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             self.assertEqual(returned['packages'][1]['properties'], {'Pkg.Revision': '35.0.0'})
             self.assertEqual(set(returned['files']), {path[len(sdk) + 1:] for path, _ in expected_reads[1:]})
             self.assertTrue(clocks[0].finished)
-            self.assertIsNone(helper.SDK_CURRENT_USE)
-            with self.assertRaisesRegex(helper.Refused, '^provisioned-sdk-current-use-not-admitted$'):
+            self.assertEqual(helper.SDK_CURRENT_USE['productVersion'], '26.6.2')
+            with self.assertRaisesRegex(helper.Refused, '^provisioned-sdk-source-nomination-mismatch$'):
                 helper.admit_sdk_current_use(returned)
 
             failures = [
@@ -449,7 +454,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     return types.SimpleNamespace()
                 environment = {'MRK_ANDROID_PREPARATION_WORK': '../unsafe' if kind == 'unsafe-name' else str(expected_path)}
                 helper.os = types.SimpleNamespace(**dict(vars(os), environ=environment))
-                helper.sys = types.SimpleNamespace(argv=['fixed-source', 'prepare-a' if kind == 'wrong-scope' else 'observe-sdk'])
+                helper.sys = types.SimpleNamespace(argv=['fixed-source', 'observe-sdk' if kind == 'wrong-scope' else 'prepare-a'])
                 helper.admit_work, helper.context, helper.load = admit, context, load
                 result = None
                 try:
@@ -472,7 +477,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     self.assertEqual(admitted, [])
                     self.assertEqual(loads, [])
                 else:
-                    self.assertEqual(leaves, ['observe-sdk-failure.json'])
+                    self.assertEqual(leaves, ['prepare-a-failure.json'])
                     path = directory / leaves[0]
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                     raw = path.read_bytes()
@@ -483,9 +488,296 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     self.assertEqual(value['status'], 'refused')
                     self.assertFalse(value['nativeOrTaskSuccess'])
                     self.assertFalse(value['cleanupAuthorized'])
-                    self.assertEqual(value['scope'], 'observe-sdk')
+                    self.assertEqual(value['scope'], 'prepare-a')
                     self.assertEqual(value['stage'], {'wrong-scope': 'scope-context', 'context': 'scope-context',
                                                      'normal-load': 'normal-helper-load', 'transport-load': 'transport-helper-load'}[kind])
                     self.assertEqual(value['reason'], {'wrong-scope': 'fixed-source-scope', 'context': 'fixed-native-python-host',
                                                       'normal-load': 'source-module-pin', 'transport-load': 'source-module-pin'}[kind])
                     self.assertNotIn(str(directory), raw.decode())
+
+    def test_a_owned_startup_named_digest_and_exact_source_metadata_projection(self):
+        self.assertNotEqual(os.getuid(), 0)
+        helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_files_data')
+        transport = fixture_module('desktop/tools/macos_android_supplier_preparation.py', '_mrk_a_paths_data')
+        scratch = Path(os.environ['TMPDIR'])
+        class Clock:
+            def __init__(self, seconds=810): self.failed = False
+            def check(self): return 1
+        with tempfile.TemporaryDirectory(prefix='a-files-', dir=scratch) as temporary:
+            work = Path(temporary)
+            adopted = []
+            original_admit = helper.admit_work
+            def admit(path):
+                private = original_admit(path); adopted.append(private); return private
+            fault = KeyboardInterrupt('inert-startup')
+            def fail_clock(seconds): raise fault
+            helper.admit_work = admit; helper.N = types.SimpleNamespace(PhaseClock=fail_clock)
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                helper.observe_sdk_current_use(work)
+            self.assertIs(caught.exception, fault)
+            self.assertEqual(len(adopted), 1)
+            self.assertEqual(adopted[0]['fds'], [])
+            helper.admit_work = original_admit
+            helper.N = types.SimpleNamespace(PhaseClock=Clock); helper.P = transport; helper.SOURCE = ROOT
+            (work / 'tools').mkdir(mode=0o700)
+            a = helper.Acquisition(work)
+            # Only the two committed tiny XMLs are projected; no archive/vendor command.
+            a.project_sdk_metadata()
+            self.assertEqual(a.files, 2); self.assertEqual(a.writes, 35551)
+            self.assertEqual(a.reads, 2 * 35551 + 4)
+            self.assertLessEqual(a.roster_bytes, 4 << 20)
+            self.assertLessEqual(a.directory_bytes, 4 << 20)
+            for entry, row in zip(helper.SDK_METADATA, a.roster):
+                path = work / 'tools' / entry['target']
+                self.assertEqual(path.read_bytes(), (ROOT / entry['path']).read_bytes())
+                self.assertEqual(row['origin'], entry['origin'])
+                self.assertEqual(row['sourcePath'], entry['path'])
+                self.assertNotIn('vendorMode', row)
+                self.assertEqual(row['mode'], 0o444)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)  # Not sealed/executable yet.
+            self.assertFalse((work / 'tools/sdk/licenses').exists())
+            # Tiny inert observer member: EOF is charged; primary digest refusal
+            # survives a consuming leaf-close fault, while every parent closes.
+            opens, closes = [], []
+            original_os = helper.os
+            def tracked_open(*args, **kwargs):
+                fd = os.open(*args, **kwargs); opens.append(fd); return fd
+            def tracked_close(fd):
+                closes.append(fd); os.close(fd)
+                if fd == opens[-1]: raise OSError('inert-consuming-leaf-close')
+            helper.os = types.SimpleNamespace(**dict(vars(os), open=tracked_open, close=tracked_close))
+            tiny = helper.Acquisition(work); tiny.role = {'role': 'gradle', 'archivePrefix': 'fixed'}
+            row = ('fixed/observer-fixture', 'file', 0o100644, 3, '0' * 64)
+            rescued = []
+            try:
+                tiny.begin(row); tiny.block(row[0], 0, b'abc')
+                with self.assertRaisesRegex(helper.Refused, '^tool-payload-digest$'): tiny.end(row)
+            finally:
+                helper.os = original_os
+                for fd in opens:
+                    if fd not in closes: os.close(fd); rescued.append(fd)
+            self.assertEqual(rescued, []); self.assertEqual(len(closes), len(set(closes)))
+            self.assertIsNone(tiny.active)
+            good = ('fixed/observer-eof', 'file', 0o100644, 3, helper.digest(b'abc'))
+            tiny.begin(good); tiny.block(good[0], 0, b'abc'); tiny.end(good)
+            self.assertEqual(tiny.reads, 4)
+            # Renaming an ancestor leaves the held leaf intact but must revoke digest.
+            (work / 'a').mkdir(mode=0o700)
+            path = work / 'a/file'; path.write_bytes(b'bounded'); path.chmod(0o600)
+            original_os = helper.os; changed = False
+            def pread(fd, size, offset):
+                nonlocal changed
+                data = os.pread(fd, size, offset)
+                if not changed:
+                    changed = True; (work / 'a').rename(work / 'retained-a'); (work / 'a').mkdir(mode=0o700)
+                    (work / 'a/file').write_bytes(b'bounded')
+                return data
+            helper.os = types.SimpleNamespace(**dict(vars(os), pread=pread))
+            try:
+                with self.assertRaisesRegex(helper.Refused, '^ancestor-original-post$'):
+                    helper.file_digest(path, 7, Clock())
+            finally: helper.os = original_os
+            self.assertTrue(changed)
+            with self.assertRaisesRegex(helper.Refused, '^preparation-output-bound$'):
+                helper.publish_preparation(work, '../outside', b'x')
+
+    def test_a_transport_consuming_closes_and_final_caller_deadline(self):
+        self.assertNotEqual(os.getuid(), 0)
+        helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_transport_data')
+        scratch = Path(os.environ['TMPDIR'])
+        class Clock:
+            def __init__(self, seconds):
+                self.deadline = helper.time.monotonic_ns() + seconds * 1000000000
+            def check(self): return helper.time.monotonic_ns()
+        helper.N = types.SimpleNamespace(PhaseClock=Clock)
+        for kind in ('redirect-close', 'read-and-close'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix='a-transport-', dir=scratch) as temporary:
+                work = Path(temporary); (work / 'archives').mkdir(mode=0o700)
+                opens, closes, requested = [], [], []
+                primary = ValueError('inert-first-failure')
+                close_fault = RuntimeError('inert-consuming-close')
+                class Response:
+                    code = 302 if kind == 'redirect-close' else 200
+                    count = 0
+                    def read(self, amount): raise primary
+                    def close(self):
+                        self.count += 1
+                        raise primary if kind == 'redirect-close' else close_fault
+                response = Response()
+                class Opener:
+                    def open(self, req, timeout): requested.append(req.full_url); return response
+                helper.P = types.SimpleNamespace(response_headers=lambda r: {'location': 'https://fixed.invalid/body'} if r.code == 302 else {},
+                    release_redirect=lambda value: value)
+                original_os = helper.os
+                def tracked_open(*args, **kwargs):
+                    fd = os.open(*args, **kwargs); opens.append(fd); return fd
+                def tracked_close(fd): closes.append(fd); os.close(fd)
+                helper.os = types.SimpleNamespace(**dict(vars(os), open=tracked_open, close=tracked_close))
+                rescued = []
+                try:
+                    a = helper.Acquisition(work)
+                    role = {'role': 'fixed', 'url': 'https://github.com/fixed' if kind == 'redirect-close' else 'https://fixed.invalid/body',
+                            'bytes': 1, 'sha256': '0' * 64}
+                    with self.assertRaises(ValueError) as caught: a.capture(role, Opener())
+                    self.assertIs(caught.exception, primary)
+                finally:
+                    helper.os = original_os
+                    for fd in opens:
+                        if fd not in closes: os.close(fd); rescued.append(fd)
+                self.assertEqual(rescued, [])
+                self.assertEqual(len(closes), len(set(closes)))
+                self.assertEqual(set(closes), set(opens))
+                self.assertEqual(response.count, 1)
+                self.assertEqual(len(requested), 1)
+        with tempfile.TemporaryDirectory(prefix='a-publish-', dir=scratch) as temporary:
+            work = Path(temporary); events = []; original_os = helper.os
+            def closed(fd): os.close(fd); events.append('close')
+            class LatePublication:
+                count = 0
+                def check(self):
+                    self.count += 1
+                    if self.count == 4:
+                        self_outer.assertTrue(events)
+                        raise helper.Refused('inert-publication-deadline')
+            self_outer = self
+            helper.os = types.SimpleNamespace(**dict(vars(os), close=closed))
+            try:
+                with self.assertRaisesRegex(helper.Refused, '^inert-publication-deadline$'):
+                    helper.publish_preparation(work, 'acquisition.json', b'{}', clock=LatePublication())
+            finally: helper.os = original_os
+            self.assertEqual((work / 'acquisition.json').read_bytes(), b'{}')
+        # main must consume its real private chain before the final clock call;
+        # a late failure cannot return wrapper0. No prepare/vendor body executes.
+        expected = Path('/Users/runner/work/_temp/mrk-android-dependencies.Test0001')
+        for late in (False, True):
+            with self.subTest(late=late), tempfile.TemporaryDirectory(prefix='a-final-', dir=scratch) as temporary:
+                work = Path(temporary); adopted = []; finished = []
+                original = helper.admit_work, helper.os, helper.sys, helper.context, helper.load, helper.prepare
+                def admit(path):
+                    private = original[0](work); adopted.append(private); return dict(private, path=expected)
+                class FinalClock:
+                    def finish(self):
+                        self_outer.assertEqual(adopted[0]['fds'], [])
+                        finished.append(True)
+                        if late: raise KeyboardInterrupt('inert-late-finality')
+                self_outer = self
+                helper.admit_work = admit
+                helper.os = types.SimpleNamespace(**dict(vars(os), environ={'MRK_ANDROID_PREPARATION_WORK': str(expected)}))
+                helper.sys = types.SimpleNamespace(argv=['fixed', 'prepare-a'])
+                helper.context = lambda: expected; helper.load = lambda *args: types.SimpleNamespace()
+                helper.prepare = lambda work, private: FinalClock()
+                try: result = helper.main()
+                finally:
+                    helper.admit_work, helper.os, helper.sys, helper.context, helper.load, helper.prepare = original
+                    for private in adopted:
+                        if private['fds']: helper.close_chain(private['fds'], private['originals'])
+                self.assertEqual(result, 78 if late else 0)
+                self.assertEqual(finished, [True])
+
+    def test_a_actual_report_and_complete_cleanup_receipt_reject_partial_evidence(self):
+        self.assertNotEqual(os.getuid(), 0)
+        helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_receipt_data')
+        normal = fixture_module('desktop/tools/macos_normal_ui_runner.py', '_mrk_a_record_data')
+        helper.N = normal
+        scratch = Path(os.environ['TMPDIR']); sha = 'c' * 40
+        helper.os = types.SimpleNamespace(**dict(vars(os), environ={'GITHUB_SHA': sha}))
+        class Clock:
+            def check(self): return 1
+        with tempfile.TemporaryDirectory(prefix='a-receipt-', dir=scratch) as temporary:
+            work = Path(temporary)
+            # Explicit inert validator DATA, never a native-observation receipt.
+            report = dict(helper.SDK_CURRENT_USE, source=sha, status='observed-not-admitted', originalsClosed=True,
+                classification='current-run-provisioned-sdk-observation-not-license-entitlement', acceptancePerformed=False)
+            path = work / 'sdk-observation.json'
+            def write_report(value): path.write_bytes(helper.encoded(value)); path.chmod(0o600)
+            write_report(report)
+            self.assertEqual(helper.current_observation(work, Clock()), helper.digest(path.read_bytes()))
+            for change in ({'source': 'd' * 40}, {'originalsClosed': False}, {'status': 'refused'},
+                           {'acceptancePerformed': True}, {'productVersion': '26.0.1'}):
+                write_report(dict(report, **change))
+                with self.assertRaises(helper.Refused): helper.current_observation(work, Clock())
+            def record_clock(seconds):
+                return {'startNs': '0', 'deadlineNs': str(seconds * 1000000000), 'beforePublicationNs': '1',
+                        'postCloseDeadlineRequired': True}
+            _, task, jdk = helper.arguments(work)
+            head = ['/usr/bin/git', '-C', str(helper.SOURCE), 'rev-parse', 'HEAD']
+            clean = ['/usr/bin/git', '-C', str(helper.SOURCE), 'status', '--porcelain=v1', '--untracked-files=all']
+            commands = [('source-head-pre', head, 10, 4096), ('source-clean-pre', clean, 10, 16384),
+                ('android-public-tool-acquisition', [sys.executable, '-I', '-S', '-B',
+                    str(helper.SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384),
+                ('android-dependency-jdk-version', [str(jdk / 'bin/java'), '-version'], 15, 8192),
+                ('android-dependency-gradle-version', ['/bin/sh', str(work / 'tools/gradle/bin/gradle'), '--version'], 15, 8192),
+                ('android-dependency-lock-task', task, 900, 2 << 20),
+                ('source-head-post', head, 10, 4096), ('source-clean-post', clean, 10, 16384)]
+            records = []
+            for role, argv, cap, limit in commands:
+                body = (sha + '\n').encode() if role.startswith('source-head') else b''
+                records.append({'role': role, 'returncode': 0, 'timeoutSeconds': cap, 'roleCapSeconds': cap,
+                    'outputLimitBytes': limit, 'argvSha256': helper.digest(normal.encoded(argv)), 'stdoutBytes': len(body),
+                    'stdoutSha256': helper.digest(body), 'stderrBytes': 0, 'stderrSha256': helper.digest(b'')})
+            identity = list(helper.nine(work.stat())[:5])
+            value = {'schemaVersion': 1, 'phase': 'A', 'status': 'closed-awaiting-distinct-data-review',
+                'source': sha, 'workflow': helper.WORKFLOW, 'ref': helper.REF, 'wrapperReturncodeRequired': 0,
+                'commands': records, 'sourcePrePost': True, 'toolRosterSha256': '1' * 64,
+                'acquisitionSha256': '2' * 64, 'acquisitionClock': record_clock(900), 'sdkObservationSha256': '3' * 64,
+                'sdkMetadata': helper.SDK_METADATA, 'aab': {'bytes': 4, 'sha256': '4' * 64},
+                'fixtureSha256': helper.digest(b'project'), 'verificationSha256': helper.digest(b'verification'),
+                'workIdentity': identity, 'disposalIdentities': {k: identity for k in ('archives', 'tools', 'run')},
+                'protectedRegistration': False, 'uiQualification': False, 'phaseClock': record_clock(1200)}
+            helper.acquisition_receipt = lambda work, clock: ({'sdkObservationSha256': '3' * 64, 'toolRosterSha256': '1' * 64}, '2' * 64)
+            helper.resources = lambda: (b'project', b'verification')
+            helper.read = lambda path, limit, clock: ((ROOT / path.relative_to(helper.SOURCE)).read_bytes(), None)
+            helper.cleanup_receipt(work, value, Clock())
+            mutations = [('phase', 'B'), ('workflow', 'wrong'), ('source', 'e' * 40), ('wrapperReturncodeRequired', False),
+                         ('toolRosterSha256', '9' * 64), ('fixtureSha256', '9' * 64), ('commands', records[:-1])]
+            for key, invalid in mutations:
+                with self.subTest(field=key), self.assertRaises(helper.Refused):
+                    helper.cleanup_receipt(work, dict(value, **{key: invalid}), Clock())
+            for key, invalid in (('argvSha256', 'f' * 64), ('roleCapSeconds', 901), ('timeoutSeconds', 0),
+                                 ('returncode', False), ('stdoutBytes', (2 << 20) + 1)):
+                modified = json.loads(json.dumps(value)); modified['commands'][5][key] = invalid
+                with self.subTest(record=key), self.assertRaises(helper.Refused): helper.cleanup_receipt(work, modified, Clock())
+            for change in ({'deadlineNs': '1'}, {'beforePublicationNs': str(1200 * 1000000000)},
+                           {'postCloseDeadlineRequired': False}):
+                modified = dict(value, phaseClock=dict(value['phaseClock'], **change))
+                with self.subTest(clock=change), self.assertRaises(helper.Refused): helper.cleanup_receipt(work, modified, Clock())
+
+        # Inert prepare-path adapters prove that the admitted acquisition roster
+        # must equal the first live tool POST BEFORE any Java/Gradle entry. These
+        # synthetic return values are control-flow DATA, never native receipts.
+        flow = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_roster_flow_data')
+        class FlowClock:
+            def __init__(self, seconds): self.seconds = seconds
+            def before_publication(self): return {'inertSeconds': self.seconds}
+            def finish(self): pass
+        flow.os = types.SimpleNamespace(**dict(vars(os), statvfs=lambda path: types.SimpleNamespace(f_bavail=8 << 30, f_frsize=1),
+            environ={k: 'inert' for k in ('GITHUB_REPOSITORY', 'GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_SHA',
+                'GITHUB_WORKFLOW_SHA', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKSPACE', 'RUNNER_ENVIRONMENT',
+                'RUNNER_OS', 'RUNNER_ARCH', 'MRK_ANDROID_PREPARATION_WORK')}))
+        flow.observe_sdk_current_use = lambda work, private: object()
+        flow.admit_sdk_current_use = lambda value: None
+        flow.resources = lambda: (b'project', b'verification')
+        flow.source_original = lambda phase, suffix: None
+        flow.publish_preparation = lambda *args, **kwargs: None
+        flow.acquisition_receipt = lambda work, clock: ({'toolRosterSha256': '1' * 64}, '2' * 64)
+        flow.materialize = lambda *args: {}
+        reached = ValueError('inert-first-vendor-entry')
+        for mismatch in (True, False):
+            with self.subTest(live_roster_mismatch=mismatch), tempfile.TemporaryDirectory(prefix='a-roster-flow-', dir=scratch) as temporary:
+                calls = []
+                class Phase:
+                    def __init__(self, *args): self.records = []
+                    def call(self, role, *args):
+                        calls.append(role)
+                        if role != 'android-public-tool-acquisition': raise reached
+                        return types.SimpleNamespace(returncode=0)
+                flow.N = types.SimpleNamespace(PhaseClock=FlowClock, NormalPhase=Phase, load_normal_owner=lambda source: object())
+                flow.tool_post = lambda work, clock: ('3' if mismatch else '1') * 64
+                if mismatch:
+                    with self.assertRaisesRegex(flow.Refused, '^acquisition-live-tool-roster$'):
+                        flow.prepare(Path(temporary), private=object())
+                    self.assertEqual(calls, ['android-public-tool-acquisition'])
+                else:
+                    with self.assertRaises(ValueError) as caught: flow.prepare(Path(temporary), private=object())
+                    self.assertIs(caught.exception, reached)
+                    self.assertEqual(calls, ['android-public-tool-acquisition', 'android-dependency-jdk-version'])

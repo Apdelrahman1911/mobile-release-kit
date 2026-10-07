@@ -2,8 +2,8 @@
 """Fixed ARM engineering AGP lock preparation A; never protected UI admission.
 
 No phase B exists before distinct review of genuine A locks and inventory.
-SDK_CURRENT_USE is deliberately unavailable until an actual provisioned Mac
-current-use cohort is independently admitted. A receipt marker is not a licence.
+The current-use cohort is derived from actual reviewed provisioned Mac evidence.
+A receipt marker is not a licence or delegated agreement.
 """
 from __future__ import annotations
 import base64
@@ -27,8 +27,8 @@ import xml.etree.ElementTree as ET
 SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
 REF = 'refs/heads/verify/desktop-macos-android-dependencies'
 WORKFLOW = '.github/workflows/desktop-macos-android-dependencies.yml'
-RUN_SCOPE = 'observe-sdk'  # Fixed SOURCE selection; no workflow/runtime switch.
-SDK_CURRENT_USE = None  # Not an agreement, approval flag, guessed path or receipt.
+RUN_SCOPE = 'prepare-a'  # Fixed SOURCE selection; no workflow/runtime switch.
+SDK_CURRENT_USE = {'existingSelectedReceiptId': '24333f8a63b6825ea9c5514f83c2829b004d1fee', 'files': {'build-tools/35.0.0/package.xml': {'bytes': 18408, 'mode': 420, 'ownerUid': 501, 'sha256': 'efe1bc3424e93863725a90df610fae21e29aca6634f99dd3510d5b42fa2ff049'}, 'build-tools/35.0.0/source.properties': {'bytes': 63, 'mode': 420, 'ownerUid': 501, 'sha256': '084847d70abc41284feee7ea717e7c92eab0d1be05f048c27445a359cfe109d8'}, 'licenses/android-sdk-license': {'bytes': 41, 'mode': 420, 'ownerUid': 501, 'sha256': 'c43fa37686457c3f18caa3607945f4ec52a9d1beaaad8117e50dc4e863270c85'}, 'platforms/android-35/package.xml': {'bytes': 18510, 'mode': 420, 'ownerUid': 501, 'sha256': '7bca67e2f0f7258856d6f7ff0aa1a883e67ec8cce2553dbaf56baa79876e657f'}, 'platforms/android-35/source.properties': {'bytes': 257, 'mode': 420, 'ownerUid': 501, 'sha256': '2c3764446f335ad2cc44383a0360fe247620b7c774ec100d5087771ac8ed3b28'}}, 'image': {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'}, 'licenseDefinitionSha256': 'aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723', 'productVersion': '26.6.2', 'root': '/Users/runner/Library/Android/sdk'}  # Reviewed observation3f082944, never legal authority.
 CHUNK = 65536
 TOOL_BYTES = 1 << 30
 READ_BYTES = 8 << 30
@@ -41,6 +41,7 @@ ACQUISITION_SECONDS = 900
 PINS = {'desktop/tools/macos_android_supplier_preparation.py': [64306, '1d16d1e6af1d6d7795f36bef1bef89efbc7f05f80ac5e869216ad5225e536808'], 'desktop/tools/macos_android_supplier_correspondence.py': [53703, 'f0234fa1f56f9e5ba81a5619b6a8ae4605eefbd13e5157dd991657f7703faf29'], 'desktop/tools/macos_normal_ui_runner.py': [108597, '20b96a54f6b44e8098be9dd16baef9dcd33563858ff98dae069521dd697cd9b2']}
 ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
 RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [6125, 'cbcc8c69f468ae157611614f8dc30f5037f8ef39f1c095d0d7aba31c24f58c37'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
+SDK_METADATA = [{'bytes': 17832, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/platform-35-package.xml', 'sha256': '385364dad6ba50838ec90abc8e4593976e0e0c54c87cf703857ba0a1aad63fe2', 'target': 'sdk/platforms/android-35/package.xml'}, {'bytes': 17719, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/build-tools-35-package.xml', 'sha256': '6f7a9969f1bb25e39ae22fa5690b878e6806217453acf3b534712fb3a76ad1d4', 'target': 'sdk/build-tools/35.0.0/package.xml'}]
 N = P = C = None
 
 class Refused(Exception):
@@ -94,12 +95,12 @@ def recheck_chain(fds, originals):
              == nine(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5], 'ancestor-original-post')
 
 
-def close_chain(fds, originals):
+def close_chain(fds, originals, *, file_fd=None):
     """Consume all originals once and preserve this call's first own failure."""
     failure = None
     try: recheck_chain(fds, originals)
     except BaseException as error: failure = error
-    closing = fds[:]
+    closing = fds[:] + ([] if file_fd is None else [file_fd])
     fds.clear()  # Retirement precedes consuming closes; no numeric retry.
     for fd in reversed(closing):
         try: os.close(fd)
@@ -156,7 +157,8 @@ def admit_work(path):
 
 def publish_json(private, name, value):
     """Only two closed diagnostic leaves, through the retained private original."""
-    limits = {'sdk-observation.json': 16384, 'observe-sdk-failure.json': 4096}
+    limits = {'sdk-observation.json': 16384, 'observe-sdk-failure.json': 4096,
+              'prepare-a-failure.json': 4096, 'acquire-failure.json': 4096, 'cleanup-failure.json': 4096}
     need(name in limits, 'diagnostic-leaf')
     raw = encoded(value)
     need(0 < len(raw) <= limits[name], 'diagnostic-bound')
@@ -192,10 +194,94 @@ def publish_json(private, name, value):
     recheck_chain(fds, originals)
 
 
-def file_digest(path, limit, clock):
-    fds = chain(path.parent); fd = None
+def publish_preparation(work, relative, raw, *, clock=None):
+    """Only fixed A leaves; same retained-parent/original readback as diagnostics."""
+    limits = {'tool-roster.json': 4 << 20, 'directory-roster.json': 4 << 20,
+        'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
+        'evidence/failed-commands.json': 16384, 'evidence/inventory.json': 1 << 20,
+        'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
+        'evidence/receipt.json': 16384, 'run/project/gradle/verification-metadata.xml': 128 << 10}
+    for name in ('settings.gradle', 'build.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml',
+                 'app/src/main/java/org/example/saved/MainActivity.java',
+                 'gradle/wrapper/gradle-wrapper.properties', 'release/version.properties',
+                 'release/mobile-release.json', '.gitignore'):
+        limits['run/project/' + name] = 16384
+    need(relative in limits and type(raw) is bytes and 0 < len(raw) <= limits[relative], 'preparation-output-bound')
+    path = work / relative; held = chain(path.parent, retained=True); fd = None; primary = None
     try:
-        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fds[-1])
+        if clock: clock.check()
+        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=held[0][-1])
+        before = nine(os.fstat(fd))
+        need(stat.S_ISREG(before[2]) and stat.S_IMODE(before[2]) == 0o600
+             and before[3] == os.getuid() and before[5:7] == (1, 0), 'preparation-output-original')
+        for at in range(0, len(raw), CHUNK):
+            view = memoryview(raw)[at:at + CHUNK]
+            while view:
+                if clock: clock.check()
+                count = os.write(fd, view); need(count > 0, 'preparation-output-short'); view = view[count:]
+        os.fsync(fd); after = nine(os.fstat(fd))
+        need(after[:6] == before[:6] and after[6] == len(raw), 'preparation-output-size')
+        for at in range(0, len(raw), CHUNK):
+            if clock: clock.check()
+            need(os.pread(fd, min(CHUNK, len(raw) - at), at) == raw[at:at + CHUNK], 'preparation-output-readback')
+        need(not os.pread(fd, 1, len(raw)) and nine(os.fstat(fd)) == after
+             == nine(os.stat(path.name, dir_fd=held[0][-1], follow_symlinks=False)), 'preparation-output-post')
+        recheck_chain(*held); os.fsync(held[0][-1])
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        try: close_chain(*held, file_fd=fd)
+        except BaseException:
+            if primary is None: raise
+    if clock: clock.check()
+
+
+def clock_record(value, seconds):
+    need(type(value) is dict and set(value) == {'startNs', 'deadlineNs', 'beforePublicationNs',
+         'postCloseDeadlineRequired'} and value['postCloseDeadlineRequired'] is True, 'receipt-clock')
+    need(all(type(value[k]) is str and re.fullmatch('[0-9]{1,20}', value[k])
+         for k in ('startNs', 'deadlineNs', 'beforePublicationNs')), 'receipt-clock-number')
+    start, deadline, before = (int(value[k]) for k in ('startNs', 'deadlineNs', 'beforePublicationNs'))
+    need(start <= before < deadline and deadline - start == seconds * 1_000_000_000, 'receipt-clock-endpoint')
+
+
+def current_observation(work, clock):
+    raw, identity = read(work / 'sdk-observation.json', 16384, clock=clock)
+    value = N.document(raw)
+    need(identity[3] == os.getuid() and stat.S_IMODE(identity[2]) == 0o600
+         and value.get('source') == os.environ['GITHUB_SHA']
+         and value.get('classification') == 'current-run-provisioned-sdk-observation-not-license-entitlement'
+         and value.get('acceptancePerformed') is False and 'reason' not in value, 'current-observation-original')
+    admit_sdk_current_use(value)
+    return digest(raw)
+
+
+def acquisition_receipt(work, clock):
+    raw, _ = read(work / 'acquisition.json', 16384, clock=clock); value = N.document(raw)
+    need(set(value) == {'status', 'source', 'workflow', 'ref', 'phase', 'archives', 'archiveBytes',
+         'toolBytes', 'readBytes', 'files', 'entries', 'stockCaSha256', 'nativeExecuted',
+         'protectedRegistration', 'sdkObservationSha256', 'sdkMetadata', 'toolRosterSha256', 'phaseClock'}, 'acquisition-fields')
+    need(value['status'] == 'closed' and value['source'] == os.environ['GITHUB_SHA']
+         and value['workflow'] == WORKFLOW and value['ref'] == REF and value['phase'] == 'acquisition'
+         and value['archives'] == ARCHIVES and value['archiveBytes'] == 469391018
+         and value['nativeExecuted'] is False and value['protectedRegistration'] is False
+         and value['sdkMetadata'] == SDK_METADATA
+         and value['sdkObservationSha256'] == current_observation(work, clock), 'acquisition-bindings')
+    for key, maximum in (('toolBytes', TOOL_BYTES), ('readBytes', READ_BYTES), ('files', FILES), ('entries', ENTRIES)):
+        need(type(value[key]) is int and 0 < value[key] <= maximum, 'acquisition-resource')
+    need(type(value['stockCaSha256']) is str and re.fullmatch('[0-9a-f]{64}', value['stockCaSha256']), 'acquisition-ca-digest')
+    clock_record(value['phaseClock'], 810)
+    rows, _ = read(work / 'tool-roster.json', 4 << 20, clock=clock)
+    dirs, _ = read(work / 'directory-roster.json', 4 << 20, clock=clock)
+    need(value['toolRosterSha256'] == digest(rows + dirs), 'acquisition-tool-roster')
+    return value, digest(raw)
+
+
+def file_digest(path, limit, clock):
+    held = chain(path.parent, retained=True); fd = None; primary = None
+    try:
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=held[0][-1])
         before = nine(os.fstat(fd))
         need(stat.S_ISREG(before[2]) and before[3] == os.getuid() and before[5] == 1
              and not before[2] & 0o022 and 0 <= before[6] <= limit, 'artifact-original')
@@ -204,12 +290,17 @@ def file_digest(path, limit, clock):
             clock.check(); amount = min(CHUNK, before[6] - at); part = os.pread(fd, amount, at)
             need(len(part) == amount, 'artifact-short'); sha.update(part)
             if at == 0: prefix = part[:4]
+        clock.check()
         need(not os.pread(fd, 1, before[6]) and nine(os.fstat(fd)) == before
-             == nine(os.stat(path.name, dir_fd=fds[-1], follow_symlinks=False)), 'artifact-post')
+             == nine(os.stat(path.name, dir_fd=held[0][-1], follow_symlinks=False)), 'artifact-post')
+        recheck_chain(*held)
         return before[6], sha.hexdigest(), prefix
+    except BaseException as error:
+        primary = error; raise
     finally:
-        if fd is not None: os.close(fd)
-        for parent in reversed(fds): os.close(parent)
+        try: close_chain(*held, file_fd=fd)
+        except BaseException:
+            if primary is None: raise
 
 
 def load(name, relative):
@@ -273,79 +364,85 @@ def observe_sdk_current_use(work, *, private=None):
     """Five fixed readonly SDK originals; absence is DATA, never legal acceptance."""
     owned_private = private is None
     if owned_private: private = admit_work(work)
-    clock = N.PhaseClock(30)
-    report = {'classification': 'current-run-provisioned-sdk-observation-not-license-entitlement',
-              'source': os.environ['GITHUB_SHA'], 'status': 'refused', 'files': {}}
+    primary = None
     try:
-        root = os.environ.get('MRK_PROVISIONED_SDK_ROOT', '')
-        need(root == '/Users/runner/Library/Android/sdk', 'fixed-provisioned-sdk-root-unavailable')
-        image = {k: os.environ.get(k, '') for k in ('ImageOS', 'ImageVersion')}
-        need(all(re.fullmatch('[A-Za-z0-9._-]{1,80}', v) for v in image.values()), 'hosted-image-metadata-unavailable')
-        raw, identity = read(Path('/System/Library/CoreServices/SystemVersion.plist'), 65536, clock=clock)
-        system = plistlib.loads(raw)
-        need(identity[3] == 0 and re.fullmatch(r'26(?:\.[0-9]{1,3}){0,2}', system.get('ProductVersion', '')), 'actual-macos26')
-        report.update(root=root, image=image, productVersion=system['ProductVersion'])
-        names = ('licenses/android-sdk-license', 'platforms/android-35/source.properties',
-                 'platforms/android-35/package.xml', 'build-tools/35.0.0/source.properties',
-                 'build-tools/35.0.0/package.xml')
-        bodies = {}
-        for name in names:
-            raw, identity = read(Path(root) / name, 4096 if name.startswith('licenses/') else 65536, clock=clock)
-            bodies[name] = raw
-            report['files'][name] = {'bytes': len(raw), 'sha256': digest(raw),
-                                     'ownerUid': identity[3], 'mode': stat.S_IMODE(identity[2])}
-        marker = bodies[names[0]]
-        need(re.fullmatch(rb'\n?(?:[0-9a-f]{40}\n)*[0-9a-f]{40}\n?', marker), 'existing-sdk-receipt-shape')
-        ids = marker.decode('ascii').strip().splitlines()
-        need(len(ids) == len(set(ids)) and len(ids) <= 64, 'existing-sdk-receipt-bound')
-        definition = 'aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723'
-        selected = '24333f8a63b6825ea9c5514f83c2829b004d1fee'
-        need(selected in ids, 'selected-sdk-receipt-absent')
-        packages = []
-        for scope, package, revision in [('platforms/android-35', 'platforms;android-35', '2'),
-                                         ('build-tools/35.0.0', 'build-tools;35.0.0', '35.0.0')]:
-            props = P.properties(bodies[scope + '/source.properties'], {'Pkg.Revision', 'AndroidVersion.ApiLevel'})
-            need(props.get('Pkg.Revision') == revision and (scope.startswith('build-tools/')
-                 or props.get('AndroidVersion.ApiLevel') == '35'), 'provisioned-sdk-version')
-            raw = bodies[scope + '/package.xml']
-            need(b'<!DOCTYPE' not in raw and b'<!ENTITY' not in raw, 'sdk-xml-declarations')
-            xml = ET.fromstring(raw)
-            licenses = [node for node in xml if node.tag.rsplit('}', 1)[-1] == 'license']
-            locals_ = [node for node in xml if node.tag.rsplit('}', 1)[-1] == 'localPackage']
-            need(len(licenses) == len(locals_) == 1 and licenses[0].get('id') == 'android-sdk-license'
-                 and locals_[0].get('path') == package, 'sdk-package-identity')
-            text = licenses[0].text
-            need(type(text) is str and len(text.encode()) <= 32768, 'sdk-license-definition-bound')
-            # Existing repository31.9.2 TrimStringAdapter correspondence rule.
-            text = re.sub(r'(?<=\s)[ \t]*', '', text, flags=re.ASCII)
-            text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
-            text = re.sub(r' +', ' ', text).strip(''.join(chr(n) for n in range(33)))
-            normalized = text.encode('utf-8')
-            need(len(normalized) == 16960 and digest(normalized) == definition
-                 and hashlib.sha1(normalized).hexdigest() == selected, 'sdk-license-definition-mismatch')
-            uses = [node for node in locals_[0] if node.tag.rsplit('}', 1)[-1] == 'uses-license']
-            need(len(uses) == 1 and uses[0].attrib == {'ref': 'android-sdk-license'}, 'sdk-package-license-reference')
-            packages.append({'package': package, 'properties': props})
-        report.update(status='observed-not-admitted', packages=packages,
-                      licenseDefinitionSha256=definition, existingSelectedReceiptId=selected,
-                      receiptIdCount=len(ids), originalsClosed=True, acceptancePerformed=False)
-        clock.check()
-    except BaseException as error:
-        # A caught interruption after positive staging must not preserve success.
-        report['status'] = 'refused'
-        for key in ('originalsClosed', 'packages', 'licenseDefinitionSha256',
-                    'existingSelectedReceiptId', 'receiptIdCount', 'acceptancePerformed'):
-            report.pop(key, None)
-        clock.failed = True
-        code = str(error) if isinstance(error, Refused) else 'sdk-observation-original-failure'
-        report['reason'] = code if re.fullmatch('[a-z0-9-]{1,96}', code) else 'sdk-observation-original-failure'
-    try:
+        clock = N.PhaseClock(30)
+        report = {'classification': 'current-run-provisioned-sdk-observation-not-license-entitlement',
+                  'source': os.environ['GITHUB_SHA'], 'status': 'refused', 'files': {}}
+        try:
+            root = os.environ.get('MRK_PROVISIONED_SDK_ROOT', '')
+            need(root == '/Users/runner/Library/Android/sdk', 'fixed-provisioned-sdk-root-unavailable')
+            image = {k: os.environ.get(k, '') for k in ('ImageOS', 'ImageVersion')}
+            need(all(re.fullmatch('[A-Za-z0-9._-]{1,80}', v) for v in image.values()), 'hosted-image-metadata-unavailable')
+            raw, identity = read(Path('/System/Library/CoreServices/SystemVersion.plist'), 65536, clock=clock)
+            system = plistlib.loads(raw)
+            need(identity[3] == 0 and re.fullmatch(r'26(?:\.[0-9]{1,3}){0,2}', system.get('ProductVersion', '')), 'actual-macos26')
+            report.update(root=root, image=image, productVersion=system['ProductVersion'])
+            names = ('licenses/android-sdk-license', 'platforms/android-35/source.properties',
+                     'platforms/android-35/package.xml', 'build-tools/35.0.0/source.properties',
+                     'build-tools/35.0.0/package.xml')
+            bodies = {}
+            for name in names:
+                raw, identity = read(Path(root) / name, 4096 if name.startswith('licenses/') else 65536, clock=clock)
+                bodies[name] = raw
+                report['files'][name] = {'bytes': len(raw), 'sha256': digest(raw),
+                                         'ownerUid': identity[3], 'mode': stat.S_IMODE(identity[2])}
+            marker = bodies[names[0]]
+            need(re.fullmatch(rb'\n?(?:[0-9a-f]{40}\n)*[0-9a-f]{40}\n?', marker), 'existing-sdk-receipt-shape')
+            ids = marker.decode('ascii').strip().splitlines()
+            need(len(ids) == len(set(ids)) and len(ids) <= 64, 'existing-sdk-receipt-bound')
+            definition = 'aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723'
+            selected = '24333f8a63b6825ea9c5514f83c2829b004d1fee'
+            need(selected in ids, 'selected-sdk-receipt-absent')
+            packages = []
+            for scope, package, revision in [('platforms/android-35', 'platforms;android-35', '2'),
+                                             ('build-tools/35.0.0', 'build-tools;35.0.0', '35.0.0')]:
+                props = P.properties(bodies[scope + '/source.properties'], {'Pkg.Revision', 'AndroidVersion.ApiLevel'})
+                need(props.get('Pkg.Revision') == revision and (scope.startswith('build-tools/')
+                     or props.get('AndroidVersion.ApiLevel') == '35'), 'provisioned-sdk-version')
+                raw = bodies[scope + '/package.xml']
+                need(b'<!DOCTYPE' not in raw and b'<!ENTITY' not in raw, 'sdk-xml-declarations')
+                xml = ET.fromstring(raw)
+                licenses = [node for node in xml if node.tag.rsplit('}', 1)[-1] == 'license']
+                locals_ = [node for node in xml if node.tag.rsplit('}', 1)[-1] == 'localPackage']
+                need(len(licenses) == len(locals_) == 1 and licenses[0].get('id') == 'android-sdk-license'
+                     and locals_[0].get('path') == package, 'sdk-package-identity')
+                text = licenses[0].text
+                need(type(text) is str and len(text.encode()) <= 32768, 'sdk-license-definition-bound')
+                # Existing repository31.9.2 TrimStringAdapter correspondence rule.
+                text = re.sub(r'(?<=\s)[ \t]*', '', text, flags=re.ASCII)
+                text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)
+                text = re.sub(r' +', ' ', text).strip(''.join(chr(n) for n in range(33)))
+                normalized = text.encode('utf-8')
+                need(len(normalized) == 16960 and digest(normalized) == definition
+                     and hashlib.sha1(normalized).hexdigest() == selected, 'sdk-license-definition-mismatch')
+                uses = [node for node in locals_[0] if node.tag.rsplit('}', 1)[-1] == 'uses-license']
+                need(len(uses) == 1 and uses[0].attrib == {'ref': 'android-sdk-license'}, 'sdk-package-license-reference')
+                packages.append({'package': package, 'properties': props})
+            report.update(status='observed-not-admitted', packages=packages,
+                          licenseDefinitionSha256=definition, existingSelectedReceiptId=selected,
+                          receiptIdCount=len(ids), originalsClosed=True, acceptancePerformed=False)
+            clock.check()
+        except BaseException as error:
+            # A caught interruption after positive staging must not preserve success.
+            report['status'] = 'refused'
+            for key in ('originalsClosed', 'packages', 'licenseDefinitionSha256',
+                        'existingSelectedReceiptId', 'receiptIdCount', 'acceptancePerformed'):
+                report.pop(key, None)
+            clock.failed = True
+            code = str(error) if isinstance(error, Refused) else 'sdk-observation-original-failure'
+            report['reason'] = code if re.fullmatch('[a-z0-9-]{1,96}', code) else 'sdk-observation-original-failure'
         publish_json(private, 'sdk-observation.json', report)
         need(report['status'] == 'observed-not-admitted' and 'reason' not in report, 'sdk-observation-refused')
         clock.finish()
         return report
+    except BaseException as error:
+        primary = error; raise
     finally:
-        if owned_private: close_chain(private['fds'], private['originals'])
+        if owned_private:
+            try: close_chain(private['fds'], private['originals'])
+            except BaseException:
+                if primary is None: raise
 
 
 def admit_sdk_current_use(observed):
@@ -370,6 +467,8 @@ class Acquisition:
         self.entries = 0
         self.files = 0
         self.roster = []
+        self.roster_bytes = 3
+        self.directory_bytes = 3
         self.active = None
         self.archive_fd = None
         self.archive_before = None
@@ -397,7 +496,7 @@ class Acquisition:
 
     def parent(self, relative):
         parts = P.relative(relative)
-        fds = chain(self.work / 'tools')
+        fds, originals = chain(self.work / 'tools', retained=True)
         prefix = []
         try:
             for part in parts[:-1]:
@@ -407,15 +506,27 @@ class Acquisition:
                     os.mkdir(part, 0o700, dir_fd=fds[-1]); self.entries += 1
                 except FileExistsError: pass
                 fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fds[-1])
-                fds.append(fd); state = nine(os.fstat(fd))
+                fds.append(fd); state = nine(os.fstat(fd)); originals.append((part, state[:5]))
                 need(state[3] == os.getuid() and stat.S_IMODE(state[2]) == 0o700, 'private-tool-directory')
                 relative_dir = '/'.join(prefix)
-                before = self.directories.setdefault(relative_dir, list(state[:5]))
-                need(before == list(state[:5]), 'tool-directory-changed')
-            return fds, parts[-1]
+                if relative_dir not in self.directories:
+                    self.directory_bytes += len(encoded({relative_dir: list(state[:5])}))
+                    need(self.directory_bytes <= 4 << 20, 'directory-roster-bound')
+                    self.directories[relative_dir] = list(state[:5])
+                need(self.directories[relative_dir] == list(state[:5]), 'tool-directory-changed')
+            recheck_chain(fds, originals)
+            return (fds, originals), parts[-1]
         except BaseException:
-            for fd in reversed(fds): os.close(fd)
+            try: close_chain(fds, originals)
+            except BaseException: pass
             raise
+
+    def append_row(self, row):
+        # Incremental conservative charge; avoid an unbounded intermediate roster.
+        self.roster_bytes += len(encoded(row)) + 1
+        need(self.roster_bytes <= 4 << 20 and self.files < FILES, 'tool-roster-bound')
+        self.roster.append(row); self.files += 1
+
 
     def target(self, name):
         prefix = self.role['archivePrefix']
@@ -436,20 +547,25 @@ class Acquisition:
              and self.files < FILES, 'tool-write-bound')
         mode = row[2] & 0o7777
         need(mode in (0o444, 0o555, 0o644, 0o755), 'unsupported-vendor-file-mode')
-        fds, leaf = self.parent(target)
-        fd = None
+        held, leaf = self.parent(target)
+        fd = None; primary = None; transferred = False
         try:
             fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                         0o600, dir_fd=fds[-1])
-            s = os.fstat(fd)
-            need(s.st_uid == os.getuid() and s.st_nlink == 1 and s.st_size == 0
-                 and stat.S_IMODE(s.st_mode) == 0o600, 'new-tool-original')
-            self.active = (fd, fds, leaf, target, row[3], 0, hashlib.sha256(), mode)
-            fd = None
+                         0o600, dir_fd=held[0][-1])
+            state = nine(os.fstat(fd))
+            need(state[3] == os.getuid() and state[5] == 1 and state[6] == 0
+                 and stat.S_IMODE(state[2]) == 0o600, 'new-tool-original')
+            recheck_chain(*held)
+            self.active = (fd, held, leaf, target, row[3], 0, hashlib.sha256(), mode)
+            transferred = True
+        except BaseException as error:
+            primary = error; raise
         finally:
-            if fd is not None: os.close(fd)
-            if self.active is None:
-                for parent in reversed(fds): os.close(parent)
+            if not transferred:
+                try: close_chain(*held, file_fd=fd)
+                except BaseException:
+                    if primary is None: raise
+
 
     def block(self, name, offset, raw):
         if self.target(name) is None: return
@@ -468,26 +584,30 @@ class Acquisition:
 
     def end(self, row):
         if self.target(row[0]) is None: return
-        fd, parents, leaf, target, size, at, sha, mode = self.active
-        self.active = None
+        fd, held, leaf, target, size, at, sha, mode = self.active
+        self.active = None; primary = None
         try:
             need(at == size and sha.hexdigest() == row[4], 'tool-payload-digest')
             os.fsync(fd)
-            before = nine(os.fstat(fd))
-            observed = hashlib.sha256()
+            before = nine(os.fstat(fd)); observed = hashlib.sha256()
             for pos in range(0, size, CHUNK):
                 amount = min(CHUNK, size - pos); self.charge_read(amount)
                 data = os.pread(fd, amount, pos)
                 need(len(data) == amount, 'tool-readback-short'); observed.update(data)
+            self.charge_read(1)
             need(not os.pread(fd, 1, size) and observed.hexdigest() == row[4]
                  and nine(os.fstat(fd)) == before
-                 == nine(os.stat(leaf, dir_fd=parents[-1], follow_symlinks=False)), 'tool-readback-post')
-            self.roster.append({'path': target, 'bytes': size, 'sha256': row[4],
-                                'vendorMode': row[2], 'mode': mode & ~0o222, 'identity': list(before)})
-            self.files += 1
+                 == nine(os.stat(leaf, dir_fd=held[0][-1], follow_symlinks=False)), 'tool-readback-post')
+            recheck_chain(*held)
+            self.append_row({'path': target, 'bytes': size, 'sha256': row[4],
+                             'vendorMode': row[2], 'mode': mode & ~0o222, 'identity': list(before)})
+        except BaseException as error:
+            primary = error; raise
         finally:
-            os.close(fd)
-            for parent in reversed(parents): os.close(parent)
+            try: close_chain(*held, file_fd=fd)
+            except BaseException:
+                if primary is None: raise
+
 
     def terminal_row(self, row):
         self.point(); self.entries += 1
@@ -497,8 +617,8 @@ class Acquisition:
         if row[1] == 'directory':
             # Observed JDK GNU directory sgid is DATA, never installed authority.
             need(row[2] in (0o40755, 0o42755), 'unsupported-vendor-directory-mode')
-            parents, _ = self.parent(target + '/__directory_only__')
-            for fd in reversed(parents): os.close(fd)
+            held, _ = self.parent(target + '/__directory_only__')
+            close_chain(*held)
         elif row[1] == 'alias':
             # No implicit hardlink, alias chasing, or new link interpretation.
             raise Refused('unsupported-vendor-alias')
@@ -512,6 +632,7 @@ class Acquisition:
         endpoint = time.monotonic() + min(120, (self.clock.deadline - self.clock.check()) / 1e9)
         url = role['url']; response = None; fd = None
         target = self.work / 'archives' / role['role']
+        held = chain(target.parent, retained=True); primary = None
         try:
             def request(address):
                 need(time.monotonic() < endpoint, 'archive-download-deadline')
@@ -522,12 +643,12 @@ class Acquisition:
             if url.startswith('https://github.com/'):
                 need(response.code == 302, 'fixed-release-redirect')
                 address = P.release_redirect(headers.get('location'))
-                response.close(); response = None
+                closing, response = response, None; closing.close()
                 response = request(address); headers = P.response_headers(response)
             need(response.code == 200 and 'location' not in headers
                  and headers.get('content-encoding', 'identity') == 'identity'
                  and ('content-length' not in headers or int(headers['content-length']) == role['bytes']), 'archive-response')
-            fd = os.open(target, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            fd = os.open(target.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=held[0][-1])
             sha = hashlib.sha256(); count = 0
             while True:
                 self.point(); need(time.monotonic() < endpoint, 'archive-download-deadline')
@@ -545,7 +666,7 @@ class Acquisition:
                 while view:
                     self.point(); n = os.write(fd, view); need(n > 0, 'archive-write-short'); view = view[n:]
             need(count == role['bytes'] and sha.hexdigest() == role['sha256'], 'archive-checksum')
-            response.close(); response = None
+            closing, response = response, None; closing.close()
             os.fsync(fd)
             self.archive_fd, self.archive_before, self.archive_path = fd, nine(os.fstat(fd)), target
             need(self.archive_before[5] == 1 and self.archive_before[6] == role['bytes']
@@ -553,43 +674,105 @@ class Acquisition:
             capture = C.compile_archive(self, C.Pin(role['role'], role['bytes'], role['sha256']), observer=self)
             capture.consume_rows(self.terminal_row)
             self.verify_binding()
+            recheck_chain(*held)
+        except BaseException as error:
+            primary = error; raise
         finally:
+            failure = None
             if self.active is not None:
                 active, self.active = self.active, None
-                os.close(active[0])
-                for parent in reversed(active[1]): os.close(parent)
-            if response is not None: response.close()
-            if fd is not None: os.close(fd)
+                try: close_chain(*active[1], file_fd=active[0])
+                except BaseException as error: failure = error
+            if response is not None:
+                closing, response = response, None
+                try: closing.close()
+                except BaseException:
+                    if failure is None: failure = Refused('transport-close-unknown')
             self.archive_fd = None
+            try: close_chain(*held, file_fd=fd)
+            except BaseException as error:
+                if failure is None: failure = error
+            if primary is None and failure is not None: raise failure
+
+    def project_sdk_metadata(self):
+        for entry in SDK_METADATA:
+            self.point()
+            self.charge_read(entry['bytes']); self.charge_read(1)
+            raw, _ = read(SOURCE / entry['path'], entry['bytes'], clock=self.clock)
+            need((len(raw), digest(raw)) == (entry['bytes'], entry['sha256']), 'sdk-source-metadata-pin')
+            need(self.writes + len(raw) <= TOOL_BYTES and self.files < FILES
+                 and self.entries < ENTRIES, 'sdk-metadata-resource-bound')
+            self.entries += 1
+            held, leaf = self.parent(entry['target']); fd = None; primary = None
+            try:
+                fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                             0o600, dir_fd=held[0][-1])
+                initial = nine(os.fstat(fd))
+                need(initial[3] == os.getuid() and initial[5] == 1 and initial[6] == 0
+                     and stat.S_IMODE(initial[2]) == 0o600, 'sdk-metadata-original')
+                view = memoryview(raw)
+                while view:
+                    self.point(); count = os.write(fd, view)
+                    need(count > 0, 'sdk-metadata-write-short'); view = view[count:]
+                self.writes += len(raw); os.fsync(fd)
+                before = nine(os.fstat(fd)); self.charge_read(len(raw)); self.charge_read(1)
+                need(os.pread(fd, len(raw), 0) == raw and not os.pread(fd, 1, len(raw))
+                     and before[:6] == initial[:6] and before[6] == len(raw)
+                     and nine(os.fstat(fd)) == before
+                     == nine(os.stat(leaf, dir_fd=held[0][-1], follow_symlinks=False)), 'sdk-metadata-post')
+                recheck_chain(*held)
+                self.append_row({'path': entry['target'], 'bytes': len(raw), 'sha256': digest(raw),
+                    'origin': entry['origin'], 'sourcePath': entry['path'], 'mode': 0o444,
+                    'identity': list(before)})
+            except BaseException as error:
+                primary = error; raise
+            finally:
+                try: close_chain(*held, file_fd=fd)
+                except BaseException:
+                    if primary is None: raise
 
     def seal(self):
         need(self.files > 0 and len({r['path'] for r in self.roster}) == self.files, 'tool-roster')
         for row in self.roster:
             self.point()
-            fds, leaf = self.parent(row['path']); fd = None
+            held, leaf = self.parent(row['path']); fd = None; primary = None
             try:
-                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fds[-1])
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held[0][-1])
                 need(list(nine(os.fstat(fd))) == row['identity'], 'tool-preseal-original')
                 os.fchmod(fd, row['mode']); os.fsync(fd)
                 after = nine(os.fstat(fd))
-                need(nine(os.stat(leaf, dir_fd=fds[-1], follow_symlinks=False)) == after
+                need(nine(os.stat(leaf, dir_fd=held[0][-1], follow_symlinks=False)) == after
                      and stat.S_IMODE(after[2]) == row['mode'], 'tool-seal-post')
                 row['identity'] = list(after)
+                recheck_chain(*held)
+            except BaseException as error:
+                primary = error; raise
             finally:
-                if fd is not None: os.close(fd)
-                for parent in reversed(fds): os.close(parent)
+                try: close_chain(*held, file_fd=fd)
+                except BaseException:
+                    if primary is None: raise
         aapt = next(r for r in self.roster if r['path'] == 'gradle/native/aapt2/aapt2')
         need((aapt['bytes'], aapt['sha256'], aapt['vendorMode']) == (11143368,
              '213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e', 0o100755), 'osx-aapt2-member')
         raw = encoded(self.roster); need(len(raw) <= 4 << 20, 'tool-roster-bound')
-        N.exclusive_output(self.work / 'tool-roster.json', raw, 4 << 20)
-        N.exclusive_output(self.work / 'directory-roster.json', encoded(self.directories), 4 << 20)
-        self.clock.finish()
+        directories = encoded(self.directories)
+        need(len(directories) <= 4 << 20, 'directory-roster-bound')
+        for body in (raw, directories):
+            for at in range(0, len(body), CHUNK): self.charge_read(min(CHUNK, len(body) - at))
+            self.charge_read(1)
+        publish_preparation(self.work, 'tool-roster.json', raw, clock=self.clock)
+        publish_preparation(self.work, 'directory-roster.json', directories, clock=self.clock)
+        return digest(raw + directories)
 
-def acquire(work):
-    # This child is reachable only through the fixed owned acquisition role.
-    need(os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1', 'acquisition-original-required')
+def acquire(work, *, private=None):
+    # This flag selects the internal role; it is NOT parent authentication.
+    need(os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1' and private is not None, 'acquisition-original-required')
     a = Acquisition(work)
+    recheck_chain(private['fds'], private['originals'])
+    a.charge_read(16384); a.charge_read(1)
+    sdk_sha = current_observation(work, a.clock)  # Current private original, SOURCE and reviewed cohort.
+    for _ in range((1 << 20) // CHUNK): a.charge_read(CHUNK)
+    a.charge_read(1)
     ca, ca_identity = read(Path('/private/etc/ssl/cert.pem'), 1 << 20, clock=a.clock)
     need(ca_identity[3] == 0, 'root-owned-stock-ca')
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -598,11 +781,19 @@ def acquire(work):
     tls.load_verify_locations(cadata=ca.decode('ascii'))
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), P.NoRedirect(), urllib.request.HTTPSHandler(context=tls))
     for row in ARCHIVES: a.capture(row, opener)
-    a.seal()
-    N.exclusive_output(work / 'acquisition.json', encoded({'status': 'closed', 'archives': ARCHIVES,
+    a.project_sdk_metadata()
+    roster_sha = a.seal()
+    a.charge_read(16384); a.charge_read(1)  # Reserve fixed receipt readback before publication.
+    publish_preparation(work, 'acquisition.json', encoded({'status': 'closed', 'phase': 'acquisition',
+        'source': os.environ['GITHUB_SHA'], 'workflow': WORKFLOW, 'ref': REF, 'archives': ARCHIVES,
         'archiveBytes': 469391018, 'toolBytes': a.writes, 'readBytes': a.reads,
         'files': a.files, 'entries': a.entries, 'stockCaSha256': digest(ca),
-        'nativeExecuted': False, 'protectedRegistration': False}), 16384)
+        'sdkObservationSha256': sdk_sha, 'sdkMetadata': SDK_METADATA, 'toolRosterSha256': roster_sha,
+        'nativeExecuted': False, 'protectedRegistration': False,
+        'phaseClock': a.clock.before_publication()}), clock=a.clock)
+    recheck_chain(private['fds'], private['originals'])
+    # main consumes its retained work descriptors before the final successful endpoint.
+    return a.clock
 
 
 def tool_post(work, clock):
@@ -625,20 +816,26 @@ def tool_post(work, clock):
     total = 0
     for row in rows:
         clock.check(); total += row['bytes']; need(total <= TOOL_BYTES, 'tool-total')
-        path = work / 'tools' / row['path']; fds = chain(path.parent); fd = None
+        path = work / 'tools' / row['path']
+        held = chain(path.parent, retained=True); fd = None; primary = None
         try:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fds[-1])
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=held[0][-1])
             before = nine(os.fstat(fd)); need(list(before) == row['identity'], 'tool-identity')
             sha = hashlib.sha256()
             for at in range(0, row['bytes'], CHUNK):
                 clock.check(); count = min(CHUNK, row['bytes'] - at); part = os.pread(fd, count, at)
                 need(len(part) == count, 'tool-short'); sha.update(part)
+            clock.check()
             need(not os.pread(fd, 1, row['bytes']) and sha.hexdigest() == row['sha256']
                  and nine(os.fstat(fd)) == before
-                 == nine(os.stat(path.name, dir_fd=fds[-1], follow_symlinks=False)), 'tool-post')
+                 == nine(os.stat(path.name, dir_fd=held[0][-1], follow_symlinks=False)), 'tool-post')
+            recheck_chain(*held)
+        except BaseException as error:
+            primary = error; raise
         finally:
-            if fd is not None: os.close(fd)
-            for parent in reversed(fds): os.close(parent)
+            try: close_chain(*held, file_fd=fd)
+            except BaseException:
+                if primary is None: raise
     return digest(raw + directories_raw)
 
 
@@ -650,7 +847,7 @@ def resources():
     return list(bodies.values())
 
 
-def materialize(work, project_raw, verification):
+def materialize(work, project_raw, verification, clock):
     value = json.loads(project_raw)
     need(set(value) == {'schemaVersion', 'files', 'stages'} and value['schemaVersion'] == 1
          and value['stages'] == {} and len(value['files']) == 9, 'fixture-resource-shape')
@@ -660,9 +857,9 @@ def materialize(work, project_raw, verification):
         name = relative.removeprefix('project/'); P.relative(name)
         body = base64.b64decode(content, validate=True)
         path = work / 'run/project' / name; path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        N.exclusive_output(path, body, 16384); originals[name] = digest(body)
+        publish_preparation(work, 'run/project/' + name, body, clock=clock); originals[name] = digest(body)
     need(sum(len(base64.b64decode(r)) for r in value['files'].values()) == 4236, 'fixture-decoded-bound')
-    N.exclusive_output(work / 'run/project/gradle/verification-metadata.xml', verification, 128 << 10)
+    publish_preparation(work, 'run/project/gradle/verification-metadata.xml', verification, clock=clock)
     originals['gradle/verification-metadata.xml'] = digest(verification)
     return originals
 
@@ -730,9 +927,9 @@ def source_original(phase, suffix):
     need(value.returncode == 0 and value.stdout == b'', 'source-clean')
 
 
-def prepare(work):
+def prepare(work, *, private=None):
     need(os.statvfs(work).f_bavail * os.statvfs(work).f_frsize >= 8 << 30, 'eight-gib-free-prerequisite')
-    observed_sdk = observe_sdk_current_use(work)
+    observed_sdk = observe_sdk_current_use(work, private=private)
     admit_sdk_current_use(observed_sdk)  # Refuses BEFORE download/materialization/native task.
     owner = N.load_normal_owner(SOURCE)
     project_raw, verification = resources()
@@ -747,17 +944,26 @@ def prepare(work):
         child_env[key] = os.environ[key]
     child_env['MRK_ANDROID_ACQUISITION_CHILD'] = '1'
     acquisition = N.NormalPhase(owner, child_env, SOURCE, clock)
-    source_original(acquisition, 'pre')
-    result = acquisition.call('android-public-tool-acquisition', [sys.executable, '-I', '-S', '-B',
-        str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384)
-    N.exclusive_output(work / 'evidence/acquisition-commands.json', encoded(acquisition.records), 16384)
+    primary = None
+    try:
+        source_original(acquisition, 'pre')
+        result = acquisition.call('android-public-tool-acquisition', [sys.executable, '-I', '-S', '-B',
+            str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384)
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        try: publish_preparation(work, 'evidence/acquisition-commands.json', encoded(acquisition.records),
+                                 clock=clock if primary is None else None)
+        except BaseException:
+            if primary is None: raise
     need(result.returncode == 0, 'acquisition-original-return')
-    acquired_raw, _ = read(work / 'acquisition.json', 16384, clock=clock)
-    need(json.loads(acquired_raw)['status'] == 'closed', 'acquisition-finality')
+    acquired, acquisition_sha = acquisition_receipt(work, clock)
+    acquisition_clock = clock.before_publication()
     clock.finish()
     clock = N.PhaseClock(PHASE_SECONDS)
-    originals = materialize(work, project_raw, verification)
+    originals = materialize(work, project_raw, verification, clock)
     before_tools = tool_post(work, clock)
+    need(before_tools == acquired['toolRosterSha256'], 'acquisition-live-tool-roster')
     env, command, jdk = arguments(work)
     phase = N.NormalPhase(owner, env, work / 'run/project', clock)
     try:
@@ -780,47 +986,103 @@ def prepare(work):
             need(digest(raw) == sha, 'project-source-post')
         source_original(phase, 'post')
         need(tool_post(work, clock) == before_tools and resources() == [project_raw, verification], 'source-tools-post')
-        N.exclusive_output(work / 'evidence/inventory.json', encoded(actual), 1 << 20)
+        publish_preparation(work, 'evidence/inventory.json', encoded(actual), clock=clock)
         for name, raw in locks.items():
-            N.exclusive_output(work / 'evidence' / name.replace('/', '-'), raw, 32 << 10)
+            publish_preparation(work, 'evidence/' + name.replace('/', '-'), raw, clock=clock)
         receipt = {'schemaVersion': 1, 'phase': 'A', 'status': 'closed-awaiting-distinct-data-review',
             'source': os.environ['GITHUB_SHA'], 'workflow': WORKFLOW, 'ref': REF,
             'wrapperReturncodeRequired': 0, 'commands': acquisition.records + phase.records,
             'sourcePrePost': True, 'toolRosterSha256': before_tools,
+            'acquisitionSha256': acquisition_sha, 'acquisitionClock': acquisition_clock,
+            'sdkObservationSha256': acquired['sdkObservationSha256'], 'sdkMetadata': SDK_METADATA,
             'aab': {'bytes': aab_size, 'sha256': aab_sha}, 'fixtureSha256': digest(project_raw),
             'verificationSha256': digest(verification), 'workIdentity': root_identity,
             'disposalIdentities': identities, 'protectedRegistration': False, 'uiQualification': False,
             'phaseClock': clock.before_publication()}
-        N.exclusive_output(work / 'evidence/receipt.json', encoded(receipt), 16384)
-        clock.finish()
+        publish_preparation(work, 'evidence/receipt.json', encoded(receipt), clock=clock)
+        return clock
     except BaseException:
         # Raw original output remains private; no failure is promoted to closure.
-        N.exclusive_output(work / 'evidence/failed-commands.json', encoded(phase.records), 16384)
+        try: publish_preparation(work, 'evidence/failed-commands.json', encoded(phase.records))
+        except BaseException: pass
         raise
 
 
-def cleanup(work):
+def cleanup_receipt(work, value, clock):
+    fields = {'schemaVersion', 'phase', 'status', 'source', 'workflow', 'ref', 'wrapperReturncodeRequired',
+        'commands', 'sourcePrePost', 'toolRosterSha256', 'acquisitionSha256', 'acquisitionClock',
+        'sdkObservationSha256', 'sdkMetadata', 'aab', 'fixtureSha256', 'verificationSha256',
+        'workIdentity', 'disposalIdentities', 'protectedRegistration', 'uiQualification', 'phaseClock'}
+    need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
+         and value['schemaVersion'] == 1 and value['phase'] == 'A'
+         and value['status'] == 'closed-awaiting-distinct-data-review'
+         and value['source'] == os.environ['GITHUB_SHA'] and value['workflow'] == WORKFLOW and value['ref'] == REF
+         and value['sourcePrePost'] is True and type(value['wrapperReturncodeRequired']) is int
+         and value['wrapperReturncodeRequired'] == 0 and value['protectedRegistration'] is False
+         and value['uiQualification'] is False and value['sdkMetadata'] == SDK_METADATA, 'cleanup-receipt')
+    clock_record(value['phaseClock'], PHASE_SECONDS); clock_record(value['acquisitionClock'], ACQUISITION_SECONDS)
+    _, task, jdk = arguments(work)
+    head = ['/usr/bin/git', '-C', str(SOURCE), 'rev-parse', 'HEAD']
+    clean = ['/usr/bin/git', '-C', str(SOURCE), 'status', '--porcelain=v1', '--untracked-files=all']
+    expected = [('source-head-pre', head, 10, 4096), ('source-clean-pre', clean, 10, 16384),
+        ('android-public-tool-acquisition', [sys.executable, '-I', '-S', '-B',
+            str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384),
+        ('android-dependency-jdk-version', [str(jdk / 'bin/java'), '-version'], 15, 8192),
+        ('android-dependency-gradle-version', ['/bin/sh', str(work / 'tools/gradle/bin/gradle'), '--version'], 15, 8192),
+        ('android-dependency-lock-task', task, 900, 2 << 20),
+        ('source-head-post', head, 10, 4096), ('source-clean-post', clean, 10, 16384)]
+    need(type(value['commands']) is list and len(value['commands']) == len(expected), 'cleanup-command-count')
+    for record, (role, argv, cap, limit) in zip(value['commands'], expected):
+        need(type(record) is dict and set(record) == {'role', 'returncode', 'timeoutSeconds', 'roleCapSeconds',
+             'outputLimitBytes', 'argvSha256', 'stdoutBytes', 'stdoutSha256', 'stderrBytes', 'stderrSha256'}, 'cleanup-command-fields')
+        need(record['role'] == role and type(record['returncode']) is int and record['returncode'] == 0
+             and type(record['roleCapSeconds']) is int and record['roleCapSeconds'] == cap
+             and type(record['timeoutSeconds']) is int and 1 <= record['timeoutSeconds'] <= cap
+             and type(record['outputLimitBytes']) is int and record['outputLimitBytes'] == limit
+             and record['argvSha256'] == digest(N.encoded(argv)), 'cleanup-command-original')
+        need(all(type(record[k]) is int and 0 <= record[k] <= limit for k in ('stdoutBytes', 'stderrBytes'))
+             and record['stdoutBytes'] + record['stderrBytes'] <= limit
+             and all(type(record[k]) is str and re.fullmatch('[0-9a-f]{64}', record[k])
+                     for k in ('stdoutSha256', 'stderrSha256')), 'cleanup-command-output')
+        if role.startswith('source-'):
+            body = (os.environ['GITHUB_SHA'] + '\n').encode() if 'head' in role else b''
+            need(record['stdoutBytes'] == len(body) and record['stdoutSha256'] == digest(body)
+                 and record['stderrBytes'] == 0 and record['stderrSha256'] == digest(b''), 'cleanup-source-original')
+    acquired, sha = acquisition_receipt(work, clock)
+    need(value['acquisitionSha256'] == sha and value['sdkObservationSha256'] == acquired['sdkObservationSha256']
+         and value['toolRosterSha256'] == acquired['toolRosterSha256'], 'cleanup-acquisition-binding')
+    project, verification = resources()
+    need(value['fixtureSha256'] == digest(project) and value['verificationSha256'] == digest(verification), 'cleanup-resource-binding')
+    for entry in SDK_METADATA:
+        raw, _ = read(SOURCE / entry['path'], 32768, clock=clock)
+        need((len(raw), digest(raw)) == (entry['bytes'], entry['sha256']), 'cleanup-sdk-source-binding')
+    need(type(value['aab']) is dict and set(value['aab']) == {'bytes', 'sha256'}
+         and type(value['aab']['bytes']) is int and 0 < value['aab']['bytes'] <= 64 << 20
+         and type(value['aab']['sha256']) is str and re.fullmatch('[0-9a-f]{64}', value['aab']['sha256']), 'cleanup-aab-binding')
+    need(type(value['disposalIdentities']) is dict and set(value['disposalIdentities']) == {'archives', 'tools', 'run'}, 'cleanup-disposal-fields')
+    for identity in [value['workIdentity'], *value['disposalIdentities'].values()]:
+        need(type(identity) is list and len(identity) == 5 and all(type(v) is int and v >= 0 for v in identity)
+             and identity[3] == os.getuid() and stat.S_ISDIR(identity[2])
+             and stat.S_IMODE(identity[2]) == 0o700, 'cleanup-directory-identity')
+
+
+def cleanup(work, *, private=None):
     need(os.environ.get('MRK_PREPARATION_WRAPPER_RETURN') == '0'
-         and os.environ.get('MRK_PREPARATION_EVIDENCE_UPLOAD') == 'success', 'cleanup-original-gates')
-    raw, _ = read(work / 'evidence/receipt.json', 16384)
-    value = json.loads(raw)
-    need(value['status'] == 'closed-awaiting-distinct-data-review' and value['source'] == os.environ['GITHUB_SHA']
-         and value['sourcePrePost'] is True and value['ref'] == REF
-         and [r['role'] for r in value['commands']] == ['source-head-pre', 'source-clean-pre', 'android-public-tool-acquisition',
-             'android-dependency-jdk-version', 'android-dependency-gradle-version', 'android-dependency-lock-task', 'source-head-post', 'source-clean-post']
-         and all(type(r['returncode']) is int and r['returncode'] == 0 for r in value['commands']), 'cleanup-receipt')
-    parents = chain(work)
-    try:
-        fd = parents[-1]
-        need(list(nine(os.fstat(fd))[:5]) == value['workIdentity'] and shutil.rmtree.avoids_symlink_attacks, 'cleanup-owned-parent')
-        # Preflight all literal children BEFORE the first disposal, then use this retained FD.
-        for leaf in ('archives', 'tools', 'run'):
-            need(list(nine(os.stat(leaf, dir_fd=fd, follow_symlinks=False))[:5]) == value['disposalIdentities'][leaf], 'cleanup-child-identity')
-        for leaf in ('archives', 'tools', 'run'):
-            shutil.rmtree(leaf, dir_fd=fd)
-        os.fsync(fd)
-    finally:
-        for fd in reversed(parents): os.close(fd)
+         and os.environ.get('MRK_PREPARATION_EVIDENCE_UPLOAD') == 'success'
+         and private is not None, 'cleanup-original-gates')
+    clock = N.PhaseClock(90)  # Within unchanged two-minute disposal step.
+    raw, _ = read(work / 'evidence/receipt.json', 16384, clock=clock)
+    value = N.document(raw); cleanup_receipt(work, value, clock)
+    fds, originals = private['fds'], private['originals']
+    recheck_chain(fds, originals); fd = fds[-1]
+    need(list(nine(os.fstat(fd))[:5]) == value['workIdentity'] and shutil.rmtree.avoids_symlink_attacks, 'cleanup-owned-parent')
+    for leaf in ('archives', 'tools', 'run'):
+        need(list(nine(os.stat(leaf, dir_fd=fd, follow_symlinks=False))[:5]) == value['disposalIdentities'][leaf], 'cleanup-child-identity')
+    for leaf in ('archives', 'tools', 'run'):
+        clock.check(); recheck_chain(fds, originals)
+        shutil.rmtree(leaf, dir_fd=fd)
+    os.fsync(fd); recheck_chain(fds, originals)
+    return clock
 
 
 def main():
@@ -828,6 +1090,7 @@ def main():
     private = None
     stage = 'work-admission'
     result = 78
+    final_clock = None
     try:
         # A safe original work directory is required even for early diagnostics.
         candidate = os.environ.get('MRK_ANDROID_PREPARATION_WORK', '')
@@ -846,21 +1109,22 @@ def main():
         if sys.argv[1] == 'acquire':
             stage = 'archive-helper-load'
             C = load('_mrk_android_preparation_correspondence', 'desktop/tools/macos_android_supplier_correspondence.py')
-        stage = 'sdk-observation' if sys.argv[1] == 'observe-sdk' else 'dormant-preparation'
+        stage = 'sdk-observation' if sys.argv[1] == 'observe-sdk' else sys.argv[1]
         if sys.argv[1] == 'observe-sdk':
             report = observe_sdk_current_use(work, private=private)
             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
         else:
-            {'prepare-a': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work)
+            final_clock = {'prepare-a': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work, private=private)
         recheck_chain(private['fds'], private['originals'])
         result = 0
     except BaseException as error:
-        code = str(error) if isinstance(error, Refused) else 'observation-original-failure'
-        if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'observation-original-failure'
+        code = str(error) if isinstance(error, Refused) else 'preparation-original-failure'
+        if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'preparation-original-failure'
         if private is not None:
             try:
-                publish_json(private, 'observe-sdk-failure.json', {'status': 'refused', 'stage': stage,
+                name = 'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-a') + '-failure.json'
+                publish_json(private, name, {'status': 'refused', 'stage': stage,
                     'reason': code, 'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False})
             except BaseException:
                 pass  # An unsafe/unknown original cannot be reopened for diagnostics.
@@ -869,6 +1133,9 @@ def main():
         if private is not None:
             try: close_chain(private['fds'], private['originals'])
             except BaseException: result = 78
+    if result == 0 and final_clock is not None:
+        try: final_clock.finish()
+        except BaseException: result = 78
     return result
 
 if __name__ == '__main__':
