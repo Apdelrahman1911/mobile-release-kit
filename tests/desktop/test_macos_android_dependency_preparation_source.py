@@ -706,6 +706,87 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 self.assertEqual(result, 78 if late else 0)
                 self.assertEqual(finished, [True])
 
+        # Actual tiny tool namespace: no tool bodies are read, including the
+        # unexpected symlink. Only the exact public cache name is published.
+        namespace = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_namespace_data')
+        details = {}
+        for name in ('.knownPackages', 'private-token-α'):
+            with self.subTest(namespace=name), tempfile.TemporaryDirectory(prefix='a-namespace-', dir=scratch) as temporary:
+                work = Path(temporary); tools = work / 'tools'; tools.mkdir(mode=0o700)
+                sdk = tools / 'sdk'; sdk.mkdir(mode=0o700)
+                (sdk / name).symlink_to('/never-read/private-content')
+                for leaf, value in (('tool-roster.json', []),
+                                    ('directory-roster.json', {'sdk': list(namespace.nine(sdk.stat())[:5])})):
+                    (work / leaf).write_bytes(namespace.encoded(value)); (work / leaf).chmod(0o600)
+                original_read = namespace.read; reads = []
+                def roster_read(path, limit, *, clock):
+                    reads.append(path.name); return original_read(path, limit, clock=clock)
+                namespace.read = roster_read
+                try:
+                    with self.assertRaisesRegex(namespace.Refused, '^tool-namespace-changed$') as caught:
+                        namespace.tool_post(work, Clock(1))
+                finally: namespace.read = original_read
+                detail = caught.exception.tool_namespace; details[name] = detail
+                relative = ('sdk/' + name).encode('utf-8')
+                self.assertEqual(reads, ['tool-roster.json', 'directory-roster.json'])
+                self.assertEqual(detail, {'change': 'unexpected', 'toolFamily': 'sdk',
+                    'relativeBytes': len(relative), 'relativeSha256': namespace.digest(relative),
+                    'publicPath': 'sdk/.knownPackages' if name == '.knownPackages' else None})
+                self.assertNotIn(b'private-token', namespace.encoded(detail))
+                self.assertNotIn(str(work).encode(), namespace.encoded(detail))
+                # Duplicate recognition remains bounded and refuses identically.
+                original_os = namespace.os
+                namespace.os = types.SimpleNamespace(**dict(vars(os), walk=lambda *a, **k: [(str(tools), ['sdk', 'sdk'], [])]))
+                try:
+                    with self.assertRaisesRegex(namespace.Refused, '^tool-namespace-changed$') as duplicate:
+                        namespace.tool_post(work, Clock(1))
+                    self.assertEqual(duplicate.exception.tool_namespace['change'], 'duplicate')
+                finally: namespace.os = original_os
+
+        # The real retained-FD publisher admits only the closed optional shape;
+        # even publication failure leaves wrapper78 and consumes all originals.
+        for mutation in ('none', 'private', 'extra', 'bad-path', 'bad-size', 'bad-hash', 'bad-family', 'bad-change', 'wrong-code', 'publish-failure'):
+            with self.subTest(namespace_publication=mutation), tempfile.TemporaryDirectory(prefix='a-namespace-main-', dir=scratch) as temporary:
+                work = Path(temporary); adopted = []
+                detail = dict(details['private-token-α' if mutation == 'private' else '.knownPackages'])
+                if mutation == 'extra': detail['raw'] = 'private-token'
+                if mutation == 'bad-path': detail['publicPath'] = 'sdk/private-token'
+                if mutation == 'bad-size': detail['relativeBytes'] = True
+                if mutation == 'bad-hash': detail['relativeSha256'] = '0' * 64
+                if mutation == 'bad-family': detail['toolFamily'] = 'private-token'
+                if mutation == 'bad-change': detail['change'] = 'private-token'
+                primary = namespace.Refused('another-original-failure' if mutation == 'wrong-code' else 'tool-namespace-changed')
+                primary.tool_namespace = detail
+                original = (namespace.admit_work, namespace.os, namespace.sys, namespace.context,
+                            namespace.load, namespace.prepare, namespace.publish_json)
+                def admit(path):
+                    private = original[0](work); adopted.append(private); return dict(private, path=expected)
+                def refuse(work, *, private): raise primary
+                def failed_publish(*args): raise KeyboardInterrupt('inert-publication-failure')
+                namespace.admit_work = admit
+                namespace.os = types.SimpleNamespace(**dict(vars(os), environ={'MRK_ANDROID_PREPARATION_WORK': str(expected)}))
+                namespace.sys = types.SimpleNamespace(argv=['fixed', 'prepare-a'])
+                namespace.context = lambda: expected; namespace.load = lambda *args: types.SimpleNamespace()
+                namespace.prepare = refuse
+                if mutation == 'publish-failure': namespace.publish_json = failed_publish
+                try: result = namespace.main()
+                finally:
+                    (namespace.admit_work, namespace.os, namespace.sys, namespace.context,
+                     namespace.load, namespace.prepare, namespace.publish_json) = original
+                    remaining = [fd for private in adopted for fd in private['fds']]
+                    for private in adopted:
+                        if private['fds']: namespace.close_chain(private['fds'], private['originals'])
+                self.assertEqual(result, 78); self.assertEqual(remaining, [])
+                if mutation == 'publish-failure':
+                    self.assertEqual(list(work.iterdir()), []); continue
+                raw = (work / 'prepare-a-failure.json').read_bytes(); report = json.loads(raw)
+                self.assertLessEqual(len(raw), 4096); self.assertNotIn(b'private-token', raw)
+                self.assertNotIn(str(work).encode(), raw)
+                self.assertEqual(report['reason'], str(primary))
+                self.assertFalse(report['nativeOrTaskSuccess']); self.assertFalse(report['cleanupAuthorized'])
+                if mutation in ('none', 'private'): self.assertEqual(report['toolNamespace'], detail)
+                else: self.assertNotIn('toolNamespace', report)
+
     def test_a_actual_report_and_complete_cleanup_receipt_reject_partial_evidence(self):
         self.assertNotEqual(os.getuid(), 0)
         helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_receipt_data')

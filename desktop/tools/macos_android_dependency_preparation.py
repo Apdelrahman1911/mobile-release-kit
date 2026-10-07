@@ -820,7 +820,22 @@ def tool_post(work, clock):
         clock.check()
         for name in dirs + files:
             path = Path(root) / name; relative = str(path.relative_to(work / 'tools'))
-            need(relative in expected and relative not in found, 'tool-namespace-changed')
+            if relative not in expected or relative in found:
+                error = Refused('tool-namespace-changed')
+                try:
+                    # No body/stat/extra traversal. Only one exact public SOURCE
+                    # cache name is reportable; unknown names remain hashes.
+                    raw_relative = relative.encode('utf-8')
+                    if 0 < len(raw_relative) <= 4096:
+                        family = relative.split('/', 1)[0]
+                        error.tool_namespace = {
+                            'change': 'duplicate' if relative in found else 'unexpected',
+                            'toolFamily': family if family in ('jdk', 'sdk', 'gradle') else 'other',
+                            'relativeBytes': len(raw_relative), 'relativeSha256': digest(raw_relative),
+                            'publicPath': relative if relative == 'sdk/.knownPackages' else None}
+                except BaseException:
+                    pass  # Optional diagnostics never replace the original refusal.
+                raise error
             found.add(relative); need(len(found) <= ENTRIES + FILES, 'tool-namespace-bound')
             if relative in directories:
                 need(list(nine(os.lstat(path))[:5]) == directories[relative], 'tool-directory-post')
@@ -1378,8 +1393,27 @@ def main():
         if private is not None:
             try:
                 name = 'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-a') + '-failure.json'
-                publish_json(private, name, {'status': 'refused', 'stage': stage,
-                    'reason': code, 'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False})
+                report = {'status': 'refused', 'stage': stage, 'reason': code,
+                    'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False}
+                try:
+                    detail = getattr(error, 'tool_namespace', None)
+                    if (isinstance(error, Refused) and code == 'tool-namespace-changed'
+                            and type(detail) is dict and set(detail) == {
+                                'change', 'toolFamily', 'relativeBytes', 'relativeSha256', 'publicPath'}
+                            and type(detail['change']) is str and detail['change'] in ('unexpected', 'duplicate')
+                            and type(detail['toolFamily']) is str and detail['toolFamily'] in ('jdk', 'sdk', 'gradle', 'other')
+                            and type(detail['relativeBytes']) is int and 0 < detail['relativeBytes'] <= 4096
+                            and type(detail['relativeSha256']) is str
+                            and re.fullmatch('[0-9a-f]{64}', detail['relativeSha256'])
+                            and (detail['publicPath'] is None or (
+                                type(detail['publicPath']) is str and detail['publicPath'] == 'sdk/.knownPackages'
+                                and detail['toolFamily'] == 'sdk'
+                                and detail['relativeBytes'] == len(b'sdk/.knownPackages')
+                                and detail['relativeSha256'] == digest(b'sdk/.knownPackages')))):
+                        report['toolNamespace'] = detail
+                except BaseException:
+                    pass  # Malformed optional detail cannot suppress the base failure.
+                publish_json(private, name, report)
             except BaseException:
                 pass  # An unsafe/unknown original cannot be reopened for diagnostics.
         result = 78
