@@ -97,7 +97,8 @@ jobs:
               expected_supplier_artifact=11415902210
               ;;
             x86_64-apple-darwin)
-              [[ "$MRK_MACOS_AQUA_SCOPE" == local-edits3 && "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+              # Scope support does not select a job or provide signed packaging.
+              [[ ( "$MRK_MACOS_AQUA_SCOPE" == local-edits3 || "$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || "$MRK_MACOS_AQUA_SCOPE" == ios-recovery-pending ) && "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
               expected_supplier_receipt=a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b
               expected_supplier_tar=739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd
               expected_supplier_source=079ab2a2c8fef88f01bf909e7669c685f07e1375

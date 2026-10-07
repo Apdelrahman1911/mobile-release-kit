@@ -12322,7 +12322,13 @@ class LocalEditsAquaDataTests(unittest.TestCase):
                              '"$(/usr/bin/uname -m)" == ' + machine):
                 self.assertIn(expected, branch)
             if target == "x86_64-apple-darwin":
-                self.assertIn('"$MRK_MACOS_AQUA_SCOPE" == local-edits3', branch)
+                self.assertEqual(
+                    [line.strip() for line in branch.splitlines() if line.lstrip().startswith("[[ ")],
+                    ['[[ ( "$MRK_MACOS_AQUA_SCOPE" == local-edits3 || '
+                     '"$MRK_MACOS_AQUA_SCOPE" == ios-current-synthetic || '
+                     '"$MRK_MACOS_AQUA_SCOPE" == ios-recovery-pending ) && '
+                     '"$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && '
+                     '"$(/usr/bin/uname -m)" == x86_64 ]] || exit 1'])
             for (suffix, key), value in zip(fields, pins):
                 self.assertEqual(branch.count("expected_" + key + "=" + value + "\n"), 1)
                 self.assertEqual(workflow.count("      MRK_MACOS_PYTHON_SUPPLIER_" + suffix + ": ${{ matrix." + key + " }}\n"), 1)
@@ -12348,6 +12354,16 @@ class LocalEditsAquaDataTests(unittest.TestCase):
         self.assertLess(run.index('need(result.returncode == 0, "app-return")'), run.index('report = parse_result'))
         self.assertLess(run.index('report = parse_result'), run.index('"fixture-local-readback"'))
         self.assertLess(run.index('"fixture-local-readback"'), run.index('emit({"schemaVersion": 1'))
+        # Parser DATA continuity only; the matrix and signed-package barrier stay unchanged.
+        for target in (M.ARM_TARGET, M.INTEL_TARGET):
+            binding = M.Binding(BINDING.source, BINDING.run, BINDING.attempt, target).checked()
+            for scope, cases in (("ios-current-synthetic", M.IOS_CURRENT_CASES),
+                                 (M.IOS_ACCOUNT_CASE, (M.IOS_ACCOUNT_CASE,))):
+                self.assertEqual(M.entry_arguments(["--scope", scope, "--target", target]), (scope, target))
+                self.assertEqual(M.selected_cases(scope), cases)
+                for case in cases:
+                    expected = M.expected_result(binding, case)
+                    self.assertEqual(M.parse_result(captured(expected), b"", binding, case), expected)
 
 
 class LocalChecksAquaDataTests(unittest.TestCase):
