@@ -3174,10 +3174,20 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     module.build_environment(environment, work, release)
             self.assertEqual(selected["RUSTUP_TOOLCHAIN"], "1.98.1")
             self.assertEqual(selected["RUSTUP_AUTO_INSTALL"], "0")
-            for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            for target, toolchain in (("aarch64-apple-darwin", "1.98.1"), ("x86_64-apple-darwin", "1.98.0")):
                 directory = "/Users/runner/.rustup/toolchains/stable-" + target + "/bin"
-                cleaned = module.build_environment(environment, work, TOOL.RELEASE, target=target)
+                selected_environment = dict(environment, RUSTUP_TOOLCHAIN=toolchain)
+                cleaned = module.build_environment(selected_environment, work, TOOL.RELEASE, target=target)
                 self.assertEqual(module.direct_rust_tools(target), (directory + "/cargo", directory + "/rustc"))
+                self.assertEqual(module.rust_toolchain(target), toolchain)
+                self.assertEqual(cleaned["RUSTUP_TOOLCHAIN"], toolchain)
+                absent = dict(selected_environment); del absent["RUSTUP_TOOLCHAIN"]
+                self.assertEqual(module.build_environment(absent, work, TOOL.RELEASE, target=target), cleaned)
+                receipt = module.Operation(owner, checkout, work, "prepare", selected_environment, TOOL, target=target).receipt
+                self.assertEqual((receipt["target"], receipt["toolchain"], receipt["passed"]), (target, toolchain, False))
+                for wrong in ("1.98.0" if toolchain == "1.98.1" else "1.98.1", "nightly", None, True):
+                    with self.subTest(target=target, selector=wrong), self.assertRaisesRegex(module.Refused, "^direct-rust-source-route$"):
+                        module.build_environment(dict(selected_environment, RUSTUP_TOOLCHAIN=wrong), work, TOOL.RELEASE, target=target)
                 self.assertEqual(cleaned["RUSTC"], directory + "/rustc")
                 self.assertEqual(cleaned["PATH"], directory + ":/usr/bin:/bin:/usr/sbin:/sbin")
                 self.assertEqual((cleaned["HOME"], cleaned["CARGO_HOME"], cleaned["RUSTUP_HOME"]),
@@ -3720,9 +3730,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         ordinary_ref = "refs/heads/verify/desktop-macos-installed"
         ordinary_work = module.WORK_PARENT / "mrk-macos-installed.AbC12345"
-        for target, machine, runner in (("aarch64-apple-darwin", "arm64", "ARM64"),
-                                         ("x86_64-apple-darwin", "x86_64", "X64")):
-            ordinary = dict(environment, GITHUB_REF=ordinary_ref, RUNNER_ARCH=runner,
+        for target, machine, runner, toolchain in (("aarch64-apple-darwin", "arm64", "ARM64", "1.98.1"),
+                                                    ("x86_64-apple-darwin", "x86_64", "X64", "1.98.0")):
+            ordinary = dict(environment, GITHUB_REF=ordinary_ref, RUNNER_ARCH=runner, RUSTUP_TOOLCHAIN=toolchain,
                 GITHUB_WORKFLOW_REF="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + ordinary_ref,
                 MRK_MACOS_WORK=str(ordinary_work), MRK_MACOS_PACKAGE_ROLE="ordinary-image")
             uname = mock.Mock(return_value=SimpleNamespace(machine=machine))
@@ -3734,6 +3744,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                       getgid=mock.Mock(return_value=20), getegid=mock.Mock(return_value=20))):
                 self.assertEqual(module.admit(ordinary, target=target), ordinary_work)
                 self.assertEqual(uname.call_count, 1)
+                for wrong in ("1.98.0" if toolchain == "1.98.1" else "1.98.1", "nightly", None, True):
+                    with self.subTest(target=target, toolchain=wrong), self.assertRaisesRegex(module.Refused, "^hosted-source-bindings$"):
+                        module.admit(dict(ordinary, RUSTUP_TOOLCHAIN=wrong), target=target)
                 with self.assertRaisesRegex(module.Refused, "^hosted-source-bindings$"):
                     module.admit(dict(ordinary, RUNNER_ARCH="X64" if runner == "ARM64" else "ARM64"), target=target)
                 uname.return_value = SimpleNamespace(machine="x86_64" if machine == "arm64" else "arm64")
@@ -3746,13 +3759,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.assertRaisesRegex(module.Refused, "^closed-build-target$"):
                     module.admit(ordinary, target=[])
                 self.assertEqual(uname.call_count, observed)
-                aqua = dict(environment, RUNNER_ARCH=runner)
+                aqua = dict(environment, RUNNER_ARCH=runner, RUSTUP_TOOLCHAIN=toolchain)
                 self.assertEqual(module.admit(aqua, target=target), work)
                 for phase in module.PHASES:
                     self.assertEqual(module.admit(aqua, target=target, phase=phase), work)
                 for scope in module.PACKAGE_SCOPES:
                     self.assertEqual(module.admit(dict(aqua, MRK_MACOS_AQUA_SCOPE=scope), target=target), work)
                 for key, value, reason in (
+                    ("RUSTUP_TOOLCHAIN", "1.98.0" if toolchain == "1.98.1" else "1.98.1", "hosted-source-bindings"),
                     ("RUNNER_ARCH", "X64" if runner == "ARM64" else "ARM64", "hosted-source-bindings"),
                     ("GITHUB_WORKFLOW_SHA", "b" * 40, "hosted-source-bindings"),
                     ("GITHUB_REF", "refs/heads/main", "closed-workflow-route"),
@@ -7870,6 +7884,26 @@ class MacNormalPreviewData(unittest.TestCase):
                       'with self.credential_scope(self.phase):'):
             self.assertIn(exact, fixed_sign)
         self.assertNotIn('"--deep"', fixed_sign)
+        # Payload notarization owns the former direct input CLI. Both input
+        # passes still receive the same signed vault-helper digest binding.
+        notarize = next(node for node in operation.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "notarize_payload")
+        arguments = [node.value for node in notarize.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "arguments" for target in node.targets)]
+        self.assertEqual(len(arguments), 1)
+        self.assertIsInstance(arguments[0], ast.Call)
+        self.assertEqual(ast.get_source_segment(package_source, arguments[0].func), "argparse.Namespace")
+        self.assertEqual([ast.get_source_segment(package_source, item.value) for item in arguments[0].keywords
+                          if item.arg == "expected_vault_helper"],
+                         ['self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256")'])
+        input_calls = [ast.get_source_segment(package_source, node) for node in ast.walk(notarize)
+                       if isinstance(node, ast.Call) and any(
+                           ast.get_source_segment(package_source, argument) == "self.stager.input_command"
+                           for argument in node.args)]
+        self.assertEqual(input_calls, [
+            'self.notary_io("notary-preflight-input", self.stager.input_command, arguments)',
+            'self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)',
+        ])
         for name in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
             workflow = (root / ".github/workflows" / name).read_text()
             build = workflow.index("--manifest-path desktop/helpers/macos-vault-helper/Cargo.toml")
@@ -7879,7 +7913,9 @@ class MacNormalPreviewData(unittest.TestCase):
             app_sign = workflow.index('macos_android_helper_package.py sign-root-app --target "$MRK_MACOS_TARGET"', stage)
             self.assertLess(build, helper_sign); self.assertLess(helper_sign, digest)
             self.assertLess(digest, stage); self.assertLess(stage, app_sign)
-            self.assertIn('RUSTUP_TOOLCHAIN: "1.98.1"', workflow)
+            self.assertIn('RUSTUP_TOOLCHAIN: ${{ fromJSON(\'{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}\')[matrix.target] }}', workflow)
+            self.assertNotIn("RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0", workflow)
+            self.assertIn('RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0', workflow)
             phases = ("sign-vault-helper", "sign-desktop-payload", "sign-root-app", "sign-root-installer")
             if name == "desktop-macos-installed.yml":
                 phases += ("sign-desktop-image",)
@@ -7887,7 +7923,12 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertEqual(workflow.count("macos_android_helper_package.py " + phase + ' --target "$MRK_MACOS_TARGET"'), 1)
             self.assertEqual(workflow.count("--options runtime"), 0)
             self.assertEqual(workflow.count("--entitlements desktop/packaging/macos-empty-entitlements.plist"), 0)
-            self.assertEqual(workflow.count('--expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256"'), 2)
+            vault_argument = '--expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256"'
+            self.assertEqual(workflow.count(vault_argument), 1)
+            self.assertEqual(workflow[stage:app_sign].count(vault_argument), 1)
+            notarize_call = 'macos_android_helper_package.py notarize-payload --target "$MRK_MACOS_TARGET"'
+            self.assertEqual(workflow.count(notarize_call), 1)
+            self.assertLess(app_sign, workflow.index(notarize_call))
             # Prohibition text may mention --deep. Inspect only the real shell
             #signing commands, folding their continued arguments without execution.
             commands = workflow.replace('\\\n', " ").splitlines()

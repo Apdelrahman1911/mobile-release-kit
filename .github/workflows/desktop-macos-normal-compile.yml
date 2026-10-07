@@ -15,11 +15,11 @@ on:
         required: true
         type: string
       target:
-        description: Fixed compiler target (both by default)
+        description: Fixed compiler rows (both full graphs, or remaining Intel plus ARM vault)
         required: false
         type: choice
         default: both
-        options: [both, arm, intel]
+        options: [both, arm, intel, remaining]
 
 permissions:
   contents: read
@@ -30,17 +30,18 @@ concurrency:
 
 jobs:
   compile:
-    name: Normal compile only / ${{ matrix.target }}
+    name: Compile only / ${{ matrix.target }} / ${{ matrix.mode }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(inputs.target == 'arm' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin"}]' || inputs.target == 'intel' && '[{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin"}]' || '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin"}]') }}
+        include: ${{ fromJSON(inputs.target == 'remaining' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"vault-only"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || inputs.target == 'arm' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"}]' || inputs.target == 'intel' && '[{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 65 || 45 }}
+    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || matrix.mode == 'full4' && 50 || 45 }}
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
+      MRK_MACOS_COMPILE_MODE: ${{ matrix.mode }}
       MRK_DESKTOP_HOSTED_CHECKS: macos-normal-compile-v1
       MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
       MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}
@@ -59,13 +60,14 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
             case "$MRK_COMPILE_SELECTION" in
-              both) ;;
-              arm) [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;
-              intel) [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin ]] ;;
+              both) [[ "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
+              arm) [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
+              intel) [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
+              remaining) [[ ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == vault-only ) || ( "$MRK_MACOS_TARGET" == x86_64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == full4 ) ]] ;;
               *) exit 1 ;;
             esac
           else
-            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both ]]
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both && "$MRK_MACOS_COMPILE_MODE" == full4 ]]
           fi
       - name: Check out exact source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,6 +84,7 @@ jobs:
         with:
           python-version: '3.14.7'
       - name: Select fixed frontend compiler
+        if: matrix.mode == 'full4'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
@@ -101,8 +104,8 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
-      - name: Compile actual frontend and native shell without launching them
-        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 47 || 25 }}
+      - name: Compile selected graphs without launching outputs
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || matrix.mode == 'full4' && 32 || 25 }}
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -113,7 +116,7 @@ jobs:
         if: always() && steps.prepare.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-macos-normal-compile-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-macos-normal-compile-${{ matrix.target }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.prepare.outputs.root }}/public-bindings.json
             ${{ steps.prepare.outputs.root }}/acquire-checks.json

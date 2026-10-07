@@ -48,7 +48,7 @@ jobs:
             supplier_attempt: '1'
             supplier_artifact: '11419502465'
     env:
-      RUSTUP_TOOLCHAIN: "1.98.1"
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
       MRK_MACOS_RUNNER: ${{ matrix.runner }}
       MRK_MACOS_MACHINE: ${{ matrix.machine }}
@@ -347,6 +347,11 @@ jobs:
           build_target = os.environ['MRK_MACOS_TARGET']
           machines = {'aarch64-apple-darwin': 'arm64', 'x86_64-apple-darwin': 'x86_64'}
           if build_target not in machines: raise ValueError('direct-rust-target')
+          rust_tuples = {
+              "aarch64-apple-darwin": ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"),
+              "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+          }
+          rust_release, rust_commit = rust_tuples[build_target]
           bin_directory = rustup_home / ('toolchains/stable-' + build_target + '/bin')
           compiler_path = str(bin_directory) + ':/usr/bin:/bin:/usr/sbin:/sbin'
           def need(value, reason):
@@ -354,7 +359,7 @@ jobs:
           need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == machines[build_target]
                and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'direct-rust-host')
           need(os.environ.get('HOME') == str(home) and os.environ.get('GITHUB_WORKSPACE') == str(checkout)
-               and os.environ.get('RUSTUP_TOOLCHAIN') == '1.98.1'
+               and os.environ.get('RUSTUP_TOOLCHAIN') == rust_release
                and os.environ.get('CARGO_HOME', str(cargo_home)) == str(cargo_home)
                and os.environ.get('RUSTUP_HOME', str(rustup_home)) == str(rustup_home)
                and os.environ.get('RUSTC', str(bin_directory / 'rustc')) == str(bin_directory / 'rustc')
@@ -452,7 +457,7 @@ jobs:
               spec.loader.exec_module(qualification)
               owner = qualification.load_owner(checkout)
               environment = dict(PATH=compiler_path, HOME=str(home), CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
-                                 RUSTC=str(bin_directory / 'rustc'), RUSTUP_TOOLCHAIN='1.98.1', RUSTUP_AUTO_INSTALL='0',
+                                 RUSTC=str(bin_directory / 'rustc'), RUSTUP_TOOLCHAIN=rust_release, RUSTUP_AUTO_INSTALL='0',
                                  LANG='C', LC_ALL='C', TZ='UTC', DEVELOPER_DIR=os.environ['DEVELOPER_DIR'],
                                  MACOSX_DEPLOYMENT_TARGET=os.environ['MACOSX_DEPLOYMENT_TARGET'])
               for tool in ('rustc', 'cargo'):
@@ -467,10 +472,10 @@ jobs:
                   pending_call = False  # Only this original complete return settles the command.
                   need(result.returncode == 0 and not result.stderr and result.stdout, 'direct-rust-version-return')
                   lines = result.stdout.decode('utf-8', 'strict').strip().splitlines()
-                  need(lines[0].startswith(tool + ' ') and lines.count('release: 1.98.1') == 1
-                       and lines.count('host: ' + build_target) == 1, 'direct-rust-version-host')
+                  need(lines[0].startswith(tool + ' ') and [line for line in lines if line.partition(':')[0].strip() == 'release'] == ['release: ' + rust_release]
+                       and [line for line in lines if line.partition(':')[0].strip() == 'host'] == ['host: ' + build_target], 'direct-rust-version-host')
                   if tool == 'rustc':
-                      need(lines.count('commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985') == 1, 'direct-rust-clock-commit')
+                      need([line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] == ['commit-hash: ' + rust_commit], 'direct-rust-clock-commit')
                   no_configuration(); check_originals()
           except BaseException as error:
               failure = error
@@ -485,7 +490,7 @@ jobs:
                       except OSError: close_errors.append('direct-rust-close-unknown')
           if failure is not None or pending_call or close_errors or not all(row['closed'] for row in originals):
               raise SystemExit('Fixed direct Rust admission refused; no toolchain install or fallback.')
-          print('Fixed direct Rust1.98.1 compiler and Cargo admitted; no distribution install performed.')
+          print('Fixed direct Rust' + rust_release + ' compiler and Cargo admitted; no distribution install performed.')
           PY_DIRECT_RUST
       - name: Admit only a fresh independently pinned Python transport destination
         timeout-minutes: 1
@@ -982,7 +987,7 @@ jobs:
           set -o noclobber
           umask 077
           set +e
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
             --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
             --target "$MRK_MACOS_TARGET" --message-format=json \
             > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
@@ -1014,7 +1019,8 @@ jobs:
           record = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
                     "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
                     "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
-                    "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
+                    "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                    "toolchain": {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[os.environ["MRK_MACOS_TARGET"]],
                     "helperSha256": hashlib.sha256(body).hexdigest(), "helperBytes": len(body),
                     "signing": "source-selected-leaf-runtime-empty-entitlements-strictly-verified",
                     "nativeCallerAndKeychainQualified": False, "developerIdOrNotarizationQualified": False}
@@ -1038,7 +1044,7 @@ jobs:
           cd src-tauri
           set -o noclobber
           set +e
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --manifest-path ../helpers/macos-desktop-image/Cargo.toml --lib \
             --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/normal-build.jsonl" 2> "$MRK_MACOS_WORK/normal-build.stderr"
           cargo_status=$?
@@ -1067,12 +1073,17 @@ jobs:
               raise ValueError("effective versions require the original successful build")
           repository_default = tomllib.loads((checkout / "desktop/rust-toolchain.toml").read_text())["toolchain"]["channel"]
           selected_toolchain = os.environ.get("RUSTUP_TOOLCHAIN")
-          if repository_default != "1.98.0" or selected_toolchain != "1.98.1":
-              raise ValueError("review the changed repository default or Mac clock toolchain before this gate")
-          # Query only the same admitted direct tools; no shim or installation.
           build_target = os.environ["MRK_MACOS_TARGET"]
           if build_target not in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
               raise ValueError("effective-rust-target")
+          rust_tuples = {
+              "aarch64-apple-darwin": ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"),
+              "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+          }
+          rust_release, rust_commit = rust_tuples[build_target]
+          if repository_default != "1.98.0" or selected_toolchain != rust_release:
+              raise ValueError("review the changed repository default or Mac clock toolchain before this gate")
+          # Query only the same admitted direct tools; no shim or installation.
           rust_bin = "/Users/runner/.rustup/toolchains/stable-" + build_target + "/bin"
           environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
           versions = {}
@@ -1083,11 +1094,12 @@ jobs:
               if result.stderr or not result.stdout or len(result.stdout) > 4096:
                   raise ValueError("effective version output refused")
               output = result.stdout.decode("utf-8", "strict").strip()
-              if (not output.startswith(tool + " ") or output.splitlines().count("release: 1.98.1") != 1
-                      or output.splitlines().count("host: " + build_target) != 1):
+              lines = output.splitlines()
+              if (not output.startswith(tool + " ")
+                      or [line for line in lines if line.partition(':')[0].strip() == 'release'] != ['release: ' + rust_release]
+                      or [line for line in lines if line.partition(':')[0].strip() == 'host'] != ['host: ' + build_target]):
                   raise ValueError("effective tool version output refused")
-              if tool == "rustc" and ("release: 1.98.1" not in output.splitlines()
-                      or "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985" not in output.splitlines()):
+              if tool == "rustc" and [line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] != ['commit-hash: ' + rust_commit]:
                   raise ValueError("effective compiler differs from reviewed Apple clock binding")
               # Existing schema names the logical role; actual argv above is absolute.
               versions[tool] = {"command": [tool, "--version", "--verbose"], "output": output}
@@ -1760,16 +1772,16 @@ jobs:
             (( statuses[1] == 0 && statuses[2] == 0 )) || return 1
           }
           # Multiple FULL names belong after Cargo's --; libtest --exact is not a prefix filter.
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused dialog-regressions "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused dialog-regressions "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --no-default-features --features desktop-shell,custom-protocol \
             --target "$MRK_MACOS_TARGET" --lib -- --exact --test-threads=1 --color=never --format=pretty \
             shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal \
             shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused installer-finalizer-regression "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused installer-finalizer-regression "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --no-default-features --features macos-installed-installer \
             --target "$MRK_MACOS_TARGET" --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
             installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
-          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused native-abi-regression "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused native-abi-regression "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
             --locked --release --target "$MRK_MACOS_TARGET" \
             --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
             tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
@@ -1826,7 +1838,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer-fixture \
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer-fixture \
               --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"
@@ -1940,7 +1952,7 @@ jobs:
           set -o noclobber
           (
             cd desktop/src-tauri
-            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN=1.98.1 RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build --locked --release --no-default-features --features macos-installed-installer \
               --target "$MRK_MACOS_TARGET" --bin mrk-macos-install
           )
           installer="$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/mrk-macos-install"

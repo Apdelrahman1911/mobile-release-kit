@@ -741,6 +741,10 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(M.expected_result(selected, "first-save"), M.expected_result(BINDING, "first-save"))
             self.assertEqual(M._gate_new_report(selected, M.VAULT_HELPER_SCOPE)["platform"], platform)
             self.assertEqual(M._capacity_new_report(selected, M.VAULT_HELPER_SCOPE)["platform"], platform)
+            toolchain = {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[target]
+            self.assertEqual(data["toolchain"], toolchain)
+            self.assertEqual(M._gate_new_report(selected, M.VAULT_HELPER_SCOPE)["toolchain"], toolchain)
+            self.assertEqual(M._capacity_new_report(selected, M.VAULT_HELPER_SCOPE)["toolchain"], toolchain)
         for target in (None, [], True, "arm64", "x86_64h-apple-darwin", "x86_64-unknown-linux-gnu"):
             with self.subTest(target=target), self.assertRaises(M.Refused):
                 replace(BINDING, target=target).checked()
@@ -7200,8 +7204,8 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertNotIn("rustup override", workflow)
         self.assertLess(workflow.index("Bind the complete reviewed first-party checkout before compilation"), workflow.index("Admit the fixed image Rust tools without installing a distribution"))
         self.assertLess(workflow.index("Admit the fixed image Rust tools without installing a distribution"), workflow.index("Compile headless Mac libraries"))
-        for required in ("('toolchains/stable-' + build_target + '/bin')", "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985",
-                         "release: 1.98.1", "lines.count('host: ' + build_target)", "RUSTUP_AUTO_INSTALL='0'",
+        for required in ("('toolchains/stable-' + build_target + '/bin')", "line.partition(':')[0].strip() == 'commit-hash'",
+                         "line.partition(':')[0].strip() == 'release'", "line.partition(':')[0].strip() == 'host'", "RUSTUP_AUTO_INSTALL='0'",
                          "owner = qualification.load_owner(checkout)", "pending_call = True",
                          "pending_call = False", "if not pending_call:", "no_configuration(); check_originals()",
                          "('config', 'config.toml', 'credentials', 'credentials.toml')",
@@ -7213,7 +7217,95 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertEqual(clock.count("result = owner.run_owned("), 1)
         self.assertEqual(clock.count("for tool in ('rustc', 'cargo'):"), 1)
         self.assertLess(clock.index("no_configuration(); check_originals()"), clock.index("result = owner.run_owned("))
-        self.assertLess(clock.index("row['closed'] = True"), clock.index("print('Fixed direct Rust1.98.1"))
+        self.assertLess(clock.index("row['closed'] = True"), clock.index("print('Fixed direct Rust' + rust_release"))
+
+        # Evaluate only these shape-pinned pure predicates, never a workflow
+        # block, command, import, configuration read or source-selected callable.
+        expected_tuples = {
+            "aarch64-apple-darwin": ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"),
+            "x86_64-apple-darwin": ("1.98.0", "88d9e12ae178fab0fb5cc050a94da85685d449ea"),
+        }
+        def program(block, marker):
+            opening, closing = "<<'" + marker + "'\n", "\n          " + marker
+            self.assertEqual(block.count(opening), 1)
+            body = block.split(opening, 1)[1].split(closing, 1)[0]
+            rows = body.splitlines()
+            self.assertTrue(all(not row or row.startswith(" " * 10) for row in rows))
+            parsed = ast.parse("\n".join(row[10:] for row in rows))
+            maps = [node.value for node in ast.walk(parsed) if isinstance(node, ast.Assign)
+                    and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                    and node.targets[0].id == "rust_tuples"]
+            self.assertEqual(len(maps), 1)
+            self.assertEqual(ast.literal_eval(maps[0]), expected_tuples)
+            return parsed
+        def need_predicate(parsed, reason):
+            values = [node.args[0] for node in ast.walk(parsed) if isinstance(node, ast.Call)
+                      and isinstance(node.func, ast.Name) and node.func.id == "need" and len(node.args) == 2
+                      and isinstance(node.args[1], ast.Constant) and node.args[1].value == reason]
+            self.assertEqual(len(values), 1)
+            return values[0]
+        def refusal_predicate(parsed, reason):
+            values = [node.test for node in ast.walk(parsed) if isinstance(node, ast.If) and len(node.body) == 1
+                      and isinstance(node.body[0], ast.Raise) and isinstance(node.body[0].exc, ast.Call)
+                      and isinstance(node.body[0].exc.func, ast.Name) and node.body[0].exc.func.id == "ValueError"
+                      and len(node.body[0].exc.args) == 1 and isinstance(node.body[0].exc.args[0], ast.Constant)
+                      and node.body[0].exc.args[0].value == reason]
+            self.assertEqual(len(values), 1)
+            return values[0]
+        for filename in ("desktop-macos-installed.yml", "desktop-macos-aqua.yml"):
+            source = (PATH.parents[2] / ".github/workflows" / filename).read_text()
+            direct = program(source, "PY_DIRECT_RUST")
+            stages = [("direct", [
+                (need_predicate(direct, "direct-rust-version-host"),
+                 "lines[0].startswith(tool + ' ') and [line for line in lines if line.partition(':')[0].strip() == 'release'] == ['release: ' + rust_release] and [line for line in lines if line.partition(':')[0].strip() == 'host'] == ['host: ' + build_target]", False, False),
+                (need_predicate(direct, "direct-rust-clock-commit"),
+                 "[line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] == ['commit-hash: ' + rust_commit]", False, True),
+            ])]
+            if filename == "desktop-macos-installed.yml":
+                later = program(source, "PY_EFFECTIVE_RUST")
+                stages.append(("effective", [
+                    (refusal_predicate(later, "effective tool version output refused"),
+                     "not output.startswith(tool + ' ') or [line for line in lines if line.partition(':')[0].strip() == 'release'] != ['release: ' + rust_release] or [line for line in lines if line.partition(':')[0].strip() == 'host'] != ['host: ' + build_target]", True, False),
+                    (refusal_predicate(later, "effective compiler differs from reviewed Apple clock binding"),
+                     "tool == 'rustc' and [line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] != ['commit-hash: ' + rust_commit]", True, False),
+                ]))
+            else:
+                block = source.split("      - name: Record exact source and actual tool bindings only after route admission\n", 1)[1].split("      - name: ", 1)[0]
+                later = program(block, "PY")
+                stages.append(("source-binding", [(refusal_predicate(later, "direct Rust source binding differs from admitted image"),
+                    "not output.startswith(name + ' ') or [line for line in lines if line.partition(':')[0].strip() == 'release'] != ['release: ' + rust_release] or [line for line in lines if line.partition(':')[0].strip() == 'host'] != ['host: ' + build_target] or name == 'rustc' and [line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] != ['commit-hash: ' + rust_commit]", True, False)]))
+            # Each original query must refuse on its own; one stronger earlier
+            # admission must not hide a weaker later record's predicate.
+            for stage, specs in stages:
+                predicates = []
+                for actual, expected, inverted, rust_only in specs:
+                    self.assertEqual(ast.dump(actual, include_attributes=False), ast.dump(ast.parse(expected, mode="eval").body, include_attributes=False))
+                    predicates.append((compile(ast.Expression(actual), "<fixed-inert-rust-predicate>", "eval"), inverted, rust_only))
+                for target, (release, commit) in expected_tuples.items():
+                    other = "x86_64-apple-darwin" if target == "aarch64-apple-darwin" else "aarch64-apple-darwin"
+                    for tool in ("rustc", "cargo"):
+                        lines = [tool + " " + release + " (inert)", "release: " + release, "host: " + target, "commit-hash: " + commit]
+                        cases = [("valid", lines), ("wrong-tool", ["other " + release, *lines[1:]])]
+                        fields = [("release", 1, expected_tuples[other][0]), ("host", 2, other)]
+                        if tool == "rustc": fields.append(("commit-hash", 3, expected_tuples[other][1]))
+                        for field, index, wrong in fields:
+                            cases.extend([
+                                ("wrong-" + field, [*lines[:index], field + ": " + wrong, *lines[index+1:]]),
+                                ("missing-" + field, [*lines[:index], *lines[index+1:]]),
+                                ("repeated-" + field, lines + [lines[index]]),
+                                ("conflicting-" + field, lines + [field + ": " + wrong]),
+                                ("spacing-" + field, [*lines[:index], lines[index].replace(": ", ":  "), *lines[index+1:]]),
+                                ("key-spacing-" + field, lines + [" " + field + " : " + wrong]),
+                            ])
+                        if tool == "cargo":
+                            cases.append(("cargo-commit-unpinned", [*lines[:3], "commit-hash: independently-unpinned"]))
+                        for label, observed in cases:
+                            variables = dict(tool=tool, name=tool, build_target=target, rust_release=release,
+                                             rust_commit=commit, lines=observed, output="\n".join(observed))
+                            admitted = all(bool(eval(code, {"__builtins__": {}}, variables)) != inverted
+                                           for code, inverted, rust_only in predicates if not rust_only or tool == "rustc")
+                            with self.subTest(workflow=filename, stage=stage, target=target, tool=tool, mutation=label):
+                                self.assertEqual(admitted, label in ("valid", "cargo-commit-unpinned"))
         for forbidden in ("shutil.which", ".resolve(", "CARGO_NET_OFFLINE=", "cargo fetch", "os.chmod", "os.unlink", "os.mkdir"):
             self.assertNotIn(forbidden, clock)
         direct = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo"
@@ -10017,7 +10109,8 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
         "descriptorSha256": M.digest(descriptor), "signatureSha256": "e" * 64, "descriptorBytes": len(descriptor), "signatureBytes": 256}
     receipt = {"schemaVersion": 1, "phase": "package-install", "target": binding.target, "source": binding.source,
         "workflowSource": binding.source, "workflow": M.WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
-        "packageRole": "installed-shell-observation", "toolchain": "1.98.1", "helperIdentifier": "dev.mobile-release-kit.desktop.android-register",
+        "packageRole": "installed-shell-observation",
+        "toolchain": {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[binding.target], "helperIdentifier": "dev.mobile-release-kit.desktop.android-register",
         "passed": True, "originalClosesKnown": True, "targetRetired": True, "outerFinalityRequired": True,
         "directStagerIOPending": None, "cleanupErrors": [], "androidServiceAuthenticated": False,
         "androidRegisteredCopyQualified": False, "androidBuildQualified": False, "developerIdOrNotarizationQualified": False, "productReady": False,
@@ -10287,6 +10380,9 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                         lambda row: row['releaseSet']['current'].update(protocolSha256='f' * 64),
                         lambda row: row['releaseSet']['current'].update(sourceCommit='f' * 40)]),
                     ("android-helper-package-install.json", [lambda row: row.update(runAttempt='2'), lambda row: row.update(passed=1),
+                        lambda row: row.update(toolchain='1.98.1' if target == M.INTEL_TARGET else '1.98.0'),
+                        lambda row: row.update(toolchain='nightly'), lambda row: row.update(toolchain=None),
+                        lambda row: row.update(toolchain=True),
                         lambda row: row.update(failure={}), lambda row: row.update(originalClosesKnown=False),
                         lambda row: row.update(targetRetired=False), lambda row: row.update(directStagerIOPending='v2-readback'),
                         lambda row: row.update(developerIdOrNotarizationQualified=True),

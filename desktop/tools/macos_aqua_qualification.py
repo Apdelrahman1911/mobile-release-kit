@@ -1638,7 +1638,8 @@ def target_data(target):
             "sourceLock": "source-lock-intel.json" if intel else "source-lock.json",
             "releasePrefix": "macos26-x86_64-" if intel else "macos26-arm64-",
             "platform": "macOS26-x86_64" if intel else "macOS26-arm64",
-            "cargo": "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo"}
+            "cargo": "/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo",
+            "toolchain": "1.98.0" if intel else "1.98.1"}
 
 
 @dataclass(frozen=True)
@@ -5772,7 +5773,7 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection):
     receipt = _gate_json(anchors["android-helper-package-install.json"], 16384)
     fixed = {"schemaVersion": 1, "phase": "package-install", "target": binding.target, "source": binding.source,
         "workflowSource": binding.source, "workflow": WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
-        "packageRole": "installed-shell-observation", "toolchain": "1.98.1",
+        "packageRole": "installed-shell-observation", "toolchain": target_data(binding.target)["toolchain"],
         "helperIdentifier": "dev.mobile-release-kit.desktop.android-register", "passed": True,
         "originalClosesKnown": True, "targetRetired": True, "outerFinalityRequired": True,
         "directStagerIOPending": None, "cleanupErrors": [], "androidServiceAuthenticated": False,
@@ -5993,7 +5994,7 @@ def _gate_dependencies(fixtures, binding, checkout, work, environment):
 def _gate_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-installed-shipping-gate-control", **binding.public(),
         "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
-        "toolchain": "1.98.1", "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
+        "toolchain": target_data(binding.target)["toolchain"], "testName": SHIPPING_GATE_TEST, "headlessReceiptSha256": None,
         "compilerJsonSha256": None, "installationReadbackSha256": None, "artifact": None,
         "ownerEntered": False, "originalCallReturned": False, "ownerReturncode": None, "ownerElapsedNanoseconds": None,
         "stdoutSha256": None, "stderrSha256": None, "stdoutBytes": None, "stderrBytes": None, "namedTestPassed": False,
@@ -6246,7 +6247,7 @@ def _capacity_dependencies(fixtures, binding, checkout, work, environment):
 def _capacity_new_report(binding, scope):
     return {"schemaVersion": 1, "type": "macos-shipping-capacity-data", **binding.public(),
         "workflow": WORKFLOW, "workflowSource": binding.source, "aquaScope": scope, "platform": target_data(binding.target)["platform"],
-        "toolchain": "1.98.1", "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
+        "toolchain": target_data(binding.target)["toolchain"], "names": list(SHIPPING_CAPACITY_TESTS), "features": [],
         "headlessReceiptSha256": None, "compilerJsonSha256": None, "artifact": None,
         "ownerCallsEntered": 0, "ownerCallsReturned": 0, "originalCallReturned": False, "ownerReturncode": None,
         "ownerElapsedNanoseconds": None, "finalElapsedNanoseconds": None, "deadlineMetAfterFinalCloses": False,

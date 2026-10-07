@@ -733,9 +733,13 @@ MAC_COMPILE_GRAPHS = (
     ("mac-observer-compile-only", "desktop/src-tauri/Cargo.toml", "test", "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"),
     ("mac-image-compile-only", "desktop/helpers/macos-desktop-image/Cargo.toml", "release", "macos-installed-desktop-image", "lib"),
 )
+MAC_COMPILE_VAULT_GRAPH = (
+    "mac-vault-bin-compile-only", "desktop/helpers/macos-vault-helper/Cargo.toml",
+    "release", "", "mrk-vault-keychain",
+)
 MAC_COMPILE_CHECKS = {
-    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
-    "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
 }
 COMPILE_PROFILES = {
     MAC_COMPILE_SCOPE: {"workflow": MAC_COMPILE_WORKFLOW, "ref": MAC_COMPILE_REF,
@@ -2655,6 +2659,7 @@ VERSION_NATIVE_SOURCES = tuple(sorted({
 
 TOOL_CHECKS = frozenset({
     "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata",
+    "mac-vault-locked-metadata", "mac-vault-bin-compile-only",
     "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
@@ -2751,6 +2756,42 @@ def mac_compile_target(environment: dict[str, str]) -> str:
     return target
 
 
+def mac_compile_graphs(target: str, mode: str) -> tuple:
+    """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
+    require(target in MAC_COMPILE_HOSTS and type(mode) is str
+            and (mode == "full4" or mode == "vault-only" and target == "aarch64-apple-darwin"),
+            "Normal Mac compiler graph mode differs")
+    return (MAC_COMPILE_VAULT_GRAPH, *MAC_COMPILE_GRAPHS) if mode == "full4" else (MAC_COMPILE_VAULT_GRAPH,)
+
+
+def mac_compile_mode(environment: dict[str, str], target: str) -> str:
+    """Independently bind the SOURCE-fixed dispatch row before root allocation."""
+    selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
+    mac_compile_graphs(target, mode)
+    require(environment.get("MRK_MACOS_TARGET") == target
+            and selection in ("both", "arm", "intel", "remaining")
+            and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                 or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
+            "Normal Mac compiler selection differs")
+    require((selection == "both" and mode == "full4")
+            or (selection == "arm" and target == "aarch64-apple-darwin" and mode == "full4")
+            or (selection == "intel" and target == "x86_64-apple-darwin" and mode == "full4")
+            or (selection == "remaining" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and mode == ("vault-only" if target == "aarch64-apple-darwin" else "full4")),
+            "Normal Mac compiler selected row differs")
+    return mode
+
+
+def mac_compile_checks(target: str, mode: str) -> dict:
+    mac_compile_graphs(target, mode)
+    if mode == "full4":
+        return MAC_COMPILE_CHECKS
+    return {
+        "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata"),
+        "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only"),
+    }
+
+
 def compiler_binding(context: dict) -> dict:
     if context.get("executionScope") == MAC_COMPILE_SCOPE:
         target = context.get("macCompile", {}).get("target")
@@ -2782,12 +2823,14 @@ def mac_compile_release(raw: bytes, target: str, cargo: bytes, tauri: bytes) -> 
     return release
 
 
-def mac_compile_inputs(source: Path, target: str) -> dict:
-    require(target in MAC_COMPILE_HOSTS, "Unknown normal Mac source target")
+def mac_compile_inputs(source: Path, target: str, mode: str) -> dict:
+    graphs = mac_compile_graphs(target, mode)
     paths = ("desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock",
              "desktop/helpers/macos-desktop-image/Cargo.toml", "desktop/helpers/macos-desktop-image/Cargo.lock",
              "desktop/src-tauri/tauri.conf.json", "desktop/native/macos-installed-native/build.rs",
              "desktop/packaging/macos-android-service-signing.profile", "desktop/packaging/macos-install-producer-signing.profile",
+             "desktop/helpers/macos-vault-helper/Cargo.toml", "desktop/helpers/macos-vault-helper/Cargo.lock",
+             "desktop/helpers/macos-vault-helper/src/main.rs", "desktop/native/macos-installed-native/Cargo.toml",
              "desktop/macos-installed-inputs/" + MAC_COMPILE_HOSTS[target][3])
     bodies, rows = {}, []
     for name in paths:
@@ -2799,18 +2842,20 @@ def mac_compile_inputs(source: Path, target: str) -> dict:
         bodies[name] = raw
         rows.append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
     release = mac_compile_release(bodies[paths[-1]], target, bodies[paths[0]], bodies[paths[4]])
-    return {"target": target, "release": release, "sources": rows,
-            "graphs": [list(row) for row in MAC_COMPILE_GRAPHS], "execution": "compile-only"}
+    return {"target": target, "mode": mode, "release": release, "sources": rows,
+            "graphs": [list(row) for row in graphs], "execution": "compile-only"}
 
 
 def mac_compile_source_guard(source: Path, root: Path) -> None:
-    no_cargo_configuration((source / "desktop/helpers/macos-desktop-image", source / "desktop/helpers",
+    helpers = (source / "desktop/helpers/macos-desktop-image", source / "desktop/helpers/macos-vault-helper")
+    no_cargo_configuration((*helpers, source / "desktop/helpers",
                             source / "desktop/src-tauri", source / "desktop", source, *source.parents,
                             root, *root.parents))
-    # This manifest must never select a stale adjacent output instead of the
-    # single explicit private Cargo target. Check again after acquisition.
-    generated = source / "desktop/helpers/macos-desktop-image/target"
-    require(not generated.exists() and not generated.is_symlink(), "Helper manifest has a preexisting generated target")
+    # Neither separate manifest may select a stale adjacent output instead of
+    # the single explicit private Cargo target. Recheck after acquisition/use.
+    for helper in helpers:
+        generated = helper / "target"
+        require(not generated.exists() and not generated.is_symlink(), "Helper manifest has a preexisting generated target")
 
 
 def compile_profile(scope: str) -> dict:
@@ -2939,7 +2984,15 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         "checks": [{"check": name, "exitCode": 0} for name in profile["checks"][phase]],
     }
     if context["executionScope"] == MAC_COMPILE_SCOPE:
-        expected.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
+        mac = context.get("macCompile")
+        require(type(mac) is dict, "Normal Mac compiler receipt context differs")
+        graphs = mac_compile_graphs(mac.get("target"), mac.get("mode"))
+        require(same_compile_json(mac.get("graphs"), [list(row) for row in graphs]),
+                "Normal Mac compiler receipt graphs differ")
+        selected = mac_compile_checks(mac["target"], mac["mode"])
+        expected.update(sourceTree=context["sourceTree"], macCompile=mac,
+                        node=NODE if mac["mode"] == "full4" else None,
+                        checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -7160,6 +7213,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     sha = os.environ["GITHUB_SHA"]
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None, "Invalid source SHA")
     mac_target = mac_compile_target(os.environ) if scope == MAC_COMPILE_SCOPE else None
+    mac_mode = mac_compile_mode(os.environ, mac_target) if mac_target is not None else None
     if mac_target is not None:
         mac_compile_source_guard(source, temp)
     for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
@@ -7225,7 +7279,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     context.update(binding)
     if mac_target is not None:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Normal Mac source tree differs")
-        context["macCompile"] = mac_compile_inputs(source, mac_target)
+        context["macCompile"] = mac_compile_inputs(source, mac_target, mac_mode)
     if windows:
         context.update(scope=scope, event=os.environ["GITHUB_EVENT_NAME"], ref=os.environ["GITHUB_REF"])
     workflow = (profile["workflow"] if profile else WORKFLOW_NATIVE_WORKFLOW if native_edit
@@ -7349,7 +7403,9 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
                 and context.get("workflowSha256") == hash_file(Path(context["source"]) / profile["workflow"]),
                 "Compiler task workflow binding changed")
         if scope == MAC_COMPILE_SCOPE:
-            require(context.get("macCompile") == mac_compile_inputs(Path(context["source"]), mac_compile_target(os.environ))
+            target = mac_compile_target(os.environ)
+            mode = mac_compile_mode(os.environ, target)
+            require(context.get("macCompile") == mac_compile_inputs(Path(context["source"]), target, mode)
                     and re.fullmatch(r"[0-9a-f]{40}", context.get("sourceTree", "")) is not None,
                     "Normal Mac compiler source/target binding changed")
         if scope == GTK_COMPILE_SCOPE:
@@ -7966,6 +8022,13 @@ def clean_compile(context: dict) -> None:
     # Validate the complete deletion roster before removing any of it. All were
     # created by prepare/acquire/compile in this fresh hosted job, never user data.
     directories = [source / relative for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen")]
+    if context.get("executionScope") == MAC_COMPILE_SCOPE and context["macCompile"]["mode"] == "vault-only":
+        # No frontend original ran in this fixed mode. Never invent or adopt
+        # generated directories just to satisfy the full4 deletion roster.
+        for directory in directories:
+            require(not directory.exists() and not directory.is_symlink(),
+                    "Vault-only compiler has unexpected frontend output; retain it")
+        directories = []
     directories.extend(root / name for name in COMPILER_DIRECTORIES)
     for directory in directories:
         require(directory.is_dir() and not directory.is_symlink()
@@ -8040,23 +8103,29 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 
 
 def phase_mac_compile(name: str, context: dict) -> None:
-    """Three fixed compile-only graphs through the SAME existing run/cleanup owner."""
+    """Fixed vault-first graphs through the SAME existing run/cleanup owner."""
     require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos",
             "Wrong normal Mac compiler scope")
     require(name in ("acquire", "compile", "clean"), "Wrong normal Mac compiler phase")
+    mac = context.get("macCompile")
+    require(type(mac) is dict, "Normal Mac compiler context differs")
+    target, mode = mac.get("target"), mac.get("mode")
+    graphs = mac_compile_graphs(target, mode)
+    require(same_compile_json(mac.get("graphs"), [list(row) for row in graphs]),
+            "Normal Mac compiler selected graphs differ")
+    selected_checks = mac_compile_checks(target, mode)
     if name == "clean":
         source_unchanged(context)
         mac_compile_source_guard(Path(context["source"]), Path(context["root"]))
-        require(context["macCompile"] == mac_compile_inputs(Path(context["source"]), context["macCompile"]["target"]),
+        require(mac == mac_compile_inputs(Path(context["source"]), target, mode),
                 "Normal Mac cleanup source inputs changed")
         clean_compile(context)
         return
     started = time.monotonic()
-    # Intel cold compilation measured 1120s for the first release graph.
-    # Preserve all three profiles/jobs1; only its aggregate scheduling
-    # budget differs. Every original cap and the 30s reserve stay fixed.
-    deadline = started + (900 if name == "acquire" else
-                          2700 if context["macCompile"]["target"] == "x86_64-apple-darwin" else 1500)
+    # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
+    # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode == "full4" else 1500
+    deadline = started + budget
     previous = started
     def remaining(cap: int) -> int:
         nonlocal previous
@@ -8070,68 +8139,77 @@ def phase_mac_compile(name: str, context: dict) -> None:
     remaining(30)
     source_unchanged(context, timeout_for=remaining)
     mac_compile_source_guard(source, root)
-    require(context["macCompile"] == mac_compile_inputs(source, context["macCompile"]["target"]),
-            "Normal Mac source inputs changed")
+    require(mac == mac_compile_inputs(source, target, mode), "Normal Mac source inputs changed")
     environment = clean_environment(root)
     environment["GITHUB_SHA"] = context["sourceSha"]
     remaining(30)
     cargo, _ = tools(context, environment, timeout_for=remaining)
     remaining(30)
-    target = context["macCompile"]["target"]
     desktop, manifest = source / "desktop", source / "desktop/src-tauri/Cargo.toml"
     image_manifest = source / "desktop/helpers/macos-desktop-image/Cargo.toml"
+    vault_manifest = source / MAC_COMPILE_VAULT_GRAPH[1]
     if name == "acquire":
-        # Separate locked graphs, shared fresh private Cargo cache; metadata does
-        # not build or unify their deliberately incompatible native roles.
-        for check, cargo_manifest, features, output_path in (
-            ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[1][3]], root / "metadata.json"),
-            ("mac-image-locked-metadata", image_manifest, [], root / "target/mac-image-metadata.json"),
-        ):
+        # Distinct locked graphs never unify their incompatible native roles.
+        # The actual vault metadata supplies the existing root slot when alone.
+        metadata = [("mac-vault-locked-metadata", vault_manifest, [],
+                     root / "metadata.json" if mode == "vault-only" else root / "target/mac-vault-metadata.json")]
+        if mode == "full4":
+            metadata.extend((
+                ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[1][3]], root / "metadata.json"),
+                ("mac-image-locked-metadata", image_manifest, [], root / "target/mac-image-metadata.json"),
+            ))
+        for check, cargo_manifest, features, output_path in metadata:
             with output_path.open("x", encoding="utf-8") as output:
                 run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
                      *features, "--filter-platform", target, "--manifest-path", str(cargo_manifest)],
                     check=check, cwd=root, env=environment, timeout=remaining(600), output=output)
             remaining(30)
-    node = shutil.which("node")
-    require(node is not None, "Selected Node unavailable")
-    observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
-    require(observed == NODE, "Selected Node version differs")
-    if name == "acquire":
-        npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
-        ordinary(npm)
-        run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
-             "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
-             "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
-            check="npm-locked-no-scripts", cwd=desktop, env=environment, timeout=remaining(300))
     else:
-        run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
-            check="typescript-no-emit", cwd=desktop, env=environment, timeout=remaining(60))
-        run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
-             str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
-            check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
-        # SOURCE projections are DATA, not invented runtime or signing anchors.
-        environment.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=context["macCompile"]["release"])
+        environment.update(MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=mac["release"])
         common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", target,
                   "--target-dir", str(root / "target")]
-        for check, relative, profile, features, artifact in MAC_COMPILE_GRAPHS:
-            argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
-            if profile == "test":
-                argv += ["--features", features, "--test", artifact, "--no-run"]
-            elif artifact == "lib":
-                argv += ["--release", "--lib"]
-            else:
-                argv += ["--release", "--features", features, "--bin", artifact]
-            run(argv, check=check, cwd=root, env=environment, timeout=remaining(1500))
-            remaining(30)
+        # Fail fast on the small separate helper BEFORE frontend or app linkage.
+        run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
+            check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
+        remaining(30)
+    observed = None
+    if mode == "full4":
+        node = shutil.which("node")
+        require(node is not None, "Selected Node unavailable")
+        observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
+        require(observed == NODE, "Selected Node version differs")
+        if name == "acquire":
+            npm = Path(node).parent.parent / "lib/node_modules/npm/bin/npm-cli.js"
+            ordinary(npm)
+            run([node, "--max-old-space-size=768", str(npm), "ci", "--ignore-scripts", "--no-audit", "--no-fund",
+                 "--userconfig", str(root / "npmrc-user"), "--globalconfig", str(root / "npmrc-global"),
+                 "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
+                check="npm-locked-no-scripts", cwd=desktop, env=environment, timeout=remaining(300))
+        else:
+            run([node, "--max-old-space-size=768", "node_modules/typescript/bin/tsc", "--noEmit", "-p", "tsconfig.json"],
+                check="typescript-no-emit", cwd=desktop, env=environment, timeout=remaining(60))
+            run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
+                 str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
+                check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
+            for check, relative, profile, features, artifact in MAC_COMPILE_GRAPHS:
+                argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
+                if profile == "test":
+                    argv += ["--features", features, "--test", artifact, "--no-run"]
+                elif artifact == "lib":
+                    argv += ["--release", "--lib"]
+                else:
+                    argv += ["--release", "--features", features, "--bin", artifact]
+                run(argv, check=check, cwd=root, env=environment,
+                    timeout=remaining(2700 if target == "x86_64-apple-darwin" else 1500))
+                remaining(30)
     remaining(30)
     mac_compile_source_guard(source, root)
-    require(context["macCompile"] == mac_compile_inputs(source, target), "Normal Mac source inputs changed after compilation")
+    require(mac == mac_compile_inputs(source, target, mode), "Normal Mac source inputs changed after compilation")
     remaining(30)
     source_unchanged(context, timeout_for=remaining)
     remaining(30)
-    phase_receipt(context, name, list(MAC_COMPILE_CHECKS[name]), node=observed)
-    # A retained receipt is not an original phase exit. If publication arrives
-    # late, fail the SAME phase; the fixed workflow never cleans on that return.
+    phase_receipt(context, name, list(selected_checks[name]), node=observed)
+    # Retained receipt bytes never override a late original phase failure.
     remaining(30)
 
 

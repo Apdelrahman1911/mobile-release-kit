@@ -751,22 +751,29 @@ def direct_rust_tools(target=ARM_TARGET):
     return directory + "/cargo", directory + "/rustc"
 
 
+def rust_toolchain(target=ARM_TARGET):
+    """Expected current hosted label only; the original tool query is separate."""
+    build_profile(target)
+    return "1.98.0" if target == INTEL_TARGET else "1.98.1"
+
+
 def build_environment(environment, work, release, *, target=ARM_TARGET):
     # release is the SAME owner's parsed, held source build-release projection;
     # direct tools cannot fall back to a rustup shim or inherited selector.
     need(type(release) is str and 0 < len(release) < 64 and release.isascii()
          and re.fullmatch(r"[a-z0-9_.-]*[a-z0-9]", release) is not None, "image-source-release")
     cargo, rustc = direct_rust_tools(target)
+    toolchain = rust_toolchain(target)
     need(environment.get("HOME") == "/Users/runner"
          and environment.get("CARGO_HOME", "/Users/runner/.cargo") == "/Users/runner/.cargo"
          and environment.get("RUSTUP_HOME", "/Users/runner/.rustup") == "/Users/runner/.rustup"
          and environment.get("RUSTC", rustc) == rustc
-         and environment.get("RUSTUP_TOOLCHAIN", "1.98.1") == "1.98.1"
+         and environment.get("RUSTUP_TOOLCHAIN", toolchain) == toolchain
          and environment.get("RUSTUP_AUTO_INSTALL", "0") == "0", "direct-rust-source-route")
     selected = {key: environment[key] for key in ("DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
     selected.update(PATH=cargo.rsplit("/", 1)[0] + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner",
                     CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rustc,
-                    LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN="1.98.1", RUSTUP_AUTO_INSTALL="0",
+                    LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN=toolchain, RUSTUP_AUTO_INSTALL="0",
                     CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(work / "android-helper-target"),
                     TMPDIR=str(work / "android-helper-target/tmp"),
                     MRK_MACOS_INSTALL_SOURCE_COMMIT=environment["GITHUB_SHA"], MRK_IMAGE_RELEASE_ID=release)
@@ -954,7 +961,7 @@ class Operation:
                         "packageRole": environment.get("MRK_MACOS_PACKAGE_ROLE"),
                         "workflowSource": environment["GITHUB_WORKFLOW_SHA"],
                         "workflow": environment["GITHUB_WORKFLOW_REF"], "runId": environment["GITHUB_RUN_ID"],
-                        "runAttempt": environment["GITHUB_RUN_ATTEMPT"], "toolchain": "1.98.1",
+                        "runAttempt": environment["GITHUB_RUN_ATTEMPT"], "toolchain": rust_toolchain(target),
                         "helperIdentifier": IDENTIFIER, "originalCalls": self.calls,
                         "credentialOriginals": self.credential_calls, "credentialContexts": self.credential_contexts,
                         "targetRetired": False, "originalClosesKnown": False, "passed": False,
@@ -4081,7 +4088,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref,
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
                 "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
-                "RUSTUP_TOOLCHAIN": "1.98.1", "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
+                "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
     if python_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
         del required["RUSTUP_TOOLCHAIN"]
