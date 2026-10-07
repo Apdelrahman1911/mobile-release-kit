@@ -8534,6 +8534,32 @@ def source_slots_writer(path: Path, stream: TextIO) -> tuple:
     return source_slots_identity(observed)
 
 
+def source_slots_capture_admission(value) -> dict | None:
+    """Closed, partial refusal facts only; never a receipt or cleanup grant."""
+    try:
+        if type(value) is not dict or set(value) != {
+                "schemaVersion", "output", "limitBytes", "writerBytes", "openedBytes",
+                "failedCheck", "readerClosed", "partialObservation"}:
+            return None
+        limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
+                  "source-slots-compile.stdout": 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+                  "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
+        if (type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+                or type(value["output"]) is not str or value["output"] not in limits
+                or type(value["limitBytes"]) is not int or value["limitBytes"] != limits[value["output"]]
+                or any(type(value[key]) is not int or not 0 <= value[key] <= (1 << 63) - 1
+                       for key in ("writerBytes", "openedBytes"))
+                or type(value["failedCheck"]) is not str or value["failedCheck"] not in {
+                    "opened-identity", "named-identity", "regular-file", "owner", "single-link",
+                    "private-mode", "byte-bound", "nonempty-metadata"}
+                or value["readerClosed"] is not True or value["partialObservation"] is not True
+                or len(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()) + 1 > 1024):
+            return None
+        return dict(value)
+    except Exception:
+        return None
+
+
 def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> bytes:
     # Only the fixed stdout/stderr originals just returned by run() are read.
     # This is bounded post-original admission, not a new streaming IO owner.
@@ -8545,14 +8571,31 @@ def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> b
                 "source-slots-compile.stdout", "source-slots-compile.stderr"}),
             "Unexpected SourceSlots private output")
     original = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    admission_failure = None
     try:
         observed = os.fstat(original)
-        require(source_slots_identity(observed) == expected == source_slots_identity(path.lstat())
-                and stat.S_ISREG(observed.st_mode) and observed.st_uid == os.geteuid()
-                and observed.st_nlink == 1 and stat.S_IMODE(observed.st_mode) == 0o600
-                and 0 <= observed.st_size <= limits[path.name]
-                and (path.name != "metadata.json" or observed.st_size > 0),
-                "SourceSlots private output is changed or oversized")
+        # Same predicates and short-circuit IO order: do not lstat/geteuid just
+        # to fill an optional explanation of an earlier failed predicate.
+        failed_check = None
+        if not source_slots_identity(observed) == expected:
+            failed_check = "opened-identity"
+        elif not expected == source_slots_identity(path.lstat()):
+            failed_check = "named-identity"
+        elif not stat.S_ISREG(observed.st_mode):
+            failed_check = "regular-file"
+        elif not observed.st_uid == os.geteuid():
+            failed_check = "owner"
+        elif not observed.st_nlink == 1:
+            failed_check = "single-link"
+        elif not stat.S_IMODE(observed.st_mode) == 0o600:
+            failed_check = "private-mode"
+        elif not 0 <= observed.st_size <= limits[path.name]:
+            failed_check = "byte-bound"
+        elif not (path.name != "metadata.json" or observed.st_size > 0):
+            failed_check = "nonempty-metadata"
+        if failed_check is not None:
+            admission_failure = CheckFailure("SourceSlots private output is changed or oversized")
+            raise admission_failure
         remaining = observed.st_size
         chunks = []
         while remaining:
@@ -8565,7 +8608,17 @@ def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> b
                 and source_slots_identity(path.lstat()) == expected, "SourceSlots private output POST changed")
         return b"".join(chunks)
     finally:
-        os.close(original)
+        os.close(original)  # Preserve consuming-close error propagation exactly.
+        if admission_failure is not None:
+            try:
+                facts = source_slots_capture_admission({
+                    "schemaVersion": 1, "output": path.name, "limitBytes": limits[path.name],
+                    "writerBytes": expected[6], "openedBytes": observed.st_size,
+                    "failedCheck": failed_check, "readerClosed": True, "partialObservation": True})
+                if facts is not None:
+                    admission_failure._source_slots_capture_admission = facts
+            except BaseException:
+                pass  # Optional facts cannot replace this same original refusal.
 
 
 def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
@@ -8754,6 +8807,7 @@ def phase_source_slots(name: str, context: dict) -> None:
     deadline, previous = started + 900, started
     last_check = "source-pre"
     compiler_diagnostic = None
+    original_return_code, capture_admission = None, None
     def remaining(cap: int) -> int:
         nonlocal previous
         now = time.monotonic()
@@ -8784,7 +8838,7 @@ def phase_source_slots(name: str, context: dict) -> None:
         else:
             # Reuse one Cargo-fingerprinted compile; only the literal exact case
             # follows it. No ignored filter, arbitrary selector or other graph.
-            commands = (("headless-test-compile-only", [cargo, "test", *common, "--message-format=json", "--no-run"],
+            commands = (("headless-test-compile-only", [cargo, "test", *common, "--message-format=json,json-diagnostic-short", "--no-run"],
                          root / "target/source-slots-compile.stdout", root / "target/source-slots-compile.stderr", 600),
                         ("mac-source-slots-data-test", [cargo, "test", *common, SOURCE_SLOTS_TEST,
                                                        "--", "--exact", "--test-threads=1"],
@@ -8792,6 +8846,7 @@ def phase_source_slots(name: str, context: dict) -> None:
         result = None
         for check, argv, output_path, stderr_path, cap in commands:
             last_check = check
+            original_return_code, capture_admission = None, None
             remaining(30)
             command_failure = None
             try:
@@ -8800,12 +8855,16 @@ def phase_source_slots(name: str, context: dict) -> None:
                     require(all(row[6] == 0 for row in before), "SourceSlots private output was not fresh")
                     try:
                         run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                        original_return_code = 0  # Only after this actual check=True original returned.
                     except CheckFailure as error:
                         command_failure = error
                         witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
-                        if not (check == "headless-test-compile-only" and type(witness) is tuple and len(witness) == 2
-                                and type(witness[0]) is str and witness[0] == check
-                                and type(witness[1]) is int and 0 < witness[1] <= 255):
+                        returned = (type(witness) is tuple and len(witness) == 2
+                                    and type(witness[0]) is str and witness[0] == check
+                                    and type(witness[1]) is int and 0 < witness[1] <= 255)
+                        if returned:
+                            original_return_code = witness[1]
+                        if not (check == "headless-test-compile-only" and returned):
                             raise
                         compiler_diagnostic = source_slots_diagnostic_unavailable(witness[1], "capture-unavailable")
                     output.flush()
@@ -8825,7 +8884,13 @@ def phase_source_slots(name: str, context: dict) -> None:
                 raw = source_slots_read(output_path, originals[0])
                 source_slots_read(stderr_path, originals[1])
                 remaining(30)
-            except BaseException:
+            except BaseException as error:
+                try:
+                    facts = source_slots_capture_admission(error.__dict__.get("_source_slots_capture_admission")) if type(error) is CheckFailure else None
+                    if facts is not None and facts["output"] in {output_path.name, stderr_path.name}:
+                        capture_admission = facts
+                except BaseException:
+                    pass
                 if command_failure is not None:
                     # A later flush/read/close/diagnostic failure cannot replace
                     # the first returned/unknown command outcome or start a test.
@@ -8857,6 +8922,17 @@ def phase_source_slots(name: str, context: dict) -> None:
                     compiler_diagnostic = source_slots_diagnostic_unavailable(
                         compiler_diagnostic["returnCode"], "deadline-unavailable")
             failure["compilerDiagnostic"] = compiler_diagnostic
+        if last_check in {"mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test"}:
+            failure["originalCommandReturnCode"] = (original_return_code
+                if type(original_return_code) is int and 0 <= original_return_code <= 255 else None)
+        try:
+            facts = source_slots_capture_admission(capture_admission)
+            if facts is not None:
+                explained = {**failure, "captureAdmission": facts}
+                if len(json.dumps(explained, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384:
+                    failure = explained
+        except BaseException:
+            pass  # Keep the old bounded failure envelope if optional details fail.
         try:
             if (len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384
                     and "compilerDiagnostic" in failure):

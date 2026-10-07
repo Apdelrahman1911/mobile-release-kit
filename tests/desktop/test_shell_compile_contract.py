@@ -1599,9 +1599,10 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
                 self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
                 if kw["check"] == "headless-test-compile-only":
-                    self.assertEqual(argv[-2:], ["--message-format=json", "--no-run"])
+                    self.assertEqual(argv[-2:], ["--message-format=json,json-diagnostic-short", "--no-run"])
                 else:
                     self.assertNotIn("--message-format=json", argv)
+                    self.assertNotIn("--message-format=json,json-diagnostic-short", argv)
                     self.assertNotIn("--no-run", argv)
                     self.assertEqual(argv[-4:], [SOURCE_SLOTS_CASE, "--", "--exact", "--test-threads=1"])
             passed = [value for path, value in publications if path.endswith("/compile-checks.json")]
@@ -1615,6 +1616,10 @@ class ShellCompileContractTests(unittest.TestCase):
                     expected_fields.add("compilerDiagnostic")
                     self.assertEqual(failure["compilerDiagnostic"], {"state": "unavailable", "reason": "original-unavailable",
                                      "returnCode": None, "errors": [], "sources": []})
+                if failure["lastFixedStage"] in {"headless-test-compile-only", "mac-source-slots-data-test"}:
+                    expected_fields.add("originalCommandReturnCode")
+                    self.assertEqual(failure["originalCommandReturnCode"], None if fault in {
+                        "compile-nonzero", "test-nonzero"} else 0)
                 self.assertEqual(set(failure), expected_fields)
                 self.assertEqual(failure["status"], "failed-or-unknown")
                 self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
@@ -1916,7 +1921,7 @@ class ShellCompileContractTests(unittest.TestCase):
             def subprocess_original(argv, **kw):
                 originals.append((list(map(str, argv)), dict(kw)))
                 if argv[0] == "/fixed/cargo":
-                    self.assertIn("--message-format=json", argv)
+                    self.assertIn("--message-format=json,json-diagnostic-short", argv)
                     self.assertEqual(argv[-1], "--no-run")
                     self.assertEqual(kw["timeout"], 600)
                     self.assertTrue(kw["check"])
@@ -1996,6 +2001,212 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertEqual(len(originals), 1)
             if fault in ("read", "source", "malformed"):
                 self.assertEqual(len(originals), 1)
+
+
+        # Cargo short rendering keeps the complete structured error and warning
+        # records. Only their unused rendered strings differ, never severity or spans.
+        full_error, short_error, warning = message(), message(), message()
+        full_error["message"]["rendered"] = "long source excerpt\n" * 100
+        short_error["message"]["rendered"] = "src/lib.rs:19:7: error[E0433]\n"
+        warning["message"]["level"] = "warning"
+        warning["message"]["rendered"] = "src/lib.rs:2:1: warning\n"
+        full_frames = cargo_bytes([warning, full_error, terminal])
+        short_frames = cargo_bytes([warning, short_error, terminal])
+        self.assertIn(b'"warning"', full_frames)
+        self.assertIn(b'"warning"', short_frames)
+        self.assertLess(len(short_frames), len(full_frames))
+        self.assertEqual(helper.source_slots_diagnostic_records(full_frames, b"", source),
+                         helper.source_slots_diagnostic_records(short_frames, b"", source))
+        self.assertEqual(helper.source_slots_diagnostic_records(short_frames, b"", source)[0]["code"], "E0433")
+
+        # Each actual reader predicate is distinguished without an extra lstat,
+        # owner query, payload read or close. The original rejection stays identical.
+        class AdmissionOS(OriginalOS):
+            def __init__(self, body, fault):
+                super().__init__(body, fault); self.trace = []
+            def fstat(self, fd):
+                self.trace.append("fstat"); return super().fstat(fd)
+            def geteuid(self):
+                self.trace.append("geteuid"); return super().geteuid()
+            def read(self, fd, size):
+                self.trace.append("read"); return super().read(fd, size)
+            def close(self, fd):
+                self.trace.append("close"); return super().close(fd)
+        class AdmissionPath(ReadPath):
+            def lstat(self):
+                original.trace.append("lstat"); return super().lstat()
+        for fault, label in (("opened", "opened-identity"), ("named", "named-identity"),
+                             ("type", "regular-file"), ("uid", "owner"), ("link", "single-link"),
+                             ("mode", "private-mode"), ("oversize", "byte-bound"), ("empty", "nonempty-metadata")):
+            original = AdmissionOS(b"" if fault == "empty" else b"inert", fault)
+            if fault == "type": original.info.st_mode = 0o040600
+            expected = helper.source_slots_identity(original.info)
+            if fault == "opened": expected = (1, 999, *expected[2:])
+            name = "metadata.json" if fault == "empty" else "source-slots-compile.stdout"
+            with self.subTest(admission=fault), patch.object(helper, "os", original), self.assertRaises(helper.CheckFailure) as refused:
+                helper.source_slots_read(AdmissionPath("/inert") / name, expected)
+            facts = refused.exception.__dict__["_source_slots_capture_admission"]
+            self.assertEqual(str(refused.exception), "SourceSlots private output is changed or oversized")
+            self.assertEqual(facts, {"schemaVersion": 1, "output": name,
+                "limitBytes": 16 * 1024 * 1024 if name == "metadata.json" else 1024 * 1024,
+                "writerBytes": expected[6], "openedBytes": original.info.st_size,
+                "failedCheck": label, "readerClosed": True, "partialObservation": True})
+            self.assertEqual(original.trace, ["fstat"] + ([] if fault == "opened" else ["lstat"])
+                + ([] if fault in {"opened", "named", "type"} else ["geteuid"]) + ["close"])
+            self.assertEqual(original.closes, [77])
+            self.assertLessEqual(len(json.dumps(facts).encode()) + 1, 1024)
+            self.assertNotIn("/inert", json.dumps(facts))
+        valid_facts = {"schemaVersion": 1, "output": "source-slots-compile.stdout", "limitBytes": 1024 * 1024,
+            "writerBytes": 1024 * 1024 + 1, "openedBytes": 1024 * 1024 + 1, "failedCheck": "byte-bound",
+            "readerClosed": True, "partialObservation": True}
+        self.assertEqual(helper.source_slots_capture_admission(valid_facts), valid_facts)
+        self.assertIsNot(helper.source_slots_capture_admission(valid_facts), valid_facts)
+        for key, value in (("schemaVersion", True), ("output", "/private/unselected"), ("limitBytes", True),
+                           ("limitBytes", 16 * 1024 * 1024), ("writerBytes", True), ("writerBytes", -1),
+                           ("openedBytes", 1 << 63), ("openedBytes", 1.0), ("failedCheck", "arbitrary-text"),
+                           ("readerClosed", 1), ("partialObservation", False), ("extra", "x" * 2048)):
+            with self.subTest(malformed_fact=key, value=value):
+                self.assertIsNone(helper.source_slots_capture_admission({**valid_facts, key: value}))
+        for value in (None, [], {}, {key: value for key, value in valid_facts.items() if key != "readerClosed"}):
+            self.assertIsNone(helper.source_slots_capture_admission(value))
+        for name in ("metadata.json", "source-slots-metadata.stderr", "source-slots-test.stdout", "source-slots-test.stderr"):
+            cap = 16 * 1024 * 1024 if name == "metadata.json" else 1024 * 1024
+            self.assertIsNotNone(helper.source_slots_capture_admission({**valid_facts, "output": name, "limitBytes": cap}))
+        for fault in ("optional", "close"):
+            original = OriginalOS(b"inert", "oversize") if fault == "optional" else CloseFailureOS(b"inert", "oversize")
+            with self.subTest(admission_after_close=fault), patch.object(helper, "os", original), \
+                    patch.object(helper, "source_slots_capture_admission", side_effect=ValueError("inert optional failure")) as optional:
+                with self.assertRaises(helper.CheckFailure if fault == "optional" else OSError) as refused:
+                    helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"), helper.source_slots_identity(original.info))
+                if fault == "optional":
+                    self.assertNotIn("_source_slots_capture_admission", refused.exception.__dict__)
+                    self.assertEqual(str(refused.exception), "SourceSlots private output is changed or oversized")
+                else:
+                    optional.assert_not_called()
+                    self.assertNotIn("_source_slots_capture_admission", refused.exception.__context__.__dict__)
+            self.assertEqual(original.closes, [77])
+
+        # Use the real run() and reader with inert subprocess/FD originals. Zero
+        # is a command observation, not a passing phase; no DATA follows refusal.
+        actual_read = helper.source_slots_read
+        for fault in ("oversize", "named", "reader-close", "nonzero-read", "startup", "test-startup",
+                      "test-nonzero", "malformed-facts", "publication"):
+            events, captures, calls, publications, run_failures, read_failures, closed = [], {}, [], [], [], [], []
+            SlotsPath, writer, memory_read = source_slots_paths(events, captures)
+            def capture_original(argv, **kw):
+                calls.append(list(argv))
+                self.assertEqual(argv[0], "/fixed/cargo"); self.assertTrue(kw["check"])
+                if "--no-run" in argv:
+                    self.assertIn("--message-format=json,json-diagnostic-short", argv)
+                    self.assertEqual(kw["timeout"], 600)
+                    if fault == "startup": raise OSError("inert startup")
+                    if fault not in {"test-startup", "test-nonzero"}:
+                        kw["stdout"].write("x" * (1024 * 1024 + 1))
+                    if fault == "nonzero-read": raise helper.subprocess.CalledProcessError(101, argv)
+                else:
+                    self.assertEqual(argv[-4:], [SOURCE_SLOTS_CASE, "--", "--exact", "--test-threads=1"])
+                    self.assertFalse(any(arg.startswith("--message-format=") for arg in argv))
+                    self.assertEqual(kw["timeout"], 150)
+                    if fault == "test-startup": raise OSError("inert DATA startup")
+                    raise helper.subprocess.CalledProcessError(102, argv)
+                return helper.subprocess.CompletedProcess(argv, 0)
+            def capture_run(argv, **kw):
+                try: return actual_run(argv, **kw)
+                except helper.CheckFailure as error:
+                    run_failures.append(error); raise
+            def read_admitted(path, expected, *, retain=False):
+                self.assertTrue(all(kind != "open" or any(row[:2] == ("closed", item) for row in events)
+                    for kind, item, *tail in events))
+                reader_type = CloseFailureOS if fault == "reader-close" else OriginalOS
+                original = reader_type(captures[str(path)], "named" if fault == "named" else None)
+                original.info.st_ino, original.info.st_mtime_ns, original.info.st_ctime_ns = 3, 1, 1
+                class ClosedPath(PurePosixPath):
+                    def lstat(self):
+                        if original.fault == "named":
+                            changed = Info(original.info.st_size); changed.st_ino = 999; return changed
+                        return original.info
+                try:
+                    with patch.object(helper, "os", original):
+                        return actual_read(ClosedPath(str(path)), expected, retain=retain)
+                except BaseException as error:
+                    read_failures.append(error)
+                    if fault == "malformed-facts" and type(error) is helper.CheckFailure:
+                        error._source_slots_capture_admission = {**valid_facts, "openedBytes": True}
+                    raise
+                finally:
+                    closed.extend(original.closes)
+            def publish_failure(path, value):
+                self.assertEqual(path.name, "source-slots-failure.json")
+                if fault == "publication": raise OSError("inert failed publication")
+                publications.append(deepcopy(value))
+            with self.subTest(admission_original=fault), contextlib.redirect_stdout(io.StringIO()), patch.object(helper, "Path", SlotsPath), \
+                    patch.object(helper, "tools", return_value=("/fixed/cargo", None)), patch.object(helper, "source_unchanged"), \
+                    patch.object(helper, "source_slots_source_guard"), patch.object(helper.subprocess, "run", side_effect=capture_original), \
+                    patch.object(helper, "run", side_effect=capture_run), patch.object(helper, "source_slots_writer", side_effect=writer), \
+                    patch.object(helper, "source_slots_read", side_effect=read_admitted), patch.object(helper, "write_json", side_effect=publish_failure), \
+                    patch.object(helper.time, "monotonic", return_value=100.0), patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True), \
+                    self.assertRaises(OSError if fault == "reader-close" else helper.CheckFailure) as failed:
+                helper.phase_source_slots("compile", bound)
+            self.assertIs(failed.exception, run_failures[0] if run_failures else read_failures[0])
+            self.assertEqual(len(calls), 2 if fault in {"test-startup", "test-nonzero"} else 1)
+            self.assertEqual(len(publications), 0 if fault == "publication" else 1)
+            for failure in publications:
+                self.assertEqual(failure["status"], "failed-or-unknown")
+                self.assertEqual(failure["lastFixedStage"], "mac-source-slots-data-test" if fault.startswith("test-") else "headless-test-compile-only")
+                self.assertEqual(failure["originalCommandReturnCode"], None if fault in {"startup", "test-startup"}
+                    else 101 if fault == "nonzero-read" else 102 if fault == "test-nonzero" else 0)
+                self.assertEqual("captureAdmission" in failure, fault in {"oversize", "named", "nonzero-read"})
+                if "captureAdmission" in failure:
+                    self.assertEqual(failure["captureAdmission"]["failedCheck"], "named-identity" if fault == "named" else "byte-bound")
+                    self.assertEqual(failure["captureAdmission"]["output"], "source-slots-compile.stdout")
+                if not fault.startswith("test-"):
+                    self.assertEqual(failure["compilerDiagnostic"]["returnCode"], 101 if fault == "nonzero-read" else None)
+                    self.assertEqual(failure["compilerDiagnostic"]["state"], "unavailable")
+                self.assertLessEqual(len(json.dumps(failure).encode()) + 1, 16384)
+                self.assertNotIn("inert ", json.dumps(failure))
+                self.assertNotIn("/inert", json.dumps(failure))
+            self.assertTrue(all(fd == 77 for fd in closed))
+
+
+        # Secondary interrupts from optional decoration must not replace the
+        # already-established reader refusal or the first returned101 original.
+        # Reuse the exact actual-run/reader doubles above, resetting all state.
+        actual_admission = helper.source_slots_capture_admission
+        for code in (0, 101):
+            for secondary in (KeyboardInterrupt, SystemExit):
+                for interruption_at in (1, 2, 3):
+                    fault = "nonzero-read" if code == 101 else "oversize"
+                    events, captures, calls, publications, run_failures, read_failures, closed = [], {}, [], [], [], [], []
+                    SlotsPath, writer, memory_read = source_slots_paths(events, captures)
+                    admission_calls = []
+                    def optional_interruption(value):
+                        admission_calls.append(value)
+                        if len(admission_calls) == interruption_at:
+                            raise secondary("inert secondary decoration interrupt")
+                        return actual_admission(value)
+                    with self.subTest(returned_code=code, secondary=secondary.__name__, optional_stage=interruption_at), contextlib.redirect_stdout(io.StringIO()), \
+                            patch.object(helper, "Path", SlotsPath), patch.object(helper, "tools", return_value=("/fixed/cargo", None)), \
+                            patch.object(helper, "source_unchanged"), patch.object(helper, "source_slots_source_guard"), \
+                            patch.object(helper.subprocess, "run", side_effect=capture_original), patch.object(helper, "run", side_effect=capture_run), \
+                            patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read_admitted), \
+                            patch.object(helper, "source_slots_capture_admission", side_effect=optional_interruption), \
+                            patch.object(helper, "write_json", side_effect=publish_failure), patch.object(helper.time, "monotonic", return_value=100.0), \
+                            patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True), self.assertRaises(helper.CheckFailure) as failed:
+                        helper.phase_source_slots("compile", bound)
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(len(read_failures), 1)
+                    self.assertIs(failed.exception, run_failures[0] if code else read_failures[0])
+                    self.assertEqual(len(admission_calls), 3)
+                    self.assertEqual(closed, [77])
+                    self.assertEqual(len(publications), 1)
+                    self.assertEqual(publications[0]["status"], "failed-or-unknown")
+                    self.assertEqual(publications[0]["lastFixedStage"], "headless-test-compile-only")
+                    self.assertEqual(publications[0]["originalCommandReturnCode"], code)
+                    self.assertNotIn("captureAdmission", publications[0])
+                    self.assertEqual(publications[0]["compilerDiagnostic"]["returnCode"], 101 if code else None)
+                    self.assertEqual(publications[0]["compilerDiagnostic"]["state"], "unavailable")
+                    self.assertNotIn("secondary", json.dumps(publications[0]))
+                    self.assertLessEqual(len(json.dumps(publications[0]).encode()) + 1, 16384)
 
 
 if __name__ == "__main__":
