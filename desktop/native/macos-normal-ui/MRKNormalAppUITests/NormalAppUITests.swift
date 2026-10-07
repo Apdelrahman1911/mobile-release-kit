@@ -840,9 +840,10 @@ final class NormalAppUITests: XCTestCase {
         _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Private by design.")), in: renderer)
         let guide = try waitElement(named(renderer, "Credential and signing asset guides"), in: renderer,
                                    failures: ["The native service is unavailable", "The field catalogue could not be loaded"])
-        _ = try unique(controls(guide, [.button], label: "Android upload keystore", prefix: true),
+        // WebKit exposes aria-pressed buttons as Cocoa checkboxes, retaining toggle state.
+        _ = try unique(controls(guide, [.checkBox], label: "Android upload keystore", prefix: true),
                        "actual core Android guide is missing or repeated")
-        let apple = try unique(controls(guide, [.button], label: "Apple Distribution identity", prefix: true),
+        let apple = try unique(controls(guide, [.checkBox], label: "Apple Distribution identity", prefix: true),
                                "actual core Apple guide is missing or repeated")
         try reveal(apple, in: renderer)
         try require(apple.isEnabled && apple.isHittable, "actual core guide selection unavailable")

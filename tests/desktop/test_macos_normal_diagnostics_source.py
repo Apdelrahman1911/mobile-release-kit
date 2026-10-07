@@ -135,9 +135,36 @@ EVIDENCE_LEAVES = ['diagnostics-test-file-limit.status',
 
 # Closed engineering-only inverse: unchanged ordinary semantic/owner hashes below
 # remain authoritative after exactly these reviewed source regions are removed.
+# Exact context-bound inverse of the accepted engineering failure diagnostics.
+ENGINEERING_DIAGNOSTIC_REGIONS = (('    @MainActor private var packagedRequireDiagnosticEmitted = false\n'
+  '    @MainActor private var originalLaunch: OrdinaryLaunch?\n',
+  '    @MainActor private var packagedRequireDiagnosticEmitted = false\n'
+  '    @MainActor private var engineeringRequireDiagnosticActive = false\n'
+  '    @MainActor private var engineeringRequireDiagnosticEmitted = false\n'
+  '    @MainActor private var originalLaunch: OrdinaryLaunch?\n'),
+ ('                    '
+  'print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\\(line);ordinal=\\(sample.ordinal);waiter=\\(waiter.rawValue);enabled=\\(sample.enabled '
+  '? 1 : 0);hittable=\\(sample.hittable ? 1 : '
+  '0);reason=\\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")\n'
+  '                }\n'
+  '            }\n'
+  '            throw refusal\n',
+  '                    '
+  'print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\\(line);ordinal=\\(sample.ordinal);waiter=\\(waiter.rawValue);enabled=\\(sample.enabled '
+  '? 1 : 0);hittable=\\(sample.hittable ? 1 : '
+  '0);reason=\\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")\n'
+  '                }\n'
+  '            }\n'
+  '            if engineeringRequireDiagnosticActive && originalFailureAbsent && '
+  '!engineeringRequireDiagnosticEmitted\n'
+  '                && line >= 1 && line <= 65535 {\n'
+  '                engineeringRequireDiagnosticEmitted = true\n'
+  '                print("MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)")\n'
+  '            }\n'
+  '            throw refusal\n'))
 ENGINEERING_MAIN_BEGIN = '    // Engineering main only: actual embedded UI and current-core reference data.\n'
 ENGINEERING_MAIN_END = '    // End engineering main fixture; ordinary installed cases below are unchanged.\n\n'
-ENGINEERING_MAIN_SHA256 = '4cdab7a9f333b9c74ff66aaca6eafc42502a4c52174db1368ee71e714e1f3828'
+ENGINEERING_MAIN_SHA256 = '40b7c619718364a9f901c6c2f36f82e807681ea9c64732a12c75b3b50c084d16'
 ENGINEERING_BEFORE_SWIFT_SHA256 = 'c463302b56cee2da043d1cbb9ce87f03f1d92118759cf3c3127ed25dc48f0dad'
 ENGINEERING_CORE_GUIDE_SHA256 = '7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478'
 ENGINEERING_SHARED_REGIONS = (('        private let clock: CaseClock\n        private let reply = LaunchReply()',
@@ -256,6 +283,9 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertLess(begin, end)
         self.assertEqual(digest(swift[begin:end].encode()), ENGINEERING_MAIN_SHA256)
         swift = swift[:begin] + swift[end:]
+        for original, current in reversed(ENGINEERING_DIAGNOSTIC_REGIONS):
+            self.assertEqual(swift.count(current), 1)
+            swift = swift.replace(current, original, 1)
         for original, current in reversed(ENGINEERING_SHARED_REGIONS):
             self.assertEqual(swift.count(current), 1)
             swift = swift.replace(current, original, 1)
@@ -674,8 +704,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         ordered = ('try beginCase(seconds: 60)', 'let work = try engineeringWork()',
                    'let app = try launchEngineeringMain(work: work)',
                    'named(renderer, "Credential and signing asset guides")',
-                   'label: "Android upload keystore", prefix: true',
-                   'label: "Apple Distribution identity", prefix: true', 'apple.click()',
+                   'controls(guide, [.checkBox], label: "Android upload keystore", prefix: true)',
+                   'controls(guide, [.checkBox], label: "Apple Distribution identity", prefix: true)', 'apple.click()',
                    '"Original Distribution P12"', '"Reference guide · not a result"',
                    'let first = try quitSheet(app, window)', '"Cancel"', 'try engineeringDashboard(renderer)',
                    'let second = try quitSheet(app, window)', '"Quit"',
@@ -697,6 +727,13 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                     engineering_source.replace('configuration.allowsRunningApplicationSubstitution = false',
                                                'configuration.allowsRunningApplicationSubstitution = true', 1)):
             with self.assertRaises(AssertionError): self.restored_engineering_main(bad)
+        for original, current in ENGINEERING_DIAGNOSTIC_REGIONS:
+            for bad in (engineering_source.replace(current, original, 1),
+                        engineering_source.replace(current, current + current, 1),
+                        engineering_source.replace(current, current.replace('engineeringRequireDiagnostic',
+                                                                          'changedEngineeringDiagnostic'), 1),
+                        engineering_source.replace(current, original, 1) + current):
+                with self.assertRaises(AssertionError): self.restored_engineering_main(bad)
 
         names = ('desktop/src/App.tsx', 'desktop/src/pages/Credentials.tsx', 'desktop/src/bridge.ts',
                  'desktop/src/releaseInputGuidance.ts', 'desktop/src-tauri/src/runtime.rs', 'desktop/engine_bootstrap.py',
@@ -716,7 +753,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn('parseCredentialGuide(structuredClone(rawGuide)) : null', guidance)
         page = reads['desktop/src/pages/Credentials.tsx']
         for token in ('<AssetGuide guide={inputState.help.guide}', 'aria-label="Credential and signing asset guides"',
-                      '{guide.kinds.map((entry)', '{entry.label}', '<h4>{field.label}</h4>', 'Reference guide · not a result'):
+                      '{guide.kinds.map((entry)', 'aria-pressed={entry.id === kind.id}',
+                      '{entry.label}', '<h4>{field.label}</h4>', 'Reference guide · not a result'):
             self.assertIn(token, page)
         self.assertNotIn('Original Distribution P12', page)
         self.assertNotIn('Android upload keystore', page)
