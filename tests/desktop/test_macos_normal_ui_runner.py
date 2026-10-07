@@ -3186,7 +3186,6 @@ class NormalPhaseDataTests(unittest.TestCase):
             (b'fixture: Android output DATA exact refusal missing', 'r063'),
             (b'fixture: Android output DATA leaf write', 'r064'),
             (b'fixture: Android output DATA mkdir', 'r065'),
-            (b'fixture: Android output DATA private original root differs', 'r066'),
             (b'fixture: Android output DATA private root creation', 'r067'),
             (b'fixture: Android output DATA temporary consuming close', 'r068'),
             (b'fixture: Android output DATA temporary original', 'r069'),
@@ -3252,10 +3251,17 @@ class NormalPhaseDataTests(unittest.TestCase):
             (b'fixture: owned roster limit/duplicate', 'r129'),
             (b'fixture: owned roster open failed', 'r130'),
             (b'fixture: owned roster read failed', 'r131'),
+            (b'fixture: Android output DATA private original root mode differs', 'r132'),
+            (b'fixture: Android output DATA private original root uid differs', 'r133'),
+            (b'fixture: Android output DATA private original root gid differs', 'r134'),
+            (b'fixture: Android output DATA private original root flags differ', 'r135'),
+            (b'fixture: Android output DATA private original root kind differs', 'r136'),
+            (b'fixture: Android output DATA private original root descriptor differs', 'r137'),
+            (b'fixture: Android output DATA private original root entry differs', 'r138'),
         )
-        self.assertEqual(len(data_reasons), 131)
-        self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 132)])
-        self.assertEqual(len({literal for literal, _ in data_reasons}), 131)
+        self.assertEqual(len(data_reasons), 137)
+        self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 139) if i != 66])
+        self.assertEqual(len({literal for literal, _ in data_reasons}), 137)
         swift = SWIFT.read_text(encoding="utf-8")
         data_swift = swift.split("        static func exerciseAndroidOutputCustodyData() throws {", 1)[1].split(
             "        // A one-case transfer of observation custody", 1)[0]
@@ -3283,6 +3289,12 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertIn('try need(observed, "Android output DATA exact refusal missing")', refused_source)
         self.assertNotIn('throw Refusal.condition', refused_source)
         self.assertNotIn('String(describing:', refused_source)
+        # The first failed original root clause is observable; every predicate,
+        # order and live stat call remains the original short-circuit contract.
+        expected_root_guards = '                    try need(initialRoot.mode & 0o7777 == 0o700, "Android output DATA private original root mode differs")\n                    try need(initialRoot.uid == getuid(), "Android output DATA private original root uid differs")\n                    try need(initialRoot.gid == getgid(), "Android output DATA private original root gid differs")\n                    try need(initialRoot.flags == 0, "Android output DATA private original root flags differ")\n                    try need(initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "Android output DATA private original root kind differs")\n                    try need(initialRoot == facts(cleanupRoot), "Android output DATA private original root descriptor differs")\n                    try need(initialRoot == named(temporary, rootName), "Android output DATA private original root entry differs")'
+        self.assertEqual(data_swift.count(expected_root_guards), 1)
+        self.assertNotIn('"Android output DATA private original root differs"', data_swift)
+        self.assertNotIn("r066", [code for _, code in data_reasons])
 
         def data_marker(scenario="valid", ending=b"\n"):
             return (b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE=v1;scenario=" + scenario.encode()

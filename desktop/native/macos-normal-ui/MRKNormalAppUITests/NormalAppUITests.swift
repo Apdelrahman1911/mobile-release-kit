@@ -1795,11 +1795,13 @@ final class NormalAppUITests: XCTestCase {
                 do {
                     try need(cleanupRoot >= 0, "Android output DATA cleanup original")
                     guard let initialRoot = cleanupFacts else { throw Refusal.condition("fixture: Android DATA created root facts absent") }
-                    try need(initialRoot.mode & 0o7777 == 0o700 && initialRoot.uid == getuid()
-                        && initialRoot.gid == getgid() && initialRoot.flags == 0
-                        && initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
-                        && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),
-                        "Android output DATA private original root differs")
+                    try need(initialRoot.mode & 0o7777 == 0o700, "Android output DATA private original root mode differs")
+                    try need(initialRoot.uid == getuid(), "Android output DATA private original root uid differs")
+                    try need(initialRoot.gid == getgid(), "Android output DATA private original root gid differs")
+                    try need(initialRoot.flags == 0, "Android output DATA private original root flags differ")
+                    try need(initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "Android output DATA private original root kind differs")
+                    try need(initialRoot == facts(cleanupRoot), "Android output DATA private original root descriptor differs")
+                    try need(initialRoot == named(temporary, rootName), "Android output DATA private original root entry differs")
                     fixture.directories[""] = try fixture.adoptDirectory(
                         openat(temporary, rootName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: temporary, name: rootName)
                     try need(fixture.directories[""]!.facts == initialRoot

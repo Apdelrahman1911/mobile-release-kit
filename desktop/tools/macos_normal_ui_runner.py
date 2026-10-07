@@ -1632,7 +1632,6 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         b'fixture: Android output DATA exact refusal missing': 'r063',
         b'fixture: Android output DATA leaf write': 'r064',
         b'fixture: Android output DATA mkdir': 'r065',
-        b'fixture: Android output DATA private original root differs': 'r066',
         b'fixture: Android output DATA private root creation': 'r067',
         b'fixture: Android output DATA temporary consuming close': 'r068',
         b'fixture: Android output DATA temporary original': 'r069',
@@ -1698,6 +1697,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         b'fixture: owned roster limit/duplicate': 'r129',
         b'fixture: owned roster open failed': 'r130',
         b'fixture: owned roster read failed': 'r131',
+        b'fixture: Android output DATA private original root mode differs': 'r132',
+        b'fixture: Android output DATA private original root uid differs': 'r133',
+        b'fixture: Android output DATA private original root gid differs': 'r134',
+        b'fixture: Android output DATA private original root flags differ': 'r135',
+        b'fixture: Android output DATA private original root kind differs': 'r136',
+        b'fixture: Android output DATA private original root descriptor differs': 'r137',
+        b'fixture: Android output DATA private original root entry differs': 'r138',
     } if output_eligible else {}
     output_markers, output_failures = 0, 0
     output_scenario = output_reason = output_site = None
