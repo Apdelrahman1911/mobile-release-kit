@@ -1745,6 +1745,7 @@ class ShellCompileContractTests(unittest.TestCase):
         # All path names below are inert; only a fixed Git metadata double is
         # consulted, never a SOURCE body, compiler, dependency or native API.
         source = bound["source"]
+        stdout_limit = 2 * 1024 * 1024  # Only complete compiler stdout; all other stream caps stay fixed.
         app = "desktop/src-tauri"
         native = "desktop/native/macos-installed-native"
         private = "synthetic-private-diagnostic-must-not-escape"
@@ -1819,7 +1820,7 @@ class ShellCompileContractTests(unittest.TestCase):
                      cargo_bytes([message(spans=[primary("src/lib.rs", column=1048577)]), terminal]),
                      cargo_bytes([message()] * 17 + [terminal]), cargo_bytes([message(spans=[primary("src/lib.rs")] * 33), terminal]),
                      cargo_bytes([message(spans=[primary("src/" + str(n) + ".rs") for n in range(9)]), terminal]),
-                     cargo_bytes([{"reason": "compiler-artifact"}] * 4096 + [terminal]), b"x" * (1024 * 1024 + 1)]
+                     cargo_bytes([{"reason": "compiler-artifact"}] * 4096 + [terminal]), b"x" * (stdout_limit + 1)]
         for overflow in (b"1e9999", b"-1e9999"):
             malformed.append(b'{"reason":"compiler-artifact","ignored":{"nested":' + overflow + b'}}\n' + simple_raw)
             malformed.append(simple_raw.replace(b'"reason":"compiler-message"',
@@ -1827,6 +1828,25 @@ class ShellCompileContractTests(unittest.TestCase):
         finite = b'{"reason":"compiler-artifact","ignored":{"nested":[1.25,-1e300]}}\n' + simple_raw
         self.assertEqual(helper.source_slots_diagnostic_records(finite, b"", source),
                          helper.source_slots_diagnostic_records(simple_raw, b"", source))
+        # Genuine complete JSON envelopes cross the old byte limit without
+        # losing terminal/error validation or escaping the small public result.
+        prefix, suffix = b'{"reason":"compiler-artifact","opaque":"', b'"}\n'
+        for size in (1406142, stdout_limit, stdout_limit + 1):
+            padded = prefix + b"x" * (size - len(prefix + suffix + simple_raw)) + suffix + simple_raw
+            self.assertEqual(len(padded), size)
+            with self.subTest(compiler_diagnostic_bytes=size):
+                if size > stdout_limit:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.source_slots_diagnostic_records(padded, b"", source)
+                else:
+                    self.assertEqual(helper.source_slots_diagnostic_records(padded, b"", source),
+                                     helper.source_slots_diagnostic_records(simple_raw, b"", source))
+                    with patch.object(helper, "source_unchanged"), patch.object(helper, "run", return_value=metadata), \
+                            patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True):
+                        bounded = helper.source_slots_compiler_diagnostic(bound, padded, b"", 101, timeout_for=lambda cap: cap)
+                    self.assertEqual(bounded, diagnostic)
+                    self.assertLessEqual(len(json.dumps(bounded).encode()), 12288)
+                    self.assertNotIn(private, json.dumps(bounded))
         for raw in malformed:
             with self.subTest(malformed_bytes=len(raw)), self.assertRaises(helper.CheckFailure):
                 helper.source_slots_diagnostic_records(raw, b"", source)
@@ -1864,6 +1884,8 @@ class ShellCompileContractTests(unittest.TestCase):
         for name in ("source-slots-compile.stdout", "source-slots-compile.stderr"):
             for fault in (None, "named", "mode", "link", "uid", "post", "tail", "early", "oversize"):
                 original = OriginalOS(simple_raw, fault)
+                if name == "source-slots-compile.stdout" and fault == "oversize":
+                    original.info.st_size = stdout_limit + 1
                 expected = helper.source_slots_identity(original.info)
                 with self.subTest(retained_name=name, fault=fault), patch.object(helper, "os", original):
                     if fault is None:
@@ -1872,11 +1894,25 @@ class ShellCompileContractTests(unittest.TestCase):
                         with self.assertRaises(helper.CheckFailure):
                             helper.source_slots_read(ReadPath("/inert") / name, expected, retain=True)
                 self.assertEqual(original.closes, [77])
-        original = OriginalOS(b"x" * (1024 * 1024), None)
-        with patch.object(helper, "os", original):
-            self.assertEqual(len(helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"),
-                             helper.source_slots_identity(original.info), retain=True)), 1024 * 1024)
-        self.assertEqual(original.closes, [77])
+        for name, size, retain, admitted in (
+                ("source-slots-compile.stdout", 1406142, False, True),
+                ("source-slots-compile.stdout", stdout_limit, True, True),
+                ("source-slots-compile.stdout", stdout_limit + 1, True, False),
+                ("source-slots-compile.stderr", 1024 * 1024, True, True),
+                ("source-slots-compile.stderr", 1024 * 1024 + 1, True, False)):
+            original = OriginalOS(b"x" * size, None)
+            with self.subTest(capture_budget=(name, size, retain)), patch.object(helper, "os", original):
+                if admitted:
+                    value = helper.source_slots_read(ReadPath("/inert") / name,
+                        helper.source_slots_identity(original.info), retain=retain)
+                    self.assertEqual(len(value), size if retain else 0)
+                    self.assertEqual(original.position, size)
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.source_slots_read(ReadPath("/inert") / name,
+                            helper.source_slots_identity(original.info), retain=retain)
+                    self.assertEqual(original.position, 0)  # Reject before any body read.
+            self.assertEqual(original.closes, [77])
         for name, retain in (("source-slots-test.stdout", True), ("metadata.json", True), ("source-slots-compile.stdout", 1)):
             original = OriginalOS(b"x", None)
             with patch.object(helper, "os", original), self.assertRaises(helper.CheckFailure):
@@ -2040,6 +2076,7 @@ class ShellCompileContractTests(unittest.TestCase):
                              ("mode", "private-mode"), ("oversize", "byte-bound"), ("empty", "nonempty-metadata")):
             original = AdmissionOS(b"" if fault == "empty" else b"inert", fault)
             if fault == "type": original.info.st_mode = 0o040600
+            if fault == "oversize": original.info.st_size = stdout_limit + 1
             expected = helper.source_slots_identity(original.info)
             if fault == "opened": expected = (1, 999, *expected[2:])
             name = "metadata.json" if fault == "empty" else "source-slots-compile.stdout"
@@ -2048,7 +2085,7 @@ class ShellCompileContractTests(unittest.TestCase):
             facts = refused.exception.__dict__["_source_slots_capture_admission"]
             self.assertEqual(str(refused.exception), "SourceSlots private output is changed or oversized")
             self.assertEqual(facts, {"schemaVersion": 1, "output": name,
-                "limitBytes": 16 * 1024 * 1024 if name == "metadata.json" else 1024 * 1024,
+                "limitBytes": 16 * 1024 * 1024 if name == "metadata.json" else stdout_limit,
                 "writerBytes": expected[6], "openedBytes": original.info.st_size,
                 "failedCheck": label, "readerClosed": True, "partialObservation": True})
             self.assertEqual(original.trace, ["fstat"] + ([] if fault == "opened" else ["lstat"])
@@ -2056,13 +2093,13 @@ class ShellCompileContractTests(unittest.TestCase):
             self.assertEqual(original.closes, [77])
             self.assertLessEqual(len(json.dumps(facts).encode()) + 1, 1024)
             self.assertNotIn("/inert", json.dumps(facts))
-        valid_facts = {"schemaVersion": 1, "output": "source-slots-compile.stdout", "limitBytes": 1024 * 1024,
-            "writerBytes": 1024 * 1024 + 1, "openedBytes": 1024 * 1024 + 1, "failedCheck": "byte-bound",
+        valid_facts = {"schemaVersion": 1, "output": "source-slots-compile.stdout", "limitBytes": stdout_limit,
+            "writerBytes": stdout_limit + 1, "openedBytes": stdout_limit + 1, "failedCheck": "byte-bound",
             "readerClosed": True, "partialObservation": True}
         self.assertEqual(helper.source_slots_capture_admission(valid_facts), valid_facts)
         self.assertIsNot(helper.source_slots_capture_admission(valid_facts), valid_facts)
         for key, value in (("schemaVersion", True), ("output", "/private/unselected"), ("limitBytes", True),
-                           ("limitBytes", 16 * 1024 * 1024), ("writerBytes", True), ("writerBytes", -1),
+                           ("limitBytes", 1024 * 1024), ("limitBytes", 16 * 1024 * 1024), ("writerBytes", True), ("writerBytes", -1),
                            ("openedBytes", 1 << 63), ("openedBytes", 1.0), ("failedCheck", "arbitrary-text"),
                            ("readerClosed", 1), ("partialObservation", False), ("extra", "x" * 2048)):
             with self.subTest(malformed_fact=key, value=value):
@@ -2074,6 +2111,7 @@ class ShellCompileContractTests(unittest.TestCase):
             self.assertIsNotNone(helper.source_slots_capture_admission({**valid_facts, "output": name, "limitBytes": cap}))
         for fault in ("optional", "close"):
             original = OriginalOS(b"inert", "oversize") if fault == "optional" else CloseFailureOS(b"inert", "oversize")
+            original.info.st_size = stdout_limit + 1
             with self.subTest(admission_after_close=fault), patch.object(helper, "os", original), \
                     patch.object(helper, "source_slots_capture_admission", side_effect=ValueError("inert optional failure")) as optional:
                 with self.assertRaises(helper.CheckFailure if fault == "optional" else OSError) as refused:
@@ -2101,7 +2139,7 @@ class ShellCompileContractTests(unittest.TestCase):
                     self.assertEqual(kw["timeout"], 600)
                     if fault == "startup": raise OSError("inert startup")
                     if fault not in {"test-startup", "test-nonzero"}:
-                        kw["stdout"].write("x" * (1024 * 1024 + 1))
+                        kw["stdout"].write("x" * (stdout_limit + 1))
                     if fault == "nonzero-read": raise helper.subprocess.CalledProcessError(101, argv)
                 else:
                     self.assertEqual(argv[-4:], [SOURCE_SLOTS_CASE, "--", "--exact", "--test-threads=1"])

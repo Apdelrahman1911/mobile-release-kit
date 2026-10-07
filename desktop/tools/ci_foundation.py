@@ -8542,7 +8542,7 @@ def source_slots_capture_admission(value) -> dict | None:
                 "failedCheck", "readerClosed", "partialObservation"}:
             return None
         limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
-                  "source-slots-compile.stdout": 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+                  "source-slots-compile.stdout": 2 * 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
                   "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
         if (type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
                 or type(value["output"]) is not str or value["output"] not in limits
@@ -8564,7 +8564,7 @@ def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> b
     # Only the fixed stdout/stderr originals just returned by run() are read.
     # This is bounded post-original admission, not a new streaming IO owner.
     limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
-              "source-slots-compile.stdout": 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+              "source-slots-compile.stdout": 2 * 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
               "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
     require(path.name in limits and type(expected) is tuple and len(expected) == 9
             and type(retain) is bool and (not retain or path.name in {
@@ -8632,9 +8632,9 @@ def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
 
 def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> list[dict]:
     """Only bounded Cargo error DATA; no raw message or foreign path escapes."""
-    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024
+    require(type(raw) is bytes and 0 < len(raw) <= 2 * 1024 * 1024
             and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
-            "SourceSlots diagnostic captures exceed their unchanged bounds")
+            "SourceSlots diagnostic captures exceed their fixed stdout/stderr bounds")
     packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
                 ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
     def pairs(items):
