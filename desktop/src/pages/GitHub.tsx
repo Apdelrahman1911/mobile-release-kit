@@ -170,10 +170,10 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
     {state.result?.state === 'invalid' && <section className="card"><SectionHeading title="Draft needs correction" description="The passive core returned no workflow or settings proposal. This preview saved or applied nothing and did not contact GitHub."><Badge tone="danger">Format invalid</Badge></SectionHeading><Issues issues={state.result.validation.issues} /><button type="button" className="button secondary" onClick={() => onNavigate('settings')}>Review the draft and field guidance</button></section>}
     {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
-    <section className="card"><SectionHeading title="Remote authority stays disabled" description="Neither a preview nor local caller installation enables Connect, remote setup, credential provisioning, checks or dispatch. Those operations need separate reviewed ownership and authorization." /><div className="github-disabled-actions">
+    <section className="card"><SectionHeading title="Local setup is not remote authorization" description="Previewing or applying local caller files does not configure remote environments or secrets, or authorize workflow dispatch. Separate connection and workflow cards enforce their own native availability and user-consent requirements." /><div className="github-disabled-actions">
       <DisabledAction label="Apply remote GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and remote apply are not implemented. A local file plan has no remote authority.')} />
       <DisabledAction label="Provision GitHub secrets" icon="key" reason={futureReason(info?.capabilities, 'github.setup', 'Environment and secret provisioning are not implemented. No credential values are accepted.')} />
-      <DisabledAction label="Run checks / dispatch" icon="rocket" reason={futureReason(info?.capabilities, 'release.candidate', 'Protected workflow dispatch and native release execution are not implemented.')} />
+      <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
     </div></section>
   </>;
 }

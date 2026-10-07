@@ -288,6 +288,429 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
                 self.assertTrue(failed_arena.failed)
                 self.assertGreater(failed_arena.held["rows"], 0)
 
+        # Compact complete-inner storage must not become a second verifier.
+        # Build inert classic ZIP bytes with exact local/CD common UNIX fields,
+        # both codecs, descriptors and the accepted opaque directory marker.
+        def compact_fixture(*, descriptor=False):
+            values = (("dir/", b"", 0, 0o40755, 3),
+                      ("dir/C.class", b"payload" * 19000, 8, 0o100644, 3),
+                      ("dir/c.class", b"", 0, 0o100600, 3),
+                      ("日本/é.txt", b"complete UTF8 resource", 0, 0o600, 0),
+                      ("odd//", b"", 0, 0o40755, 3))
+            local, central = bytearray(), bytearray()
+            for name, material, method, mode, creator in values:
+                raw_name = name.encode("utf-8")
+                if method == 8:
+                    encoder = C.zlib.compressobj(1, C.zlib.DEFLATED, -15)
+                    packed = encoder.compress(material) + encoder.flush()
+                else:
+                    packed = material
+                crc = C.zlib.crc32(material) & 0xffffffff
+                flags = 0x800 | (8 if descriptor else 0)
+                common = b"\0" * 8  # Present zero bytes are not absent metadata.
+                local_extra = struct.pack("<HH", 0x5855, 12) + common + struct.pack("<HH", 12, 34)
+                central_extra = struct.pack("<HH", 0x5855, 8) + common
+                at = len(local)
+                local_values = (0, 0, 0) if descriptor else (crc, len(packed), len(material))
+                local.extend(struct.pack("<4s5H3I2H", b"PK\x03\x04", 20, flags, method, 0, 0,
+                    *local_values, len(raw_name), len(local_extra)))
+                local.extend(raw_name + local_extra + packed)
+                if descriptor:
+                    local.extend(struct.pack("<4s3I", b"PK\x07\x08", crc, len(packed), len(material)))
+                external = (mode << 16) | (0x10 if name.endswith("/") else 0)
+                central.extend(struct.pack("<4s6H3I5H2I", b"PK\x01\x02", creator << 8 | 20,
+                    20, flags, method, 0, 0, crc, len(packed), len(material), len(raw_name),
+                    len(central_extra), 0, 0, 0, external, at))
+                central.extend(raw_name + central_extra)
+            end = struct.pack("<4s4H2IH", b"PK\x05\x06", 0, 0, len(values), len(values),
+                              len(central), len(local), 0)
+            return bytes(local + central + end)
+
+        for descriptors in (False, True):
+            material = compact_fixture(descriptor=descriptors)
+            nomination = C.OpaqueZipPin(len(material), hashlib.sha256(material).hexdigest())
+            plain_owner, packed_owner = Original(material), Original(material)
+            plain_observer, packed_observer = Recorder(), Recorder()
+            plain = C.compile_opaque_zip(plain_owner, nomination, observer=plain_observer)
+            packed_arena = I.Arena(packed_owner)
+            packed = C.compile_opaque_zip(packed_owner, nomination, observer=packed_observer,
+                                         workspace=packed_arena, compact=True)
+            expected_charge = sum(1024 + 4 * len(member.name.encode("utf-8"))
+                                  for member in packed._capture.rows)
+            self.assertEqual(C._COMPACT_FIELDS.size, 71)
+            self.assertEqual(packed_arena.held["rows"], expected_charge)
+            measured = sys.getsizeof(packed._capture.rows) + sys.getsizeof(packed._capture.names)
+            for member in packed._capture.rows:
+                self.assertIs(type(member), C._CompactMember)
+                self.assertEqual(member.__slots__, ("name", "_packed"))
+                self.assertFalse(hasattr(member, "__dict__"))
+                self.assertEqual(len(member._packed), 71)
+                self.assertIsNone(member.raw_name)
+                self.assertIsNone(member.old_unix)
+                measured += sys.getsizeof(member) + sys.getsizeof(member.name) + sys.getsizeof(member._packed)
+            self.assertLess(measured, expected_charge)
+            plain_output, packed_output = [], []
+            plain_receipt = plain.publish(plain_output.append)
+            packed_receipt = packed.publish(packed_output.append)
+            self.assertEqual(packed_output, plain_output)
+            self.assertEqual(packed_owner.reads, plain_owner.reads)
+            self.assertEqual(packed_receipt["issuedReadBytes"], plain_receipt["issuedReadBytes"])
+            self.assertEqual(packed_observer.events, plain_observer.events)
+            self.assertEqual(packed_observer.payloads, plain_observer.payloads)
+            expected = [tuple(value) for value in json.loads(plain_output[0])["rows"]]
+            owner = Original(material); budget = I.Arena(owner)
+            terminal = C.compile_opaque_zip(owner, nomination, workspace=budget, compact=True)
+            seen = []
+            def consume_compact(value):
+                self.assertIs(type(value), tuple)
+                self.assertEqual(len(value), len(C.COLUMNS))
+                self.assertTrue(terminal._published)
+                self.assertFalse(terminal._capture.names)
+                self.assertEqual(budget.held["rows"], sum(
+                    1024 + 4 * len(item[0].encode("utf-8")) for item in expected[len(seen) + 1:]))
+                seen.append(value)
+                with self.assertRaisesRegex(C.Refused, "report_finality"):
+                    terminal.consume_rows(lambda _: self.fail("compact reentry"))
+            packed_summary = terminal.consume_rows(consume_compact)
+            self.assertEqual(seen, expected)
+            self.assertEqual(packed_summary["rosterReservationBytes"], expected_charge)
+            self.assertEqual(budget.held["rows"], 0)
+            self.assertFalse(terminal._capture.rows)
+
+            # Raw local names, common UNIX bytes and late payload CRC checks
+            # still reject. Every local header is checked before callbacks.
+            changed_name = bytearray(material); changed_name[30] ^= 1
+            changed_unix = bytearray(material)
+            first_name_length = struct.unpack_from("<H", changed_unix, 26)[0]
+            changed_unix[30 + first_name_length + 4] ^= 1
+            crc_input = zip_bytes([("empty", b""), ("last", b"unaltered payload")])
+            changed_crc = bytearray(crc_input)
+            changed_crc[crc_input.index(b"unaltered payload")] ^= 1
+            for reason, bad in (("zip_local_name_disagreement", bytes(changed_name)),
+                                ("zip_old_unix_local_central_disagreement", bytes(changed_unix)),
+                                ("zip_member_crc_or_length", bytes(changed_crc))):
+                for compact_mode in (False, True):
+                    recording = Recorder(); bad_owner = Original(bad); bad_arena = I.Arena(bad_owner)
+                    with self.subTest(compact=compact_mode, diagnostic=reason), self.assertRaisesRegex(C.Refused, reason):
+                        C.compile_opaque_zip(bad_owner, C.OpaqueZipPin(len(bad), hashlib.sha256(bad).hexdigest()),
+                            observer=recording, workspace=bad_arena, compact=compact_mode)
+                    self.assertEqual(bad_arena.held["rows"], 0)
+                    if reason != "zip_member_crc_or_length":
+                        self.assertEqual(recording.events, [])
+                    else:
+                        self.assertNotIn(("end", "last"), [(kind, value[0]) for kind, value in recording.events])
+
+        # Fixed-bit presence is independent of data bytes. UTF8 and the one
+        # terminal directory slash round-trip exactly, including the marker.
+        example = C.Member("日本/dir/", "directory", 0o40755, 0, local=0, compressed=0,
+            method=0, flags=0x800, crc=0, creator=3, raw_name="日本/dir//".encode("utf-8"), old_unix=b"\0" * 8)
+        packed = C._CompactMember(example)
+        self.assertEqual(packed.raw_name, example.raw_name)
+        self.assertEqual(packed.old_unix, b"\0" * 8)
+        self.assertIsNone(packed.data)
+        self.assertIsNone(packed.sha256)
+        packed.data = example.data = 100
+        packed.sha256 = example.sha256 = "0" * 64
+        for hint in C._COMPACT_HINTS:
+            packed.hint = example.hint = hint
+            self.assertEqual(packed.row(), example.row())
+        packed.raw_name = packed.old_unix = None
+        self.assertIsNone(packed.raw_name)
+        self.assertIsNone(packed.old_unix)
+        self.assertEqual(packed.sha256, "0" * 64)
+        self.assertEqual(packed.data, 100)
+
+        # The exact previously accepted empty legacy directory sentinel keeps
+        # its raw mode bits; compact storage does not coerce it to a POSIX mode.
+        legacy = bytearray(compact_fixture())
+        central = struct.unpack_from("<I", legacy, len(legacy) - 22 + 16)[0]
+        struct.pack_into("<H", legacy, 6, 0)
+        struct.pack_into("<H", legacy, central + 8, 0)
+        struct.pack_into("<I", legacy, central + 38, 0xffff0010)
+        legacy = bytes(legacy)
+        legacy_pin = C.OpaqueZipPin(len(legacy), hashlib.sha256(legacy).hexdigest())
+        legacy_rows = []
+        for compact_mode in (False, True):
+            values = []
+            C.compile_opaque_zip(Original(legacy), legacy_pin, compact=compact_mode).consume_rows(values.append)
+            self.assertEqual(values[0][:4], ("dir", "directory", 0xffff, 0))
+            legacy_rows.append(values)
+        self.assertEqual(*legacy_rows)
+        with self.assertRaisesRegex(C.Refused, "zip_member_mode_or_creator"):
+            C.compile_archive(Original(legacy), C.Pin("bundletool", len(legacy), legacy_pin.sha256))
+
+        # The separately observed empty SGID directory is another exact inert
+        # encoding. Ordinary archives still refuse it; no installed mode exists.
+        def empty_setgid_zip(values=(("com/", b""), ("com/value", b"opaque child resource"))):
+            material = bytearray(zip_bytes(values))
+            central_at = struct.unpack_from("<I", material, len(material) - 6)[0]
+            struct.pack_into("<H", material, 6, 0x800)
+            struct.pack_into("<H", material, central_at + 4, 3 << 8 | 20)
+            struct.pack_into("<H", material, central_at + 8, 0x800)
+            struct.pack_into("<I", material, central_at + 38, 0x45ed0010)
+            return bytes(material), central_at
+
+        material, central_at = empty_setgid_zip()
+        nomination = C.OpaqueZipPin(len(material), hashlib.sha256(material).hexdigest())
+        setgid_rows, setgid_outputs = [], []
+        for compact_mode in (False, True):
+            owner = Original(material); bounded = I.Arena(owner); recording = Recorder()
+            terminal = C.compile_opaque_zip(owner, nomination, observer=recording,
+                                            workspace=bounded, compact=compact_mode)
+            values = []
+            summary = terminal.consume_rows(values.append)
+            self.assertEqual(values[0][:6], ("com", "directory", 0o42755, 0, None, None))
+            self.assertEqual(values[0][8:13], (0, 0, 0x800, 0, 3))
+            self.assertEqual((summary["members"], summary["files"], summary["aliases"]), (2, 1, 0))
+            self.assertEqual(values[1][4], hashlib.sha256(b"opaque child resource").hexdigest())
+            self.assertEqual([(kind, value[0]) for kind, value in recording.events],
+                             [("begin", "com/value"), ("end", "com/value")])
+            self.assertEqual(bytes(recording.payloads["com/value"]), b"opaque child resource")
+            self.assertEqual(owner.body, material)
+            self.assertGreater(owner.bindings, 0)
+            self.assertEqual(bounded.held["rows"], 0)
+            self.assertFalse(terminal._capture.rows)
+            setgid_rows.append(values)
+            published = []
+            C.compile_opaque_zip(Original(material), nomination, compact=compact_mode).publish(published.append)
+            document = json.loads(published[0])
+            self.assertEqual(document["kind"], "offline-opaque-zip-correspondence-data")
+            self.assertIsNone(document["label"])
+            self.assertFalse(document["supplierAuthority"])
+            self.assertFalse(document["nativeClosure"])
+            self.assertEqual(document["rows"], [list(value) for value in values])
+            setgid_outputs.append(published)
+        self.assertEqual(*setgid_rows)
+        self.assertEqual(*setgid_outputs)
+        for label in C.LABELS:
+            if label != "jdk":
+                with self.subTest(ordinary=label), self.assertRaisesRegex(C.Refused, "zip_member_mode_or_creator"):
+                    C.compile_archive(Original(material), C.Pin(label, len(material), nomination.sha256))
+
+        # Change one fixed field at a time, keeping whole input pins honest.
+        # None of these neighbors is permission for set-ID files or extraction.
+        near = []
+        for label, offset, fmt, value in (
+                ("creator", central_at + 4, "<H", 4 << 8 | 20),
+                ("suid", central_at + 38, "<I", 0o46755 << 16 | 0x10),
+                ("sticky", central_at + 38, "<I", 0o43755 << 16 | 0x10),
+                ("regular-file", central_at + 38, "<I", 0o102755 << 16 | 0x10),
+                ("symlink", central_at + 38, "<I", 0o122755 << 16 | 0x10),
+                ("permissions", central_at + 38, "<I", 0o42750 << 16 | 0x10),
+                ("dos-bits", central_at + 38, "<I", 0o42755 << 16),
+                ("flags", central_at + 8, "<H", 0),
+                ("descriptor", central_at + 8, "<H", 0x808),
+                ("deflate", central_at + 10, "<H", 8),
+                ("crc", central_at + 16, "<I", 1),
+                ("local-flags", 6, "<H", 0),
+                ("local-crc", 14, "<I", 1)):
+            broken = bytearray(material); struct.pack_into(fmt, broken, offset, value)
+            near.append((label, bytes(broken)))
+        changed_name = bytearray(material); changed_name[30] ^= 0x20
+        near.append(("local-name", bytes(changed_name)))
+        changed_payload = bytearray(material)
+        changed_payload[changed_payload.index(b"opaque child resource")] ^= 1
+        near.append(("child-crc", bytes(changed_payload)))
+        for label, values in (
+                ("missing-slash", (("comx", b""),)),
+                ("nonempty", (("com/", b"x"),)),
+                ("unsafe-name", (("../", b""),)),
+                ("directory-file-collision", (("com/", b""), ("com", b"file"))),
+                ("file-parent", (("com/", b""), ("com/x", b"file"), ("com/x/y", b"child")))):
+            near.append((label, empty_setgid_zip(values)[0]))
+        duplicate, _ = empty_setgid_zip((("com/", b""), ("dup/", b"")))
+        near.append(("duplicate", duplicate.replace(b"dup/", b"com/")))
+        for label, broken in near:
+            for compact_mode in (False, True):
+                failed_owner = Original(broken); bounded = I.Arena(failed_owner); output = []
+                with self.subTest(setgid_neighbor=label, compact=compact_mode), self.assertRaises(C.Refused):
+                    C.compile_opaque_zip(failed_owner,
+                        C.OpaqueZipPin(len(broken), hashlib.sha256(broken).hexdigest()),
+                        workspace=bounded, compact=compact_mode).publish(output.append)
+                self.assertEqual(output, [])
+                self.assertEqual(bounded.held["rows"], 0)
+                self.assertGreater(failed_owner.bindings, 0)
+
+        # Exact pre-name refusal diagnostics are raw central metadata, not
+        # permission to admit modes/creators or to interpret a malformed name.
+        def mode_fixture(creator, mode, low, name, payload, flags):
+            fixture = bytearray(zip_bytes([("x" * len(name), payload)]))
+            central_at = fixture.index(b"PK\x01\x02")
+            fixture[30:30 + len(name)] = name
+            fixture[central_at + 46:central_at + 46 + len(name)] = name
+            struct.pack_into("<H", fixture, central_at + 4, creator << 8 | 20)
+            struct.pack_into("<H", fixture, central_at + 8, flags)
+            struct.pack_into("<I", fixture, central_at + 38, mode << 16 | low)
+            return bytes(fixture), central_at
+
+        cases = (("creator", 4, 0o100644, 0, b"bad", b"unverified payload", 0),
+                 ("mode", 3, 0o104644, 0, b"bad", b"unverified payload", 0),
+                 ("both", 5, 0o102644, 0, b"bad", b"unverified payload", 0),
+                 ("raw-name", 4, 0o100644, 0, b"\xffbad", b"unverified payload", 0),
+                 ("near-marker-flags", 3, 0xffff, 0x10, b"dir/", b"", 0x800),
+                 ("near-marker-nonempty", 3, 0xffff, 0x10, b"dir/", b"x", 0))
+        for case, creator, mode, low, name, payload, flags in cases:
+            bad, central_at = mode_fixture(creator, mode, low, name, payload, flags)
+            nomination = C.OpaqueZipPin(len(bad), hashlib.sha256(bad).hexdigest())
+            for compact_mode in (False, True):
+                recording = Recorder(); refused_owner = Original(bad)
+                refused_arena = I.Arena(refused_owner); output = []
+                with self.subTest(mode_diagnostic=case, compact=compact_mode), self.assertRaises(C.Refused) as failure:
+                    C.compile_opaque_zip(refused_owner, nomination, observer=recording,
+                        workspace=refused_arena, compact=compact_mode).publish(output.append)
+                self.assertIs(type(failure.exception), C.Refused)
+                self.assertEqual(failure.exception.args, ("zip_member_mode_or_creator",))
+                detail = failure.exception._fixed_zip_diagnostic
+                self.assertEqual(detail, {
+                    "schemaVersion": 1, "kind": "central-member-mode-metadata-v1",
+                    "reason": "zip_member_mode_or_creator", "contextsComplete": True,
+                    "zipView": {"bytes": len(bad), "sha256": nomination.sha256, "opaque": True},
+                    "nameBytes": len(name), "nameHex": name.hex(),
+                    "nameSha256": hashlib.sha256(name).hexdigest(), "containers": [],
+                    "fields": {
+                        "member": {"madeBy": creator << 8 | 20, "creatorSystem": creator,
+                            "externalAttributes": mode << 16 | low, "rawMode": mode,
+                            "permittedModeMask": 0o170777, "unsupportedModeBits": mode & ~0o170777,
+                            "creatorAllowed": creator in (0, 3), "trailingSlash": name.endswith(b"/"),
+                            "opaqueDirectoryExemption": False, "flags": flags, "method": 0,
+                            "crc32": C.zlib.crc32(payload) & 0xffffffff, "compressedBytes": len(payload),
+                            "bytes": len(payload), "localHeaderOffset": 0},
+                        "central": {"ordinal": 0, "entryCount": 1, "centralOffset": central_at,
+                            "centralDirectoryOffset": central_at,
+                            "centralDirectoryBytes": len(bad) - 22 - central_at,
+                            "centralEndOffset": len(bad) - 22,
+                            "centralHeaderSha256": hashlib.sha256(bad[central_at:central_at + 46]).hexdigest()},
+                        "semanticMemberNameAdmitted": False, "failedMemberPayloadVerified": False,
+                        "laterCentralMembersVerified": False}})
+                self.assertEqual(recording.events, [])
+                self.assertEqual(output, [])
+                self.assertEqual(refused_arena.held["rows"], 0)
+                self.assertLess(len(json.dumps(detail, separators=(",", ":"))), 8192)
+
+        # Failure of optional annotation storage keeps the very same original
+        # refusal and failed-pass disposal. Only the local fixture class moves.
+        original_refused = C.Refused
+        created = []
+        class NoDiagnostic(original_refused):
+            def __init__(self, *args):
+                super().__init__(*args)
+                created.append(self)
+            def __setattr__(self, key, value):
+                if key == "_fixed_zip_diagnostic":
+                    raise RuntimeError("synthetic-diagnostic-storage-failure")
+                super().__setattr__(key, value)
+        bad, _ = mode_fixture(4, 0o100644, 0, b"bad", b"payload", 0)
+        refused_owner = Original(bad); refused_arena = I.Arena(refused_owner); recording = Recorder()
+        try:
+            C.Refused = NoDiagnostic
+            with self.assertRaises(NoDiagnostic) as failure:
+                C.compile_opaque_zip(refused_owner, C.OpaqueZipPin(len(bad), hashlib.sha256(bad).hexdigest()),
+                    observer=recording, workspace=refused_arena, compact=True)
+            self.assertEqual(len(created), 1)
+            self.assertIs(failure.exception, created[0])
+            self.assertEqual(failure.exception.args, ("zip_member_mode_or_creator",))
+            self.assertFalse(hasattr(failure.exception, "_fixed_zip_diagnostic"))
+            self.assertEqual(recording.events, [])
+            self.assertEqual(refused_arena.held["rows"], 0)
+        finally:
+            C.Refused = original_refused
+        self.assertIs(C.Refused, original_refused)
+
+        # Reject overflow or an invalid optional field rather than truncating
+        # packed bits; these are only internal scalar-shape tests, not native DATA.
+        for field, invalid in (("mode", -1), ("size", True), ("local", 0xffffffff),
+                               ("compressed", 1 << 32), ("flags", 1 << 16),
+                               ("crc", 1 << 32), ("method", 9), ("creator", 2),
+                               ("old_unix", b"short")):
+            candidate = C.Member("a", "file", 0o100644, 0, local=0, compressed=0,
+                method=0, flags=0, crc=0, creator=3, raw_name=b"a")
+            setattr(candidate, field, invalid)
+            with self.subTest(compact_field=field), self.assertRaisesRegex(C.Refused, "compact_member_shape"):
+                C._CompactMember(candidate)
+
+        for bad in (zip_bytes([("/absolute", b"x")]), zip_bytes([("a/../escape", b"x")]),
+                    zip_bytes([("a//file", b"x")]), zip_bytes([("a\\b", b"x")]),
+                    zip_bytes([("parent", b"file"), ("parent/child", b"x")]),
+                    zip_bytes([("same", b"x"), ("diff", b"y")]).replace(b"diff", b"same")):
+            for compact_mode in (False, True):
+                with self.subTest(compact=compact_mode), self.assertRaises(C.Refused):
+                    C.compile_opaque_zip(Original(bad), C.OpaqueZipPin(len(bad), hashlib.sha256(bad).hexdigest()),
+                                         compact=compact_mode)
+
+        # Failure on actual compact construction is inside the SAME compile
+        # exception/disposal path, before local or payload traversal. Restore
+        # this fixture-module binding exactly; no stdlib original is replaced.
+        original_compact = C._CompactMember
+        primary = RuntimeError("compact-allocation-failure")
+        class RefusingCompact:
+            def __init__(self, _):
+                raise primary
+        class ConstructionArena(I.Arena):
+            def __init__(self, owner):
+                super().__init__(owner)
+                self.reservations = []
+            def reserve_rows(self, count):
+                self.reservations.append(count)
+                super().reserve_rows(count)
+        failed_owner = Original(drain_raw); failed_arena = ConstructionArena(failed_owner); recording = Recorder()
+        try:
+            C._CompactMember = RefusingCompact
+            with self.assertRaises(RuntimeError) as failure:
+                C.compile_opaque_zip(failed_owner, drain_pin, observer=recording,
+                                     workspace=failed_arena, compact=True)
+            self.assertIs(failure.exception, primary)
+            self.assertEqual(failed_arena.reservations, [1024 + 4 * len("p/z.class")])
+            self.assertEqual(failed_arena.held["rows"], 0)
+            self.assertEqual(recording.events, [])
+        finally:
+            C._CompactMember = original_compact
+        self.assertIs(C._CompactMember, original_compact)
+
+        # Actual compact terminal failures preserve their original exception,
+        # cannot republish, and dispose only known row/name references.
+        for stage in ("callback", "cancel", "binding", "release", "cleanup"):
+            primary = KeyboardInterrupt("compact-cancel") if stage == "cancel" else RuntimeError("compact-" + stage)
+            secondary = RuntimeError("compact-secondary-release")
+            class CompactOriginal(Original):
+                refuse_binding = False
+                def verify_binding(self):
+                    super().verify_binding()
+                    if self.refuse_binding:
+                        raise primary
+            class CompactArena(I.Arena):
+                refuse_release = False
+                def release_rows(self, count):
+                    if self.refuse_release:
+                        self.refuse_release = False
+                        self.failed = True
+                        raise secondary if stage == "cleanup" else primary
+                    super().release_rows(count)
+            failed_owner = CompactOriginal(drain_raw); failed_arena = CompactArena(failed_owner)
+            terminal = C.compile_opaque_zip(failed_owner, drain_pin, workspace=failed_arena, compact=True)
+            failed_arena.refuse_release = stage == "release"
+            callbacks = []
+            def compact_failure(value):
+                callbacks.append(value[0])
+                if stage in ("callback", "cancel", "cleanup"):
+                    failed_arena.refuse_release = stage == "cleanup"
+                    raise primary
+                if len(callbacks) == 4 and stage == "binding":
+                    failed_owner.refuse_binding = True
+            with self.subTest(compact_failure=stage), self.assertRaises(type(primary)) as failure:
+                terminal.consume_rows(compact_failure)
+            self.assertIs(failure.exception, primary)
+            self.assertTrue(terminal._capture.failed)
+            self.assertEqual(terminal._capture.rows, [])
+            self.assertEqual(terminal._capture.names, set())
+            if stage not in ("release", "cleanup"):
+                self.assertEqual(failed_arena.held["rows"], 0)
+            else:
+                self.assertTrue(failed_arena.failed)
+                self.assertGreater(failed_arena.held["rows"], 0)
+            for operation in (terminal.consume_rows, terminal.publish):
+                with self.assertRaisesRegex(C.Refused, "report_finality"):
+                    operation(lambda _: self.fail("failed compact report reused"))
+
     def test_streamed_native_snapshots_bind_actual_slice_and_keep_ambiguous_headers_distinct(self):
         intel, arm = macho(), macho(0x0100000C, 0)
         raw = universal(arm, intel)
@@ -729,6 +1152,206 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
             I._inspect_complete_non_jdk(Original(raw), C,
                 ("gradle", len(raw), hashlib.sha256(raw).hexdigest()))
 
+        # Actual complete nested collection includes the raw042755 directory,
+        # not just its safe child files or a normalized permission projection.
+        inner = bytearray(zip_bytes([("com/", b""), ("com/C.class", java),
+                                     ("com/native.dylib", native),
+                                     ("com/unknown.class", b"not Java bytecode")]))
+        central_at = struct.unpack_from("<I", inner, len(inner) - 6)[0]
+        struct.pack_into("<H", inner, 6, 0x800)
+        struct.pack_into("<H", inner, central_at + 4, 3 << 8 | 20)
+        struct.pack_into("<H", inner, central_at + 8, 0x800)
+        struct.pack_into("<I", inner, central_at + 38, 0x45ed0010)
+        inner = bytes(inner)
+        values = []
+        C.compile_opaque_zip(Original(inner), C.OpaqueZipPin(len(inner), hashlib.sha256(inner).hexdigest()),
+                             compact=True).consume_rows(values.append)
+        self.assertEqual(values[0][:4], ("com", "directory", 0o42755, 0))
+        expected_enumeration = hashlib.sha256()
+        normalized_enumeration = hashlib.sha256()
+        for value in values:
+            expected_enumeration.update(json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n")
+            normalized = list(value)
+            if normalized[1] == "directory":
+                normalized[2] = 0o40755
+            normalized_enumeration.update(json.dumps(normalized, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n")
+        self.assertNotEqual(expected_enumeration.hexdigest(), normalized_enumeration.hexdigest())
+        raw = zip_bytes([("gradle/lib/observed.jar", inner)])
+        complete = I._inspect_complete_non_jdk(Original(raw), C,
+            ("gradle", len(raw), hashlib.sha256(raw).hexdigest()))
+        checked = complete.document["innerArchives"][0]
+        self.assertEqual((checked["centralMembers"], checked["inspectedMembers"], checked["files"],
+                          checked["directoryMembers"]), (4, 4, 3, 1))
+        self.assertEqual(checked["enumerationSha256"], expected_enumeration.hexdigest())
+        self.assertEqual(checked["sha256"], hashlib.sha256(inner).hexdigest())
+        self.assertEqual([value["name"] for value in checked["nativeMembers"]], ["com/native.dylib"])
+        self.assertEqual([value["name"] for value in checked["unknownMembers"]], ["com/unknown.class"])
+        self.assertIsNone(checked["negativeEvidence"])
+        self.assertFalse(checked["nativeExecuted"])
+        self.assertFalse(checked["supplierAuthority"])
+        self.assertTrue(complete.document["completeInnerCoverage"])
+        self.assertEqual(complete.document["uninspectedInnerArchives"], [])
+        self.assertEqual(complete.arena.held["payload"], 0)
+        self.assertEqual(complete.arena.held["rows"],
+            sum(1536 + 8 * len(value[0]) + 8 * len(value[5] or "") for value in complete.document["rows"]))
+        published = []
+        complete.publish(published.append)
+        self.assertEqual(json.loads(published[0])["innerArchives"][0]["enumerationSha256"],
+                         expected_enumeration.hexdigest())
+        for label, offset, fmt, value in (("local-name", 30, "<B", ord("C")),
+                ("local-crc", 14, "<I", 1),
+                ("unsafe-mode", central_at + 38, "<I", 0o46755 << 16 | 0x10)):
+            broken = bytearray(inner); struct.pack_into(fmt, broken, offset, value); broken = bytes(broken)
+            bounded = I.Arena(Original()); collector = I._Observer(C, bounded, complete=True)
+            completed = row("gradle/lib/observed.jar", broken)
+            try:
+                collector.begin(completed[:4] + (None,) + completed[5:-1] + (None,))
+                for at in range(0, len(broken), 3):
+                    collector.block(completed[0], at, broken[at:at + 3])
+                with self.subTest(setgid_nested=label), self.assertRaises(C.Refused):
+                    collector.end(completed)
+                self.assertTrue(bounded.failed)
+                self.assertFalse(collector.archives)
+            finally:
+                collector.dispose_current()
+            self.assertEqual(bounded.held["payload"], 0)
+            self.assertEqual(bounded.held["rows"], 0)
+
+        # A refusal in a completed nested JAR retains its exact admitted
+        # parent rows, innermost first, without claiming the failed name/payload.
+        malformed = bytearray(zip_bytes([("leaf", b"unverified leaf payload")]))
+        central_at = malformed.index(b"PK\x01\x02")
+        struct.pack_into("<H", malformed, central_at + 4, 3 << 8 | 20)
+        struct.pack_into("<I", malformed, central_at + 38, 0o104644 << 16)
+        malformed = bytes(malformed)
+        enclosing = zip_bytes([("inside.jar", malformed), ("later", b"not yet observed")])
+        enclosing_name = "gradle/lib/context.jar"
+        completed = row(enclosing_name, enclosing)
+        bounded = I.Arena(Original())
+        collector = I._Observer(C, bounded, complete=True)
+        try:
+            collector.begin(completed[:4] + (None,) + completed[5:-1] + (None,))
+            for at in range(0, len(enclosing), 3):
+                collector.block(enclosing_name, at, enclosing[at:at + 3])
+            with self.assertRaises(C.Refused) as failure:
+                collector.end(completed)
+            self.assertIs(type(failure.exception), C.Refused)
+            self.assertEqual(failure.exception.args, ("zip_member_mode_or_creator",))
+            detail = failure.exception._fixed_zip_diagnostic
+            self.assertEqual(detail["kind"], "central-member-mode-metadata-v1")
+            self.assertIs(detail["contextsComplete"], True)
+            self.assertEqual(detail["zipView"], {"bytes": len(malformed),
+                "sha256": hashlib.sha256(malformed).hexdigest(), "opaque": True})
+            with zipfile.ZipFile(io.BytesIO(enclosing), "r") as oracle:
+                inside_mode = oracle.getinfo("inside.jar").external_attr >> 16
+            self.assertEqual(detail["containers"], [
+                {"nameBytes": len(name.encode("utf-8")), "nameHex": name.encode("utf-8").hex(),
+                 "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(), "mode": mode,
+                 "zipViewOffset": 0, "zipViewBytes": len(body),
+                 "zipViewSha256": hashlib.sha256(body).hexdigest()}
+                for name, body, mode in (("inside.jar", malformed, inside_mode),
+                                         (enclosing_name, enclosing, completed[2]))])
+            self.assertEqual(detail["fields"]["central"]["centralHeaderSha256"],
+                             hashlib.sha256(malformed[central_at:central_at + 46]).hexdigest())
+            for key in ("semanticMemberNameAdmitted", "failedMemberPayloadVerified", "laterCentralMembersVerified"):
+                self.assertIs(detail["fields"][key], False)
+            self.assertTrue(bounded.failed)
+            self.assertFalse(collector.archives)
+        finally:
+            collector.dispose_current()
+        self.assertEqual(bounded.held["payload"], 0)
+        self.assertEqual(bounded.held["rows"], 0)
+
+        # One real byte-only inner census crosses the old16k FILE_COUNT.
+        # Native/unknown/nested entries are deliberately LAST in local order;
+        # a compact book is not permission to stop at the old prefix.
+        self.assertEqual((C.FILE_COUNT, C.ENTRY_LIMIT), (16384, 32768))
+        large_count = C.FILE_COUNT + 1
+        late = {"z-late/native.dylib": macho(),
+                "z-late/unknown.class": b"not Java bytecode",
+                "z-late/nested.jar": zip_bytes([("notice", b"complete late nested payload")])}
+        large_rows = [(f"p/C{number:05}.class", java) for number in range(large_count)]
+        large_zip = zip_bytes(large_rows + list(late.items()))
+        del large_rows
+        large_pin = C.OpaqueZipPin(len(large_zip), hashlib.sha256(large_zip).hexdigest())
+        with self.assertRaisesRegex(C.Refused, "expanded_member_bound") as old_bound:
+            C.compile_opaque_zip(Original(large_zip), large_pin)
+        detail = old_bound.exception._fixed_zip_diagnostic
+        self.assertEqual(detail["fields"]["counters"]["files"], 16385)
+        self.assertEqual(detail["fields"]["limits"]["files"], 16384)
+        self.assertTrue(detail["fields"]["exceeded"]["files"])
+        self.assertFalse(detail["fields"]["failedMemberPayloadVerified"])
+        self.assertFalse(detail["fields"]["laterCentralMembersVerified"])
+
+        # Independent generated-ZIP metadata supplies every expected scalar;
+        # no product parser is used to compute the large enumeration oracle.
+        expected_enumeration = hashlib.sha256()
+        expected_compact_charge = old_charge = 0
+        java_sha = hashlib.sha256(java).hexdigest()
+        hints = {"z-late/native.dylib": "macho", "z-late/unknown.class": None,
+                 "z-late/nested.jar": "zip"}
+        with zipfile.ZipFile(io.BytesIO(large_zip), "r") as oracle:
+            oracle_infos = sorted(oracle.infolist(), key=lambda info: info.filename)
+            self.assertEqual(len(oracle_infos), large_count + 3)
+            for info in oracle_infos:
+                self.assertEqual((info.compress_type, info.extra), (zipfile.ZIP_STORED, b""))
+                material = late.get(info.filename, java)
+                expected_sha = hashlib.sha256(material).hexdigest() if info.filename in late else java_sha
+                value = (info.filename, "file", info.external_attr >> 16, len(material), expected_sha,
+                         None, info.header_offset, info.header_offset + 30 + len(info.filename.encode("utf-8")),
+                         info.compress_size, 0, info.flag_bits, info.CRC, info.create_system,
+                         hints.get(info.filename, "fat-macho-or-java-class"))
+                self.assertEqual((info.file_size, info.CRC), (len(material), C.zlib.crc32(material) & 0xffffffff))
+                expected_enumeration.update(json.dumps(value, ensure_ascii=True, separators=(",", ":"),
+                                                       allow_nan=False).encode("ascii") + b"\n")
+                expected_compact_charge += 1024 + 4 * len(info.filename.encode("utf-8"))
+                old_charge += 1536 + 8 * len(info.filename)
+        del oracle_infos, oracle
+
+        large_outer = zip_bytes([("large-complete.jar", large_zip)])
+        large_owner = Original(large_outer)
+        large_report = I._inspect_complete_non_jdk(large_owner, C,
+            ("gradle", len(large_outer), hashlib.sha256(large_outer).hexdigest()))
+        observed = large_report.document
+        inner = observed["innerArchives"][0]
+        self.assertEqual((inner["centralMembers"], inner["inspectedMembers"], inner["files"]),
+                         (large_count + 3,) * 3)
+        self.assertEqual(inner["directoryMembers"], 0)
+        self.assertTrue(inner["completeMemberHashes"])
+        self.assertEqual((inner["bytes"], inner["sha256"]), (len(large_zip), large_pin.sha256))
+        self.assertEqual(inner["enumerationSha256"], expected_enumeration.hexdigest())
+        self.assertEqual(inner["expandedInspectedBytes"], large_count * len(java) + sum(map(len, late.values())))
+        self.assertEqual(inner["formatCounts"]["java-class-header"], large_count)
+        self.assertEqual(sum(inner["formatCounts"].values()), large_count + 3)
+        self.assertEqual([item["name"] for item in inner["nativeMembers"]], ["z-late/native.dylib"])
+        self.assertEqual(inner["nativeMembers"][0]["sha256"], hashlib.sha256(late["z-late/native.dylib"]).hexdigest())
+        self.assertEqual(inner["nativeMembers"][0]["selectedCpu"], "x86_64")
+        self.assertEqual([(item["name"], item["reason"]) for item in inner["unknownMembers"]],
+                         [("z-late/unknown.class", "class-name-format-disagreement")])
+        self.assertEqual([item["name"] for item in inner["nestedArchives"]], ["z-late/nested.jar"])
+        self.assertEqual(inner["nestedArchives"][0]["files"], 1)
+        self.assertIsNone(inner["negativeEvidence"])
+        self.assertEqual(inner["innerBookReservationBytes"], expected_compact_charge)
+        self.assertLess(expected_compact_charge, old_charge)
+        self.assertLessEqual(large_report.arena.peaks["rows"], I.ROWS_LIMIT)
+        self.assertLessEqual(large_report.arena.peak, I.WORKSPACE_LIMIT)
+        self.assertEqual(large_report.arena.held["payload"], 0)
+        self.assertEqual(large_report.arena.held["rows"], 1536 + 8 * len("large-complete.jar"))
+        self.assertEqual(observed["issuedReadBytes"], observed["outer"]["issuedReadBytes"]
+                         + inner["issuedReadBytes"] + inner["nestedArchives"][0]["issuedReadBytes"])
+        self.assertEqual(observed["innerExpandedBytes"], inner["expandedInspectedBytes"]
+                         + inner["nestedArchives"][0]["expandedInspectedBytes"])
+        self.assertTrue(observed["completeInnerCoverage"])
+        self.assertEqual(observed["uninspectedInnerArchives"], [])
+        output = []; receipt = large_report.publish(output.append)
+        self.assertEqual(receipt["sha256"], hashlib.sha256(output[0]).hexdigest())
+        self.assertEqual(json.loads(output[0])["innerArchives"][0]["enumerationSha256"],
+                         expected_enumeration.hexdigest())
+        self.assertFalse(observed["supplierAuthority"])
+        self.assertFalse(observed["nativeClosure"])
+        self.assertFalse(receipt["nativeExecuted"])
+
+
     def test_nested_and_simultaneous_workspace_limits_fail_without_resetting_the_original(self):
         leaf = zip_bytes([("value", b"complete")])
         one = zip_bytes([("one.jar", leaf)])
@@ -839,6 +1462,118 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
             oversized.publish(lambda _: self.fail("oversized output must not escape"))
         self.assertTrue(oversized.arena.failed)
         self.assertFalse(oversized.published)
+
+        self.assertEqual((C.ENTRY_LIMIT, C.FILE_COUNT, C.ROSTER_LIMIT, C.WORKSPACE_LIMIT),
+                         (32768, 16384, 48 * I.MIB, 64 * I.MIB))
+        self.assertEqual((I.PAYLOAD_LIMIT, I.ROWS_LIMIT, I.WORKSPACE_LIMIT, I.READ_LIMIT,
+                          I.EXPANDED_LIMIT, I.OUTPUT_LIMIT),
+                         (64 * I.MIB, 48 * I.MIB, 128 * I.MIB, 768 * I.MIB, 1024 * I.MIB, 8 * I.MIB))
+        tiny = zip_bytes([("one", b"actual compact payload")])
+        tiny_pin = C.OpaqueZipPin(len(tiny), hashlib.sha256(tiny).hexdigest())
+        for mode in (None, 0, 1, "true", [], {}):
+            owner = Original(tiny)
+            with self.subTest(compact_mode=mode), self.assertRaisesRegex(C.Refused, "opaque_zip_compact_mode"):
+                C.compile_opaque_zip(owner, tiny_pin, compact=mode)
+            self.assertEqual((owner.checks, owner.bindings, owner.reads), (0, 0, []))
+        owner = Original(tiny)
+        with self.assertRaisesRegex(C.Refused, "opaque_zip_compact_mode"):
+            C._Pass(owner, C.Pin("gradle", len(tiny), tiny_pin.sha256), compact=True)
+        self.assertEqual((owner.checks, owner.bindings, owner.reads), (0, 0, []))
+
+        # Exact existing header ceiling without a second32k payload traversal.
+        # The16k-plus complete-byte regression is in the preceding method.
+        headers = C._Pass(Original(tiny), tiny_pin, compact=True)
+        for _ in range(C.ENTRY_LIMIT):
+            headers.header()
+        self.assertEqual(headers.headers, C.ENTRY_LIMIT)
+        with self.assertRaisesRegex(C.Refused, "entry_header_bound"):
+            headers.header()
+        over_count = bytearray(tiny)
+        struct.pack_into("<HH", over_count, len(over_count) - 22 + 8, C.ENTRY_LIMIT + 1, C.ENTRY_LIMIT + 1)
+        bad = bytes(over_count)
+        with self.assertRaisesRegex(C.Refused, "zip_directory_extent_or_multidisk_zip64"):
+            C.compile_opaque_zip(Original(bad), C.OpaqueZipPin(len(bad), hashlib.sha256(bad).hexdigest()),
+                                 compact=True)
+
+        def complete_fixture(material, budget):
+            # Same completed ordered collector; no archive/pin shortcut. This
+            # synthetic enclosing row has its actual stream SHA and length.
+            collector = I._Observer(C, budget, complete=True, top_level=True)
+            value = row("compact-fixture.jar", material)
+            try:
+                collector.begin(value[:4] + (None,) + value[5:-1] + (None,))
+                for at in range(0, len(material), I.WINDOW):
+                    collector.block(value[0], at, material[at:at + I.WINDOW])
+                collector.end(value)
+                self.assertEqual(len(collector.archives), 1)
+                return collector.archives[0]
+            finally:
+                collector.dispose_current()
+
+        reference_budget = I.Arena(Original())
+        reference = complete_fixture(tiny, reference_budget)
+        required_reads, required_expanded = reference_budget.reads, reference_budget.expanded
+        self.assertEqual(required_reads, reference["issuedReadBytes"])
+        self.assertEqual(required_expanded, reference["expandedInspectedBytes"])
+        self.assertEqual(reference["innerBookReservationBytes"], 1024 + 4 * len("one"))
+        self.assertEqual((reference_budget.held["payload"], reference_budget.held["rows"]), (0, 0))
+
+        # Real aggregate charges precede retention and are never reset by
+        # compact mode; existing absolute limits apply with prior live state.
+        for kind, amount, reason in (("rows", I.ROWS_LIMIT, "aggregate-row-reservation"),
+                                     ("payload", I.PAYLOAD_LIMIT, "aggregate-payload-reservation"),
+                                     ("facts", I.WORKSPACE_LIMIT - 8 * I.MIB, "aggregate-workspace-reservation")):
+            budget = I.Arena(Original())
+            budget.reserve(kind, amount)
+            with self.subTest(compact_bound=kind), self.assertRaisesRegex(I.InspectionRefused, reason):
+                complete_fixture(tiny, budget)
+            self.assertTrue(budget.failed)
+            self.assertEqual(budget.held[kind], amount)
+            if kind != "rows":
+                self.assertEqual(budget.held["rows"], 0)
+            if kind != "payload":
+                self.assertEqual(budget.held["payload"], 0)
+            budget.release(kind, amount)
+            with self.assertRaisesRegex(I.InspectionRefused, "inspection-already-failed"):
+                budget.check()
+
+        for counter, required, bound, reason in (("reads", required_reads, I.READ_LIMIT, "aggregate-issued-read-bound"),
+                                                  ("expanded", required_expanded, I.EXPANDED_LIMIT,
+                                                   "aggregate-inner-expansion-bound")):
+            for over in (False, True):
+                budget = I.Arena(Original())
+                charge = budget.charge_read if counter == "reads" else budget.charge_expanded
+                before = bound - required + int(over)
+                charge(before)
+                if over:
+                    with self.subTest(counter=counter), self.assertRaisesRegex(I.InspectionRefused, reason):
+                        complete_fixture(tiny, budget)
+                    self.assertTrue(budget.failed)
+                    self.assertGreaterEqual(getattr(budget, counter), before)
+                    self.assertLessEqual(getattr(budget, counter), bound)
+                else:
+                    observed = complete_fixture(tiny, budget)
+                    self.assertEqual(getattr(budget, counter), bound)
+                    self.assertEqual(observed["enumerationSha256"], reference["enumerationSha256"])
+                    self.assertFalse(budget.failed)
+                self.assertEqual((budget.held["payload"], budget.held["rows"]), (0, 0))
+
+        # An original that expires during central admission cannot continue to
+        # native/payload observations or recover after known heap disposal.
+        class ExpiringCompactArena(I.Arena):
+            def charge_expanded(self, count):
+                super().charge_expanded(count)
+                self.original.expired = True
+        expired_owner = Original()
+        expired = ExpiringCompactArena(expired_owner)
+        with self.assertRaisesRegex(C.Refused, "original-endpoint"):
+            complete_fixture(tiny, expired)
+        self.assertTrue(expired.failed)
+        self.assertEqual((expired.held["payload"], expired.held["rows"]), (0, 0))
+        expired_owner.expired = False
+        with self.assertRaisesRegex(I.InspectionRefused, "inspection-already-failed"):
+            expired.check()
+
 
     def test_fixed_nomination_and_final_publication_never_recover_an_original_failure(self):
         parser_bytes = (_TOOLS / "macos_android_supplier_correspondence.py").read_bytes()

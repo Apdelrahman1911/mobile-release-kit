@@ -683,6 +683,38 @@ pub(crate) fn arm64_slice(prefix: &[u8], size: u64) -> Option<MachSlice> {
     native_slice(prefix, size, MachArchitecture::Arm64)
 }
 pub(crate) fn native_slice(prefix: &[u8], size: u64, architecture: MachArchitecture) -> Option<MachSlice> {
+    native_slice_table(prefix, size, architecture, false)
+}
+/// Exact embedded Bundletool JNA DATA selection, never original custody or a
+/// native grant. The caller must separately bind complete same-original archive
+/// and member hashes, then retain the normal header/loader/authority checks.
+/// Raw member mode0 is not the installed archive's0444 mode.
+pub(crate) fn bundletool_jna_slice(profile: Profile,
+    archive: &crate::android_native_macos_profile::ToolArchiveComparison<'_>,
+    member: &crate::android_native_macos_profile::ToolMemberComparison<'_>,
+    prefix: &[u8]) -> Option<MachSlice> {
+    const TABLE: [u8; 48] = [
+        0xca,0xfe,0xba,0xbe,0,0,0,2,0,0,0,7,0,0,0,3,
+        0,0,0x10,0,0,1,0x54,0xc8,0,0,0,0x0c,1,0,0,7,
+        0,0,0,3,0,1,0x70,0,0,1,0x52,0xc4,0,0,0,0x0c,
+    ];
+    if profile != Profile::MacX64
+        || (archive.component, archive.bytes, archive.sha256) != ("bundletool", BUNDLETOOL_BYTES, BUNDLETOOL_SHA)
+        || archive.containing_jar.is_some()
+        || (member.name, member.bytes, member.sha256, member.mode)
+            != ("com/sun/jna/darwin/libjnidispatch.jnilib", 180932,
+                "e8ad39879b107ed955388d29555ddbcff3ada41598780eef579246752dd96c75", 0)
+        || prefix.len() != 4096 || prefix.get(..TABLE.len()) != Some(TABLE.as_slice())
+        || !digest_matches(prefix, "6c8e81470d05a2abc4766e917906bff125f614b30d5e0038c19e64d50c70dac3") {
+        return None;
+    }
+    // The opaque i386 sibling is neither selected nor rewritten. All ordinary
+    // range/alignment/duplicate checks still run on the original FAT table.
+    let slice = native_slice_table(prefix, member.bytes, MachArchitecture::X86_64, true)?;
+    (slice == MachSlice { offset: 94208, size: 86724 }).then_some(slice)
+}
+fn native_slice_table(prefix: &[u8], size: u64, architecture: MachArchitecture,
+    exact_bundletool_jna: bool) -> Option<MachSlice> {
     const ARM64: u32 = 0x0100000c;
     const X64: u32 = 0x01000007;
     if size < 32 || prefix.len() < 8 { return None; }
@@ -699,7 +731,8 @@ pub(crate) fn native_slice(prefix: &[u8], size: u64, architecture: MachArchitect
     let mut selected = None; let mut ranges = Vec::new(); let mut seen = BTreeSet::new();
     for index in 0..count {
         let at = 8 + index*width; let cpu = be(at)?;
-        if !matches!(cpu, ARM64|X64) || !seen.insert(cpu) { return None; }
+        let exact_i386_sibling = exact_bundletool_jna && index == 0 && cpu == 7 && be(at+4)? == 3;
+        if (!matches!(cpu, ARM64|X64) && !exact_i386_sibling) || !seen.insert(cpu) { return None; }
         let u64be = |at:usize| prefix.get(at..at+8).and_then(|s|s.try_into().ok()).map(u64::from_be_bytes);
         let (offset, length, align) = if wide { (u64be(at+8)?, u64be(at+16)?, be(at+24)?) }
             else { (u64::from(be(at+8)?), u64::from(be(at+12)?), be(at+16)?) };
@@ -1052,6 +1085,76 @@ mod tests {
         let intel=native_slice(&thin,32,MachArchitecture::X86_64).unwrap();
         assert!(native_commands(&thin,intel,MachArchitecture::X86_64).is_some());
         assert!(macho_commands(&thin,intel).is_none());
+
+        use crate::android_native_macos_profile::{ToolArchiveComparison, ToolMemberComparison};
+        let archive = ToolArchiveComparison { component: "bundletool", bytes: BUNDLETOOL_BYTES,
+            sha256: BUNDLETOOL_SHA, containing_jar: None };
+        let member = ToolMemberComparison { name: "com/sun/jna/darwin/libjnidispatch.jnilib",
+            bytes: 180932, sha256: "e8ad39879b107ed955388d29555ddbcff3ada41598780eef579246752dd96c75", mode: 0 };
+        // Exact public observation14398d55: 48-byte table plus zero padding.
+        // This is a bounded DATA fixture, not a fabricated full member/hash.
+        let mut jna = vec![0; 4096];
+        word(&mut jna, 0, 0xcafebabe, true); word(&mut jna, 4, 2, true);
+        for (at, cpu, subtype, offset, size, align) in [
+            (8, 7, 3, 4096, 87240, 12), (28, 0x01000007, 3, 94208, 86724, 12),
+        ] {
+            for (relative, value) in [(0, cpu), (4, subtype), (8, offset), (12, size), (16, align)] {
+                word(&mut jna, at + relative, value, true);
+            }
+        }
+        assert_eq!(digest(&jna), "6c8e81470d05a2abc4766e917906bff125f614b30d5e0038c19e64d50c70dac3");
+        assert_eq!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &jna),
+            Some(MachSlice { offset: 94208, size: 86724 }));
+        for architecture in [MachArchitecture::Arm64, MachArchitecture::X86_64] {
+            assert!(native_slice(&jna, member.bytes, architecture).is_none());
+        }
+        for profile in [Profile::MacArm64, Profile::LinuxX64] {
+            assert!(bundletool_jna_slice(profile, &archive, &member, &jna).is_none());
+        }
+        let wrong_sha = "0".repeat(64);
+        for changed in [
+            ToolArchiveComparison { component: "gradle", ..archive },
+            ToolArchiveComparison { bytes: archive.bytes + 1, ..archive },
+            ToolArchiveComparison { sha256: &wrong_sha, ..archive },
+            ToolArchiveComparison { containing_jar: Some(member), ..archive },
+        ] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &changed, &member, &jna).is_none());
+        }
+        for changed in [
+            ToolMemberComparison { name: "libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { name: "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { name: "com/sun/jna/darwin/Libjnidispatch.jnilib", ..member },
+            ToolMemberComparison { bytes: member.bytes + 1, ..member },
+            ToolMemberComparison { sha256: &wrong_sha, ..member },
+            ToolMemberComparison { mode: 0o444, ..member },
+            ToolMemberComparison { mode: 0o100755, ..member },
+        ] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &changed, &jna).is_none());
+        }
+        for length in [0, 7, 47, 48, 4095] {
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &jna[..length]).is_none());
+        }
+        let mut extended = jna.clone(); extended.push(0);
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &extended).is_none());
+        let mut tail = jna.clone(); tail[4095] = 1;
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &tail).is_none());
+        // Even otherwise valid alternative FAT layouts are not this fixed
+        // original. Preserve magic, count, every subtype/extent/alignment and order.
+        for (at, value) in [
+            (0, 0xbebafeca), (0, 0xcafebabf), (4, 0), (4, 1), (4, 3), (4, 5),
+            (8, 0x0100000c), (8, 0x01000007), (8, 18), (12, 4),
+            (16, 32), (16, 4097), (20, 31), (20, u32::MAX), (24, 21),
+            (28, 7), (28, 0x0100000c), (32, 0), (32, 0x80000003),
+            (36, 90112), (36, 94209), (40, 31), (40, 86725), (44, 11), (44, 21),
+        ] {
+            let mut changed = jna.clone(); word(&mut changed, at, value, true);
+            assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &changed).is_none(),
+                "changed FAT word {at}/{value}");
+        }
+        let mut reordered = jna.clone();
+        reordered[8..28].copy_from_slice(&jna[28..48]);
+        reordered[28..48].copy_from_slice(&jna[8..28]);
+        assert!(bundletool_jna_slice(Profile::MacX64, &archive, &member, &reordered).is_none());
     }
     pub(super) fn lazy_load_paths_are_parsed_and_loader_environment_commands_refused_data() {
         let path=b"/usr/lib/libSystem.B.dylib";

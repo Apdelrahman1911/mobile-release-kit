@@ -541,7 +541,10 @@ def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count
     enumeration = hashlib.sha256()
     try:
         pin = parser.OpaqueZipPin(view._length, zip_sha256)
-        report = parser.compile_opaque_zip(view, pin, observer=observer, workspace=arena)
+        if complete:
+            report = parser.compile_opaque_zip(view, pin, observer=observer, workspace=arena, compact=True)
+        else:
+            report = parser.compile_opaque_zip(view, pin, observer=observer, workspace=arena)
         def consume(item):
             arena.check()
             fragment = json.dumps(item, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")
@@ -580,9 +583,33 @@ def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count
                     "enumerationSha256": enumeration.hexdigest(), "nativeMembers": [], "nestedArchives": [],
                     "nativeExecution": False, "supplierAuthority": False}
         return result
-    except BaseException:
+    except BaseException as error:
         arena.failed = True
-        raise
+        # Detached failure-only context. The caller completed and hashed this
+        # parent member BEFORE constructing this authenticated ZIP/JMOD view.
+        # Never discover locals or read another byte to explain a refusal.
+        if (type(error) is parser.Refused and len(error.args) == 1
+                and error.args[0] in ("expanded_member_bound", "zip_member_mode_or_creator")):
+            try:
+                detail = getattr(error, "_fixed_zip_diagnostic", None)
+                if type(detail) is dict and detail.get("contextsComplete") is True:
+                    detail["contextsComplete"] = False
+                    contexts = detail.get("containers")
+                    name_bytes = row[0].encode("utf-8")
+                    if type(contexts) is list and len(contexts) < 3 and 0 < len(name_bytes) <= 512:
+                        context = {"nameBytes": len(name_bytes), "nameHex": name_bytes.hex(),
+                            "bytes": row[3], "sha256": row[4], "mode": row[2],
+                            "zipViewOffset": 4 if jmod else 0, "zipViewBytes": view._length,
+                            "zipViewSha256": zip_sha256}
+                        if context not in contexts:  # Full fixed row, not only its name.
+                            contexts.append(context)
+                            detail["contextsComplete"] = True
+            except BaseException:
+                try:
+                    error._fixed_zip_diagnostic = None
+                except BaseException:
+                    pass
+        raise  # Same exception object/args, disposal and no fallback.
     finally:
         observer.dispose_current()
         view.dispose()

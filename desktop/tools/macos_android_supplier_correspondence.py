@@ -109,6 +109,128 @@ class Member:
                 self.target, self.local, self.data, self.compressed,
                 self.method, self.flags, self.crc, self.creator, self.hint)
 
+_COMPACT_FIELDS = struct.Struct("<5IHBBIBBB8s32s")
+_COMPACT_KINDS = ("file", "directory")
+_COMPACT_HINTS = (None, "shell", "macho", "fat-macho-or-java-class", "elf", "pe", "zip", "jmod")
+
+class _CompactMember:
+    """One opaque inner row, not a second ZIP parser or publication format.
+
+    All 71 numeric/presence/digest bytes and one shared Unicode name are retained.
+    Scalar/row/raw-name values below are transient. The existing verifier still
+    checks every central/local/CRC/hash/namespace predicate before terminal use.
+    """
+    __slots__ = ("name", "_packed")
+
+    def __init__(self, member: Member):
+        if (type(member) is not Member or member.kind not in _COMPACT_KINDS
+                or member.target is not None or member.data is not None
+                or member.sha256 is not None or member.hint is not None
+                or type(member.name) is not str or type(member.raw_name) is not bytes
+                or member.old_unix is not None and
+                    (type(member.old_unix) is not bytes or len(member.old_unix) != 8)):
+            _fail("compact_member_shape")
+        values = (member.mode, member.size, member.local, member.compressed)
+        if (any(not _integer(value) or value >= 0xffffffff for value in values)
+                or not _integer(member.crc) or member.crc > 0xffffffff
+                or not _integer(member.flags) or member.flags > 0xffff
+                or member.method not in (0, 8) or type(member.method) is not int
+                or member.creator not in (0, 3) or type(member.creator) is not int):
+            _fail("compact_member_shape")
+        raw = member.name.encode("utf-8") + (b"/" if member.kind == "directory" else b"")
+        if raw != member.raw_name:
+            _fail("compact_member_name_inverse")
+        self.name = member.name
+        self._packed = bytearray(_COMPACT_FIELDS.size)
+        presence = 4 | (2 if member.old_unix is not None else 0)
+        _COMPACT_FIELDS.pack_into(self._packed, 0, member.mode, member.size,
+            member.local, 0xffffffff, member.compressed, member.flags, member.method,
+            member.creator, member.crc, _COMPACT_KINDS.index(member.kind), presence,
+            0, member.old_unix if member.old_unix is not None else b"\0" * 8, b"\0" * 32)
+
+    @property
+    def kind(self):
+        return _COMPACT_KINDS[self._packed[28]]
+    @property
+    def mode(self):
+        return struct.unpack_from("<I", self._packed, 0)[0]
+    @property
+    def size(self):
+        return struct.unpack_from("<I", self._packed, 4)[0]
+    @property
+    def local(self):
+        return struct.unpack_from("<I", self._packed, 8)[0]
+    @property
+    def data(self):
+        value = struct.unpack_from("<I", self._packed, 12)[0]
+        return None if value == 0xffffffff else value
+    @data.setter
+    def data(self, value):
+        if not _integer(value) or value >= 0xffffffff:
+            _fail("compact_member_data")
+        struct.pack_into("<I", self._packed, 12, value)
+    @property
+    def compressed(self):
+        return struct.unpack_from("<I", self._packed, 16)[0]
+    @property
+    def flags(self):
+        return struct.unpack_from("<H", self._packed, 20)[0]
+    @property
+    def method(self):
+        return self._packed[22]
+    @property
+    def creator(self):
+        return self._packed[23]
+    @property
+    def crc(self):
+        return struct.unpack_from("<I", self._packed, 24)[0]
+    @property
+    def target(self):
+        return None
+    @property
+    def sha256(self):
+        return self._packed[39:71].hex() if self._packed[29] & 1 else None
+    @sha256.setter
+    def sha256(self, value):
+        if not _sha(value):
+            _fail("compact_member_sha256")
+        self._packed[39:71] = bytes.fromhex(value)
+        self._packed[29] |= 1
+    @property
+    def hint(self):
+        return _COMPACT_HINTS[self._packed[30]]
+    @hint.setter
+    def hint(self, value):
+        if (value is not None and type(value) is not str) or value not in _COMPACT_HINTS:
+            _fail("compact_member_hint")
+        self._packed[30] = _COMPACT_HINTS.index(value)
+    @property
+    def raw_name(self):
+        if not self._packed[29] & 4:
+            return None
+        return self.name.encode("utf-8") + (b"/" if self.kind == "directory" else b"")
+    @raw_name.setter
+    def raw_name(self, value):
+        if value is not None:
+            _fail("compact_member_raw_retirement")
+        self._packed[29] &= ~4
+    @property
+    def old_unix(self):
+        return bytes(self._packed[31:39]) if self._packed[29] & 2 else None
+    @old_unix.setter
+    def old_unix(self, value):
+        if value is not None:
+            _fail("compact_member_unix_retirement")
+        self._packed[29] &= ~2
+        self._packed[31:39] = b"\0" * 8
+
+    def row(self):
+        fields = _COMPACT_FIELDS.unpack(self._packed)
+        return (self.name, _COMPACT_KINDS[fields[9]], fields[0], fields[1],
+                fields[13].hex() if fields[10] & 1 else None, None, fields[2],
+                None if fields[3] == 0xffffffff else fields[3], fields[4], fields[6],
+                fields[5], fields[8], fields[7], _COMPACT_HINTS[fields[11]])
+
 def _fail(reason):
     raise Refused(reason)
 
@@ -195,7 +317,10 @@ def _hint(prefix: bytes):
 class _Pass:
     def __init__(self, original: Original, pin: Pin | OpaqueZipPin,
                  observer: MemberObserver | None = None,
-                 workspace: InspectionWorkspace | None = None):
+                 workspace: InspectionWorkspace | None = None, *, compact: bool = False):
+        if type(compact) is not bool or compact and type(pin) is not OpaqueZipPin:
+            _fail("opaque_zip_compact_mode")
+        self.compact = compact
         self.opaque = type(pin) is OpaqueZipPin
         if (type(pin) is not Pin and not self.opaque) \
             or type(pin) is Pin and pin.label not in LABELS or not _integer(pin.size) \
@@ -212,7 +337,7 @@ class _Pass:
         self.files = 0
         self.aliases = 0
         self.headers = 0
-        self.rows: list[Member] = []
+        self.rows: list[Member | _CompactMember] = []
         self.names: set[str] = set()
         self.failed = False
     def notify(self, operation, *values):
@@ -302,11 +427,18 @@ class _Pass:
         return name if self.opaque or self.pin.label == "bundletool" else name.lower()
     def member_name(self, raw, directory=False):
         return (_opaque_name if self.opaque else _name)(raw, directory=directory)
+    def row_charge(self, member):
+        # Only the complete opaque-inner route retains packed scalar/hash DATA.
+        # The fixed charge includes name indexes/sort growth; all decoded
+        # values are single-row temporaries under the existing scratch reserve.
+        if self.compact:
+            return 1024 + 4 * len(member.name.encode("utf-8"))
+        return 1536 + 8 * len(member.name) + 8 * len(member.target or "")
     def append(self, member: Member):
         self.check()
-        # Charged before set/list/row retention, includes allocator headroom,
-        # case key, raw name, sort index and every bounded row object.
-        charge = 1536 + 8 * len(member.name) + 8 * len(member.target or "")
+        # Charged before set/list/row retention, including the actual selected
+        # representation and its complete namespace/sort indexes.
+        charge = self.row_charge(member)
         if self.roster + charge > ROSTER_LIMIT or len(self.rows) >= ENTRY_LIMIT:
             _fail("roster_workspace_bound")
         key = self.name_key(member.name)
@@ -323,9 +455,52 @@ class _Pass:
                 self.workspace.charge_expanded(member.size)
         elif member.kind == "alias":
             self.aliases += 1
-        if self.files > FILE_COUNT or self.aliases > ALIAS_COUNT or self.expanded > EXPANDED_LIMIT:
-            _fail("expanded_member_bound")
-        self.rows.append(member)
+        file_limit = ENTRY_LIMIT if self.compact else FILE_COUNT
+        if self.files > file_limit or self.aliases > ALIAS_COUNT or self.expanded > EXPANDED_LIMIT:
+            try:
+                _fail("expanded_member_bound")
+            except Refused as error:
+                try:
+                    # Snapshot before failed-pass disposal changes reservations.
+                    # No further read, traversal or acceptance follows this branch.
+                    name = member.name.encode("utf-8")
+                    target = None if member.target is None else member.target.encode("utf-8")
+                    arena = None
+                    if self.workspace is not None:
+                        w = self.workspace
+                        categories = ("payload", "rows", "facts", "output", "other")
+                        arena = {"issuedReadBytes": w.reads, "innerExpandedBytes": w.expanded,
+                            "held": {k: w.held[k] for k in categories},
+                            "peaks": {k: w.peaks[k] for k in categories}, "peakBytes": w.peak,
+                            "limits": {"issuedReadBytes": 768 << 20, "innerExpandedBytes": 1 << 30,
+                                "payloadBytes": 64 << 20, "rowBytes": 48 << 20, "workspaceBytes": 128 << 20}}
+                    error._fixed_zip_diagnostic = {
+                        "schemaVersion": 1, "kind": "append-bound-metadata-v1",
+                        "reason": "expanded_member_bound", "contextsComplete": True,
+                        "zipView": {"bytes": self.pin.size, "sha256": self.pin.sha256, "opaque": self.opaque},
+                        "nameBytes": len(name), "nameHex": name.hex(),
+                        "nameSha256": hashlib.sha256(name).hexdigest(), "containers": [],
+                        "fields": {
+                            "member": {"kind": member.kind, "mode": member.mode, "bytes": member.size,
+                                "targetBytes": None if target is None else len(target),
+                                "targetHex": None if target is None else target.hex(),
+                                "compressedBytes": member.compressed, "localHeaderOffset": member.local,
+                                "flags": member.flags, "method": member.method, "crc32": member.crc,
+                                "creatorSystem": member.creator},
+                            "counters": {"rowsBefore": len(self.rows), "entryHeaders": self.headers,
+                                "files": self.files, "aliases": self.aliases, "expandedBytes": self.expanded,
+                                "rosterBytes": self.roster, "issuedReadBytes": self.issued, "chargedRowBytes": charge},
+                            "limits": {"files": file_limit, "aliases": ALIAS_COUNT, "expandedBytes": EXPANDED_LIMIT,
+                                "entries": ENTRY_LIMIT, "rosterBytes": ROSTER_LIMIT, "issuedReadBytes": ISSUED_READ_LIMIT,
+                                "fileBytes": FILE_LIMIT, "centralBytes": CENTRAL_LIMIT, "workspaceBytes": WORKSPACE_LIMIT},
+                            "exceeded": {"files": self.files > file_limit, "aliases": self.aliases > ALIAS_COUNT,
+                                "expandedBytes": self.expanded > EXPANDED_LIMIT},
+                            "central": None, "arena": arena,
+                            "failedMemberPayloadVerified": False, "laterCentralMembersVerified": False}}
+                except BaseException:
+                    pass  # An annotation error cannot replace the original refusal.
+                raise
+        self.rows.append(_CompactMember(member) if self.compact else member)
     def finish(self):
         self.check()
         # Directory and file/alias namespace may not collide or traverse a file.
@@ -399,7 +574,7 @@ class Correspondence:
             while p.rows:
                 p.check()
                 member = p.rows.pop()
-                charge = 1536 + 8 * len(member.name) + 8 * len(member.target or "")
+                charge = p.row_charge(member)
                 row = member.row()
                 del member
                 if charge > p.roster:
@@ -533,7 +708,7 @@ def _zip_directory(p: _Pass):
         or not 46 * count <= cd_size <= CENTRAL_LIMIT or cd_at + cd_size != end_at:
         _fail("zip_directory_extent_or_multidisk_zip64")
     offset = cd_at
-    for _ in range(count):
+    for member_ordinal in range(count):
         p.header()
         fixed = p.read(offset, 46)
         if fixed[:4] != b"PK\x01\x02":
@@ -555,13 +730,47 @@ def _zip_directory(p: _Pass):
         old_unix = _extra(variable_bytes[name_len:name_len + extra_len])
         creator = made >> 8
         mode = external >> 16
-        # A legacy JAR directory sentinel is inert metadata, not POSIX mode
-        # authority. Recognize only the exact empty encoding; retain raw bits.
-        opaque_directory = (p.opaque and creator == 3 and external == 0xffff0010
-                            and raw_name.endswith(b"/") and flags == 0 and method == 0
-                            and crc == compressed == size == 0)
+        # Two observed empty JAR directory encodings are inert DATA, never
+        # permission to materialize POSIX modes. Retain every raw mode bit.
+        opaque_directory = (p.opaque and creator == 3 and raw_name.endswith(b"/")
+                            and method == 0 and crc == compressed == size == 0
+                            and ((external == 0xffff0010 and flags == 0)
+                                 or (external == 0x45ed0010 and flags == 0x800)))
         if not opaque_directory and (creator not in (0, 3) or mode & ~0o170777):
-            _fail("zip_member_mode_or_creator")
+            try:
+                _fail("zip_member_mode_or_creator")
+            except Refused as error:
+                try:
+                    # Failure-only metadata from the SAME already-read header.
+                    # The raw name is not yet semantically admitted; no member
+                    # payload or later central member has been verified here.
+                    error._fixed_zip_diagnostic = {
+                        "schemaVersion": 1, "kind": "central-member-mode-metadata-v1",
+                        "reason": "zip_member_mode_or_creator", "contextsComplete": True,
+                        "zipView": {"bytes": p.pin.size, "sha256": p.pin.sha256, "opaque": p.opaque},
+                        "nameBytes": len(raw_name), "nameHex": raw_name.hex(),
+                        "nameSha256": hashlib.sha256(raw_name).hexdigest(), "containers": [],
+                        "fields": {
+                            "member": {"madeBy": made, "creatorSystem": creator,
+                                "externalAttributes": external, "rawMode": mode,
+                                "permittedModeMask": 0o170777,
+                                "unsupportedModeBits": mode & ~0o170777,
+                                "creatorAllowed": creator in (0, 3),
+                                "trailingSlash": raw_name.endswith(b"/"),
+                                "opaqueDirectoryExemption": opaque_directory,
+                                "flags": flags, "method": method, "crc32": crc,
+                                "compressedBytes": compressed, "bytes": size,
+                                "localHeaderOffset": local},
+                            "central": {"ordinal": member_ordinal, "entryCount": count,
+                                "centralOffset": offset, "centralDirectoryOffset": cd_at,
+                                "centralDirectoryBytes": cd_size, "centralEndOffset": end_at,
+                                "centralHeaderSha256": hashlib.sha256(fixed).hexdigest()},
+                            "semanticMemberNameAdmitted": False,
+                            "failedMemberPayloadVerified": False,
+                            "laterCentralMembersVerified": False}}
+                except BaseException:
+                    pass  # Losing optional metadata cannot replace this refusal.
+                raise
         file_type = mode & 0o170000
         directory = raw_name.endswith(b"/")
         if not opaque_directory and (file_type not in (0, 0o040000, 0o100000)
@@ -574,7 +783,22 @@ def _zip_directory(p: _Pass):
                      local=local, compressed=compressed, method=method,
                      flags=flags, crc=crc, creator=creator, raw_name=raw_name,
                      old_unix=old_unix)
-        p.append(row)
+        try:
+            p.append(row)
+        except Refused as error:
+            if type(error) is Refused and error.args == ("expanded_member_bound",):
+                try:
+                    detail = getattr(error, "_fixed_zip_diagnostic", None)
+                    if type(detail) is dict:
+                        detail["contextsComplete"] = False
+                        detail["fields"]["central"] = {
+                            "ordinal": member_ordinal, "entryCount": count, "centralOffset": offset,
+                            "centralDirectoryOffset": cd_at, "centralDirectoryBytes": cd_size,
+                            "centralEndOffset": end_at, "centralHeaderSha256": hashlib.sha256(fixed).hexdigest()}
+                        detail["contextsComplete"] = True
+                except BaseException:
+                    pass
+            raise
         offset += 46 + variable
     if offset != cd_at + cd_size:
         _fail("zip_central_count_mismatch")
@@ -963,7 +1187,8 @@ def compile_archive(original: Original, pin: Pin, *,
 
 def compile_opaque_zip(original: Original, pin: OpaqueZipPin, *,
                        observer: MemberObserver | None = None,
-                       workspace: InspectionWorkspace | None = None) -> Correspondence:
+                       workspace: InspectionWorkspace | None = None,
+                       compact: bool = False) -> Correspondence:
     """Inspect one already-bounded JVM ZIP view as DATA, never a supplier.
 
     The caller authenticates a JMOD's complete preamble/member and supplies the
@@ -972,7 +1197,7 @@ def compile_opaque_zip(original: Original, pin: OpaqueZipPin, *,
     """
     if type(pin) is not OpaqueZipPin:
         _fail("opaque_zip_pin")
-    p = _Pass(original, pin, observer, workspace)
+    p = _Pass(original, pin, observer, workspace, compact=compact)
     try:
         p.authenticate()
         _zip(p)

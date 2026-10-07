@@ -63,6 +63,25 @@ def mac_context(target="aarch64-apple-darwin", mode="full4"):
                            "execution": "compile-only"}}
 
 
+def engineering_environment():
+    value = mac_environment()
+    value.pop("MRK_COMPILE_SELECTION")
+    value.pop("MRK_MACOS_COMPILE_MODE")
+    value.update(GITHUB_REF=helper.ENGINEERING_COMPILE_REF,
+                 GITHUB_WORKFLOW_REF=f"fictional/project/{helper.ENGINEERING_COMPILE_WORKFLOW}@{helper.ENGINEERING_COMPILE_REF}",
+                 MRK_DESKTOP_HOSTED_CHECKS=helper.ENGINEERING_COMPILE_SCOPE,
+                 MRK_MACOS_WORK="/inert/tmp/mrk-macos-engineering-ui.ABCdef12")
+    return value
+
+
+def engineering_context():
+    env = engineering_environment()
+    return {**helper.compile_workflow_binding(env, helper.ENGINEERING_COMPILE_SCOPE),
+            "root": "/inert/tmp/mrk-desktop-foundation-original", "source": "/inert/source", "git": "/usr/bin/git",
+            "platform": "macos", "sourceTree": "3" * 40, "workflowSha256": "2" * 64,
+            "executionScope": helper.ENGINEERING_COMPILE_SCOPE, "engineeringWork": env["MRK_MACOS_WORK"]}
+
+
 # Independent SOURCE expectations, not copied from the production tuple map.
 # These are synthetic probe/receipt DATA; only a later real -vV can qualify it.
 MAC_RUST_EXPECTED = {
@@ -134,6 +153,26 @@ class ShellCompileContractTests(unittest.TestCase):
                     helper.mac_compile_target({**env, key: bad})
         self.assertEqual(helper.RUST, "1.98.0")
         self.assertEqual(helper.TARGETS["macos"], "aarch64-apple-darwin")
+
+        # The new lane compiles one real main binary; it cannot invoke any UI,
+        # native fixture, installed, or writer phase through this compiler API.
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no compiler selection")):
+            for phase in ("native", "engineering-main-test", "windows-snapshot", "workflow-owner", "config-owner", "unknown"):
+                with self.subTest(engineering_phase=phase), self.assertRaises(helper.CheckFailure):
+                    helper.phase(phase, "macos", helper.ENGINEERING_COMPILE_SCOPE)
+            for platform in ("linux", "windows", "unknown"):
+                for phase in helper.COMPILE_PHASES:
+                    with self.subTest(engineering_platform=platform, phase=phase), self.assertRaises(helper.CheckFailure):
+                        helper.phase(phase, platform, helper.ENGINEERING_COMPILE_SCOPE)
+        for phase in helper.COMPILE_PHASES:
+            helper.admit_phase(helper.ENGINEERING_COMPILE_SCOPE, phase)
+        self.assertEqual(helper.ENGINEERING_COMPILE_FEATURES, "desktop-shell,custom-protocol,development-runtime")
+        self.assertEqual(helper.ENGINEERING_APP_IDENTIFIER, "dev.mobile-release-kit.engineering-ui")
+        self.assertEqual(helper.ENGINEERING_COMPILE_TARGET, "aarch64-apple-darwin")
+        self.assertEqual(helper.compiler_binding(engineering_context()), MAC_RUST_EXPECTED["aarch64-apple-darwin"])
+        with self.assertRaises(helper.CheckFailure):
+            helper.compiler_binding({**engineering_context(), "platform": "linux"})
 
     def test_compile_binding_requires_actual_fixed_workflow_ref_source_and_attempt(self):
         original = environment()
@@ -304,6 +343,40 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn("        if: success()\n", cleanup)
         self.assertIn("ci_foundation.py clean'", cleanup)
 
+        engineering = engineering_environment()
+        selected = helper.compile_workflow_binding(engineering, helper.ENGINEERING_COMPILE_SCOPE)
+        self.assertEqual(selected["workflowPath"], ".github/workflows/desktop-macos-engineering-ui.yml")
+        for key, bad in (("GITHUB_REF", helper.MAC_COMPILE_REF), ("GITHUB_WORKFLOW_SHA", "f" * 40),
+                         ("GITHUB_WORKFLOW_REF", environment()["GITHUB_WORKFLOW_REF"]),
+                         ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "0"),
+                         ("GITHUB_EVENT_NAME", "workflow_dispatch")):
+            with self.subTest(engineering_binding=key), self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**engineering, key: bad, "MRK_EXPECTED_SHA": "1" * 40}, helper.ENGINEERING_COMPILE_SCOPE)
+        # Actual new workflow source is also nominated, not a synthetic manifest.
+        engineering_workflow = (HELPER.parents[2] / helper.ENGINEERING_COMPILE_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn("branches: [verify/desktop-macos-engineering-ui]", engineering_workflow)
+        self.assertIn("environment: macos-engineering", engineering_workflow)
+        self.assertIn("runs-on: macos-26", engineering_workflow)
+        self.assertIn("MRK_DESKTOP_HOSTED_CHECKS: macos-engineering-ui-compile-v1", engineering_workflow)
+        self.assertNotIn("secrets.", engineering_workflow)
+        self.assertNotIn("macos-26-intel", engineering_workflow)
+        self.assertNotIn("--configured-signing", engineering_workflow)
+        self.assertNotIn("workflow_dispatch:", engineering_workflow)
+        upload = engineering_workflow.split("      - name: Retain only bounded compiler and engineering evidence", 1)[1].split("      - name: Dispose only", 1)[0]
+        self.assertNotIn("*.stdout", upload)
+        self.assertNotIn("*.stderr", upload)
+        self.assertIn("/normal-ui/engineering-smoke.json", upload)
+        self.assertIn("/normal-ui/engineering-summary.status", upload)
+        self.assertNotIn("/normal-ui/*", upload)
+        self.assertEqual(engineering_workflow.count('--work "$MRK_MACOS_WORK"'), 3)
+        self.assertIn('--expected-source "$MRK_CURRENT_SOURCE" --expected-manifest "$MRK_CURRENT_MANIFEST"', engineering_workflow)
+        self.assertIn("set -o noclobber", engineering_workflow)
+        self.assertEqual(engineering_workflow.count("ci_foundation.py compile'"), 1)
+        self.assertIn("--engineering-main-test", engineering_workflow)
+        self.assertIn("--engineering-main-summary", engineering_workflow)
+        self.assertIn("engineering-summary.status", engineering_workflow)
+        self.assertLess(engineering_workflow.index("--engineering-main-summary"), engineering_workflow.index("ci_foundation.py clean'"))
+
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
             original = receipt(phase)
@@ -429,6 +502,233 @@ class ShellCompileContractTests(unittest.TestCase):
         normal_only["graphs"] = normal_only["graphs"][1:]
         with self.assertRaises(helper.CheckFailure):
             helper.validate_compile_receipt(value, {**full, "macCompile": normal_only}, "compile")
+
+        # Reuse the actual direct Mac tools and phase receipt code with local
+        # original-command doubles. No rustup discovery/install or libtest is
+        # performed by this fixed main-only profile; old profiles above persist.
+        bound = engineering_context()
+        expected_checks = {
+            "acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata", "node-version", "npm-locked-no-scripts"),
+            "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
+        }
+        self.assertEqual(helper.ENGINEERING_COMPILE_CHECKS, expected_checks)
+        for phase, checks in expected_checks.items():
+            calls, events, published, discovered = [], [], [], []
+            MemoryPath, _ = memory_paths(events)
+            def original_call(argv, **kwargs):
+                calls.append((list(map(str, argv)), {**kwargs, "env": dict(kwargs["env"])}))
+                if kwargs["check"] == "rust-version-target":
+                    return "rustc 1.98.1\nrelease: 1.98.1\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\nhost: aarch64-apple-darwin\n"
+                if kwargs["check"] == "mac-cargo-version":
+                    return "cargo 1.98.1 (abcdef123 2026-09-01)"
+                if kwargs["check"] == "node-version":
+                    return "v24.20.0"
+                return ""
+            def selected_tool(name):
+                discovered.append(name)
+                self.assertEqual(name, "node")
+                return "/selected/bin/node"
+            with patch.object(helper, "Path", MemoryPath), patch.object(helper, "load_context", return_value=bound), \
+                    patch.object(helper, "copy_engineering_main", return_value={"relativePath": "target/engineering-main/mobile-release-kit-desktop", "bytes": 32, "sha256": "4" * 64}), \
+                    patch.object(helper, "source_unchanged"), patch.object(helper, "ordinary"), \
+                    patch.object(helper, "no_cargo_configuration"), patch.object(helper, "run", side_effect=original_call), \
+                    patch.object(helper.shutil, "which", side_effect=selected_tool), \
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin"}, clear=True), \
+                    patch.object(helper, "write_json", side_effect=lambda path, value: published.append((str(path), deepcopy(value)))):
+                helper.phase(phase, "macos", helper.ENGINEERING_COMPILE_SCOPE)
+            self.assertEqual([row[1]["check"] for row in calls], list(checks))
+            self.assertEqual(discovered, ["node"])
+            self.assertEqual(len(published), 1)
+            value = published[0][1]
+            self.assertEqual(value["scope"], "desktop-macos-engineering-ui-compile-only-v1")
+            self.assertEqual(value["engineeringWork"], bound["engineeringWork"])
+            self.assertEqual(value["sourceTree"], bound["sourceTree"])
+            self.assertEqual(value["rust"], MAC_RUST_EXPECTED["aarch64-apple-darwin"])
+            self.assertEqual(helper.validate_compile_receipt(value, bound, phase), value)
+            for key, bad in (("scope", helper.COMPILE_EVIDENCE_SCOPE), ("engineeringWork", "/foreign/work"),
+                             ("sourceTree", "f" * 40), ("checks", value["checks"][:-1]),
+                             ("rust", MAC_RUST_EXPECTED["x86_64-apple-darwin"])):
+                with self.subTest(engineering_receipt=key, phase=phase), self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt({**value, key: bad}, bound, phase)
+            cargo_commands = [row for row in calls if row[0][0].endswith("/cargo") and row[1]["check"] != "mac-cargo-version"]
+            self.assertEqual(len(cargo_commands), 1)
+            argv, kwargs = cargo_commands[0]
+            self.assertTrue(argv[0].startswith("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/"))
+            self.assertIn("--locked", argv)
+            self.assertEqual(argv[argv.index("--features") + 1], "desktop-shell,custom-protocol,development-runtime")
+            self.assertEqual(kwargs["env"]["RUSTUP_AUTO_INSTALL"], "0")
+            self.assertEqual(kwargs["env"]["TAURI_CONFIG"], '{"identifier":"dev.mobile-release-kit.engineering-ui"}')
+            self.assertNotIn("test", argv)
+            if phase == "compile":
+                self.assertIn("--offline", argv)
+                self.assertEqual(argv[argv.index("--bin") + 1], "mobile-release-kit-desktop")
+                self.assertEqual(kwargs["timeout"], 1500)
+            self.assertTrue(all(not any("rustup" == part for part in row[0]) for row in calls))
+
+        # Exercise the real streaming copy with in-memory original descriptors.
+        # Cargo's primary has TWO links, but the newly published file must have
+        # exactly one. No host path/open/write or binary execution occurs here.
+        OriginalOS = helper.os
+        class CopyOS:
+            def __init__(self, fault):
+                self.fault, self.nodes, self.fds, self.opened, self.closed = fault, {}, {}, [], []
+                self.writes = 0
+                self.next_fd = 100
+                for flag in ("O_RDONLY", "O_RDWR", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC", "O_CREAT", "O_EXCL"):
+                    setattr(self, flag, getattr(OriginalOS, flag))
+                root = PurePosixPath(bound["root"])
+                for path in (root, root / "target", root / "target/aarch64-apple-darwin", root / "target/aarch64-apple-darwin/debug"):
+                    self.add(str(path), 0o40700)
+                self.source = str(root / "target/aarch64-apple-darwin/debug/mobile-release-kit-desktop")
+                self.output = str(root / "target/engineering-main/mobile-release-kit-desktop")
+                self.add(self.source, 0o100755, b"actual compiled main fixture bytes", links=2)
+                if fault == "source-symlink":
+                    self.nodes[self.source]["mode"] = 0o120777
+            def add(self, path, mode, body=b"", links=1):
+                self.nodes[path] = {"mode": mode, "body": bytearray(body), "links": links, "ino": len(self.nodes) + 10}
+            def get(self, path, dir_fd=None):
+                return str(PurePosixPath(self.fds[dir_fd]) / str(path)) if dir_fd is not None else str(path)
+            def geteuid(self):
+                return 501
+            def open(self, path, flags, mode=0o777, *, dir_fd=None):
+                name = self.get(path, dir_fd)
+                if flags & self.O_CREAT:
+                    if name in self.nodes:
+                        raise FileExistsError("exclusive fixture output")
+                    self.add(name, 0o100000 | mode)
+                node = self.nodes[name]
+                if node["mode"] & 0o170000 == 0o120000:
+                    raise OSError("no-follow fixture")
+                if flags & self.O_DIRECTORY:
+                    self.assert_directory(node)
+                fd = self.next_fd
+                self.next_fd += 1
+                self.fds[fd] = name
+                self.opened.append(fd)
+                return fd
+            def assert_directory(self, node):
+                if node["mode"] & 0o170000 != 0o40000:
+                    raise OSError("directory fixture")
+            def mkdir(self, path, mode, *, dir_fd=None):
+                name = self.get(path, dir_fd)
+                if name in self.nodes:
+                    raise FileExistsError("directory exists")
+                self.add(name, 0o40000 | mode)
+            def details(self, name):
+                node = self.nodes[name]
+                class Details:
+                    pass
+                value = Details()
+                values = dict(st_dev=1, st_ino=node["ino"], st_mode=node["mode"], st_uid=501, st_gid=20,
+                              st_nlink=node["links"], st_size=len(node["body"]), st_mtime_ns=1, st_ctime_ns=1)
+                if name == self.source and self.fault == "oversized":
+                    values["st_size"] = 256 * 1024 * 1024 + 1
+                if name == self.source and self.fault == "original-changed" and self.writes:
+                    values["st_mtime_ns"] = 2
+                if name == self.output and self.fault == "copy-hardlink":
+                    values["st_nlink"] = 2
+                for key, item in values.items():
+                    setattr(value, key, item)
+                return value
+            def fstat(self, fd):
+                return self.details(self.fds[fd])
+            def stat(self, path, *, dir_fd=None, follow_symlinks=True):
+                if follow_symlinks:
+                    raise AssertionError("copy must not follow names")
+                return self.details(self.get(path, dir_fd))
+            def pread(self, fd, size, offset):
+                name = self.fds[fd]
+                body = bytes(self.nodes[name]["body"])
+                if name == self.source and self.fault == "early-eof":
+                    body = body[:-1]
+                if name == self.output and self.fault == "readback-changed":
+                    body = b"!" + body[1:]
+                return body[offset:offset + size]
+            def write(self, fd, body):
+                if self.fault == "write-zero":
+                    return 0
+                size = min(len(body), 3)  # Real code must complete partial writes.
+                self.nodes[self.fds[fd]]["body"].extend(body[:size])
+                self.writes += 1
+                return size
+            def fsync(self, fd):
+                if self.fault == "fsync-failed":
+                    raise OSError("fixture fsync")
+            def close(self, fd):
+                name = self.fds.pop(fd)
+                self.closed.append(fd)
+                if self.fault == "close-failed" and name == self.source:
+                    raise OSError("consumed fixture close")
+        for fault in (None, "source-symlink", "oversized", "original-changed", "copy-hardlink",
+                      "early-eof", "readback-changed", "write-zero", "fsync-failed", "close-failed", "timeout", "late-close"):
+            original = CopyOS(fault)
+            class Clock:
+                calls = 0
+                def monotonic(self):
+                    self.calls += 1
+                    return (31 if fault == "timeout" and self.calls > 1
+                            or fault == "late-close" and original.opened and len(original.closed) == len(original.opened) else 0)
+            with self.subTest(copy_fault=fault), patch.object(helper, "os", original), patch.object(helper, "time", Clock()):
+                if fault is None:
+                    copied = helper.copy_engineering_main(bound)
+                    self.assertEqual(copied, {"relativePath": "target/engineering-main/mobile-release-kit-desktop",
+                        "bytes": 34, "sha256": helper.hashlib.sha256(b"actual compiled main fixture bytes").hexdigest()})
+                    self.assertEqual(bytes(original.nodes[original.output]["body"]), b"actual compiled main fixture bytes")
+                    self.assertEqual(original.nodes[original.source]["links"], 2)
+                    self.assertEqual(original.nodes[original.output]["links"], 1)
+                    self.assertGreater(original.writes, 1)
+                else:
+                    with self.assertRaises((helper.CheckFailure, OSError)):
+                        helper.copy_engineering_main(bound)
+            self.assertEqual(original.fds, {})
+            self.assertEqual(sorted(original.closed), sorted(original.opened))
+            self.assertEqual(len(original.closed), len(set(original.closed)))
+        self.assertIs(helper.os, OriginalOS)
+        for bad in ({"relativePath": "target/debug/foreign", "bytes": 1, "sha256": "4" * 64},
+                    {"relativePath": helper.ENGINEERING_MAIN_RELATIVE, "bytes": True, "sha256": "4" * 64},
+                    {"relativePath": helper.ENGINEERING_MAIN_RELATIVE, "bytes": 256 * 1024 * 1024 + 1, "sha256": "4" * 64},
+                    {"relativePath": helper.ENGINEERING_MAIN_RELATIVE, "bytes": 1, "sha256": "0" * 64}):
+            with self.subTest(copy_receipt=bad), self.assertRaises(helper.CheckFailure):
+                helper.validate_engineering_main(bad)
+
+        # Exact completion DATA is separate from mere compile receipts. A
+        # missing/nonzero/unknown UI original cannot authorize even first delete.
+        digests = {key: "a" * 64 for key in ("compilerReceiptSha256", "runtimeResultSha256", "runtimeManifestSha256",
+            "testAdmissionSha256", "summaryAdmissionSha256", "nativeSummarySha256")}
+        completed = {"schemaVersion": 1, "scope": "engineering-main-ui-smoke-only", "status": "passed",
+            **{key: bound[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
+                                         "workflowSha256", "runId", "attempt", "engineeringWork")},
+            "compilerRoot": bound["root"], "target": "aarch64-apple-darwin", **digests,
+            "compilerBinarySha256": "4" * 64, "runtimeRosterSha256": "b" * 64, "applicationRosterSha256": "c" * 64,
+            "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testEngineeringMainCatalogueAndQuit",
+            "testCounts": {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0},
+            "sameOriginalNormalQuitObserved": True, "cleanExitStatus": None, "allWorkerFinality": "not-established",
+            "fullUIQualified": False, "productReady": False, "sourcePrePostMatched": True, "inputPrePostMatched": True,
+            "inputOriginalClosesCompleted": True, "generatedRunnerOriginalClosesCompleted": True,
+            "originalCommandsReturned": True, "originalWrapperZeroRequired": True}
+        compiled = {"compiledMain": {"relativePath": "target/engineering-main/mobile-release-kit-desktop", "bytes": 32, "sha256": "4" * 64}}
+        self.assertEqual(len(completed), 36)
+        self.assertIs(helper.validate_engineering_cleanup(completed, bound, compiled, digests), completed)
+        for key, bad in (("sourceSha", "f" * 40), ("sourceTree", "e" * 40), ("runId", "456"), ("attempt", "3"),
+                         ("compilerRoot", "/foreign/root"), ("engineeringWork", "/foreign/work"),
+                         ("target", "x86_64-apple-darwin"), ("sameOriginalNormalQuitObserved", False),
+                         ("inputOriginalClosesCompleted", False), ("generatedRunnerOriginalClosesCompleted", False),
+                         ("sourcePrePostMatched", False), ("inputPrePostMatched", False), ("originalCommandsReturned", False),
+                         ("originalWrapperZeroRequired", False), ("cleanExitStatus", 0), ("allWorkerFinality", "known"),
+                         ("fullUIQualified", True), ("productReady", True), ("compilerBinarySha256", "5" * 64),
+                         ("compilerReceiptSha256", "6" * 64), ("runtimeResultSha256", "7" * 64),
+                         ("nativeSummarySha256", "8" * 64), ("unexpected", True)):
+            with self.subTest(cleanup_field=key), self.assertRaises(helper.CheckFailure):
+                helper.validate_engineering_cleanup({**completed, key: bad}, bound, compiled, digests)
+        for counts in ({**completed["testCounts"], "skippedTests": 1}, {**completed["testCounts"], "totalTestCount": 2},
+                       {**completed["testCounts"], "passedTests": True}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_engineering_cleanup({**completed, "testCounts": counts}, bound, compiled, digests)
+        with patch.object(helper, "engineering_cleanup", side_effect=helper.CheckFailure("unknown UI original")) as terminal, \
+                patch.object(helper.shutil, "rmtree", side_effect=AssertionError("must not delete before positive UI")):
+            with self.assertRaises(helper.CheckFailure):
+                helper.clean_compile(bound)
+            terminal.assert_called_once_with(bound)
 
 
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):

@@ -153,6 +153,7 @@ final class NormalAppUITests: XCTestCase {
         static let outerURL = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app", isDirectory: true)
         static let payloadURL = outerURL.appendingPathComponent("Contents/Helpers/MobileReleaseKitPayload.app", isDirectory: true)
         private let clock: CaseClock
+        private let profile: LaunchProfile
         private let reply = LaunchReply()
         private var original: NSRunningApplication?
         private var requested = false
@@ -167,7 +168,10 @@ final class NormalAppUITests: XCTestCase {
         private var forceReturned: Bool?
         private var cleanupTerminationObserved = false
 
-        init(clock: CaseClock) { self.clock = clock }
+        init(clock: CaseClock, profile: LaunchProfile = .ordinary) {
+            self.clock = clock
+            self.profile = profile
+        }
 
         private func handoff() {
             handoffs = min(2, handoffs + 1)
@@ -211,13 +215,24 @@ final class NormalAppUITests: XCTestCase {
             _ = try clock.remaining(1)
         }
         private func payloadIdentity() throws -> NSRunningApplication {
-            guard let original,
-                  original.bundleURL?.path == Self.payloadURL.path,
-                  original.executableURL?.path == Self.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,
-                  original.bundleIdentifier == "dev.mobile-release-kit.desktop" else {
-                throw clock.fail("original running reference is not the fixed payload")
+            switch profile {
+            case .ordinary:
+                guard let original,
+                      original.bundleURL?.path == Self.payloadURL.path,
+                      original.executableURL?.path == Self.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,
+                      original.bundleIdentifier == "dev.mobile-release-kit.desktop" else {
+                    throw clock.fail("original running reference is not the fixed payload")
+                }
+                return original
+            case .engineeringMain(let work):
+                let app = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)
+                guard let original, original.bundleURL?.path == app.path,
+                      original.executableURL?.path == app.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,
+                      original.bundleIdentifier == "dev.mobile-release-kit.engineering-ui" else {
+                    throw clock.fail("original running reference is not the fixed engineering main")
+                }
+                return original
             }
-            return original
         }
 
         func requestAndAwait() throws {
@@ -230,11 +245,25 @@ final class NormalAppUITests: XCTestCase {
             configuration.allowsRunningApplicationSubstitution = false
             configuration.promptsUserIfNeeded = false
             configuration.arguments = []
-            // No environment override: the unchanged ordinary entry derives its
-            // own eight-entry environment and inherits the original gate once.
+            let requestURL: URL
+            switch profile {
+            case .ordinary:
+                // No environment override: the unchanged ordinary entry derives its
+                // own eight-entry environment and inherits the original gate once.
+                requestURL = Self.outerURL
+            case .engineeringMain(let work):
+                requestURL = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)
+                configuration.environment = [
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner",
+                    "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",
+                    "TMPDIR": work.appendingPathComponent("normal-ui/tmp", isDirectory: true).path + "/",
+                    "MRK_DESKTOP_DEV_PYTHON": work.appendingPathComponent("runtime/python/bin/python3").path,
+                    "MRK_DESKTOP_DEV_CORE": work.appendingPathComponent("runtime/core.zip").path,
+                ]
+            }
             requested = true
             let mailbox = reply
-            NSWorkspace.shared.openApplication(at: Self.outerURL, configuration: configuration) { [self, mailbox] application, error in
+            NSWorkspace.shared.openApplication(at: requestURL, configuration: configuration) { [self, mailbox] application, error in
                 let ticket = mailbox.enter()
                 mailbox.body(ticket, application: application, failed: error != nil)
                 DispatchQueue.main.async { self.handoff() }
@@ -343,8 +372,9 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
         _ = try remaining(15)
         guard let clock = caseClock else { throw Refusal.condition("original case clock missing") }
-        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved,
-                    "a new ordinary launch requires empty active custody")
+        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved
+                    && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
+                    "a new ordinary launch requires empty active custody and no engineering profile")
         let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
         let monitor = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         try require(outer.state == .notRunning && monitor.state == .notRunning,
@@ -711,6 +741,133 @@ final class NormalAppUITests: XCTestCase {
         // native buffer. Foundation's sandbox home is not account authority.
         return HostedAccount(name: "runner", home: "/Users/runner")
     }
+
+    // Engineering main only: actual embedded UI and current-core reference data.
+    // This never acquires the installed entry gate or any project/write permit.
+    private enum LaunchProfile {
+        case ordinary
+        case engineeringMain(work: URL)
+    }
+
+    @MainActor private func engineeringWork() throws -> URL {
+        #if !arch(arm64)
+        throw Refusal.condition("engineering main fixture is ARM-only")
+        #else
+        _ = try admitHostedAccount() // The existing sameBuild SOURCE profile stays intact.
+        let value = ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] ?? ""
+        let prefix = "/Users/runner/work/_temp/mrk-macos-engineering-ui."
+        let suffix = value.hasPrefix(prefix) ? String(value.dropFirst(prefix.count)) : ""
+        let alphabet = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+        try require(suffix.utf8.count == 8 && suffix.unicodeScalars.allSatisfy(alphabet.contains),
+                    "engineering main work binding is not the fixed fresh family")
+        let work = URL(fileURLWithPath: value, isDirectory: true)
+        try require(work.path == value && work.standardizedFileURL.path == value,
+                    "engineering main work binding is not canonical")
+        return work
+        #endif
+    }
+
+    @MainActor private func launchEngineeringMain(work: URL) throws -> XCUIApplication {
+        guard let clock = caseClock else { throw Refusal.condition("original engineering case clock missing") }
+        try require(originalLaunch == nil && entryGateObservation == nil && completedPersistenceLifetime == nil && !normalQuitObserved,
+                    "engineering launch requires empty original custody")
+        let url = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)
+        let monitor = XCUIApplication(url: url)
+        // Read-only occupancy checks confer no cleanup or adoption authority.
+        try require(monitor.state == .notRunning
+                    && NSRunningApplication.runningApplications(withBundleIdentifier: "dev.mobile-release-kit.engineering-ui").isEmpty
+                    && !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleURL?.path == url.path }),
+                    "occupied engineering fixture must not be launched, adopted or terminated")
+        let owner = OrdinaryLaunch(clock: clock, profile: .engineeringMain(work: work))
+        originalLaunch = owner // SAME first-reference owner before the one fallible request.
+        try owner.requestAndAwait()
+        try owner.healthy()
+        return monitor // Monitoring/clicks only; it never creates or replaces the original.
+    }
+
+    @MainActor private func engineeringDashboard(_ renderer: XCUIElement) throws {
+        let heading = renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here."))
+        _ = try waitElement(heading, in: renderer)
+        _ = try unique(renderer.staticTexts.matching(identifier: "Select a project to see its configuration and discover static build hints."),
+                       "engineering smoke unexpectedly selected a project")
+        let open = try unique(renderer.buttons.matching(identifier: "Open project folder"), "engineering dashboard project control differs")
+        let choose = try unique(renderer.buttons.matching(identifier: "Choose a project"), "engineering dashboard selection control differs")
+        try require(!open.isEnabled && !choose.isEnabled,
+                    "engineering smoke must not enable Mac development project or writer admission")
+        try engineeringNoFallback(renderer)
+    }
+
+    @MainActor private func engineeringNoFallback(_ renderer: XCUIElement) throws {
+        for message in ["BROWSER PREVIEW — EXAMPLE DATA ONLY", "Loading desktop capabilities and the core field catalogue…",
+                        "The native service is unavailable", "The field catalogue could not be loaded",
+                        "The guided asset catalogue is unavailable", "The engine is disabled", "Bundled engine unavailable"] {
+            try require(renderer.staticTexts.matching(identifier: message).count == 0,
+                        "engineering UI has a loading, unavailable or example substitute")
+        }
+    }
+
+    @MainActor
+    func testEngineeringMainCatalogueAndQuit() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 60
+        try beginCase(seconds: 60) // Includes original host/source/input admission.
+        let work = try engineeringWork()
+        let app = try launchEngineeringMain(work: work)
+        try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "engineering main did not enter foreground")
+        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "engineering main window missing")
+        let window = try unique(app.windows, "engineering main window ambiguous")
+        try require(window.isHittable, "engineering main window unusable")
+        let renderers = window.webViews
+        let initial = renderers.count
+        try require(initial <= 1, "engineering first-party renderer ambiguous")
+        if initial == 0 {
+            try require(renderers.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "engineering renderer missing")
+        }
+        let renderer = try unique(renderers, "engineering renderer missing or ambiguous")
+        // Wait on actual current-core guide data below, not a static UI heading.
+        // Initial loading may settle; no retry/second app or fallback is allowed.
+        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here.")), in: renderer)
+        try click(renderer.buttons.matching(identifier: "Credentials"), "engineering Credentials navigation unavailable")
+        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Private by design.")), in: renderer)
+        let guide = try waitElement(named(renderer, "Credential and signing asset guides"), in: renderer,
+                                   failures: ["The native service is unavailable", "The field catalogue could not be loaded"])
+        _ = try unique(controls(guide, [.button], label: "Android upload keystore", prefix: true),
+                       "actual core Android guide is missing or repeated")
+        let apple = try unique(controls(guide, [.button], label: "Apple Distribution identity", prefix: true),
+                               "actual core Apple guide is missing or repeated")
+        try reveal(apple, in: renderer)
+        try require(apple.isEnabled && apple.isHittable, "actual core guide selection unavailable")
+        apple.click() // Reference-only selection: no credential import or operation.
+        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Original Distribution P12")), in: renderer)
+        _ = try unique(renderer.staticTexts.matching(identifier: "Reference guide · not a result"),
+                       "guide was not explicitly reference-only")
+        try engineeringNoFallback(renderer)
+        try require(window.sheets.count == 0, "reference navigation opened an unexpected native operation")
+
+        let first = try quitSheet(app, window)
+        try click(first.buttons.matching(identifier: "Cancel"), "engineering normal Quit Cancel unavailable")
+        try waitGone(first)
+        try require(app.state == .runningForeground && window.exists && window.isHittable,
+                    "engineering Quit Cancel did not retain the same usable window")
+        try click(renderer.buttons.matching(identifier: "Dashboard"), "engineering post-Cancel navigation unavailable")
+        try engineeringDashboard(renderer)
+        let second = try quitSheet(app, window)
+        try click(second.buttons.matching(identifier: "Quit"), "engineering normal Quit confirmation unavailable")
+        guard let clock = caseClock, let owner = originalLaunch, entryGateObservation == nil else {
+            throw Refusal.condition("engineering original custody changed")
+        }
+        let end = try clock.end(within: 10)
+        try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)), "engineering normal Quit did not stop UI")
+        try owner.observeNormalTermination(until: end) // SAME absolute end and original.
+        try require(app.state == .notRunning, "engineering UI changed after original termination")
+        try owner.acceptTerminal()
+        normalQuitObserved = true // Existing teardown still rechecks this SAME original.
+        _ = try remaining(1)
+        // Not final until original XCTest/xcodebuild, products/input POST, summary
+        // and the existing runner's consuming closes/returned status also pass.
+        print("MRK_MACOS_ENGINEERING_MAIN_UI=mainRequest=1;completion=1;body=1;handoff=1;mainIdentity=1;catalogueGuide=1;projectSelected=0;editCapability=unavailable;originalTerminated=1;failureCleanup=0;caseDeadlineMet=1;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+    // End engineering main fixture; ordinary installed cases below are unchanged.
 
     private enum SourceProfile { case sameBuild, packagedEntry }
 

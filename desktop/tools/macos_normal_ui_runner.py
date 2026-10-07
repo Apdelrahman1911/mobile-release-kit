@@ -370,10 +370,11 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
-    need(tuple(methods) == (PACKAGED_METHOD,) or
+    need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
+    need(engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
@@ -386,13 +387,15 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
+    need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
-        command = xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target)
+        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
+                   if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target))
         products.check()
         original = call("one-admitted-ui-test", command, timeout)
         products.check()
@@ -635,9 +638,9 @@ class NormalPhase:
             raise
 
 
-def exclusive_output(path, body, limit):
+def exclusive_output(path, body, limit, *, allow_empty=False):
     """No overwrite/reopen; original complete readback and consuming close."""
-    need(type(body) is bytes and 0 < len(body) <= limit, "normal-output-bound")
+    need(type(allow_empty) is bool and type(body) is bytes and (0 if allow_empty else 1) <= len(body) <= limit, "normal-output-bound")
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         initial = os.fstat(fd)
@@ -1102,17 +1105,576 @@ def normal_context(request):
     return root, source, environment, file_limit
 
 
+# A separate closed, credential-free main-UI fixture. Ordinary/packaged inputs
+# never select it, and its result cannot satisfy an installed qualification.
+ENGINEERING_WORKFLOW = ".github/workflows/desktop-macos-engineering-ui.yml"
+ENGINEERING_REF = "refs/heads/verify/desktop-macos-engineering-ui"
+ENGINEERING_SCOPE = "macos-engineering-ui-compile-v1"
+ENGINEERING_COMPILE_EVIDENCE = "desktop-macos-engineering-ui-compile-only-v1"
+ENGINEERING_METHOD = CLASS + "testEngineeringMainCatalogueAndQuit"
+ENGINEERING_PLIST = "desktop/native/macos-normal-ui/engineering-main-app.plist"
+ENGINEERING_APP = "Mobile Release Kit.app"
+ENGINEERING_IDENTIFIER = "dev.mobile-release-kit.engineering-ui"
+ENGINEERING_EXECUTABLE = "mobile-release-kit-desktop"
+ENGINEERING_MAIN_BYTES = 256 * 1024 * 1024
+ENGINEERING_MODES = {"--engineering-main-build": "build", "--engineering-main-test": "test",
+                     "--engineering-main-summary": "summary"}
+ENGINEERING_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
+}
+ENGINEERING_RUST = {"release": "1.98.1", "commitHash": "48a229ceaefd4985c50990b14116b6d856af0985", "target": ARM_TARGET}
+ENGINEERING_MARKER = ("MRK_MACOS_ENGINEERING_MAIN_UI=mainRequest=1;completion=1;body=1;handoff=1;"
+    "mainIdentity=1;catalogueGuide=1;projectSelected=0;editCapability=unavailable;originalTerminated=1;"
+    "failureCleanup=0;caseDeadlineMet=1;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+ENGINEERING_BINDINGS = ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "engineeringWork")
+
+
+def engineering_request(arguments, temporary):
+    need(type(arguments) is list and len(arguments) == 3 and all(type(item) is str for item in arguments)
+         and arguments[0] in ENGINEERING_MODES and arguments[1] == "--work", "engineering-fixed-command")
+    work = Path(arguments[2])
+    need(str(work) == arguments[2] and work.parent == Path("/Users/runner/work/_temp")
+         and re.fullmatch(r"mrk-macos-engineering-ui\.[A-Za-z0-9]{8}", work.name)
+         and temporary == str(work / "normal-ui/tmp") + "/", "engineering-fixed-work")
+    mode = ENGINEERING_MODES[arguments[0]]
+    return dict(engineering=True, phase=mode, target=ARM_TARGET, work=work,
+        derived=work / "normal-ui/DerivedData", result=None if mode == "build" else work / "normal-ui/engineering-test.xcresult",
+        methods=(ENGINEERING_METHOD,) if mode == "test" else (), allowance=60 if mode == "test" else None,
+        timeout={"build": 240, "test": 180, "summary": 30}[mode], phaseSeconds={"build": 450, "test": 345, "summary": 90}[mode])
+
+
+def engineering_document(body, limit=65536):
+    need(type(body) is bytes and 0 < len(body) <= limit, "engineering-json-bound")
+    value = json.loads(body.decode("utf-8", "strict"), object_pairs_hook=pairs,
+        parse_constant=lambda _: (_ for _ in ()).throw(Refused("engineering-json-number")))
+    need(type(value) is dict, "engineering-json-object")
+    return value
+
+
+def engineering_context(request):
+    """Same host/owner and file limits; an independent, exact environment map."""
+    need(request.get("engineering") is True and request["target"] == ARM_TARGET, "engineering-arm-only")
+    environment = os.environ
+    source = environment.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
+    repository = environment.get("GITHUB_REPOSITORY", "")
+    need(re.fullmatch(r"[0-9a-f]{40}", source) and environment.get("GITHUB_SHA") == source
+         and environment.get("TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE") == source
+         and environment.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == "github-hosted-macos26-arm64"
+         and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+         and environment.get("GITHUB_EVENT_NAME") == "push" and environment.get("GITHUB_REF") == ENGINEERING_REF
+         and environment.get("GITHUB_WORKFLOW_SHA") == source
+         and environment.get("GITHUB_WORKFLOW_REF") == repository + "/" + ENGINEERING_WORKFLOW + "@" + ENGINEERING_REF
+         and all(re.fullmatch(r"[1-9][0-9]{0,19}", environment.get(key, "")) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+         "engineering-source-workflow-binding")
+    import resource
+    need(sys.platform == "darwin" and platform.machine() == "arm64" and platform.mac_ver()[0].startswith("26.")
+         and environment.get("DEVELOPER_DIR") == DEVELOPER, "engineering-host-developer")
+    file_limit = normal_file_limit(request["phase"], resource.getrlimit(resource.RLIMIT_FSIZE))
+    import pwd
+    account = pwd.getpwuid(os.getuid())
+    need(os.getuid() > 0 and os.getuid() == os.geteuid() == account.pw_uid
+         and os.getgid() == os.getegid() == account.pw_gid and account.pw_name == "runner"
+         and account.pw_dir == "/Users/runner" and os.stat("/dev/console").st_uid == os.getuid(), "engineering-console-account")
+    root = Path(__file__).absolute().parents[2]
+    compiler = Path(environment.get("MRK_DESKTOP_CI_ROOT", ""))
+    need(str(root) == "/Users/runner/work/mobile-release-kit/mobile-release-kit" and Path.cwd() == root
+         and environment.get("GITHUB_WORKSPACE") == str(root)
+         and environment.get("MRK_MACOS_WORK") == str(request["work"])
+         and compiler.parent == request["work"].parent
+         and re.fullmatch(r"mrk-desktop-foundation-[A-Za-z0-9_]{8}", compiler.name)
+         and environment.get("TMPDIR") == str(request["work"] / "normal-ui/tmp") + "/", "engineering-owned-input-paths")
+    for directory in (request["work"], compiler):
+        fd = open_directory(directory)
+        try:
+            value = os.fstat(fd)
+            need(value.st_uid == os.getuid() and value.st_gid == os.getgid() and stat.S_IMODE(value.st_mode) == 0o700
+                 and full9(os.stat(directory, follow_symlinks=False)) == full9(value), "engineering-private-owned-root")
+        finally:
+            os.close(fd)
+    request["compiler"] = compiler
+    request["binding"] = {"sourceSha": source, "workflowSha": source, "workflowPath": ENGINEERING_WORKFLOW,
+        "workflowRef": environment["GITHUB_WORKFLOW_REF"], "runId": environment["GITHUB_RUN_ID"],
+        "attempt": environment["GITHUB_RUN_ATTEMPT"], "engineeringWork": str(request["work"])}
+    clean = {key: environment[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TZ",
+        "DEVELOPER_DIR", "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB", "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE",
+        "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE")}
+    need(all(clean[key] == value for key, value in {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner",
+         "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()),
+         "engineering-clean-environment")
+    # Xcode forwards only this fixed, source-admitted fixture path to XCTest.
+    # The application itself receives its own literal whitelist in Swift.
+    clean["TEST_RUNNER_MRK_ENGINEERING_UI_WORK"] = str(request["work"])
+    return root, source, clean, file_limit
+
+
+def engineering_compile_receipt(value, binding, phase, *, compiled=None):
+    need(phase in ENGINEERING_CHECKS, "engineering-compiler-phase")
+    expected = {"schemaVersion": 1, "scope": ENGINEERING_COMPILE_EVIDENCE, "phase": phase, "status": "passed",
+        **binding, "platform": "macos", "rust": ENGINEERING_RUST, "node": "v24.20.0",
+        "checks": [{"check": name, "exitCode": 0} for name in ENGINEERING_CHECKS[phase]]}
+    if phase == "compile":
+        need(type(compiled) is dict and set(compiled) == {"relativePath", "bytes", "sha256"}
+             and compiled["relativePath"] == "target/engineering-main/" + ENGINEERING_EXECUTABLE
+             and type(compiled["bytes"]) is int and 0 < compiled["bytes"] <= ENGINEERING_MAIN_BYTES
+             and type(compiled["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", compiled["sha256"]),
+             "engineering-compiled-original-receipt")
+        expected["compiledMain"] = compiled
+    else:
+        need(compiled is None, "engineering-acquire-has-no-binary")
+    # JSON serialization distinguishes bool/float from the exact integer fields.
+    need(type(value) is dict and encoded(value) == encoded(expected), "engineering-complete-compiler-receipt")
+
+
+def engineering_source_state(phase, binding):
+    original = phase.call("engineering-source-identity", ["/usr/bin/git", "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD", "HEAD^{tree}"], 15, 1024)
+    need(original.returncode == 0 and original.stdout == (binding["sourceSha"] + "\n" + binding["sourceTree"] + "\n").encode(),
+         "engineering-source-identity")
+    unchanged = phase.call("engineering-source-clean", ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "diff", "--quiet", "--no-ext-diff", "--no-textconv", "HEAD", "--"], 15, 1024)
+    need(unchanged.returncode == 0 and unchanged.stdout == b"", "engineering-source-modified")
+    return normal_source_state(phase, binding["sourceSha"])
+
+
+class EngineeringInputs:
+    """Fixed fixture inputs, not an execution owner or a caller-supplied packager.
+
+    All runtime files are admitted against the original stager manifest. Critical
+    originals stay open through the original command; every other bounded read
+    consumes its own original once. Failed closes cannot yield a positive receipt.
+    """
+    def __init__(self, phase, request):
+        self.phase, self.request = phase, request
+        self.work, self.compiler = request["work"], request["compiler"]
+        self.held, self.closed = {}, False
+        self.runtime_roster = self.app_roster = None
+
+    def read(self, path, limit, *, keep=True, collect=True):
+        path = Path(path)
+        need(path not in self.held, "engineering-original-duplicate")
+        parent = open_directory(path.parent)
+        fd = None
+        try:
+            parent_identity = full9(os.fstat(parent))
+            need(stat.S_ISDIR(parent_identity[2]) and not parent_identity[2] & 0o022, "engineering-input-parent")
+            fd = os.open(path.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+            body, identity, digest = original_body(fd, limit, collect=collect)
+            need(identity[3] == os.getuid() and identity[4] == os.getgid() and not identity[2] & 0o022
+                 and full9(os.stat(path.name, dir_fd=parent, follow_symlinks=False)) == identity, "engineering-input-original")
+            if keep:
+                self.held[path] = (fd, parent, parent_identity[:5], identity, digest, limit)
+                fd = parent = None
+            return body, identity, digest
+        finally:
+            try:
+                if fd is not None:
+                    os.close(fd)
+            finally:
+                if parent is not None:
+                    os.close(parent)
+
+    def __enter__(self):
+        try:
+            context = engineering_document(self.read(self.compiler / "context.json", 65536)[0])
+            public = engineering_document(self.read(self.compiler / "public-bindings.json", 1024 * 1024)[0], 1024 * 1024)
+            binding = self.request["binding"]
+            need(all(context.get(key) == value for key, value in binding.items())
+                 and context.get("root") == str(self.compiler) and context.get("source") == str(self.phase.root)
+                 and context.get("platform") == "macos" and context.get("executionScope") == ENGINEERING_SCOPE
+                 and type(context.get("sourceTree")) is str and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]),
+                 "engineering-compiler-context")
+            workflow = self.read(self.phase.root / ENGINEERING_WORKFLOW, 128 * 1024)[2]
+            binding = {**binding, "sourceTree": context["sourceTree"], "workflowSha256": workflow}
+            need(all(context.get(key) == value and public.get(key) == value for key, value in binding.items())
+                 and public.get("scope") == ENGINEERING_COMPILE_EVIDENCE and public.get("platform") == "macos",
+                 "engineering-public-source-bindings")
+            self.binding = binding
+            for name in ("acquire", "compile"):
+                body, _, digest = self.read(self.compiler / (name + "-checks.json"), 16384)
+                value = engineering_document(body)
+                compiled = value.get("compiledMain") if name == "compile" else None
+                engineering_compile_receipt(value, binding, name, compiled=compiled)
+                if name == "compile":
+                    self.compile_digest = digest
+                    self.compiled = compiled
+            self.binary = self.compiler / ("target/engineering-main/" + ENGINEERING_EXECUTABLE)
+            _, binary_identity, binary_digest = self.read(self.binary, ENGINEERING_MAIN_BYTES, collect=False)
+            need(binary_identity[2] & 0o111 and (binary_identity[6], binary_digest) == (self.compiled["bytes"], self.compiled["sha256"]),
+                 "engineering-compiled-main-executable")
+            plist_body = self.read(self.phase.root / ENGINEERING_PLIST, 4096)[0]
+            self.plist_body = plist_body
+            metadata = plist(plist_body)
+            need(metadata.get("CFBundleIdentifier") == ENGINEERING_IDENTIFIER
+                 and metadata.get("CFBundleExecutable") == ENGINEERING_EXECUTABLE
+                 and metadata.get("CFBundleName") == "Mobile Release Kit" and metadata.get("CFBundlePackageType") == "APPL",
+                 "engineering-fixed-plist")
+            description = engineering_document(self.read(self.work / "runtime-description.json", 65536)[0])
+            result_body, _, self.runtime_result_digest = self.read(self.work / "runtime-result.json", 65536)
+            result = engineering_document(result_body)
+            expected = dict(description, qualification="current-source-staged-no-native-execution")
+            need(description.get("qualification") == "current-source-description-only-not-build-or-install-authority"
+                 and encoded(result) == encoded(expected) and result.get("target") == ARM_TARGET
+                 and result.get("supplierOrigin") == "fresh-public-source"
+                 and result.get("supplierReceiptSha256") == "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d"
+                 and result.get("supplierProfile") == "mrk-macos-cpython-source-supplier-v1"
+                 and result.get("pythonVersion") == "3.14.7" and result.get("gil") is True
+                 and not any(key in result for key in ("signedRuntimeBindingSha256", "signedPythonSha256", "signingReceiptSha256")),
+                 "engineering-fresh-current-runtime")
+            manifest_body, _, self.runtime_manifest_digest = self.read(self.work / "runtime/manifest.json", 1024 * 1024)
+            manifest = engineering_document(manifest_body, 1024 * 1024)
+            need(set(manifest) == {"schemaVersion", "protocol", "coreVersion", "target", "coreSha256", "protocolSha256", "inventorySha256", "files"}
+                 and type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1
+                 and type(manifest["protocol"]) is int and manifest["protocol"] == 1 and manifest["target"] == ARM_TARGET
+                 and result.get("successorManifestSha256") == self.runtime_manifest_digest
+                 and all(manifest[key] == result.get(key) for key in ("inventorySha256", "coreSha256", "protocolSha256")),
+                 "engineering-runtime-manifest")
+            rows = manifest["files"]
+            need(type(rows) is list and 0 < len(rows) <= 2048, "engineering-runtime-roster-bound")
+            expected_files = {}
+            for row in rows:
+                need(type(row) is dict and set(row) == {"path", "sha256", "size"}
+                     and type(row["path"]) is str and 0 < len(row["path"].encode()) <= 1024
+                     and all(part not in ("", ".", "..") for part in row["path"].split("/"))
+                     and "\\" not in row["path"] and "\x00" not in row["path"] and row["path"] != "manifest.json"
+                     and row["path"] not in expected_files and type(row["sha256"]) is str
+                     and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+                     and type(row["size"]) is int and 0 <= row["size"] <= 512 * 1024 * 1024,
+                     "engineering-runtime-file-row")
+                expected_files[row["path"]] = row
+            need(list(expected_files) == sorted(expected_files)
+                 and sha(json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()) == manifest["inventorySha256"]
+                 and {"core.zip", "engine_bootstrap.py", "python/bin/python3"} <= set(expected_files)
+                 and expected_files["core.zip"]["sha256"] == manifest["coreSha256"]
+                 and sum(row["size"] for row in rows) <= 512 * 1024 * 1024, "engineering-runtime-complete-inventory")
+            self.runtime_files = expected_files
+            self.runtime_roster = self.scan(self.work / "runtime", runtime=True)
+            need(set(self.runtime_roster["files"]) == set(expected_files) | {"manifest.json"}, "engineering-runtime-extra-or-missing")
+            for name in ("python/bin/python3", "core.zip", "engine_bootstrap.py"):
+                self.read(self.work / "runtime" / name, 512 * 1024 * 1024, collect=False)
+            bootstrap = self.read(self.phase.root / "desktop/engine_bootstrap.py", 65536)[2]
+            protocol = self.read(self.phase.root / "src/mobile_release/_desktop_engine.py", 512 * 1024)[2]
+            need(bootstrap == public.get("bootstrapSha256") == expected_files["engine_bootstrap.py"]["sha256"]
+                 and protocol == manifest["protocolSha256"], "engineering-current-bootstrap-protocol")
+            if self.request["phase"] != "build":
+                self.admit_app()
+                self.require_prior("engineering-build.command-admission.json", "build")
+            return self
+        except BaseException:
+            try:
+                self.close()
+            except BaseException:
+                pass
+            raise
+
+    def scan(self, root, *, runtime):
+        files, directories = {}, {}
+        total = 0
+        root_fd = open_directory(root)
+        def walk(fd, prefix, depth):
+            nonlocal total
+            self.phase.clock.check()
+            identity = full9(os.fstat(fd))
+            need(depth <= 24 and identity[3] == os.getuid() and identity[4] == os.getgid()
+                 and stat.S_IMODE(identity[2]) == 0o555 and len(files) + len(directories) < 4096, "engineering-readonly-directory")
+            directories[prefix] = decimal(identity)
+            with os.scandir(fd) as entries:
+                names = []
+                for entry in entries:
+                    names.append(entry.name)
+                    need(len(names) <= 2048 and len(names) + len(files) + len(directories) <= 4096, "engineering-tree-count")
+            for name in sorted(names):
+                need(name not in ("", ".", "..") and "/" not in name, "engineering-tree-component")
+                relative = name if not prefix else prefix + "/" + name
+                need(len(relative.encode()) <= 1024, "engineering-tree-path")
+                named = full9(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                directory = stat.S_ISDIR(named[2])
+                need(directory or stat.S_ISREG(named[2]), "engineering-no-link-or-special-input")
+                child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_DIRECTORY if directory else os.O_NONBLOCK), dir_fd=fd)
+                try:
+                    need(full9(os.fstat(child)) == named, "engineering-tree-original")
+                    if directory:
+                        walk(child, relative, depth + 1)
+                    else:
+                        _, identity, digest = original_body(child, 512 * 1024 * 1024 if runtime else ENGINEERING_MAIN_BYTES)
+                        need(identity[3] == os.getuid() and identity[4] == os.getgid()
+                             and stat.S_IMODE(identity[2]) == (0o555 if relative == ("python/bin/python3" if runtime else "Contents/MacOS/" + ENGINEERING_EXECUTABLE) else 0o444),
+                             "engineering-readonly-file")
+                        total += identity[6]
+                        need(total <= (512 * 1024 * 1024 if runtime else ENGINEERING_MAIN_BYTES + 1024 * 1024 + 4096), "engineering-tree-bytes")
+                        if runtime and relative != "manifest.json":
+                            row = self.runtime_files.get(relative)
+                            need(row is not None and (identity[6], digest) == (row["size"], row["sha256"]), "engineering-runtime-file-correspondence")
+                        files[relative] = [decimal(identity), digest]
+                    need(full9(os.stat(name, dir_fd=fd, follow_symlinks=False)) == named, "engineering-tree-named-post")
+                finally:
+                    os.close(child)
+            need(full9(os.fstat(fd)) == tuple(int(v) for v in directories[prefix]),
+                 "engineering-tree-directory-post")
+        try:
+            walk(root_fd, "", 0)
+            need(full9(os.stat(root, follow_symlinks=False)) == full9(os.fstat(root_fd)), "engineering-tree-root-post")
+        finally:
+            os.close(root_fd)
+        return {"files": files, "directories": directories}
+
+    def admit_app(self):
+        app = self.work / ENGINEERING_APP
+        self.app_roster = self.scan(app, runtime=False)
+        need(set(self.app_roster["files"]) == {"Contents/Info.plist", "Contents/MacOS/" + ENGINEERING_EXECUTABLE, "Contents/_CodeSignature/CodeResources"}
+             and set(self.app_roster["directories"]) == {"", "Contents", "Contents/MacOS", "Contents/_CodeSignature"}, "engineering-app-exact-roster")
+        need(self.read(app / "Contents/Info.plist", 4096)[0] == self.plist_body, "engineering-app-plist-bytes")
+        self.read(app / ("Contents/MacOS/" + ENGINEERING_EXECUTABLE), ENGINEERING_MAIN_BYTES, collect=False)
+        self.read(app / "Contents/_CodeSignature/CodeResources", 1024 * 1024, collect=False)
+
+    def facts(self):
+        return {**self.binding, "compilerRoot": str(self.compiler), "target": ARM_TARGET,
+            "compilerReceiptSha256": self.compile_digest, "runtimeResultSha256": self.runtime_result_digest,
+            "runtimeManifestSha256": self.runtime_manifest_digest, "runtimeRosterSha256": sha(encoded(self.runtime_roster)),
+            "applicationRosterSha256": sha(encoded(self.app_roster)),
+            "compilerBinarySha256": self.held[self.binary][4]}
+
+    def require_prior(self, name, mode):
+        body = self.read(self.work / "normal-ui" / name, 32768)[0]
+        value = engineering_document(body)
+        need(value.get("scope") == "engineering-main-original-command-admission-only" and value.get("phase") == mode
+             and all(value.get(key) == item for key, item in self.facts().items())
+             and value.get("originalReturncode") == 0 and type(value.get("originalReturncode")) is int
+             and all(value.get(key) is True for key in ("sourcePrePostMatched", "inputPrePostMatched", "inputOriginalClosesCompleted", "originalCommandReturned")),
+             "engineering-prior-original-admission")
+        return value, sha(body)
+
+    def check(self):
+        need(not self.closed, "engineering-inputs-closed")
+        for path, (fd, parent, parent_identity, identity, digest, limit) in self.held.items():
+            self.phase.clock.check()
+            named_parent = open_directory(path.parent)
+            try:
+                need(full9(os.fstat(named_parent))[:5] == full9(os.fstat(parent))[:5] == parent_identity
+                     and full9(os.stat(path.name, dir_fd=named_parent, follow_symlinks=False)) == identity
+                     and original_body(fd, limit)[1:] == (identity, digest), "engineering-held-input-pre-post")
+            finally:
+                os.close(named_parent)
+        need(self.scan(self.work / "runtime", runtime=True) == self.runtime_roster, "engineering-runtime-pre-post")
+        if self.app_roster is not None:
+            need(self.scan(self.work / ENGINEERING_APP, runtime=False) == self.app_roster, "engineering-app-pre-post")
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        failure = None
+        while self.held:
+            _, (fd, parent, _, _, _, _) = self.held.popitem()
+            for original in (fd, parent):
+                try:
+                    os.close(original)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise failure
+
+    def __exit__(self, kind, value, traceback):
+        try:
+            self.close()
+        except BaseException:
+            if kind is None:
+                raise
+        return False
+
+
+def engineering_assemble(phase, inputs):
+    """One exclusive fixed app from the admitted actual debug-main original."""
+    app = inputs.work / ENGINEERING_APP
+    need(not os.path.lexists(app), "engineering-fresh-app-required")
+    app.mkdir(mode=0o700)
+    (app / "Contents").mkdir(mode=0o700)
+    (app / "Contents/MacOS").mkdir(mode=0o700)
+    exclusive_output(app / "Contents/Info.plist", inputs.plist_body, 4096)
+    source_fd, _, _, source_identity, source_digest, _ = inputs.held[inputs.binary]
+    output = app / ("Contents/MacOS/" + ENGINEERING_EXECUTABLE)
+    fd = os.open(output, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o700)
+    try:
+        offset = 0
+        while offset < source_identity[6]:
+            phase.clock.check()
+            block = os.pread(source_fd, min(65536, source_identity[6] - offset), offset)
+            need(bool(block), "engineering-main-copy-short")
+            used = 0
+            while used < len(block):
+                count = os.write(fd, block[used:])
+                need(type(count) is int and 0 < count <= len(block) - used, "engineering-main-copy-write")
+                used += count
+            offset += len(block)
+        os.fsync(fd)
+        _, identity, digest = original_body(fd, ENGINEERING_MAIN_BYTES)
+        need(identity[6] == source_identity[6] and digest == source_digest
+             and full9(os.stat(output, follow_symlinks=False)) == identity
+             and original_body(source_fd, ENGINEERING_MAIN_BYTES)[1:] == (source_identity, source_digest), "engineering-main-copy-correspondence")
+    finally:
+        os.close(fd)
+    for role, command in (
+        ("engineering-ad-hoc-sign", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", "--identifier", ENGINEERING_IDENTIFIER, str(app)]),
+        ("engineering-verify-app", ["/usr/bin/codesign", "--verify", "--strict", str(app)]),
+    ):
+        original = phase.call(role, command, 30)
+        if original.returncode != 0:
+            raise NativeQueryFailure(original)
+    # No executable payload, entitlement, helper or writer other than this main.
+    for name in ("Contents/Info.plist", "Contents/_CodeSignature/CodeResources"):
+        os.chmod(app / name, 0o444, follow_symlinks=False)
+    os.chmod(output, 0o555, follow_symlinks=False)
+    for name in ("Contents/MacOS", "Contents/_CodeSignature", "Contents", ""):
+        os.chmod(app / name, 0o555, follow_symlinks=False)
+    inputs.admit_app()
+
+
+def engineering_ui_markers(stdout):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024 and stdout.endswith(b"\n"), "engineering-test-output-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testEngineeringMainCatalogueAndQuit]"
+    attempts = [line for line in lines if line.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1])
+         and lines.count(ENGINEERING_MARKER) == 1
+         and sum(line.startswith("MRK_MACOS_ENGINEERING_MAIN_UI=") for line in lines) == 1
+         and all(token not in text for token in ("MRK_MACOS_UI_FAILURE_CLEANUP=", "MRK_MACOS_UI_ORIGINAL=", "MRK_MACOS_ENTRY_UI=", "MRK_MACOS_NORMAL_UI="))
+         and lines.index(attempts[0]) < lines.index(ENGINEERING_MARKER) < lines.index(attempts[1]), "engineering-one-original-terminal-case")
+    return True
+
+
+def engineering_ui_result(stdout, summary_body):
+    engineering_ui_markers(stdout)
+    summary = engineering_document(summary_body, 262144)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(summary.get(key)) is int and summary[key] == value for key, value in counts.items()), "engineering-exact-one-passing-test")
+    return {"testIdentifier": ENGINEERING_METHOD, "testCounts": counts, "nativeSummarySha256": sha(summary_body),
+        "sameOriginalNormalQuitObserved": True, "cleanExitStatus": None, "allWorkerFinality": "not-established",
+        "fullUIQualified": False, "productReady": False}
+
+
+def execute_engineering_phase(phase, request, source, file_limit):
+    mode, derived, result = request["phase"], request["derived"], request["result"]
+    final = None
+    with EngineeringInputs(phase, request) as inputs:
+        need(inputs.binding["sourceSha"] == source, "engineering-source-handoff")
+        before = engineering_source_state(phase, inputs.binding)
+        if mode == "build":
+            need(not os.path.lexists(derived), "fresh-derived-data-required")
+            engineering_assemble(phase, inputs)
+            values = {}
+            for key, name, arguments in TOOLCHAIN_QUERIES:
+                original = phase.call("normal-toolchain-" + key, list(arguments), 15, 4096)
+                if original.returncode != 0:
+                    raise NativeQueryFailure(original)
+                values[key] = original.stdout
+            normal_toolchain(values)
+            for key, name, _ in TOOLCHAIN_QUERIES:
+                phase.clock.check()
+                exclusive_output(derived.parent / name, values[key], 4096)
+            original = phase.call("normal-ui-build", normal_build_arguments(derived), 240)
+            receipt = derived.parent / "engineering-build.command-admission.json"
+            extra = {}
+        elif mode == "test":
+            verification = phase.call("engineering-verify-app", ["/usr/bin/codesign", "--verify", "--strict", str(inputs.work / ENGINEERING_APP)], 30)
+            if verification.returncode != 0:
+                raise NativeQueryFailure(verification)
+            original, products = run_admitted_test(phase.call, derived, result, (ENGINEERING_METHOD,), 60, 180, engineering=True)
+            terminal = engineering_ui_markers(original.stdout) if original.returncode == 0 else False
+            exclusive_output(derived.parent / "engineering-test.stdout", original.stdout, 1024 * 1024, allow_empty=True)
+            exclusive_output(derived.parent / "engineering-test.stderr", original.stderr, 1024 * 1024, allow_empty=True)
+            extra = {"sameOriginalNormalQuitObserved": terminal, "generatedRunnerOriginalClosesCompleted": products["originalClosesCompleted"],
+                "generatedRunnerOriginalPrePostMatched": products["originalProductsPrePostMatched"],
+                "runnerAdmission": products, "testStdoutSha256": sha(original.stdout), "testStderrSha256": sha(original.stderr)}
+            receipt = derived.parent / "engineering-test.runner-admission.json"
+        else:
+            need(mode == "summary", "engineering-fixed-phase")
+            prior, prior_digest = inputs.require_prior("engineering-test.runner-admission.json", "test")
+            need(all(prior.get(key) is True for key in ("sameOriginalNormalQuitObserved", "generatedRunnerOriginalClosesCompleted", "generatedRunnerOriginalPrePostMatched")),
+                 "engineering-original-test-terminal-required")
+            stdout, _, stdout_digest = inputs.read(derived.parent / "engineering-test.stdout", 1024 * 1024)
+            _, _, stderr_digest = inputs.read(derived.parent / "engineering-test.stderr", 1024 * 1024)
+            need(stdout_digest == prior.get("testStdoutSha256") and stderr_digest == prior.get("testStderrSha256"), "engineering-original-test-output")
+            engineering_ui_markers(stdout)
+            observed = os.stat(result, follow_symlinks=False)
+            need(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.getuid() and not observed.st_mode & 0o022, "engineering-result-directory")
+            original = phase.call("normal-ui-summary", ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", "summary", "--path", str(result), "--compact"], 30, 262144)
+            extra = {"testAdmissionSha256": prior_digest}
+            if original.returncode == 0:
+                final = engineering_ui_result(stdout, original.stdout)
+            receipt = derived.parent / "engineering-summary.command-admission.json"
+        inputs.check()
+        need(engineering_source_state(phase, inputs.binding) == before, "engineering-source-pre-post")
+        facts = {**inputs.facts(), **extra, "schemaVersion": 1, "scope": "engineering-main-original-command-admission-only",
+            "phase": mode, "originalReturncode": original.returncode, "sourcePrePostMatched": True,
+            "inputPrePostMatched": True, "originalCommandReturned": True}
+    facts.update(inputOriginalClosesCompleted=True, commands=phase.records, fileLimitBytes=list(file_limit),
+        phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
+    exclusive_output(receipt, encoded(facts) + b"\n", 32768)
+    phase.clock.check()
+    if final is not None:
+        value = {**{key: facts[key] for key in (*ENGINEERING_BINDINGS, "compilerRoot", "target", "compilerReceiptSha256",
+                     "runtimeResultSha256", "runtimeManifestSha256", "runtimeRosterSha256", "applicationRosterSha256",
+                     "compilerBinarySha256", "testAdmissionSha256")},
+            **final, "schemaVersion": 1, "scope": "engineering-main-ui-smoke-only", "status": "passed",
+            "sourcePrePostMatched": True, "inputPrePostMatched": True, "inputOriginalClosesCompleted": True,
+            "generatedRunnerOriginalClosesCompleted": True, "originalCommandsReturned": True,
+            "summaryAdmissionSha256": sha(encoded(facts) + b"\n"), "originalWrapperZeroRequired": True}
+        exclusive_output(derived.parent / "engineering-smoke.json", encoded(value) + b"\n", 16384)
+        phase.clock.check()
+    return original
+
+
+def publish_engineering_failure(request, failure):
+    """Best-effort closed facts only; never cleanup or completion authority."""
+    try:
+        need(request.get("engineering") is True and request["phase"] in ("build", "test", "summary")
+             and request["derived"] == request["work"] / "normal-ui/DerivedData", "engineering-diagnostic-request")
+        body = encoded(failure) + b"\n"
+        need(len(body) <= 16384, "engineering-diagnostic-bound")
+        work_fd = open_directory(request["work"])
+        try:
+            work = full9(os.fstat(work_fd))
+            need(stat.S_IMODE(work[2]) == 0o700 and work[3:5] == (os.getuid(), os.getgid())
+                 and full9(os.stat(request["work"], follow_symlinks=False)) == work, "engineering-diagnostic-work")
+            normal_fd = os.open("normal-ui", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=work_fd)
+            try:
+                normal = full9(os.fstat(normal_fd))
+                need(stat.S_IMODE(normal[2]) == 0o700 and normal[3:5] == (os.getuid(), os.getgid())
+                     and full9(os.stat(request["derived"].parent, follow_symlinks=False)) == normal, "engineering-diagnostic-output-root")
+                exclusive_output(request["derived"].parent / ("engineering-" + request["phase"] + ".failure-diagnostics.json"), body, 16384)
+                for path, fd, before in ((request["work"], work_fd, work), (request["derived"].parent, normal_fd, normal)):
+                    need(full9(os.fstat(fd))[:6] == before[:6]
+                         and full9(os.stat(path, follow_symlinks=False))[:6] == before[:6], "engineering-diagnostic-original-changed")
+            finally:
+                os.close(normal_fd)
+        finally:
+            os.close(work_fd)
+    except Exception:
+        # Preserve the original nonzero/unknown. Do not retry or expose raw errors.
+        try:
+            sys.stderr.write("engineering-failure-diagnostic-publication-failed\n")
+        except Exception:
+            pass
+
+
 def main():
     owner = None
     phase = None
+    request = None
+    engineering = False
     records = []
     stage = "request"
     try:
         started = time.monotonic_ns()  # Includes CLI/context/loader admission in this one phase.
-        request = normal_request(sys.argv[1:], os.environ.get("TMPDIR", ""))
+        engineering = bool(sys.argv[1:]) and sys.argv[1] in ENGINEERING_MODES
+        request = (engineering_request(sys.argv[1:], os.environ.get("TMPDIR", "")) if engineering
+                   else normal_request(sys.argv[1:], os.environ.get("TMPDIR", "")))
         clock = PhaseClock(request["phaseSeconds"], started=started)
         stage = "context"
-        root, source, environment, file_limit = normal_context(request)
+        root, source, environment, file_limit = engineering_context(request) if engineering else normal_context(request)
         stage = "loader"
         owner = load_normal_owner(root)
         stage = "phase"
@@ -1120,17 +1682,28 @@ def main():
         records = phase.records
         try:
             stage = "execute"
-            original = execute_normal_phase(phase, request, source, file_limit)
+            original = (execute_engineering_phase(phase, request, source, file_limit) if engineering
+                        else execute_normal_phase(phase, request, source, file_limit))
         except NativeQueryFailure as failure:
             # No subsequent query/build/source command after the original failed query.
             stage = "diagnostic"
-            publish_failure_diagnostics(request, failure.original, query=True)
+            if engineering:
+                publish_engineering_failure(request, normal_admission_failure(stage, failure, owner, records))
+                sys.stdout.buffer.write(failure.original.stdout)
+                sys.stderr.buffer.write(failure.original.stderr)
+                sys.stdout.buffer.flush()
+                sys.stderr.buffer.flush()
+            else:
+                publish_failure_diagnostics(request, failure.original, query=True)
             stage = "finalize"
             clock.finish()
             return failure.original.returncode
         if original.returncode != 0:
             stage = "diagnostic"
-            publish_failure_diagnostics(request, original)
+            if engineering:
+                publish_engineering_failure(request, normal_admission_failure(stage, NativeQueryFailure(original), owner, records))
+            else:
+                publish_failure_diagnostics(request, original)
         stage = "publication"
         sys.stdout.buffer.write(original.stdout)  # Workflow keeps these full originals PRIVATE.
         sys.stderr.buffer.write(original.stderr)
@@ -1143,6 +1716,8 @@ def main():
         if phase is not None:
             phase.clock.failed = True
         failure = normal_admission_failure(stage, error, owner, records)
+        if engineering and request is not None:
+            publish_engineering_failure(request, failure)
         sys.stderr.write(encoded(failure).decode("ascii") + "\n")
         return 1
 

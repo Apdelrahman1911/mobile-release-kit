@@ -741,7 +741,26 @@ MAC_COMPILE_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
     "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
 }
+# One debug, embedded-frontend main application for a credential-free UI smoke.
+# This is a compiler profile only; the existing XCTest owner is a separate lane.
+ENGINEERING_COMPILE_SCOPE = "macos-engineering-ui-compile-v1"
+ENGINEERING_COMPILE_WORKFLOW = ".github/workflows/desktop-macos-engineering-ui.yml"
+ENGINEERING_COMPILE_REF = "refs/heads/verify/desktop-macos-engineering-ui"
+ENGINEERING_COMPILE_EVIDENCE = "desktop-macos-engineering-ui-compile-only-v1"
+ENGINEERING_COMPILE_TARGET = "aarch64-apple-darwin"
+ENGINEERING_COMPILE_FEATURES = "desktop-shell,custom-protocol,development-runtime"
+ENGINEERING_APP_IDENTIFIER = "dev.mobile-release-kit.engineering-ui"
+ENGINEERING_MAIN_RELATIVE = "target/engineering-main/mobile-release-kit-desktop"
+ENGINEERING_MAIN_LIMIT = 256 * 1024 * 1024
+ENGINEERING_COMPILE_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
+}
 COMPILE_PROFILES = {
+    ENGINEERING_COMPILE_SCOPE: {"workflow": ENGINEERING_COMPILE_WORKFLOW, "ref": ENGINEERING_COMPILE_REF,
+                                "evidence": ENGINEERING_COMPILE_EVIDENCE, "checks": ENGINEERING_COMPILE_CHECKS},
     MAC_COMPILE_SCOPE: {"workflow": MAC_COMPILE_WORKFLOW, "ref": MAC_COMPILE_REF,
                         "evidence": "desktop-macos-normal-compile-only-v1", "checks": MAC_COMPILE_CHECKS},
     COMPILE_SCOPE: {"workflow": COMPILE_WORKFLOW, "ref": COMPILE_REF,
@@ -2735,7 +2754,7 @@ def admit_phase(scope: str, phase: str) -> None:
 
 def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
-    require(scope != MAC_COMPILE_SCOPE or platform == "macos", "Normal Mac compilation requires macOS")
+    require(scope not in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} or platform == "macos", "Normal Mac compilation requires macOS")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
@@ -2793,6 +2812,10 @@ def mac_compile_checks(target: str, mode: str) -> dict:
 
 
 def compiler_binding(context: dict) -> dict:
+    if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE:
+        require(context.get("platform") == "macos", "Engineering main compiler requires macOS")
+        release, commit = MAC_COMPILE_RUST[ENGINEERING_COMPILE_TARGET]
+        return {"release": release, "commitHash": commit, "target": ENGINEERING_COMPILE_TARGET}
     if context.get("executionScope") == MAC_COMPILE_SCOPE:
         target = context.get("macCompile", {}).get("target")
         require(context.get("platform") == "macos" and target in MAC_COMPILE_HOSTS,
@@ -2878,6 +2901,8 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
             and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{profile['workflow']}@{profile['ref']}",
             "Compiler workflow/ref binding differs")
     event = environment.get("GITHUB_EVENT_NAME")
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        require(event == "push", "Engineering main compilation requires its fixed push ref")
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
             "Compiler workflow event or exact dispatch source differs")
     return {"workflowPath": profile["workflow"], "workflowSha": sha,
@@ -2993,6 +3018,10 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         expected.update(sourceTree=context["sourceTree"], macCompile=mac,
                         node=NODE if mac["mode"] == "full4" else None,
                         checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
+    if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
+        expected.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
+        if phase == "compile":
+            expected["compiledMain"] = validate_engineering_main(value.get("compiledMain"))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -3130,8 +3159,10 @@ def admitted_host(*, retention_only: bool = False) -> str:
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == MAC_COMPILE_SCOPE:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE}:
         target = mac_compile_target(os.environ)
+        require(os.environ["MRK_DESKTOP_HOSTED_CHECKS"] != ENGINEERING_COMPILE_SCOPE
+                or target == ENGINEERING_COMPILE_TARGET, "Engineering main smoke is ARM only")
         require(os.uname().sysname == "Darwin" and os.uname().machine == MAC_COMPILE_HOSTS[target][1]
                 and os.geteuid() != 0, "Normal Mac compiler requires its actual non-root native host")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
@@ -3202,6 +3233,10 @@ def source_unchanged(context: dict, *, timeout_for=None) -> None:
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15), capture=True)
             == context["sourceSha"], "Checkout commit changed")
+    if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE:
+        require(run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment,
+                    timeout=15 if timeout_for is None else timeout_for(15), capture=True) == context["sourceTree"],
+                "Engineering original source tree changed")
     run([git, "diff", "--no-ext-diff", "--no-textconv", "--exit-code", "--quiet", "HEAD", "--"],
         check="source-clean", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15))
 
@@ -7066,7 +7101,8 @@ def clean_github_tls(context: dict) -> None:
 
 
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
-                  scope: str = "passive-development-foundation-only", compiled: dict | None = None) -> None:
+                  scope: str = "passive-development-foundation-only", compiled: dict | None = None,
+                  main_compiled: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
@@ -7075,6 +7111,10 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         "rust": compiler_binding(context), "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
+    if main_compiled is not None:
+        require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
+                and compiled is None, "Unexpected engineering main artifact")
+        value["compiledMain"] = validate_engineering_main(main_compiled)
     if compiled is not None:
         require(context.get("executionScope") == WINDOWS_SNAPSHOT_SCOPE
                 and context.get("scope") == WINDOWS_SNAPSHOT_SCOPE and name == "compile"
@@ -7090,6 +7130,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                      **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
         if context["executionScope"] == MAC_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
+        if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
+            value.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7189,6 +7231,248 @@ def version_public_bindings(context: dict) -> dict:
             "payloadBindings": VERSION_PAYLOAD_BINDINGS, "notVerified": list(VERSION_NOT_VERIFIED)}
 
 
+def validate_engineering_main(value: object) -> dict:
+    """Fixed copied main DATA; the UI owner independently holds the actual file."""
+    require(type(value) is dict and set(value) == {"relativePath", "bytes", "sha256"}
+            and value["relativePath"] == ENGINEERING_MAIN_RELATIVE
+            and type(value["bytes"]) is int and 0 < value["bytes"] <= ENGINEERING_MAIN_LIMIT
+            and type(value["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is not None
+            and value["sha256"] != "0" * 64, "Engineering copied main receipt differs")
+    return value
+
+
+def copy_engineering_main(context: dict) -> dict:
+    """One fresh copy after the joined Cargo build; never weaken ordinary().
+
+    Cargo's fixed primary may be hardlinked to its own deps output. Only that
+    original accepts multiple links. The new UI handoff is exclusively created,
+    one-link, streamed, read back and closed under the existing 256 MiB ceiling.
+    Any error retains all output; no compiler receipt is published in that case.
+    """
+    require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE
+            and context.get("platform") == "macos", "Engineering copy scope differs")
+    root = Path(context["root"])
+    deadline = time.monotonic() + 30
+    full9 = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                         row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    held, directories = [], []
+    answer = None
+    try:
+        parent = None
+        # Fixed traversal only, all original directories remain held.
+        for name in (str(root), "target", ENGINEERING_COMPILE_TARGET, "debug"):
+            fd = os.open(name, directory_flags, dir_fd=parent)
+            held.append(fd)
+            row = full9(os.fstat(fd))
+            require(stat.S_ISDIR(row[2]) and row[3] == os.geteuid() and not row[2] & 0o022,
+                    "Engineering compiler directory differs")
+            directories.append((parent, name, fd, row[:5]))
+            parent = fd
+        target_fd, debug_fd = held[1], held[3]
+        main_name = "mobile-release-kit-desktop"
+        original = os.open(main_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=debug_fd)
+        held.append(original)
+        before = full9(os.fstat(original))
+        require(stat.S_ISREG(before[2]) and before[2] & 0o100 and not before[2] & 0o022
+                and before[3] == os.geteuid() and before[5] >= 1
+                and 0 < before[6] <= ENGINEERING_MAIN_LIMIT,
+                "Engineering compiled primary kind, owner or size differs")
+        require(full9(os.stat(main_name, dir_fd=debug_fd, follow_symlinks=False)) == before,
+                "Engineering compiled primary name changed")
+        os.mkdir("engineering-main", 0o700, dir_fd=target_fd)
+        output_directory = os.open("engineering-main", directory_flags, dir_fd=target_fd)
+        held.append(output_directory)
+        output_directory_row = full9(os.fstat(output_directory))
+        require(stat.S_ISDIR(output_directory_row[2]) and output_directory_row[3] == os.geteuid()
+                and stat.S_IMODE(output_directory_row[2]) == 0o700, "Engineering copy directory differs")
+        directories.append((target_fd, "engineering-main", output_directory, output_directory_row[:5]))
+        output = os.open(main_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o700, dir_fd=output_directory)
+        held.append(output)
+        digest, offset = hashlib.sha256(), 0
+        while True:
+            require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+            block = os.pread(original, min(65536, ENGINEERING_MAIN_LIMIT + 1 - offset), offset)
+            if not block:
+                break
+            offset += len(block)
+            require(offset <= before[6], "Engineering primary grew during copy")
+            digest.update(block)
+            written = 0
+            while written < len(block):
+                require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+                amount = os.write(output, block[written:])
+                require(type(amount) is int and 0 < amount <= len(block) - written,
+                        "Engineering original copy write was incomplete")
+                written += amount
+        require(offset == before[6] and full9(os.fstat(original)) == before
+                and full9(os.stat(main_name, dir_fd=debug_fd, follow_symlinks=False)) == before,
+                "Engineering original compiled bytes changed")
+        os.fsync(output)
+        copied = full9(os.fstat(output))
+        require(stat.S_ISREG(copied[2]) and stat.S_IMODE(copied[2]) == 0o700
+                and copied[3] == os.geteuid() and copied[5] == 1 and copied[6] == offset,
+                "Engineering fresh copy is not a single-link executable")
+        observed, offset = hashlib.sha256(), 0
+        while True:
+            require(time.monotonic() < deadline, "Engineering main copy clock exceeded")
+            block = os.pread(output, min(65536, ENGINEERING_MAIN_LIMIT + 1 - offset), offset)
+            if not block:
+                break
+            offset += len(block)
+            require(offset <= copied[6], "Engineering copied bytes grew")
+            observed.update(block)
+        require(offset == copied[6] and observed.digest() == digest.digest()
+                and full9(os.fstat(output)) == copied
+                and full9(os.stat(main_name, dir_fd=output_directory, follow_symlinks=False)) == copied
+                and full9(os.fstat(original)) == before, "Engineering copied original readback changed")
+        for parent, name, fd, identity in directories:
+            require(full9(os.fstat(fd))[:5] == identity
+                    and full9(os.stat(name, dir_fd=parent, follow_symlinks=False))[:5] == identity,
+                    "Engineering original compiler directory changed")
+        answer = validate_engineering_main({"relativePath": ENGINEERING_MAIN_RELATIVE,
+                                           "bytes": copied[6], "sha256": digest.hexdigest()})
+    finally:
+        close_error = None
+        while held:
+            fd = held.pop()
+            try:
+                os.close(fd)  # Consume once, including failures; never retry an integer FD.
+            except OSError as error:
+                close_error = error
+        if close_error is not None:
+            raise close_error
+    require(time.monotonic() < deadline and answer is not None, "Engineering main copy did not settle")
+    return answer
+
+
+def validate_engineering_cleanup(value: object, context: dict, compiled: dict, digests: dict) -> dict:
+    """A positive UI result licenses this work's disposal, never installed authority."""
+    require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE, "Engineering cleanup scope differs")
+    main = validate_engineering_main(compiled.get("compiledMain"))
+    require(type(value) is dict and type(digests) is dict and set(digests) == {
+        "compilerReceiptSha256", "runtimeResultSha256", "runtimeManifestSha256",
+        "testAdmissionSha256", "summaryAdmissionSha256", "nativeSummarySha256"},
+        "Engineering cleanup original digest roster differs")
+    for digest in [*digests.values(), value.get("runtimeRosterSha256"), value.get("applicationRosterSha256")]:
+        require(type(digest) is str and re.fullmatch(r"[0-9a-f]{64}", digest) is not None and digest != "0" * 64,
+                "Engineering cleanup original digest differs")
+    expected = {
+        "schemaVersion": 1, "scope": "engineering-main-ui-smoke-only", "status": "passed",
+        **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef",
+                                       "workflowSha256", "runId", "attempt", "engineeringWork")},
+        "compilerRoot": context["root"], "target": ENGINEERING_COMPILE_TARGET,
+        **digests, "compilerBinarySha256": main["sha256"],
+        "runtimeRosterSha256": value["runtimeRosterSha256"], "applicationRosterSha256": value["applicationRosterSha256"],
+        "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testEngineeringMainCatalogueAndQuit",
+        "testCounts": {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0},
+        "sameOriginalNormalQuitObserved": True, "cleanExitStatus": None, "allWorkerFinality": "not-established",
+        "fullUIQualified": False, "productReady": False, "sourcePrePostMatched": True,
+        "inputPrePostMatched": True, "inputOriginalClosesCompleted": True,
+        "generatedRunnerOriginalClosesCompleted": True, "originalCommandsReturned": True,
+        "originalWrapperZeroRequired": True,
+    }
+    require(same_compile_json(value, expected), "Engineering UI original completion is not positive and source-bound")
+    return value
+
+
+def engineering_cleanup(context: dict) -> list[Path]:
+    """Positive-only addition to the existing compiler cleanup roster.
+
+    Failed/absent/unknown UI custody retains the compiler bootstrap, runtime,
+    fixture and products. Small closed evidence remains after successful cleanup.
+    """
+    work, root = engineering_main_work(), Path(context["root"])
+    require(str(work) == context["engineeringWork"], "Engineering cleanup work differs")
+    normal = work / "normal-ui"
+    deadline = time.monotonic() + 60
+    full9 = lambda row: (row.st_dev, row.st_ino, row.st_mode, row.st_uid, row.st_gid,
+                         row.st_nlink, row.st_size, row.st_mtime_ns, row.st_ctime_ns)
+    def read_original(path, limit, collect=False):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            before = full9(os.fstat(fd))
+            require(stat.S_ISREG(before[2]) and before[3] == os.geteuid() and before[5] == 1
+                    and not before[2] & 0o022 and 0 <= before[6] <= limit,
+                    "Engineering cleanup original file differs")
+            digest, offset, chunks = hashlib.sha256(), 0, []
+            while True:
+                require(time.monotonic() < deadline, "Engineering cleanup read clock exceeded")
+                block = os.pread(fd, min(65536, limit + 1 - offset), offset)
+                if not block:
+                    break
+                offset += len(block)
+                require(offset <= before[6], "Engineering cleanup original grew")
+                digest.update(block)
+                if collect:
+                    chunks.append(block)
+            require(offset == before[6] and full9(os.fstat(fd)) == before
+                    and full9(os.stat(path, follow_symlinks=False)) == before,
+                    "Engineering cleanup original changed")
+            return b"".join(chunks), digest.hexdigest(), offset
+        finally:
+            os.close(fd)
+    # A persisted pass alone is insufficient: the original summary wrapper must
+    # have returned zero AFTER its source/product/input consuming closes.
+    status, _, _ = read_original(normal / "engineering-summary.status", 2, True)
+    require(status == b"0\n", "Engineering original summary wrapper did not return zero")
+    raw_compile, compiler_digest, _ = read_original(root / "compile-checks.json", 16384, True)
+    compiled = validate_compile_receipt(parse_compile_receipt(raw_compile), context, "compile")
+    _, binary_digest, binary_size = read_original(root / ENGINEERING_MAIN_RELATIVE, ENGINEERING_MAIN_LIMIT)
+    require(compiled["compiledMain"] == {"relativePath": ENGINEERING_MAIN_RELATIVE,
+                                        "bytes": binary_size, "sha256": binary_digest},
+            "Engineering original compiler copy differs at cleanup")
+    digests = {"compilerReceiptSha256": compiler_digest}
+    for key, path, limit in (
+        ("runtimeResultSha256", work / "runtime-result.json", 65536),
+        ("runtimeManifestSha256", work / "runtime/manifest.json", 1024 * 1024),
+        ("testAdmissionSha256", normal / "engineering-test.runner-admission.json", 32768),
+        ("summaryAdmissionSha256", normal / "engineering-summary.command-admission.json", 32768),
+        ("nativeSummarySha256", normal / "engineering-summary.stdout", 262144),
+    ):
+        _, digests[key], _ = read_original(path, limit)
+    raw, _, _ = read_original(normal / "engineering-smoke.json", 16384, True)
+    validate_engineering_cleanup(parse_compile_receipt(raw), context, compiled, digests)
+    directories = ("Mobile Release Kit.app", "runtime", "fresh-python-transport", "fresh-python-supplier",
+                   "fresh-python-receipt", "runtime-description-work", "current-runtime-preparation")
+    retained = {"fresh-python-transport-result.json", "runtime-description.json", "runtime-result.json"}
+    require({path.name for path in work.iterdir()} == {*directories, "normal-ui", *retained},
+            "Engineering cleanup work roster differs; retain all")
+    normal_directories = {"DerivedData", "tmp", "engineering-test.xcresult"}
+    normal_evidence = {
+        "xcode-version.txt", "sdk-path.txt", "sdk-version.txt", "sdk-build.txt",
+        "engineering-build.command-admission.json", "engineering-test.runner-admission.json",
+        "engineering-summary.command-admission.json", "engineering-smoke.json",
+        "engineering-test.stdout", "engineering-test.stderr",
+        "engineering-build.stdout", "engineering-build.stderr", "engineering-build.status",
+        "engineering-test.wrapper.stdout", "engineering-test.wrapper.stderr", "engineering-test.status",
+        "engineering-summary.stdout", "engineering-summary.stderr", "engineering-summary.status",
+    }
+    require({path.name for path in normal.iterdir()} == normal_directories | normal_evidence,
+            "Engineering cleanup UI roster differs; retain all")
+    for directory in (normal, *(work / name for name in directories), *(normal / name for name in normal_directories)):
+        observed = directory.lstat()
+        require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid() and not observed.st_mode & 0o022,
+                "Engineering disposable directory differs; retain all")
+    for path in [*(work / name for name in retained), *(normal / name for name in normal_evidence)]:
+        ordinary(path)
+    require(time.monotonic() < deadline, "Engineering cleanup admission clock exceeded")
+    return [*(work / name for name in directories), *(normal / name for name in sorted(normal_directories))]
+
+
+def engineering_main_work() -> Path:
+    """One fixed private UI work family, never an installed or caller app path."""
+    work = Path(os.environ.get("MRK_MACOS_WORK", ""))
+    require(work.is_absolute() and work.parent == Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+            and re.fullmatch(r"mrk-macos-engineering-ui\.[A-Za-z0-9]{8}", work.name) is not None
+            and not work.is_symlink(), "Engineering UI work root differs")
+    observed = work.stat(follow_symlinks=False)
+    require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+            and stat.S_IMODE(observed.st_mode) == 0o700, "Engineering UI work root ownership differs")
+    return work
+
+
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
@@ -7199,6 +7483,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if windows:
         require(admitted_scope(platform) == scope, "Windows preparation scope differs")
     profile = compile_profile(scope) if scope in COMPILE_PROFILES else None
+    engineering_work = engineering_main_work() if scope == ENGINEERING_COMPILE_SCOPE else None
     native_workflow = scope == WORKFLOW_NATIVE_SCOPE
     native_metadata = scope == METADATA_NATIVE_SCOPE
     native_version = scope == VERSION_NATIVE_SCOPE
@@ -7214,7 +7499,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     require(re.fullmatch(r"[0-9a-f]{40}", sha) is not None, "Invalid source SHA")
     mac_target = mac_compile_target(os.environ) if scope == MAC_COMPILE_SCOPE else None
     mac_mode = mac_compile_mode(os.environ, mac_target) if mac_target is not None else None
-    if mac_target is not None:
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        require(mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET, "Engineering main target differs")
+    if mac_target is not None or scope == ENGINEERING_COMPILE_SCOPE:
         mac_compile_source_guard(source, temp)
     for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
         require(not (source / relative).exists() and not (source / relative).is_symlink(),
@@ -7242,8 +7529,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
-    rustup = None if scope == MAC_COMPILE_SCOPE else shutil.which("rustup")
-    require(git is not None and (scope == MAC_COMPILE_SCOPE or rustup is not None), "Hosted compiler tools unavailable")
+    rustup = None if scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} else shutil.which("rustup")
+    require(git is not None and (scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} or rustup is not None), "Hosted compiler tools unavailable")
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
@@ -7277,6 +7564,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
+    if engineering_work is not None:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Engineering source tree differs")
+        context["engineeringWork"] = str(engineering_work)
     if mac_target is not None:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Normal Mac source tree differs")
         context["macCompile"] = mac_compile_inputs(source, mac_target, mac_mode)
@@ -7340,6 +7630,10 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         compiler = compiler_binding(context)
         public.update(expectedRust=compiler["release"], compiler=compiler, macCompile=context["macCompile"])
         public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, engineeringWork=context["engineeringWork"])
+        public["notQualified"].extend(("shipping-signature", "installed-runtime", "edit-authority", "all-worker-finality"))
     if scope == GTK_COMPILE_SCOPE:
         public["sg1"] = context["sg1"]
         public["notQualified"].extend(("SG1-native-qualification", "installed-API-loader-writer-admission"))
@@ -7386,7 +7680,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, ENGINEERING_COMPILE_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -7408,6 +7702,15 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             require(context.get("macCompile") == mac_compile_inputs(Path(context["source"]), target, mode)
                     and re.fullmatch(r"[0-9a-f]{40}", context.get("sourceTree", "")) is not None,
                     "Normal Mac compiler source/target binding changed")
+        if scope == ENGINEERING_COMPILE_SCOPE:
+            require(context.get("engineeringWork") == str(engineering_main_work())
+                    and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and type(context.get("sourceTree")) is str
+                    and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                    and context["sourceTree"] != "0" * 40
+                    and mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET,
+                    "Engineering main original source/work/target binding changed")
+            mac_compile_source_guard(Path(context["source"]), root)
         if scope == GTK_COMPILE_SCOPE:
             require(type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -7494,7 +7797,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
 
 def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tuple[str, str]:
     root = Path(context["root"])
-    if context.get("executionScope") == MAC_COMPILE_SCOPE:
+    if context.get("executionScope") in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE}:
         selected = compiler_binding(context)
         binary = Path("/Users/runner/.rustup/toolchains") / ("stable-" + selected["target"]) / "bin"
         cargo, rustc = str(binary / "cargo"), str(binary / "rustc")
@@ -8003,6 +8306,7 @@ def clean_compile(context: dict) -> None:
     """Only positively completed compiler work; no fabricated native receipts."""
     profile = compile_profile(context.get("executionScope", ""))
     root, source = Path(context["root"]), Path(context["source"])
+    ui_outputs = engineering_cleanup(context) if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE else []
     for phase_name in profile["checks"]:
         path = root / f"{phase_name}-checks.json"
         ordinary(path)
@@ -8030,12 +8334,29 @@ def clean_compile(context: dict) -> None:
                     "Vault-only compiler has unexpected frontend output; retain it")
         directories = []
     directories.extend(root / name for name in COMPILER_DIRECTORIES)
+    directories.extend(ui_outputs)
     for directory in directories:
         require(directory.is_dir() and not directory.is_symlink()
                 and not getattr(directory.lstat(), "st_file_attributes", 0) & 0x400,
                 "Task-owned compiler output directory differs")
     for name in COMPILER_PRIVATE_FILES + COMPILE_PUBLIC_FILES:
         ordinary(root / name)
+    if ui_outputs:
+        # Only these seven fixed fixture/runtime/transport trees were made read-only.
+        # Restore owner-write after ALL terminal and deletion-roster admissions.
+        # fwalk holds each no-follow original directory; no file mode is relaxed.
+        deadline, count = time.monotonic() + 60, 0
+        for output in ui_outputs[:7]:
+            for name, _, _, original in os.fwalk(output, follow_symlinks=False):
+                count += 1
+                observed = os.fstat(original)
+                named = os.stat(name, follow_symlinks=False)
+                require(count <= 16384 and time.monotonic() < deadline
+                        and stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+                        and not observed.st_mode & 0o022
+                        and (observed.st_dev, observed.st_ino) == (named.st_dev, named.st_ino),
+                        "Engineering owned read-only cleanup directory changed")
+                os.fchmod(original, 0o700)
     for directory in directories:
         shutil.rmtree(directory)
     for name in EMPTY_NATIVE_DIRECTORIES:
@@ -8246,6 +8567,8 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     # The owner fixture binds its compiled source to this exact event commit.
     # Compile and test must use the same value; no None/ambient/latest fallback.
     environment["GITHUB_SHA"] = context["sourceSha"]
+    if scope == ENGINEERING_COMPILE_SCOPE:
+        environment["TAURI_CONFIG"] = '{"identifier":"dev.mobile-release-kit.engineering-ui"}'
     manifest = source / "desktop/src-tauri/Cargo.toml"
     source_unchanged(context)
     no_cargo_configuration((root, *root.parents))
@@ -8253,10 +8576,12 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         clean_compile(context)
         return
     if name == "acquire":
-        run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
-            check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
+        if scope != ENGINEERING_COMPILE_SCOPE:
+            run([context["rustup"], "toolchain", "install", RUST, "--profile", "minimal", "--no-self-update"],
+                check="rust-toolchain-install", cwd=root, env=environment, timeout=600)
         cargo, _ = tools(context, environment)
-        features = "development-runtime" if windows else "desktop-shell,development-runtime"
+        features = (ENGINEERING_COMPILE_FEATURES if scope == ENGINEERING_COMPILE_SCOPE else
+                    "development-runtime" if windows else "desktop-shell,development-runtime")
         # Metadata filters acquisition to this platform and active feature graph.
         with (root / "metadata.json").open("x", encoding="utf-8") as output:
             run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -8280,7 +8605,8 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
              "--cache", str(root / "npm-cache"), "--registry", "https://registry.npmjs.org/"],
             check="npm-locked-no-scripts", cwd=source / "desktop", env=environment, timeout=300)
         source_unchanged(context)
-        phase_receipt(context, name, ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
+        phase_receipt(context, name, list(ENGINEERING_COMPILE_CHECKS["acquire"]) if scope == ENGINEERING_COMPILE_SCOPE else
+                      ["rust-toolchain-install", "rust-version-target", "locked-platform-metadata"]
                       + ["node-version", "npm-locked-no-scripts"], node=observed_node)
         return
     cargo, _ = tools(context, environment)
@@ -8304,8 +8630,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
             phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"],
                           scope=WINDOWS_SNAPSHOT_PUBLIC_SCOPE, compiled=compiled)
             return
-        run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
-            check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
+        if scope != ENGINEERING_COMPILE_SCOPE:
+            run([cargo, "test", *common, "--lib", "--no-run", "--features", "development-runtime"],
+                check="headless-test-compile-only", cwd=root, env=environment, timeout=600)
         node = shutil.which("node")
         require(node is not None, "Node unavailable after setup")
         observed_node = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=15, capture=True)
@@ -8316,11 +8643,15 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
              str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
             check="vite-assets", cwd=desktop, env=environment, timeout=90)
-        run([cargo, "build", *common, "--features", "desktop-shell,development-runtime",
+        run([cargo, "build", *common, "--features",
+             ENGINEERING_COMPILE_FEATURES if scope == ENGINEERING_COMPILE_SCOPE else "desktop-shell,development-runtime",
              "--bin", "mobile-release-kit-desktop"], check="tauri-debug-compile-only", cwd=root, env=environment, timeout=1500)
+        main_compiled = copy_engineering_main(context) if scope == ENGINEERING_COMPILE_SCOPE else None
         source_unchanged(context)
-        phase_receipt(context, name, ["rust-version-target", "headless-test-compile-only"]
-                      + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node)
+        phase_receipt(context, name, list(ENGINEERING_COMPILE_CHECKS["compile"]) if scope == ENGINEERING_COMPILE_SCOPE else
+                      ["rust-version-target", "headless-test-compile-only"]
+                      + ["node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"], node=observed_node,
+                      main_compiled=main_compiled)
     elif name == "windows-snapshot":
         require(windows and platform == "windows", "Windows snapshot phase requires its dedicated scope")
         windows_inputs(context, create=True)

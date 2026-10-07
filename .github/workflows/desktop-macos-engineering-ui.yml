@@ -1,0 +1,337 @@
+name: Desktop main UI engineering smoke
+
+# Credential-free debug main only. Never an installed, signed, edit or release qualification.
+on:
+  push:
+    branches: [verify/desktop-macos-engineering-ui]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - tests/desktop/**
+      - .github/workflows/desktop-macos-engineering-ui.yml
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-engineering-ui-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  engineering-main:
+    name: Actual main, fresh core catalogue and normal Quit / ARM engineering only
+    environment: macos-engineering
+    runs-on: macos-26
+    # Finite 104-minute sum below plus six minutes of job-level reserve.
+    timeout-minutes: 110
+    env:
+      MRK_DESKTOP_PLATFORM: macos
+      MRK_DESKTOP_HOSTED_CHECKS: macos-engineering-ui-compile-v1
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_HOSTED_JOB: github-hosted-macos26-arm64
+      NODE_DISABLE_COMPILE_CACHE: '1'
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      MRK_PYTHON_SUPPLIER_RECEIPT_SHA256: 2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d
+      MRK_PYTHON_SUPPLIER_TAR_SHA256: ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695
+    steps:
+      - name: Admit only the fixed disposable ARM engineering source
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-engineering-ui ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-engineering-ui.yml@$GITHUB_REF" ]] || exit 1
+      - name: Check out the exact source without persisted credentials
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the fixed source helper Python
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Select the fixed frontend compiler
+        timeout-minutes: 3
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Create one private work root retained through the whole smoke
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner && "$HOME" == /Users/runner ]] || exit 1
+          [[ "$(/usr/bin/stat -f '%Su' /dev/console)" == runner ]] || exit 1
+          work="$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-engineering-ui.XXXXXXXX")"
+          [[ "$work" =~ ^/Users/runner/work/_temp/mrk-macos-engineering-ui\.[A-Za-z0-9]{8}$ ]] || exit 1
+          /bin/mkdir -m 700 "$work/normal-ui" "$work/normal-ui/tmp"
+          printf 'MRK_MACOS_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          printf 'root=%s\n' "$work" >> "$GITHUB_OUTPUT"
+      - name: Prepare the existing source-bound compiler owner
+        id: prepare
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Download the exact public ARM source-built Python supplier
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: '11415902210'
+          run-id: '37467019389'
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/fresh-python-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Validate and transport only the fixed fresh supplier
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin "HOME=$MRK_MACOS_WORK" "TMPDIR=$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_python_supplier_transport.py \
+            --target aarch64-apple-darwin --transport-root "$MRK_MACOS_WORK/fresh-python-transport" \
+            --expected-supplier "$MRK_PYTHON_SUPPLIER_RECEIPT_SHA256" --expected-tar "$MRK_PYTHON_SUPPLIER_TAR_SHA256" \
+            --python-output "$MRK_MACOS_WORK/fresh-python-supplier" --receipt-root "$MRK_MACOS_WORK/fresh-python-receipt" \
+            > "$MRK_MACOS_WORK/fresh-python-transport-result.json"
+      - name: Describe the current reviewed core and complete fresh runtime
+        id: description
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+          /usr/bin/env -i PATH=/usr/bin:/bin "HOME=$MRK_MACOS_WORK" "TMPDIR=$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py describe-current-runtime \
+            --target aarch64-apple-darwin --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
+            --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
+            --expected-supplier "$MRK_PYTHON_SUPPLIER_RECEIPT_SHA256" --work "$MRK_MACOS_WORK/runtime-description-work" \
+            > "$MRK_MACOS_WORK/runtime-description.json"
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+          # Extract only the two DATA commitments; current-runtime rederives both
+          # from the same unchanged Git source. No signing/installed authority.
+          "$MRK_PYTHON" -I -S -B - <<'PY_DESCRIPTION'
+          import json, os, re, stat
+          path = os.environ["MRK_MACOS_WORK"] + "/runtime-description.json"
+          full9 = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              before = full9(os.fstat(fd))
+              assert stat.S_ISREG(before[2]) and before[3] == os.geteuid() and before[5] == 1 and 0 < before[6] <= 65536
+              raw = os.read(fd, 65537)
+              assert len(raw) == before[6] and os.read(fd, 1) == b"" and full9(os.fstat(fd)) == before
+              assert full9(os.stat(path, follow_symlinks=False)) == before
+          finally:
+              os.close(fd)
+          def pairs(items):
+              result = {}
+              for key, value in items:
+                  assert key not in result
+                  result[key] = value
+              return result
+          value = json.loads(raw, object_pairs_hook=pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError("number")))
+          assert value["qualification"] == "current-source-description-only-not-build-or-install-authority"
+          assert value["target"] == "aarch64-apple-darwin" and value["supplierOrigin"] == "fresh-public-source"
+          assert value["supplierReceiptSha256"] == os.environ["MRK_PYTHON_SUPPLIER_RECEIPT_SHA256"]
+          for name in ("sourceInputsSha256", "successorManifestSha256"):
+              assert type(value[name]) is str and re.fullmatch(r"[0-9a-f]{64}", value[name]) and value[name] != "0" * 64
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("source=" + value["sourceInputsSha256"] + "\nmanifest=" + value["successorManifestSha256"] + "\n")
+          PY_DESCRIPTION
+      - name: Stage the actual current core from those same original inputs
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_CURRENT_SOURCE: ${{ steps.description.outputs.source }}
+          MRK_CURRENT_MANIFEST: ${{ steps.description.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+          /usr/bin/env -i PATH=/usr/bin:/bin "HOME=$MRK_MACOS_WORK" "TMPDIR=$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
+            --target aarch64-apple-darwin --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
+            --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
+            --expected-supplier "$MRK_PYTHON_SUPPLIER_RECEIPT_SHA256" --work "$MRK_MACOS_WORK/current-runtime-preparation" \
+            --expected-source "$MRK_CURRENT_SOURCE" --expected-manifest "$MRK_CURRENT_MANIFEST" --output "$MRK_MACOS_WORK/runtime" \
+            > "$MRK_MACOS_WORK/runtime-result.json"
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+      - name: Acquire only the locked main-app platform inputs
+        timeout-minutes: 19
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile the actual embedded frontend and one debug main
+        timeout-minutes: 33
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Assemble the private fixture and build the existing external XCTest runner
+        id: engineering_build
+        timeout-minutes: 9
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Same normal owner file-size bound; its admission checks exact RLIMIT_FSIZE.
+          ulimit -f 33554432
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_DESKTOP_CI_ROOT=$MRK_DESKTOP_CI_ROOT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --engineering-main-build --work "$MRK_MACOS_WORK" \
+            > "$MRK_MACOS_WORK/normal-ui/engineering-build.stdout" 2> "$MRK_MACOS_WORK/normal-ui/engineering-build.stderr"
+          original_status=$?
+          set -e
+          printf '%s\n' "$original_status" > "$MRK_MACOS_WORK/normal-ui/engineering-build.status"
+          [[ "$original_status" == 0 ]] || exit "$original_status"
+      - name: Observe the real main window and core catalogue then Quit that same original
+        id: engineering_test
+        timeout-minutes: 7
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Same normal owner file-size bound; its admission checks exact RLIMIT_FSIZE.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_DESKTOP_CI_ROOT=$MRK_DESKTOP_CI_ROOT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --engineering-main-test --work "$MRK_MACOS_WORK" \
+            > "$MRK_MACOS_WORK/normal-ui/engineering-test.wrapper.stdout" 2> "$MRK_MACOS_WORK/normal-ui/engineering-test.wrapper.stderr"
+          original_status=$?
+          set -e
+          printf '%s\n' "$original_status" > "$MRK_MACOS_WORK/normal-ui/engineering-test.status"
+          [[ "$original_status" == 0 ]] || exit "$original_status"
+      - name: Close the single XCTest result without claiming installed or worker authority
+        id: engineering_summary
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Same normal owner file-size bound; its admission checks exact RLIMIT_FSIZE.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" "GITHUB_REF=$GITHUB_REF" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_DESKTOP_CI_ROOT=$MRK_DESKTOP_CI_ROOT" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --engineering-main-summary --work "$MRK_MACOS_WORK" \
+            > "$MRK_MACOS_WORK/normal-ui/engineering-summary.stdout" 2> "$MRK_MACOS_WORK/normal-ui/engineering-summary.stderr"
+          original_status=$?
+          set -e
+          printf '%s\n' "$original_status" > "$MRK_MACOS_WORK/normal-ui/engineering-summary.status"
+          [[ "$original_status" == 0 ]] || exit "$original_status"
+      # Full stdout/stderr are private task diagnostics and are NEVER uploaded.
+      - name: Retain only bounded compiler and engineering evidence
+        id: evidence
+        if: always() && steps.prepare.outcome == 'success'
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-engineering-ui-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json
+            ${{ steps.work.outputs.root }}/runtime-description.json
+            ${{ steps.work.outputs.root }}/runtime-result.json
+            ${{ steps.work.outputs.root }}/normal-ui/xcode-version.txt
+            ${{ steps.work.outputs.root }}/normal-ui/sdk-path.txt
+            ${{ steps.work.outputs.root }}/normal-ui/sdk-version.txt
+            ${{ steps.work.outputs.root }}/normal-ui/sdk-build.txt
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-build.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-test.runner-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-summary.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-smoke.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-build.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-summary.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-build.status
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-test.status
+            ${{ steps.work.outputs.root }}/normal-ui/engineering-summary.status
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Dispose only after the actual UI terminal and evidence return
+        if: success() && steps.engineering_summary.outcome == 'success' && steps.evidence.outcome == 'success'
+        timeout-minutes: 4
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        # clean verifies same source/run/work/compile/runtime + complete UI final +
+        # actual summary wrapper zero, before its first deletion. All failures retain.
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'

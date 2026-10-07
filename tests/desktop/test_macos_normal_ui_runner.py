@@ -657,13 +657,12 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
     def test_source_has_one_fixed_request_and_only_original_cleanup_receivers(self):
         source = SWIFT.read_text()
-        self.assertEqual(source.count("NSWorkspace.shared.openApplication(at: Self.outerURL"), 1)
+        self.assertEqual(source.count("NSWorkspace.shared.openApplication(at: requestURL"), 1)
         self.assertEqual(source.count("let app = try launchOrdinaryApplication()"), 2)
         self.assertEqual(source.count("original.terminate()"), 1)
         self.assertEqual(source.count("original.forceTerminate()"), 1)
         for forbidden in ("app.launch()", "app.activate()", "app.terminate()", "monitor.launch(",
-                          "monitor.activate(", "monitor.terminate(", "runningApplications(",
-                          "runningApplications(withBundleIdentifier:", "processIdentifier", "kill(", "Process()"):
+                          "monitor.activate(", "monitor.terminate(", "processIdentifier", "kill(", "Process()"):
             self.assertNotIn(forbidden, source)
         for required in ("configuration.createsNewApplicationInstance = true",
                          "configuration.allowsRunningApplicationSubstitution = false",
@@ -681,6 +680,27 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             self.assertLess(launch.index(earlier), launch.index(later))
         self.assertIn("original.bundleURL?.path == Self.payloadURL.path", source)
         self.assertIn('original.bundleIdentifier == "dev.mobile-release-kit.desktop"', source)
+
+        # One shared original request, not one request per launch profile.
+        self.assertEqual(source.count("NSWorkspace.shared.openApplication("), 1)
+        route = source.split("let requestURL: URL", 1)[1].split("requested = true", 1)[0]
+        ordinary, engineering = route.split("case .engineeringMain(let work):", 1)
+        self.assertIn("case .ordinary:", ordinary)
+        self.assertIn("requestURL = Self.outerURL", ordinary)
+        self.assertNotIn("configuration.environment", ordinary)
+        self.assertIn('requestURL = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)', engineering)
+        self.assertIn('"MRK_DESKTOP_DEV_PYTHON": work.appendingPathComponent("runtime/python/bin/python3").path', engineering)
+        self.assertIn('"MRK_DESKTOP_DEV_CORE": work.appendingPathComponent("runtime/core.zip").path', engineering)
+        launch = source.split("private func launchEngineeringMain(work:", 1)[1].split("private func engineeringDashboard", 1)[0]
+        self.assertEqual(source.count("runningApplications"), 2)
+        self.assertEqual(launch.count("runningApplications"), 2)
+        self.assertIn('NSRunningApplication.runningApplications(withBundleIdentifier: "dev.mobile-release-kit.engineering-ui").isEmpty', launch)
+        self.assertIn('!NSWorkspace.shared.runningApplications.contains(where: { $0.bundleURL?.path == url.path })', launch)
+        self.assertLess(launch.index("monitor.state == .notRunning"), launch.index("originalLaunch = owner"))
+        for forbidden in ("original =", ".terminate(", ".forceTerminate(", "processIdentifier", "adopt"):
+            # The fixed refusal/comment may describe adoption; no expression does it.
+            if forbidden != "adopt": self.assertNotIn(forbidden, launch)
+        self.assertIn('ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil', source)
 
     def test_first_callback_custody_survives_reordered_main_handoffs(self):
         source = SWIFT.read_text()
@@ -807,6 +827,16 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 self.assertTrue(state["work_closed"])
                 cleanup_receivers = [state["original"]]  # Identity only, no call.
                 self.assertEqual(cleanup_receivers, [first])
+
+        engineering = source.split("private func launchEngineeringMain(work:", 1)[1].split("private func engineeringDashboard", 1)[0]
+        self.assertIn("let owner = OrdinaryLaunch(clock: clock, profile: .engineeringMain(work: work))", engineering)
+        self.assertLess(engineering.index("originalLaunch = owner"), engineering.index("try owner.requestAndAwait()"))
+        self.assertLess(engineering.index("try owner.requestAndAwait()"), engineering.index("try owner.healthy()"))
+        self.assertIn("init(clock: CaseClock, profile: LaunchProfile = .ordinary)", source)
+        self.assertEqual(source.count("private let reply = LaunchReply()"), 1)
+        self.assertNotIn("LaunchReply()", engineering)
+        self.assertNotIn("DispatchQueue", engineering)
+        self.assertNotIn("GateObservation(", engineering)
 
     def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
         self.assertEqual(MODULE.LOADER_SHA,
@@ -1024,13 +1054,13 @@ class RunnerAdmissionDataTests(unittest.TestCase):
     def test_source_uses_nonrenewable_case_clock_and_all_terminal_gates(self):
         source = SWIFT.read_text()
         custody = source.split("    private final class GateObservation {", 1)[0]
-        self.assertEqual(source.count("try beginCase(seconds: 60)"), 1)
+        self.assertEqual(source.count("try beginCase(seconds: 60)"), 2)
         self.assertEqual(source.count("try beginCase(seconds: 300)"), 7)
         self.assertEqual(source.count("try completeNormalQuit(app)"), 8)
         self.assertEqual(source.count("try completeNormalQuit(restartedApp)"), 1)
         self.assertEqual(source.count("try acceptFinalScenario()"), 7)
         self.assertEqual(source.count("try acceptPersistenceRestart()"), 1)
-        self.assertEqual(source.count("normalQuitObserved = true"), 1)
+        self.assertEqual(source.count("normalQuitObserved = true"), 2)
         for required in ("let deadline: TimeInterval", "value.isFinite, value >= last",
                          "if firstFailure == nil", "caseClock == nil && journeyDeadline == nil",
                          "journeyDeadline = clock.deadline", "min(deadline, start + maximum)",
@@ -1062,6 +1092,20 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         for required in ("owner.tearDown(normalQuit: normalQuitObserved)", "entryGateObservation?.closeOriginal()",
                          "fixture.closeOriginals()", "super.tearDown()", "if cleanupFailure == nil"):
             self.assertTrue(required in teardown, "missing terminal cleanup gate: " + required)
+
+        engineering = source.split("func testEngineeringMainCatalogueAndQuit() throws {", 1)[1].split(
+            "// End engineering main fixture;", 1)[0]
+        self.assertEqual(engineering.count("try beginCase(seconds: 60)"), 1)
+        self.assertEqual(engineering.count("try clock.end(within: 10)"), 1)
+        self.assertIn("timeout: try clock.remaining(10, before: end)", engineering)
+        self.assertIn("try owner.observeNormalTermination(until: end)", engineering)
+        ordered = ("try beginCase(seconds: 60)", "let work = try engineeringWork()", "let app = try launchEngineeringMain(work: work)",
+                   "try owner.observeNormalTermination(until: end)", "try owner.acceptTerminal()", "normalQuitObserved = true",
+                   'print("MRK_MACOS_ENGINEERING_MAIN_UI=')
+        positions = [engineering.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        for forbidden in ("gate.probe(", "GateObservation(", "original.terminate()", "forceTerminate", "try?", "catch", "beginCase(seconds: 300)"):
+            self.assertNotIn(forbidden, engineering)
 
     def test_native_panels_display_fixed_purpose_without_relaxing_sheet_identity(self):
         native = (ROOT / "desktop/native/macos-installed-native/src/native.m").read_text()
@@ -1596,6 +1640,211 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(calls, [(argv, dict(environ=environment, cwd=root, timeout=15, capture=True, text=False, output_limit=4096))])
         self.assertEqual(phase.records[0]["argvSha256"], MODULE.sha(MODULE.encoded(argv)))
 
+        # Closed engineering profile DATA only. Ordinary/packaged routing is
+        # still exercised above; no test here launches an app or compiler.
+        engineering_work = Path("/Users/runner/work/_temp/mrk-macos-engineering-ui.ABCDef12")
+        engineering_tmp = str(engineering_work / "normal-ui/tmp") + "/"
+        engineering_requests = {}
+        for mode, seconds, cap in (("build", 450, 240), ("test", 345, 180), ("summary", 90, 30)):
+            arguments = ["--engineering-main-" + mode, "--work", str(engineering_work)]
+            request = MODULE.engineering_request(arguments, engineering_tmp)
+            engineering_requests[mode] = request
+            self.assertEqual((request["phase"], request["phaseSeconds"], request["timeout"], request["target"]),
+                             (mode, seconds, cap, "aarch64-apple-darwin"))
+            self.assertEqual(request["work"], engineering_work)
+            self.assertEqual(request["derived"], engineering_work / "normal-ui/DerivedData")
+            self.assertEqual(request["methods"], (MODULE.ENGINEERING_METHOD,) if mode == "test" else ())
+            with self.assertRaises(MODULE.Refused): MODULE.normal_request(arguments, engineering_tmp)
+            for changed in (arguments[1:], arguments + ["extra"], ["--target", MODULE.INTEL_TARGET] + arguments,
+                            [arguments[0], "--work", str(engineering_work) + "/"],
+                            [arguments[0], "--work", str(engineering_work).replace("engineering-ui.", "installed.")],
+                            ["--normal-" + mode, *arguments[1:]]):
+                with self.subTest(engineering_arguments=changed), self.assertRaises(MODULE.Refused):
+                    MODULE.engineering_request(changed, engineering_tmp)
+            with self.assertRaises(MODULE.Refused): MODULE.engineering_request(arguments, temporary)
+        selected_method = "MRKNormalAppUITests/NormalAppUITests/testEngineeringMainCatalogueAndQuit"
+        self.assertEqual(MODULE.ENGINEERING_METHOD, selected_method)
+        self.assertEqual(MODULE.ENGINEERING_MAIN_BYTES, 256 * 1024 * 1024)
+        expected_arguments = ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", "fixed.xctestrun",
+            "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15", "-resultBundlePath", "fixed.xcresult",
+            "-only-testing:" + selected_method, "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+            "-default-test-execution-time-allowance", "60", "-maximum-test-execution-time-allowance", "60",
+            "-disableAutomaticPackageResolution"]
+        self.assertEqual(MODULE.xcode_test_arguments(Path("fixed.xctestrun"), Path("fixed.xcresult"),
+                         (selected_method,), 60, engineering=True), expected_arguments)
+        for selected, allowance, target_value, enabled in (((MODULE.PACKAGED_METHOD,), 60, MODULE.ARM_TARGET, True),
+                ((selected_method,), 300, MODULE.ARM_TARGET, True), ((selected_method,), 60, MODULE.INTEL_TARGET, True),
+                ((selected_method,), 60, MODULE.ARM_TARGET, False), ((selected_method,), 60, MODULE.ARM_TARGET, 1)):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.xcode_test_arguments(Path("fixed.xctestrun"), Path("fixed.xcresult"), selected,
+                                            allowance, target=target_value, engineering=enabled)
+        with patch.object(MODULE, "RunnerProducts") as products_type:
+            with self.assertRaises(MODULE.Refused):
+                MODULE.run_admitted_test(lambda *_: self.fail("mixed scope dispatched"), Path("inert"), Path("inert-result"),
+                                         (selected_method,), 60, 180, target=MODULE.INTEL_TARGET, engineering=True)
+            products_type.assert_not_called()
+
+        binding = dict(sourceSha="a" * 40, sourceTree="b" * 40,
+            workflowPath=".github/workflows/desktop-macos-engineering-ui.yml", workflowSha="a" * 40,
+            workflowRef="mobile-release-kit/mobile-release-kit/.github/workflows/desktop-macos-engineering-ui.yml@refs/heads/verify/desktop-macos-engineering-ui",
+            workflowSha256="c" * 64, runId="123", attempt="1", engineeringWork=str(engineering_work))
+        rust = dict(release="1.98.1", commitHash="48a229ceaefd4985c50990b14116b6d856af0985", target="aarch64-apple-darwin")
+        compiled = dict(relativePath="target/engineering-main/mobile-release-kit-desktop", bytes=17, sha256="d" * 64)
+        checks = {"acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata", "node-version", "npm-locked-no-scripts"),
+                  "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only")}
+        for mode in ("acquire", "compile"):
+            receipt = dict(schemaVersion=1, scope="desktop-macos-engineering-ui-compile-only-v1", phase=mode,
+                status="passed", **binding, platform="macos", rust=rust, node="v24.20.0",
+                checks=[dict(check=name, exitCode=0) for name in checks[mode]])
+            if mode == "compile": receipt["compiledMain"] = compiled
+            MODULE.engineering_compile_receipt(receipt, binding, mode, compiled=compiled if mode == "compile" else None)
+            for key, changed_value in (("schemaVersion", True), ("status", "failed"), ("sourceTree", "e" * 40),
+                    ("engineeringWork", str(engineering_work) + "-foreign"), ("checks", receipt["checks"][:-1]),
+                    ("checks", [*receipt["checks"], receipt["checks"][0]]), ("node", "v0.0.0"),
+                    ("rust", dict(rust, target="x86_64-apple-darwin"))):
+                with self.subTest(engineering_receipt=(mode, key)), self.assertRaises(MODULE.Refused):
+                    MODULE.engineering_compile_receipt(dict(receipt, **{key: changed_value}), binding, mode,
+                                                       compiled=compiled if mode == "compile" else None)
+            for key in tuple(receipt):
+                changed = dict(receipt); del changed[key]
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.engineering_compile_receipt(changed, binding, mode, compiled=compiled if mode == "compile" else None)
+            with self.assertRaises(MODULE.Refused):
+                MODULE.engineering_compile_receipt(dict(receipt, productReady=True), binding, mode,
+                                                   compiled=compiled if mode == "compile" else None)
+            if mode == "compile":
+                for key, value in (("bytes", True), ("bytes", 0), ("bytes", 256 * 1024 * 1024 + 1),
+                        ("relativePath", "target/aarch64-apple-darwin/debug/mobile-release-kit-desktop"),
+                        ("sha256", "not-a-digest")):
+                    wrong = dict(compiled, **{key: value})
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.engineering_compile_receipt(dict(receipt, compiledMain=wrong), binding, mode, compiled=wrong)
+
+        marker = ("MRK_MACOS_ENGINEERING_MAIN_UI=mainRequest=1;completion=1;body=1;handoff=1;mainIdentity=1;catalogueGuide=1;"
+                  "projectSelected=0;editCapability=unavailable;originalTerminated=1;failureCleanup=0;caseDeadlineMet=1;"
+                  "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+        case = "-[MRKNormalAppUITests.NormalAppUITests testEngineeringMainCatalogueAndQuit]"
+        output = ("Test Case '" + case + "' started.\n" + marker + "\nTest Case '" + case + "' passed (1.000 seconds).\n").encode()
+        summary = dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0, expectedFailures=0)
+        value = MODULE.engineering_ui_result(output, json.dumps(summary).encode())
+        self.assertEqual(value["testIdentifier"], selected_method)
+        self.assertEqual(value["testCounts"], summary)
+        self.assertIs(value["sameOriginalNormalQuitObserved"], True)
+        self.assertIsNone(value["cleanExitStatus"])
+        self.assertEqual(value["allWorkerFinality"], "not-established")
+        self.assertFalse(value["fullUIQualified"])
+        self.assertFalse(value["productReady"])
+        for changed in (b"", output + output, output.replace(marker.encode(), b""),
+                output.replace(b"catalogueGuide=1", b"catalogueGuide=0"), output.replace(b"originalTerminated=1", b"originalTerminated=0"),
+                output.replace(b"testEngineeringMainCatalogueAndQuit", b"testLaunchCancelAndQuit"),
+                output.replace(b" passed ", b" failed "), output.replace(b"failureCleanup=0", b"failureCleanup=1"),
+                output.replace(marker.encode(), marker.encode() + b"\n" + marker.encode()),
+                (marker + "\n").encode() + output.replace((marker + "\n").encode(), b""),
+                output + b"MRK_MACOS_UI_FAILURE_CLEANUP=attempted\n", output + b"MRK_MACOS_NORMAL_UI=not-authority\n"):
+            with self.assertRaises(MODULE.Refused): MODULE.engineering_ui_result(changed, json.dumps(summary).encode())
+        for key in summary:
+            for invalid in (True, summary[key] + 1):
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.engineering_ui_result(output, json.dumps(dict(summary, **{key: invalid})).encode())
+        with self.assertRaises(MODULE.Refused):
+            MODULE.engineering_ui_result(output, b'{"totalTestCount":1,"passedTests":1,"passedTests":1}')
+
+        # Exercise actual engineering_context with inert directory originals;
+        # only this module's os binding is replaced, never a real syscall here.
+        compiler_root = Path("/Users/runner/work/_temp/mrk-desktop-foundation-ABCDef12")
+        engine_environment = dict(environment, TMPDIR=engineering_tmp,
+            GITHUB_SHA=source, GITHUB_WORKSPACE=str(root), GITHUB_REPOSITORY="mobile-release-kit/mobile-release-kit",
+            GITHUB_EVENT_NAME="push", GITHUB_REF="refs/heads/verify/desktop-macos-engineering-ui", GITHUB_WORKFLOW_SHA=source,
+            GITHUB_WORKFLOW_REF=binding["workflowRef"], GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+            MRK_MACOS_WORK=str(engineering_work), MRK_DESKTOP_CI_ROOT=str(compiler_root),
+            MUST_NOT_INHERIT="inert private environment sentinel")
+        observed = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o700, st_uid=501, st_gid=20,
+                                   st_nlink=2, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+        closed_directories = []
+        inert_os = SimpleNamespace(environ=engine_environment, getuid=lambda: 501, geteuid=lambda: 501,
+            getgid=lambda: 20, getegid=lambda: 20, stat=lambda *_a, **_k: observed,
+            fstat=lambda _fd: observed, close=closed_directories.append)
+        with ExitStack() as stack:
+            for context in (patch.dict(sys.modules, {"resource": SimpleNamespace(RLIMIT_FSIZE=1, getrlimit=lambda _: (32 * 1024**3,) * 2),
+                                                     "pwd": SimpleNamespace(getpwuid=lambda _: account)}),
+                    patch.object(MODULE, "os", inert_os), patch.object(MODULE.sys, "platform", "darwin"),
+                    patch.object(MODULE.platform, "machine", return_value="arm64"),
+                    patch.object(MODULE.platform, "mac_ver", return_value=("26.0", (), "arm64")),
+                    patch.object(MODULE, "__file__", str(root / "desktop/tools/macos_normal_ui_runner.py")),
+                    patch.object(MODULE.Path, "cwd", return_value=root), patch.object(MODULE, "open_directory", return_value=77)):
+                stack.enter_context(context)
+            request = dict(engineering_requests["build"])
+            actual_root, actual_source, clean, limits = MODULE.engineering_context(request)
+            self.assertEqual((actual_root, actual_source, limits), (root, source, (32 * 1024**3,) * 2))
+            self.assertEqual(request["compiler"], compiler_root)
+            self.assertEqual(clean, dict(environment, TMPDIR=engineering_tmp, TEST_RUNNER_MRK_ENGINEERING_UI_WORK=str(engineering_work)))
+            self.assertEqual(closed_directories, [77, 77])
+            for key in ("GITHUB_SHA", "GITHUB_WORKSPACE", "GITHUB_EVENT_NAME", "GITHUB_REF", "GITHUB_WORKFLOW_SHA", "GITHUB_WORKFLOW_REF",
+                        "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "MRK_MACOS_WORK", "MRK_DESKTOP_CI_ROOT", "PATH"):
+                original_value = engine_environment[key]
+                try:
+                    engine_environment[key] = "not-admitted"
+                    with self.subTest(engineering_context=key), self.assertRaises(MODULE.Refused):
+                        MODULE.engineering_context(dict(engineering_requests["build"]))
+                finally:
+                    engine_environment[key] = original_value
+            with patch.object(MODULE.platform, "machine", return_value="x86_64"), self.assertRaises(MODULE.Refused):
+                MODULE.engineering_context(dict(engineering_requests["build"]))
+            with self.assertRaises(MODULE.Refused):
+                MODULE.engineering_context(dict(engineering_requests["build"], target=MODULE.INTEL_TARGET))
+
+        # Main publishes only existing closed exception/command facts, including
+        # context refusals after a parsed fixed CLI. Native output stays PRIVATE.
+        private = b"PRIVATE-engineering-diagnostic-sentinel"
+        for fault in (None, "context", "loader", "exception", "native", "query", "malformed"):
+            with self.subTest(engineering_main_failure=fault), ExitStack() as stack:
+                published, output, errors = [], io.BytesIO(), io.BytesIO()
+                stream = lambda buffer: SimpleNamespace(buffer=buffer, write=lambda value: buffer.write(value.encode()), flush=lambda: None)
+                native = subprocess.CompletedProcess(["fixed-original"], 65 if fault in ("native", "query") else 0, private, b"private stderr")
+                owner = SimpleNamespace(ProcessError=OSError, ProcessInterrupted=InterruptedError,
+                                        run_owned=lambda *_a, **_k: native)
+                def execute(phase, _request, _source, _limits):
+                    if fault == "exception": raise TypeError(private.decode())
+                    original = phase.call("one-admitted-ui-test", ["fixed-original"], 180)
+                    if fault == "query": raise MODULE.NativeQueryFailure(original)
+                    return original
+                arguments = ["helper", "--engineering-main-build", "--work", str(engineering_work)]
+                if fault == "malformed": arguments.append("extra")
+                for context in (
+                    patch.object(MODULE.sys, "argv", arguments),
+                    patch.object(MODULE.os, "environ", {"TMPDIR": engineering_tmp}),
+                    patch.object(MODULE.time, "monotonic_ns", return_value=0),
+                    patch.object(MODULE, "engineering_context", side_effect=ValueError(private.decode()) if fault == "context" else None,
+                                 return_value=(Path("/inert"), "a" * 40, {}, (32 * 1024**3,) * 2)),
+                    patch.object(MODULE, "load_normal_owner", side_effect=OSError(private.decode()) if fault == "loader" else None, return_value=owner),
+                    patch.object(MODULE, "execute_engineering_phase", side_effect=execute),
+                    patch.object(MODULE, "publish_engineering_failure", side_effect=lambda request, value: published.append((request, value))),
+                    patch.object(MODULE, "execute_normal_phase", side_effect=AssertionError("ordinary route selected")),
+                    patch.object(MODULE.sys, "stdout", stream(output)), patch.object(MODULE.sys, "stderr", stream(errors)),
+                ): stack.enter_context(context)
+                self.assertEqual(MODULE.main(), 0 if fault is None else 65 if fault in ("native", "query") else 1)
+                if fault in (None, "malformed"):
+                    self.assertEqual(published, [])
+                else:
+                    self.assertEqual(len(published), 1)
+                    request, failure = published[0]
+                    self.assertEqual(request["work"], engineering_work)
+                    self.assertEqual(set(failure), {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
+                                                   "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"})
+                    self.assertEqual(failure["scope"], "generated-ui-runner-refused")
+                    self.assertFalse(failure["productReady"])
+                    self.assertTrue(failure["unknownStateRetained"])
+                    self.assertNotIn(private, MODULE.encoded(failure))
+                    self.assertNotIn(b"private stderr", MODULE.encoded(failure))
+                    if fault in ("native", "query"):
+                        self.assertEqual(len(failure["commands"]), 1)
+                        self.assertEqual(failure["commands"][0]["returncode"], 65)
+                        self.assertEqual(failure["commands"][0]["stdoutSha256"], hashlib.sha256(private).hexdigest())
+                        self.assertEqual(output.getvalue(), private)
+                    else:
+                        self.assertEqual(failure["commands"], [])
+                        self.assertEqual(failure["stage"], "context" if fault == "context" else "loader" if fault == "loader" else "execute")
+
     def test_normal_phase_deadlines_file_limits_source_and_receipt_finality(self):
         for phase, limit in (("build", 32 * 1024**3), ("test", 1024**3), ("summary", 1024**3)):
             self.assertEqual(MODULE.normal_file_limit(phase, (limit, limit)), (limit, limit))
@@ -1708,6 +1957,303 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(owned[-2][1]["timeout"], 30)
                     self.assertEqual(owned[-2][1]["output_limit"], 262144)
                     self.assertEqual(json.loads((normal / "summary.command-admission.json").read_bytes())["resultBundle"], "test.xcresult")
+
+        # The SAME real-filesystem group also exercises the fixed engineering
+        # assembly/input/receipt path. Small synthetic bytes only: no archive,
+        # interpreter, signer, Xcode, or application is executed by this test.
+        for fault in (None, "runtime-changed", "source-changed", "native-nonzero", "late-test",
+                      "input-close", "receipt-close", "summary-nonzero", "late-summary-close"):
+            with self.subTest(engineering_original=fault), tempfile.TemporaryDirectory(prefix="mrk-engineering-main-data-") as temporary:
+                base = Path(temporary)
+                root, compiler, work = (base / name for name in ("source", "compiler", "work"))
+                for directory in (root, compiler, work): directory.mkdir(mode=0o700)
+                normal = work / "normal-ui"; normal.mkdir(mode=0o700)
+                (normal / "tmp").mkdir(mode=0o700)
+                def put(path, body, mode=0o600):
+                    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    path.write_bytes(body); path.chmod(mode)
+                relative_names = ("desktop/tools/macos_normal_ui_runner.py",
+                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift")
+                source_rows = []
+                for relative in relative_names:
+                    body = b"synthetic SOURCE only, never imported or compiled\n"
+                    put(root / relative, body)
+                    blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+                    source_rows.append(b"100644 blob " + blob.encode() + b"\t" + relative.encode() + b"\0")
+                workflow_name = ".github/workflows/desktop-macos-engineering-ui.yml"
+                workflow_body = b"synthetic fixed workflow SOURCE, never executed\n"
+                put(root / workflow_name, workflow_body)
+                bootstrap = b"synthetic bootstrap SOURCE, never executed\n"
+                protocol = b"synthetic core protocol SOURCE, never imported\n"
+                put(root / "desktop/engine_bootstrap.py", bootstrap)
+                put(root / "src/mobile_release/_desktop_engine.py", protocol)
+                plist_body = plistlib.dumps(dict(CFBundleIdentifier="dev.mobile-release-kit.engineering-ui",
+                    CFBundleExecutable="mobile-release-kit-desktop", CFBundleName="Mobile Release Kit", CFBundlePackageType="APPL"))
+                put(root / "desktop/native/macos-normal-ui/engineering-main-app.plist", plist_body)
+                binary = b"synthetic original main, not an executable format\n"
+                put(compiler / "target/engineering-main/mobile-release-kit-desktop", binary, 0o700)
+                binding = dict(sourceSha="a" * 40, sourceTree="b" * 40, workflowPath=workflow_name,
+                    workflowSha="a" * 40, workflowSha256=hashlib.sha256(workflow_body).hexdigest(),
+                    workflowRef="mobile-release-kit/mobile-release-kit/" + workflow_name + "@refs/heads/verify/desktop-macos-engineering-ui",
+                    runId="123", attempt="1", engineeringWork=str(work))
+                context = dict(binding, root=str(compiler), source=str(root), platform="macos", executionScope="macos-engineering-ui-compile-v1")
+                public = dict(binding, platform="macos", scope="desktop-macos-engineering-ui-compile-only-v1",
+                              bootstrapSha256=hashlib.sha256(bootstrap).hexdigest())
+                put(compiler / "context.json", json.dumps(context).encode())
+                put(compiler / "public-bindings.json", json.dumps(public).encode())
+                rust = dict(release="1.98.1", commitHash="48a229ceaefd4985c50990b14116b6d856af0985", target="aarch64-apple-darwin")
+                check_names = {"acquire": ("rust-version-target", "mac-cargo-version", "locked-platform-metadata", "node-version", "npm-locked-no-scripts"),
+                    "compile": ("rust-version-target", "mac-cargo-version", "node-version", "typescript-no-emit", "vite-assets", "tauri-debug-compile-only")}
+                for mode in ("acquire", "compile"):
+                    receipt = dict(schemaVersion=1, scope="desktop-macos-engineering-ui-compile-only-v1", phase=mode,
+                        status="passed", **binding, platform="macos", rust=rust, node="v24.20.0",
+                        checks=[dict(check=name, exitCode=0) for name in check_names[mode]])
+                    if mode == "compile":
+                        receipt["compiledMain"] = dict(relativePath="target/engineering-main/mobile-release-kit-desktop",
+                            bytes=len(binary), sha256=hashlib.sha256(binary).hexdigest())
+                    put(compiler / (mode + "-checks.json"), json.dumps(receipt).encode())
+                runtime = work / "runtime"
+                runtime_inputs = {"core.zip": b"synthetic core bytes, not parsed as a ZIP\n",
+                                  "engine_bootstrap.py": bootstrap, "python/bin/python3": b"synthetic interpreter, never executed\n"}
+                rows = []
+                for name, body in sorted(runtime_inputs.items()):
+                    put(runtime / name, body, 0o555 if name == "python/bin/python3" else 0o444)
+                    rows.append(dict(path=name, size=len(body), sha256=hashlib.sha256(body).hexdigest()))
+                manifest = dict(schemaVersion=1, protocol=1, coreVersion="fixture", target="aarch64-apple-darwin",
+                    coreSha256=hashlib.sha256(runtime_inputs["core.zip"]).hexdigest(),
+                    protocolSha256=hashlib.sha256(protocol).hexdigest(),
+                    inventorySha256=hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+                    files=rows)
+                manifest_body = json.dumps(manifest).encode()
+                put(runtime / "manifest.json", manifest_body, 0o444)
+                for directory in sorted((p for p in runtime.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                    directory.chmod(0o555)
+                runtime.chmod(0o555)
+                description = dict(qualification="current-source-description-only-not-build-or-install-authority", target="aarch64-apple-darwin",
+                    supplierOrigin="fresh-public-source", supplierReceiptSha256="2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d",
+                    supplierProfile="mrk-macos-cpython-source-supplier-v1", pythonVersion="3.14.7", gil=True,
+                    successorManifestSha256=hashlib.sha256(manifest_body).hexdigest(),
+                    **{key: manifest[key] for key in ("inventorySha256", "coreSha256", "protocolSha256")})
+                put(work / "runtime-description.json", json.dumps(description).encode())
+                put(work / "runtime-result.json", json.dumps(dict(description, qualification="current-source-staged-no-native-execution")).encode())
+                tool_values = (b"Xcode 26.0\nBuild version 17A324\n",
+                    b"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk\n",
+                    b"26.0\n", b"25A352\n")
+                query_values = {tuple(query[2]): body for query, body in zip(MODULE.TOOLCHAIN_QUERIES, tool_values)}
+                marker = ("MRK_MACOS_ENGINEERING_MAIN_UI=mainRequest=1;completion=1;body=1;handoff=1;mainIdentity=1;catalogueGuide=1;"
+                    "projectSelected=0;editCapability=unavailable;originalTerminated=1;failureCleanup=0;caseDeadlineMet=1;"
+                    "cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+                case = "-[MRKNormalAppUITests.NormalAppUITests testEngineeringMainCatalogueAndQuit]"
+                ui_stdout = ("Test Case '" + case + "' started.\n" + marker + "\nTest Case '" + case + "' passed (1.000 seconds).\n").encode()
+                summary_body = b'{"totalTestCount":1,"passedTests":1,"failedTests":0,"skippedTests":0,"expectedFailures":0}\n'
+                tick, owned, current_mode = [0], [], ["build"]
+                def owned_fake(argv, **kwargs):
+                    owned.append((argv, kwargs))
+                    if argv[0] == "/usr/bin/git":
+                        body = ((binding["sourceSha"] + "\n" + binding["sourceTree"] + "\n").encode() if "rev-parse" in argv
+                                else b"" if "diff" in argv else b"".join(source_rows))
+                        return subprocess.CompletedProcess(argv, 0, body, b"")
+                    if tuple(argv) in query_values:
+                        return subprocess.CompletedProcess(argv, 0, query_values[tuple(argv)], b"")
+                    if argv[0] == "/usr/bin/codesign":
+                        if "--sign" in argv:
+                            app = work / "Mobile Release Kit.app"
+                            put(app / "Contents/_CodeSignature/CodeResources", b"synthetic signature envelope\n")
+                            put(app / "Contents/MacOS/mobile-release-kit-desktop", binary + b"synthetic ad-hoc mutation\n", 0o700)
+                        return subprocess.CompletedProcess(argv, 0, b"", b"")
+                    if argv[1] == "build-for-testing":
+                        (normal / "DerivedData").mkdir(mode=0o700)
+                        return subprocess.CompletedProcess(argv, 0, b"synthetic build original\n", b"")
+                    if argv[1] == "test-without-building":
+                        (normal / "engineering-test.xcresult").mkdir(mode=0o700)
+                        if fault == "runtime-changed":
+                            path = runtime / "core.zip"; path.chmod(0o644); path.write_bytes(b"changed runtime"); path.chmod(0o444)
+                        if fault == "source-changed": (root / relative_names[0]).write_bytes(b"changed source\n")
+                        if fault == "late-test": tick[0] = 345 * 1_000_000_000
+                        return subprocess.CompletedProcess(argv, 65 if fault == "native-nonzero" else 0,
+                                                           b"" if fault == "native-nonzero" else ui_stdout, b"")
+                    if argv[:4] == ["/usr/bin/xcrun", "xcresulttool", "get", "test-results"]:
+                        return subprocess.CompletedProcess(argv, 66 if fault == "summary-nonzero" else 0, summary_body, b"")
+                    self.fail("unexpected engineering fake original route")
+                original_open, original_close = os.open, os.close
+                original_enter = MODULE.EngineeringInputs.__enter__
+                close_target, close_failures = [None], []
+                def remember_inputs(instance):
+                    returned = original_enter(instance)
+                    if current_mode[0] == "test" and fault == "input-close":
+                        close_target[0] = instance.held[runtime / "core.zip"][0]
+                    return returned
+                def open_original(path, flags, *args, **kwargs):
+                    fd = original_open(path, flags, *args, **kwargs)
+                    if flags & os.O_CREAT and str(path).endswith("/engineering-test.runner-admission.json") and fault == "receipt-close":
+                        close_target[0] = fd
+                    if flags & os.O_CREAT and str(path).endswith("/engineering-summary.command-admission.json") and fault == "late-summary-close":
+                        close_target[0] = fd
+                    return fd
+                def close_original(fd):
+                    original_close(fd)
+                    if fd == close_target[0]:
+                        close_target[0] = None; close_failures.append(fd)
+                        if fault == "late-summary-close": tick[0] = 90 * 1_000_000_000
+                        else: raise OSError("synthetic consuming original close failure")
+                request = dict(engineering=True, phase="build", target="aarch64-apple-darwin", work=work, compiler=compiler,
+                    binding={key: value for key, value in binding.items() if key not in ("sourceTree", "workflowSha256")},
+                    derived=normal / "DerivedData", result=None, methods=(), allowance=None, timeout=240, phaseSeconds=450)
+                result = normal / "engineering-smoke.json"
+                try:
+                    with patch.object(MODULE.os, "open", open_original), patch.object(MODULE.os, "close", close_original), \
+                            patch.object(MODULE.EngineeringInputs, "__enter__", remember_inputs), patch.object(MODULE, "RunnerProducts") as products_type:
+                        products = products_type.return_value.__enter__.return_value
+                        products_type.return_value.__exit__.return_value = False
+                        products.products = normal / "DerivedData/Build/Products"
+                        products.manifest = "fixed.xctestrun"
+                        products.admit.side_effect = lambda _call: {"scope": "inert-products-not-native-authority"}
+                        build_phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), {}, root, MODULE.PhaseClock(450, now=lambda: tick[0]))
+                        built = MODULE.execute_engineering_phase(build_phase, request, binding["sourceSha"], (32 * 1024**3,) * 2)
+                        self.assertEqual(built.returncode, 0)
+                        self.assertFalse(result.exists())
+                        self.assertEqual((compiler / "target/engineering-main/mobile-release-kit-desktop").read_bytes(), binary)
+                        self.assertEqual((work / "Mobile Release Kit.app/Contents/Info.plist").read_bytes(), plist_body)
+                        self.assertEqual((work / "Mobile Release Kit.app/Contents/MacOS/mobile-release-kit-desktop").read_bytes(), binary + b"synthetic ad-hoc mutation\n")
+                        build_facts = json.loads((normal / "engineering-build.command-admission.json").read_bytes())
+                        self.assertEqual(build_facts["compilerBinarySha256"], hashlib.sha256(binary).hexdigest())
+                        self.assertTrue(build_facts["inputOriginalClosesCompleted"])
+                        current_mode[0] = "test"
+                        tested_request = dict(request, phase="test", result=normal / "engineering-test.xcresult",
+                            methods=(MODULE.ENGINEERING_METHOD,), allowance=60, timeout=180, phaseSeconds=345)
+                        test_phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), {}, root, MODULE.PhaseClock(345, now=lambda: tick[0]))
+                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close", "receipt-close"):
+                            with self.assertRaises((MODULE.Refused, OSError)):
+                                MODULE.execute_engineering_phase(test_phase, tested_request, binding["sourceSha"], (1024**3,) * 2)
+                        else:
+                            tested = MODULE.execute_engineering_phase(test_phase, tested_request, binding["sourceSha"], (1024**3,) * 2)
+                            self.assertEqual(tested.returncode, 65 if fault == "native-nonzero" else 0)
+                            test_facts = json.loads((normal / "engineering-test.runner-admission.json").read_bytes())
+                            self.assertEqual(test_facts["sameOriginalNormalQuitObserved"], fault != "native-nonzero")
+                            self.assertTrue(test_facts["generatedRunnerOriginalClosesCompleted"])
+                            original_stdout = b"" if fault == "native-nonzero" else ui_stdout
+                            self.assertEqual(test_facts["testStdoutSha256"], hashlib.sha256(original_stdout).hexdigest())
+                            self.assertEqual((normal / "engineering-test.stdout").read_bytes(), original_stdout)
+                            self.assertEqual((normal / "engineering-test.stderr").read_bytes(), b"")
+                            current_mode[0] = "summary"
+                            summarized = dict(tested_request, phase="summary", timeout=30, phaseSeconds=90, methods=(), allowance=None)
+                            summary_phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), {}, root, MODULE.PhaseClock(90, now=lambda: tick[0]))
+                            if fault in ("native-nonzero", "late-summary-close"):
+                                with self.assertRaises(MODULE.Refused):
+                                    MODULE.execute_engineering_phase(summary_phase, summarized, binding["sourceSha"], (1024**3,) * 2)
+                            else:
+                                returned = MODULE.execute_engineering_phase(summary_phase, summarized, binding["sourceSha"], (1024**3,) * 2)
+                                self.assertEqual(returned.returncode, 66 if fault == "summary-nonzero" else 0)
+                        if fault is None:
+                            facts = json.loads(result.read_bytes())
+                            self.assertEqual(set(facts), {"schemaVersion", "scope", "status", "sourceSha", "sourceTree", "workflowPath",
+                                "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "engineeringWork", "compilerRoot", "target",
+                                "compilerReceiptSha256", "runtimeResultSha256", "runtimeManifestSha256", "runtimeRosterSha256", "applicationRosterSha256",
+                                "compilerBinarySha256", "testAdmissionSha256", "testIdentifier", "testCounts", "nativeSummarySha256",
+                                "sameOriginalNormalQuitObserved", "cleanExitStatus", "allWorkerFinality", "fullUIQualified", "productReady",
+                                "sourcePrePostMatched", "inputPrePostMatched", "inputOriginalClosesCompleted", "generatedRunnerOriginalClosesCompleted",
+                                "originalCommandsReturned", "summaryAdmissionSha256", "originalWrapperZeroRequired"})
+                            self.assertEqual(facts["scope"], "engineering-main-ui-smoke-only")
+                            self.assertEqual(facts["status"], "passed")
+                            self.assertEqual(facts["testCounts"], dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0, expectedFailures=0))
+                            self.assertEqual(facts["compilerReceiptSha256"], hashlib.sha256((compiler / "compile-checks.json").read_bytes()).hexdigest())
+                            self.assertEqual(facts["summaryAdmissionSha256"], hashlib.sha256((normal / "engineering-summary.command-admission.json").read_bytes()).hexdigest())
+                            self.assertEqual(facts["testAdmissionSha256"], hashlib.sha256((normal / "engineering-test.runner-admission.json").read_bytes()).hexdigest())
+                            self.assertEqual(facts["nativeSummarySha256"], hashlib.sha256(summary_body).hexdigest())
+                            for key in ("sameOriginalNormalQuitObserved", "sourcePrePostMatched", "inputPrePostMatched",
+                                        "inputOriginalClosesCompleted", "generatedRunnerOriginalClosesCompleted", "originalCommandsReturned", "originalWrapperZeroRequired"):
+                                self.assertIs(facts[key], True)
+                            self.assertIsNone(facts["cleanExitStatus"])
+                            self.assertEqual(facts["allWorkerFinality"], "not-established")
+                            self.assertFalse(facts["fullUIQualified"]); self.assertFalse(facts["productReady"])
+                            self.assertEqual(stat.S_IMODE(result.stat().st_mode), 0o600)
+                            # Published JSON alone is NOT the external wrapper's original return.
+                            self.assertFalse((normal / "engineering-summary.status").exists())
+                            with self.assertRaises(OSError): MODULE.exclusive_output(result, b"do not overwrite\n", 16384)
+                            with self.assertRaises(MODULE.Refused): MODULE.exclusive_output(normal / "empty-receipt.json", b"", 16384)
+                            with self.assertRaises(MODULE.Refused): MODULE.exclusive_output(normal / "empty-receipt.json", b"", 16384, allow_empty=1)
+                            self.assertFalse((normal / "empty-receipt.json").exists())
+                        else:
+                            self.assertFalse(result.exists())
+                        if fault in ("input-close", "receipt-close", "late-summary-close"):
+                            self.assertEqual(len(close_failures), 1)
+                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close"):
+                            self.assertFalse((normal / "engineering-test.runner-admission.json").exists())
+                        if fault == "native-nonzero":
+                            self.assertFalse(any(argv[:4] == ["/usr/bin/xcrun", "xcresulttool", "get", "test-results"] for argv, _ in owned))
+                        products.admit.assert_called_once()
+                        self.assertEqual(products.check.call_count, 2 if fault != "late-test" else 1)
+                        products_type.return_value.__exit__.assert_called_once()
+                        self.assertEqual(sum(argv[1:2] == ["test-without-building"] for argv, _ in owned), 1)
+                finally:
+                    # Only this test's known temporary tree, including deliberate
+                    # readonly fixture inputs, is made removable for its owner.
+                    for directory in [base, *(p for p in base.rglob("*") if p.is_dir())]:
+                        directory.chmod(0o700)
+
+        # The fixed diagnostic destination also uses real private directory/file
+        # originals. Its publication can never overwrite, retry, or imply success.
+        with tempfile.TemporaryDirectory(prefix="mrk-engineering-diagnostic-data-") as temporary:
+            work = Path(temporary); work.chmod(0o700)
+            normal = work / "normal-ui"; normal.mkdir(mode=0o700)
+            request = dict(engineering=True, phase="build", work=work, derived=normal / "DerivedData")
+            failure = MODULE.normal_admission_failure("context", ValueError("PRIVATE-diagnostic-value"), None, [])
+            expected = MODULE.encoded(failure) + b"\n"
+            for mode in ("build", "test", "summary"):
+                selected = dict(request, phase=mode)
+                path = normal / ("engineering-" + mode + ".failure-diagnostics.json")
+                MODULE.publish_engineering_failure(selected, failure)
+                self.assertEqual(path.read_bytes(), expected)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertNotIn(b"PRIVATE", path.read_bytes())
+                with patch.object(MODULE.sys, "stderr", io.StringIO()) as errors:
+                    MODULE.publish_engineering_failure(selected, dict(failure, stage="loader"))
+                    self.assertEqual(errors.getvalue(), "engineering-failure-diagnostic-publication-failed\n")
+                self.assertEqual(path.read_bytes(), expected)
+                path.unlink()
+            for invalid in (dict(request, engineering=False), dict(request, phase="../foreign"),
+                            dict(request, derived=work / "foreign/DerivedData")):
+                with patch.object(MODULE.sys, "stderr", io.StringIO()):
+                    MODULE.publish_engineering_failure(invalid, failure)
+                self.assertEqual(list(normal.iterdir()), [])
+            for directory in (work, normal):
+                directory.chmod(0o755)
+                try:
+                    with patch.object(MODULE.sys, "stderr", io.StringIO()):
+                        MODULE.publish_engineering_failure(request, failure)
+                    self.assertEqual(list(normal.iterdir()), [])
+                finally:
+                    directory.chmod(0o700)
+            normal.rmdir()
+            other = work / "foreign"; other.mkdir(mode=0o700)
+            normal.symlink_to(other, target_is_directory=True)
+            try:
+                with patch.object(MODULE.sys, "stderr", io.StringIO()):
+                    MODULE.publish_engineering_failure(request, failure)
+                self.assertEqual(list(other.iterdir()), [])
+            finally:
+                normal.unlink(); normal.mkdir(mode=0o700)
+            with patch.object(MODULE.sys, "stderr", io.StringIO()):
+                MODULE.publish_engineering_failure(request, dict(failure, commands=["x" * 16384]))
+            self.assertEqual(list(normal.iterdir()), [])
+            actual_open, actual_close = os.open, os.close
+            selected_fd, consumed = [None], []
+            def diagnostic_open(path, flags, *args, **kwargs):
+                fd = actual_open(path, flags, *args, **kwargs)
+                if flags & os.O_CREAT: selected_fd[0] = fd
+                return fd
+            def diagnostic_close(fd):
+                actual_close(fd)
+                if fd == selected_fd[0]:
+                    selected_fd[0] = None; consumed.append(fd)
+                    raise OSError("PRIVATE-consuming-close")
+            with patch.object(MODULE.os, "open", diagnostic_open), patch.object(MODULE.os, "close", diagnostic_close), \
+                    patch.object(MODULE.sys, "stderr", io.StringIO()) as errors:
+                MODULE.publish_engineering_failure(request, failure)
+                self.assertEqual(errors.getvalue(), "engineering-failure-diagnostic-publication-failed\n")
+            self.assertEqual(len(consumed), 1)
+            self.assertEqual((normal / "engineering-build.failure-diagnostics.json").read_bytes(), expected)
+            self.assertFalse((normal / "engineering-smoke.json").exists())
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
         selected = "testLaunchCancelAndQuit"

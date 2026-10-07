@@ -133,6 +133,88 @@ EVIDENCE_LEAVES = ['diagnostics-test-file-limit.status',
  'diagnostics-result.json']
 
 
+# Closed engineering-only inverse: unchanged ordinary semantic/owner hashes below
+# remain authoritative after exactly these reviewed source regions are removed.
+ENGINEERING_MAIN_BEGIN = '    // Engineering main only: actual embedded UI and current-core reference data.\n'
+ENGINEERING_MAIN_END = '    // End engineering main fixture; ordinary installed cases below are unchanged.\n\n'
+ENGINEERING_MAIN_SHA256 = '4cdab7a9f333b9c74ff66aaca6eafc42502a4c52174db1368ee71e714e1f3828'
+ENGINEERING_BEFORE_SWIFT_SHA256 = 'c463302b56cee2da043d1cbb9ce87f03f1d92118759cf3c3127ed25dc48f0dad'
+ENGINEERING_CORE_GUIDE_SHA256 = '7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478'
+ENGINEERING_SHARED_REGIONS = (('        private let clock: CaseClock\n        private let reply = LaunchReply()',
+  '        private let clock: CaseClock\n'
+  '        private let profile: LaunchProfile\n'
+  '        private let reply = LaunchReply()'),
+ ('        init(clock: CaseClock) { self.clock = clock }',
+  '        init(clock: CaseClock, profile: LaunchProfile = .ordinary) {\n'
+  '            self.clock = clock\n'
+  '            self.profile = profile\n'
+  '        }'),
+ ('        private func payloadIdentity() throws -> NSRunningApplication {\n'
+  '            guard let original,\n'
+  '                  original.bundleURL?.path == Self.payloadURL.path,\n'
+  '                  original.executableURL?.path == '
+  'Self.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,\n'
+  '                  original.bundleIdentifier == "dev.mobile-release-kit.desktop" else {\n'
+  '                throw clock.fail("original running reference is not the fixed payload")\n'
+  '            }\n'
+  '            return original\n'
+  '        }\n',
+  '        private func payloadIdentity() throws -> NSRunningApplication {\n'
+  '            switch profile {\n'
+  '            case .ordinary:\n'
+  '                guard let original,\n'
+  '                      original.bundleURL?.path == Self.payloadURL.path,\n'
+  '                      original.executableURL?.path == '
+  'Self.payloadURL.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,\n'
+  '                      original.bundleIdentifier == "dev.mobile-release-kit.desktop" else {\n'
+  '                    throw clock.fail("original running reference is not the fixed payload")\n'
+  '                }\n'
+  '                return original\n'
+  '            case .engineeringMain(let work):\n'
+  '                let app = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)\n'
+  '                guard let original, original.bundleURL?.path == app.path,\n'
+  '                      original.executableURL?.path == '
+  'app.appendingPathComponent("Contents/MacOS/mobile-release-kit-desktop").path,\n'
+  '                      original.bundleIdentifier == "dev.mobile-release-kit.engineering-ui" else {\n'
+  '                    throw clock.fail("original running reference is not the fixed engineering main")\n'
+  '                }\n'
+  '                return original\n'
+  '            }\n'
+  '        }\n'),
+ ('            // No environment override: the unchanged ordinary entry derives its\n'
+  '            // own eight-entry environment and inherits the original gate once.\n'
+  '            requested = true\n'
+  '            let mailbox = reply\n'
+  '            NSWorkspace.shared.openApplication(at: Self.outerURL, configuration: configuration) { [self, '
+  'mailbox] application, error in\n',
+  '            let requestURL: URL\n'
+  '            switch profile {\n'
+  '            case .ordinary:\n'
+  '                // No environment override: the unchanged ordinary entry derives its\n'
+  '                // own eight-entry environment and inherits the original gate once.\n'
+  '                requestURL = Self.outerURL\n'
+  '            case .engineeringMain(let work):\n'
+  '                requestURL = work.appendingPathComponent("Mobile Release Kit.app", isDirectory: true)\n'
+  '                configuration.environment = [\n'
+  '                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner", '
+  '"LOGNAME": "runner",\n'
+  '                    "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",\n'
+  '                    "TMPDIR": work.appendingPathComponent("normal-ui/tmp", isDirectory: true).path + "/",\n'
+  '                    "MRK_DESKTOP_DEV_PYTHON": work.appendingPathComponent("runtime/python/bin/python3").path,\n'
+  '                    "MRK_DESKTOP_DEV_CORE": work.appendingPathComponent("runtime/core.zip").path,\n'
+  '                ]\n'
+  '            }\n'
+  '            requested = true\n'
+  '            let mailbox = reply\n'
+  '            NSWorkspace.shared.openApplication(at: requestURL, configuration: configuration) { [self, mailbox] '
+  'application, error in\n'),
+ ('        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved,\n'
+  '                    "a new ordinary launch requires empty active custody")',
+  '        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved\n'
+  '                    && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,\n'
+  '                    "a new ordinary launch requires empty active custody and no engineering profile")'))
+
+
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -166,6 +248,20 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_engineering_main(self, swift: str) -> str:
+        self.assertEqual(swift.count(ENGINEERING_MAIN_BEGIN), 1)
+        self.assertEqual(swift.count(ENGINEERING_MAIN_END), 1)
+        begin = swift.index(ENGINEERING_MAIN_BEGIN)
+        end = swift.index(ENGINEERING_MAIN_END) + len(ENGINEERING_MAIN_END)
+        self.assertLess(begin, end)
+        self.assertEqual(digest(swift[begin:end].encode()), ENGINEERING_MAIN_SHA256)
+        swift = swift[:begin] + swift[end:]
+        for original, current in reversed(ENGINEERING_SHARED_REGIONS):
+            self.assertEqual(swift.count(current), 1)
+            swift = swift.replace(current, original, 1)
+        self.assertEqual(digest(swift.encode()), ENGINEERING_BEFORE_SWIFT_SHA256)
+        return swift
+
     def restored_initial_renderer_readiness(self, swift: str) -> str:
         # This one reviewed readiness allowance is not a general normalization:
         # the other launch site and every byte outside this block remain bound.
@@ -371,7 +467,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         return block
 
     def test_normal_saved_offline_and_empty_recovery_use_original_gui_only(self):
-        swift = self.restored_semantic_heading_queries((ROOT / SWIFT).read_text())
+        swift = self.restored_semantic_heading_queries(self.restored_engineering_main((ROOT / SWIFT).read_text()))
         block = self.checked_saved_checks_block(swift)
         offline = block.split('@MainActor func testSyntheticProjectSavedOfflineChecks() throws {', 1)[1]
         offline, recovery = offline.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {', 1)
@@ -524,7 +620,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertNotIn('operator', block.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection()', 1)[1])
 
     def checked_diagnostics_source(self) -> tuple[str, str]:
-        swift = self.restored_semantic_heading_queries((ROOT / SWIFT).read_text())
+        swift = self.restored_semantic_heading_queries(self.restored_engineering_main((ROOT / SWIFT).read_text()))
         # Require only the two accepted paired-host compile substitutions;
         # historical semantic/owner bytes remain under their original hash.
         for old, current in (('#if !os(macOS) || !arch(arm64)\n#error("This external UI scenario requires a fresh hosted ARM64 macOS 26 job.")\n', '#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error("This external UI scenario requires a fresh hosted native64 macOS 26 job.")\n'), ('        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n', '        #if arch(arm64)\n        let hostedJob = "github-hosted-macos26-arm64"\n        #elseif arch(x86_64)\n        let hostedJob = "github-hosted-macos26-x86_64"\n        #endif\n        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == hostedJob,\n')):
@@ -548,7 +644,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
         self.checked_diagnostics_source()
-        source = (ROOT / SWIFT).read_text()
+        source = self.restored_engineering_main((ROOT / SWIFT).read_text())
         original, semantic, count = SEMANTIC_HEADING_LINES[0]
         self.assertEqual(count, 1)
         restart_original, restart_semantic, restart_count = SEMANTIC_HEADING_LINES[-1]
@@ -564,6 +660,94 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             with self.subTest(semantic_heading_refusal=label):
                 with self.assertRaises(AssertionError):
                     self.restored_semantic_heading_queries(changed)
+
+        # The new smoke is a separate private profile. Restore only its exact
+        # reviewed regions, then retain EVERY historical ordinary-source pin
+        # and negative query mutation above. These are SOURCE checks, not UI.
+        engineering_source = (ROOT / SWIFT).read_text()
+        begin = engineering_source.index(ENGINEERING_MAIN_BEGIN)
+        end = engineering_source.index(ENGINEERING_MAIN_END) + len(ENGINEERING_MAIN_END)
+        engineering = engineering_source[begin:end]
+        self.assertEqual(digest(engineering.encode()), ENGINEERING_MAIN_SHA256)
+        self.assertIn('private enum SourceProfile { case sameBuild, packagedEntry }', source)
+        self.assertNotIn('testEngineeringMainCatalogueAndQuit', source)
+        ordered = ('try beginCase(seconds: 60)', 'let work = try engineeringWork()',
+                   'let app = try launchEngineeringMain(work: work)',
+                   'named(renderer, "Credential and signing asset guides")',
+                   'label: "Android upload keystore", prefix: true',
+                   'label: "Apple Distribution identity", prefix: true', 'apple.click()',
+                   '"Original Distribution P12"', '"Reference guide · not a result"',
+                   'let first = try quitSheet(app, window)', '"Cancel"', 'try engineeringDashboard(renderer)',
+                   'let second = try quitSheet(app, window)', '"Quit"',
+                   'try owner.observeNormalTermination(until: end)', 'try owner.acceptTerminal()',
+                   'normalQuitObserved = true', 'print("MRK_MACOS_ENGINEERING_MAIN_UI=')
+        case = engineering.split('func testEngineeringMainCatalogueAndQuit() throws {', 1)[1]
+        positions = [case.index(token) for token in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(case.count('try beginCase('), 1)
+        self.assertNotIn('GateObservation(', engineering)
+        self.assertNotIn('fixture.prepare(', engineering)
+        self.assertNotIn('app.launch(', engineering)
+        self.assertIn('try require(!open.isEnabled && !choose.isEnabled,', engineering)
+        self.assertIn('entryGateObservation == nil', engineering)
+        for bad in (engineering_source.replace('catalogueGuide=1', 'catalogueGuide=0', 1),
+                    engineering_source.replace(ENGINEERING_MAIN_BEGIN, ENGINEERING_MAIN_BEGIN * 2, 1),
+                    engineering_source.replace('case .ordinary:\n                // No environment override:',
+                                               'case .ordinary:\n                configuration.environment = [:]\n                // No environment override:', 1),
+                    engineering_source.replace('configuration.allowsRunningApplicationSubstitution = false',
+                                               'configuration.allowsRunningApplicationSubstitution = true', 1)):
+            with self.assertRaises(AssertionError): self.restored_engineering_main(bad)
+
+        names = ('desktop/src/App.tsx', 'desktop/src/pages/Credentials.tsx', 'desktop/src/bridge.ts',
+                 'desktop/src/releaseInputGuidance.ts', 'desktop/src-tauri/src/runtime.rs', 'desktop/engine_bootstrap.py',
+                 'src/mobile_release/api/_catalog.py', 'src/mobile_release/api/_credential_guide.py',
+                 'src/mobile_release/api/data/credential-guide-v1.json')
+        reads = {name: (ROOT / name).read_text() for name in names}
+        app = reads['desktop/src/App.tsx']
+        for token in ('const result = await connection.catalog();', 'releaseInputs.setCatalog(result);', 'setCatalog(result);',
+                      'releaseInputs.setCatalog(null);', '<Credentials catalog={catalog}', 'inputState={releaseInputState}'):
+            self.assertIn(token, app)
+        bridge = reads['desktop/src/bridge.ts']
+        self.assertIn("const result = await call<Catalog>('catalog');", bridge)
+        self.assertIn('credentialGuide: parseCatalogCredentialGuide(result)', bridge)
+        guidance = reads['desktop/src/releaseInputGuidance.ts']
+        self.assertIn('const admitted = parseReleaseInputHelp(raw);', guidance)
+        self.assertIn("const rawGuide = data('credentialGuide'), rawCredentials = data('credentials');", guidance)
+        self.assertIn('parseCredentialGuide(structuredClone(rawGuide)) : null', guidance)
+        page = reads['desktop/src/pages/Credentials.tsx']
+        for token in ('<AssetGuide guide={inputState.help.guide}', 'aria-label="Credential and signing asset guides"',
+                      '{guide.kinds.map((entry)', '{entry.label}', '<h4>{field.label}</h4>', 'Reference guide · not a result'):
+            self.assertIn(token, page)
+        self.assertNotIn('Original Distribution P12', page)
+        self.assertNotIn('Android upload keystore', page)
+        catalogue = reads['src/mobile_release/api/_catalog.py']
+        self.assertIn('asset_guide = credential_guide()', catalogue)
+        self.assertIn('"credentialGuide": asset_guide', catalogue)
+        loader = reads['src/mobile_release/api/_credential_guide.py']
+        self.assertIn('files("mobile_release.api").joinpath("data", "credential-guide-v1.json").open("rb")', loader)
+        self.assertIn('return source.read(MAX_RESOURCE_BYTES + 1)', loader)
+        self.assertIn('raw = _read_resource_bytes()', loader)
+        guide_body = reads['src/mobile_release/api/data/credential-guide-v1.json'].encode()
+        self.assertEqual(digest(guide_body), ENGINEERING_CORE_GUIDE_SHA256)
+        guide = json.loads(guide_body)
+        self.assertEqual([row['label'] for row in guide['kinds'] if row['id'] in ('android-keystore', 'apple-p12')],
+                         ['Android upload keystore', 'Apple Distribution identity'])
+        apple = next(row for row in guide['kinds'] if row['id'] == 'apple-p12')
+        self.assertIn('Original Distribution P12', [row['label'] for row in apple['fields']])
+        runtime = reads['desktop/src-tauri/src/runtime.rs']
+        development = runtime.split('fn development(&self, end: Instant)', 1)[1].split('\n}\n', 1)[0]
+        for token in ('selected("MRK_DESKTOP_DEV_PYTHON")?', 'selected("MRK_DESKTOP_DEV_CORE")?',
+                      'Path::new(env!("CARGO_MANIFEST_DIR")).parent()', '.join("engine_bootstrap.py")',
+                      'core.extension().is_some_and(|extension| extension == "zip")',
+                      'Ok(VerifiedRuntime { python, core, cwd: bootstrap.parent()'):
+            self.assertIn(token, development)
+        bootstrap = reads['desktop/engine_bootstrap.py']
+        self.assertIn('from mobile_release._desktop_engine import main as run_engine', bootstrap)
+        self.assertIn('return run_engine()', bootstrap)
+        self.assertIn('sys.path.insert(0, sys.argv[1])', bootstrap)
+        self.assertIn('or not sys.flags.isolated', bootstrap)
+        self.assertIn('or not sys.flags.no_site', bootstrap)
+        self.assertIn('or not sys.dont_write_bytecode', bootstrap)
 
     def test_normal_diagnostics_observes_original_complete_report_and_settled_projection(self):
         swift, insertion = self.checked_diagnostics_source()
