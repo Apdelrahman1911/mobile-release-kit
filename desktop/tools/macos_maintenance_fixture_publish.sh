@@ -71,6 +71,7 @@ if not bootstrap_ok:
 OWNER_DIAGNOSTIC_ROLES = (
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
+    'service-cocoa-startup',
     'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
     'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
     'installed-signature-5', 'installed-signature-6', 'installed-signature-7',
@@ -94,6 +95,7 @@ OWNER_DIAGNOSTIC_ROLES = (
 OWNER_DIAGNOSTIC_PHASES = (
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
+    'service-cocoa-startup',
     'sign-5', 'sign-6', 'sign-7', 'sign-8', 'sign-9',
     'verify-sign-5', 'verify-sign-6', 'verify-sign-7', 'verify-sign-8', 'verify-sign-9',
     'installed-signature-5', 'installed-signature-6', 'installed-signature-7',
@@ -119,6 +121,38 @@ OWNER_DIAGNOSTIC_PHASES = (
 )
 
 OWNER_DIAGNOSTIC_REFUSALS = (
+    'cocoa-admission-prerequisites',
+    'cocoa-code-selector',
+    'cocoa-completion-call-binding',
+    'cocoa-completion-no-context',
+    'cocoa-completion-only-route',
+    'cocoa-completion-originals',
+    'cocoa-completion-owner',
+    'cocoa-completion-required',
+    'cocoa-empty-cwd',
+    'cocoa-files-selector',
+    'cocoa-graphic-session-unavailable',
+    'cocoa-image-selector',
+    'cocoa-original-call-entry',
+    'cocoa-original-clock-correspondence',
+    'cocoa-original-result',
+    'cocoa-output-correspondence',
+    'cocoa-phase-clock',
+    'cocoa-public-binding',
+    'cocoa-public-case',
+    'cocoa-public-completion',
+    'cocoa-public-order',
+    'cocoa-public-shape',
+    'cocoa-public-started',
+    'cocoa-public-unentered',
+    'cocoa-record-binding',
+    'cocoa-record-deadline',
+    'cocoa-record-finality',
+    'cocoa-record-observation',
+    'cocoa-record-observations',
+    'cocoa-record-sequence',
+    'cocoa-record-shape',
+    'cocoa-security-session-query-failed',
     "context-receipt-diagnostic-bound",
     "context-receipt-diagnostic-calls",
     "context-receipt-diagnostic-census",
@@ -412,12 +446,16 @@ try:
         installer_context = context_record
     service_layout = None
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
-    fixture.need(not layout_record["selected"]
-                 and all(not call["role"].startswith("service-layout-") for call in calls),
+    fixture.need(layout_record["type"] == fixture.COCOA_TYPE and layout_record["selected"] is True
+                 and all(call["role"] not in ("service-layout-single", "service-layout-nested", "native-run")
+                         and not call["role"].startswith("context-") for call in calls),
                  "summary-layout-route")
+    if layout_record["observerSourceSha256"] is not None:
+        fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
+                     "summary-cocoa-source")
     if (all(result[key] for key in ("sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown"))
             and all(call["returned"] for call in calls)):
-        # The normal route reports unselected DATA, including an honest pre-Context failure.
+        # Incomplete status DATA remains diagnostic only; no missing original is repaired.
         service_layout = layout_record
     native_rust_tests = None
     if result["nativeRustTests"] is not None:
@@ -541,12 +579,17 @@ try:
         # Exact own-event masks/hashes are mentions, not path lookups,
         # causal findings, native finality or service authority.
         btm_log = btm_record
-    # This committed workflow selects the ordinary native fixture route.
-    # The separate Context-only CLI remains explicit opt-in, not an
-    # alternative success condition for this workflow or native gate.
+    # This committed workflow selects only fixed Cocoa startup DATA.
+    # Context/normal CLI behavior is retained, but cannot qualify this observation.
     fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")
     context_receipt_diagnostic = None
     diagnostic_captured = False
+    if outcome == "success":
+        try:
+            fixture.service_cocoa_result(result, source)
+            diagnostic_captured = True
+        except BaseException:
+            pass  # Preserve failure metadata; never promote an incomplete original.
     context_completed = installer_context is not None and installer_context["completed"]
     known_pass = (
         outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
@@ -579,7 +622,7 @@ try:
         contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured),
         contextObservationCompleted=bool(context_completed),
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
-        failure=None if known_pass else "native-step-or-owner-did-not-establish-acceptance")
+        failure=None if known_pass or diagnostic_captured else "native-step-or-owner-did-not-establish-acceptance")
     book.check()
 except BaseException:
     summary["accepted"] = False
@@ -645,5 +688,6 @@ except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
 print("E2 native fixture accepted." if summary["accepted"] else
+      "Cocoa status observation completed; no lifecycle or production qualification." if summary["diagnosticCaptured"] else
       "E2 native fixture is not accepted; retained summary is failure evidence only.")
 PY_PUBLISH

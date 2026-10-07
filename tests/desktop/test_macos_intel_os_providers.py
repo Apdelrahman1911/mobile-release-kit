@@ -710,7 +710,7 @@ class IntelOSProviderData(unittest.TestCase):
         tree = ast.parse(helper)
         functions = {node.name: ast.get_source_segment(helper, node) for node in tree.body if isinstance(node, ast.FunctionDef)}
         self.assertEqual(len(PROBE.SOURCE_PINS), 11)
-        self.assertEqual(sum(row[0] for row in PROBE.SOURCE_PINS.values()), 1058004)
+        self.assertEqual(sum(row[0] for row in PROBE.SOURCE_PINS.values()), 1072245)
         self.assertEqual(PROBE.ROLES, ("resolve-dyld-info", "provider-javavm", "provider-libgcc", "provider-ncurses"))
         self.assertEqual(PROBE.REF, "refs/heads/verify/desktop-macos-intel-os-providers")
         self.assertEqual(PROBE.OPTIONS, ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths"))

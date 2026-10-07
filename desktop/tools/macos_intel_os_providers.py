@@ -35,7 +35,7 @@ SOURCE_PINS = {
     'src/mobile_release/_command_process.py': (172299, '30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69'),
     'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'),
     'src/mobile_release/cancellation.py': (31041, '5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35'),
-    'desktop/tools/macos_e2_native_fixture.py': (281295, '1e242cd423ebd9e76bbdfa86719cdf9712b44b32bde4821d34b12cbc23d693d8'),
+    'desktop/tools/macos_e2_native_fixture.py': (295536, '1110de5c63c5020aace1acbc6d664d04f1b3c1662015877a18f78d28702e48bf'),
     'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'),
     'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'),
     'src/mobile_release/_lifetime_evidence.py': (19072, 'f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3'),

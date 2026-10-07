@@ -1581,6 +1581,24 @@ class ServiceLayoutObservationTests(unittest.TestCase):
         return fixture.Operation(None, None, None, Path("/inert-layout-data"),
                                  {"GITHUB_SHA": SOURCE}, service_layout=selected).service_layout
 
+    @staticmethod
+    def cocoa_record():
+        return {
+            "schemaVersion": 1, "type": "mrk-e2-service-cocoa-status-v1", "sourceCommit": SOURCE,
+            "observerSourceSha256": "b" * 64, "case": "single", "outcome": "observed",
+            "startedNs": "2000000000", "finishedNs": "3000000000",
+            "bundle": "expected-client", "executable": "expected-client", "identifier": "expected-client",
+            "plist": "expected-daemon", "callbackCount": 1, "windowsObserved": 0, "registrationEntered": False,
+            **{key: True for key in ("graphicSessionVerified", "didFinishLaunching", "stopReturned", "wakeEventPosted",
+                "runReturned", "callbacksCancelled", "delegateCleared", "delegateReleaseReturned",
+                "applicationReleaseReturned", "poolDrainReturned", "finalityKnown")},
+            "observations": [dict(stage=stage, status="not-found", startedNs=str(low), finishedNs=str(high),
+                                  factoryReturned=True, retainReturned=True, statusReturned=True,
+                                  serviceReleaseReturned=True)
+                             for stage, low, high in (("before-cocoa", 2100000000, 2200000000),
+                                                       ("did-finish-launching", 2300000000, 2400000000))],
+        }
+
     def test_status_binding_order_deadline_and_original_finality_never_grant_absence(self):
         raw = self.record()
         parse_record = lambda value, code=0: fixture.service_status_record(
@@ -1636,6 +1654,65 @@ class ServiceLayoutObservationTests(unittest.TestCase):
         changed["cases"][1]["record"]["startedNs"] = "2000000000"
         with self.assertRaises(fixture.Refused):
             fixture.service_layout_data(changed, SOURCE)
+
+
+        # All sixteen public status pairs are observations, including changes;
+        # neither NotFound nor a transition is service/approval authority.
+        cocoa = self.cocoa_record()
+        parse_cocoa = lambda value, code=0: fixture.service_cocoa_record(
+            fixture.canonical(value), code, SOURCE, "b" * 64, 1000000000, 16000000000)
+        statuses = ("not-registered", "enabled", "requires-approval", "not-found")
+        for before_status in statuses:
+            for after_status in statuses:
+                changed = copy.deepcopy(cocoa)
+                changed["observations"][0]["status"] = before_status
+                changed["observations"][1]["status"] = after_status
+                self.assertEqual(parse_cocoa(changed)["observations"], changed["observations"])
+        for key, value in {"schemaVersion": True, "callbackCount": True, "windowsObserved": False,
+                           "case": "nested", "sourceCommit": "c" * 40, "observerSourceSha256": "c" * 64,
+                           "registrationEntered": True, "startedNs": "0", "finishedNs": "16000000001",
+                           "extra": "refused", **{key: False for key in (
+                               "graphicSessionVerified", "didFinishLaunching", "stopReturned", "wakeEventPosted",
+                               "runReturned", "callbacksCancelled", "delegateCleared", "delegateReleaseReturned",
+                               "applicationReleaseReturned", "poolDrainReturned", "finalityKnown")}}.items():
+            with self.subTest(cocoa_field=key), self.assertRaises(fixture.Refused):
+                parse_cocoa(dict(cocoa, **{key: value}))
+        for code in (True, 1, 77, 78, 79):
+            with self.assertRaises(fixture.Refused):
+                parse_cocoa(cocoa, code)
+        for rows in ([], cocoa["observations"][:1], list(reversed(cocoa["observations"])),
+                     cocoa["observations"] * 2):
+            with self.assertRaises(fixture.Refused):
+                parse_cocoa(dict(cocoa, observations=rows))
+        for index in (0, 1):
+            for key, value in {"stage": "after-register", "status": "absent", "startedNs": "0",
+                               "finishedNs": "3000000001", "extra": True,
+                               **{key: False for key in ("factoryReturned", "retainReturned",
+                                                       "statusReturned", "serviceReleaseReturned")}}.items():
+                changed = copy.deepcopy(cocoa)
+                changed["observations"][index][key] = value
+                with self.subTest(cocoa_row=index, field=key), self.assertRaises(fixture.Refused):
+                    parse_cocoa(changed)
+        for options in ({"service_cocoa": 1}, {"service_cocoa": True, "service_layout": True},
+                        {"service_cocoa": True, "context_receipts": True}):
+            with self.assertRaises(fixture.Refused):
+                fixture.Operation(None, None, None, Path("/inert-cocoa-data"), {"GITHUB_SHA": SOURCE}, **options)
+        value = fixture.Operation(None, None, None, Path("/inert-cocoa-data"),
+                                  {"GITHUB_SHA": SOURCE}, service_cocoa=True).service_layout
+        self.assertIs(fixture.service_layout_data(value, SOURCE), value)
+        self.assertTrue(fixture.service_layout_finality(value, SOURCE))
+        value.update(started=True, startedNs="1000000000", deadlineNs="16000000000",
+                     observerSourceSha256="b" * 64, sameInstalledInputs=True, enteredCases=["single"])
+        self.assertFalse(fixture.service_layout_finality(value, SOURCE))
+        value["cases"] = [{"case": "single", "stdoutSha256": fixture.digest(fixture.canonical(cocoa)), "record": cocoa}]
+        value["completed"] = True
+        self.assertTrue(fixture.service_layout_finality(value, SOURCE))
+        for key, item in {"sameInstalledInputs": False, "cocoaStartupOnly": False, "physicalLayoutOnly": True,
+                          "selected": False, "deadlineNs": "31000000000", "enteredCases": ["nested"],
+                          **{key: True for key in ("entryResponsibilityTested", "registrationEntered",
+                              "productionIdentityQualified", "actualAppIntegrationQualified", "nativeLifecycleQualified")}}.items():
+            with self.subTest(cocoa_envelope=key), self.assertRaises(fixture.Refused):
+                fixture.service_layout_data(dict(value, **{key: item}), SOURCE)
 
     def test_actual_diagnostic_route_never_enters_context_or_native_and_unknown_call_retains_scratch(self):
         # Original controller methods are real; only external work/books are
@@ -1752,18 +1829,131 @@ class ServiceLayoutObservationTests(unittest.TestCase):
                 if mode == "unknown-second":
                     self.assertFalse(receipt["originalCalls"][-1]["returned"])
 
+
+        # The SAME execute/observe/call/finish methods now enter the one explicit
+        # Cocoa original. All process/file operations below remain inert doubles.
+        for mode in ("complete", "transition", "missing-startup", "unknown", "late", "source-before",
+                     "input-post", "close-unknown", "no-graphics", "session-query"):
+            with self.subTest(cocoa_mode=mode):
+                events, calls, captures = [], [], []
+                book = lambda: SimpleNamespace(check=lambda: None, finish=lambda: True, errors=[])
+                source = SimpleNamespace(book=book(), binding={"tree": "c" * 40}, inventory_digest="d" * 64,
+                                         binding_digest="e" * 64, source_handle_count=1, source_handle_reserve=192)
+                env = {"GITHUB_SHA": SOURCE, "GITHUB_WORKFLOW_SHA": SOURCE,
+                       "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+                op = fixture.Operation(None, source, None, Path("/inert-cocoa-data"), env, service_cocoa=True)
+                op.outputs, op.protected = book(), book()
+                op.outputs.directories = {op.scratch: {"identity": WORK[:5]}}
+                op.outputs.directory = lambda _path: {"fd": 90}
+                op.publish = lambda name, raw: captures.append((name, raw))
+                op.begin = lambda: events.append("begin")
+                op.build_installer_worker_tests = lambda: self.fail("unexpected installer DATA")
+                op.observe_installer_context = lambda: self.fail("unexpected mutating Context")
+                op.compile_metadata_observer = lambda: events.append("metadata")
+                op.absence = lambda _role: events.append("absence")
+                op.build_images = lambda: events.append("images")
+                op.compile_facades = lambda: events.append("facades")
+                def compile_cocoa():
+                    events.append("observer-build")
+                    op.service_layout["observerSourceSha256"] = "b" * 64
+                    op.calls.append(dict(role="service-layout-build", entered=True, returned=True, returncode=0))
+                op.compile_service_layout = compile_cocoa
+                op.sign = lambda: events.append("sign")
+                def package_cocoa():
+                    op.package = {}
+                op.package_fixture = package_cocoa
+                def install_cocoa():
+                    op.installed = op.installer_entered = True
+                op.install_fixture = install_cocoa
+                op.run_native = lambda: self.fail("unexpected native lifecycle")
+                def inputs():
+                    events.append("input-check")
+                    if mode == "input-post" and events.count("input-check") == 2:
+                        raise fixture.Refused("layout-installed-bytes")
+                op.service_layout_inputs = inputs
+                def run_cocoa(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    if mode == "unknown":
+                        raise UnknownOriginal()
+                    data = self.cocoa_record()
+                    if mode == "transition":
+                        data["observations"][1]["status"] = "not-registered"
+                    if mode == "missing-startup":
+                        data["didFinishLaunching"] = False
+                    code = 78 if mode == "no-graphics" else 79 if mode == "session-query" else 0
+                    raw = b"" if code else fixture.canonical(data)
+                    return subprocess.CompletedProcess(argv, code, raw, b"")
+                op.owner = SimpleNamespace(run_owned=run_cocoa)
+                if mode == "source-before":
+                    def source_refusal():
+                        raise fixture.Refused("original-changed")
+                    source.book.check = source_refusal
+                if mode == "close-unknown":
+                    source.book.finish = lambda: False
+                cleanup = SimpleNamespace(directory=lambda _path: {"fd": 93}, finish=lambda: True)
+                with patch.object(fixture.time, "clock_gettime_ns", side_effect=[
+                         1000000000, 2000000000, 17000000000 if mode == "late" else 4000000000]),                      patch.object(fixture.os, "listdir", return_value=[]),                      patch.object(fixture, "Originals", return_value=cleanup) as originals,                      patch.object(fixture.os, "stat", side_effect=[info, FileNotFoundError()]) as named,                      patch.object(fixture.shutil, "rmtree") as retire:
+                    retire.avoids_symlink_attacks = True
+                    receipt = op.execute()
+                    if mode in ("complete", "transition", "source-before"):
+                        retire.assert_called_once_with(op.scratch.name, dir_fd=93)
+                    else:
+                        originals.assert_not_called()
+                        named.assert_not_called()
+                        retire.assert_not_called()
+                self.assertFalse(receipt["passed"])
+                self.assertFalse(receipt["nativeEntered"])
+                self.assertFalse(receipt["nativeOwnerReturned"])
+                self.assertFalse(receipt["installerContext"]["started"])
+                self.assertFalse(receipt["actualAppIntegrationQualified"])
+                self.assertFalse(receipt["productionIdentityQualified"])
+                self.assertEqual(len(calls), 0 if mode == "source-before" else 1)
+                if calls:
+                    argv, options = calls[0]
+                    self.assertEqual(argv, [str(fixture.ROOT / (fixture.LAYOUT_CLIENTS[0] + fixture.LAYOUT_EXECUTABLE))])
+                    self.assertEqual(options["output_limit"], 2048)
+                    self.assertEqual(options["timeout"], 14)  # One elapsed second, never a renewed15.
+                    self.assertEqual(set(options["environ"]), {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"})
+                if mode in ("complete", "transition"):
+                    observed = fixture.service_cocoa_result(receipt, SOURCE)
+                    self.assertTrue(observed["completed"])
+                    self.assertFalse(observed["nativeLifecycleQualified"])
+                    self.assertEqual(events.count("input-check"), 2)
+                    for key, value in {"passed": True, "outcome": "passed", "nativeEntered": True,
+                                       "nativeOwnerReturned": True, "sourceClosesKnown": False,
+                                       "protectedClosesKnown": False, "outputClosesKnown": False,
+                                       "scratchRetired": False, "cleanupErrors": ["unknown"]}.items():
+                        with self.subTest(cocoa_completion=key), self.assertRaises(fixture.Refused):
+                            fixture.service_cocoa_result(dict(receipt, **{key: value}), SOURCE)
+                    for field, value in {"returncode": True, "workTimeoutSeconds": 16, "outputLimitBytes": 2049,
+                                         "stdoutSha256": "c" * 64, "stderrSha256": "c" * 64}.items():
+                        changed = copy.deepcopy(receipt)
+                        changed["originalCalls"][-1][field] = value
+                        with self.assertRaises(fixture.Refused):
+                            fixture.service_cocoa_result(changed, SOURCE)
+                else:
+                    with self.assertRaises(fixture.Refused):
+                        fixture.service_cocoa_result(receipt, SOURCE)
+                if mode in ("no-graphics", "session-query"):
+                    self.assertEqual(receipt["failure"], "cocoa-graphic-session-unavailable" if mode == "no-graphics"
+                                     else "cocoa-security-session-query-failed")
+                if mode == "unknown":
+                    self.assertFalse(receipt["originalCalls"][-1]["returned"])
+
     def test_fixed_public_observer_paired_inputs_and_private_loader_layer_keep_closed_scope(self):
         native = (PATH.parents[1] / fixture.LAYOUT_SOURCE.removeprefix("desktop/")).read_text(encoding="utf-8")
         owner = PATH.read_text(encoding="utf-8")
         for forbidden in ("registerAndReturnError", "unregisterAndReturnError", "openSystemSettingsLoginItems",
                           "posix_spawn", "system(", "fork(", "NSTask", "dlopen("):
             self.assertNotIn(forbidden, native)
-        self.assertEqual(native.count("daemonServiceWithPlistName:"), 1)
-        self.assertIn("SMAppServiceStatusNotFound: status = \"not-found\"", native)
-        self.assertLess(native.index("bundle.bundleIdentifier"), native.index("dataWithContentsOfURL:"))
-        self.assertLess(native.index("dataWithContentsOfURL:"), native.index("daemonServiceWithPlistName:"))
-        self.assertLess(native.index("[original release]"), native.index("[original drain]"))
-        self.assertLess(native.index("[original drain]"), native.index("snprintf(output"))
+        self.assertEqual(native.count("daemonServiceWithPlistName:"), 2)
+        ordinary = native.split("int main(int argc, char **argv) {", 1)[1].split("#else\n", 1)[1]
+        self.assertEqual(ordinary.count("daemonServiceWithPlistName:"), 1)
+        self.assertIn("SMAppServiceStatusNotFound: status = \"not-found\"", ordinary)
+        self.assertLess(ordinary.index("bundle.bundleIdentifier"), ordinary.index("dataWithContentsOfURL:"))
+        self.assertLess(ordinary.index("dataWithContentsOfURL:"), ordinary.index("daemonServiceWithPlistName:"))
+        self.assertLess(ordinary.index("[original release]"), ordinary.index("[original drain]"))
+        self.assertLess(ordinary.index("[original drain]"), ordinary.index("snprintf(output"))
         self.assertIn("Single/MRK E2 Status Client.app", native)
         self.assertIn("Nested/MRK E2 Status Host.app/Contents/Helpers/MRK E2 Status Client.app", native)
         self.assertIn('"-fno-objc-arc", "-fobjc-exceptions"', owner)
@@ -1834,6 +2024,58 @@ class ServiceLayoutObservationTests(unittest.TestCase):
         ):
             with self.subTest(label=label), self.assertRaisesRegex(fixture.Refused, "^" + label + "$"):
                 fixture.service_observer_macho(bad, stager)
+
+        # Explicit mode changes ONLY this private fixed executable loader set.
+        cocoa_libraries = libraries + (
+            b"/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+            b"/System/Library/Frameworks/Security.framework/Versions/A/Security")
+        fixture.service_observer_macho(executable(cocoa_libraries), stager, cocoa=True)
+        for data, selected in ((executable(cocoa_libraries), False), (body, True),
+                               (executable(cocoa_libraries + (libraries[0],)), True),
+                               (executable(cocoa_libraries, extra=bytes(segment)), True)):
+            with self.assertRaises(fixture.Refused):
+                fixture.service_observer_macho(data, stager, cocoa=selected)
+        for function in (fixture.service_layout_files, fixture.service_layout_code):
+            with self.assertRaises(fixture.Refused):
+                function(cocoa=1)
+        cocoa_files = fixture.service_layout_files(cocoa=True)
+        self.assertEqual(cocoa_files, {fixture.LAYOUT_CLIENTS[0] + suffix for suffix in (
+            fixture.LAYOUT_EXECUTABLE, fixture.LAYOUT_TARGET, fixture.LAYOUT_PLIST,
+            "/Contents/Info.plist", "/Contents/_CodeSignature/CodeResources")})
+        self.assertEqual(len(cocoa_files), 5)
+        self.assertEqual(fixture.service_layout_code(cocoa=True), (
+            (fixture.LAYOUT_CLIENTS[0] + fixture.LAYOUT_TARGET, fixture.LAYOUT_SERVICE),
+            (fixture.LAYOUT_CLIENTS[0], fixture.LAYOUT_ID + ".client")))
+        fixture.fixture_package(package(payload, info=info), expected, service_layout=True, service_cocoa=True)
+        for alternate in (fixture.LAYOUT_CLIENTS[1], fixture.LAYOUT_HOST):
+            changed = info.replace(fixture.LAYOUT_CLIENTS[0].encode(), alternate.encode())
+            with self.assertRaises(fixture.Refused):
+                fixture.fixture_package(package(payload, info=changed), expected, service_layout=True, service_cocoa=True)
+        with self.assertRaises(fixture.Refused):
+            fixture.fixture_package(package(payload, info=info), expected, service_cocoa=True)
+        cocoa_main = native.split("static int cocoa_main(", 1)[1].split("\n#endif", 1)[0]
+        callback = native.split("- (void)applicationDidFinishLaunching:", 1)[1].split("\n@end", 1)[0]
+        self.assertLess(cocoa_main.index("cocoa_status(&state.initial"), cocoa_main.index("[NSApplication sharedApplication]"))
+        self.assertLess(callback.index("state->did_finish = 1"), callback.index("cocoa_status(&state->startup"))
+        self.assertEqual(callback.count("cocoa_status("), 1)
+        self.assertIn("[application run]", cocoa_main)
+        self.assertIn("[state->application stop:self]", callback)
+        self.assertIn("[state->application postEvent:wake atStart:YES]", callback)
+        self.assertLess(callback.index("[state->application stop:self]"), callback.index("postEvent:wake"))
+        self.assertIn("cancelPreviousPerformRequestsWithTarget:delegate", cocoa_main)
+        self.assertLess(cocoa_main.index("application.delegate = nil"), cocoa_main.index("state.delegate_release = 1"))
+        self.assertLess(cocoa_main.index("state.pool_drain = 1"), cocoa_main.index("snprintf(output"))
+        self.assertIn("strcmp(executable, SINGLE EXECUTABLE) != 0", cocoa_main)
+        self.assertIn("getuid() == 0 || getuid() != geteuid() || getgid() != getegid()", cocoa_main)
+        self.assertIn("SessionGetInfo(callerSecuritySession, &session, &attributes)", cocoa_main)
+        self.assertIn("attributes & sessionHasGraphicAccess", cocoa_main)
+        self.assertNotIn("SessionCreate", native)
+        self.assertNotIn("[NSWindow", native)
+        self.assertEqual(cocoa_main.count("char output[2048]"), 1)
+        self.assertIn("finished - started > UINT64_C(15000000000)", cocoa_main)
+        self.assertIn('argv += ["-DMRK_E2_SERVICE_COCOA_STARTUP=1", "-framework", "AppKit", "-framework", "Security"]', owner)
+        self.assertIn('return self.observe_service_cocoa()', owner)
+        self.assertIn('service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT]', owner)
 
 
 class BTMLogObservationTests(unittest.TestCase):

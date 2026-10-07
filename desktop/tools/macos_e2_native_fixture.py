@@ -76,6 +76,10 @@ PACKAGE_PRODUCER_RUST_TESTS = (
 )
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 LAYOUT_ARGUMENT = "--observe-service-layout"
+COCOA_ARGUMENT = "--observe-service-cocoa-startup"
+COCOA_TYPE = "mrk-e2-service-cocoa-startup-observations-v1"
+COCOA_ROLE = "service-cocoa-startup"
+COCOA_SECONDS = 15
 LAYOUT_CASES = ("single", "nested")
 LAYOUT_ID = IDENTIFIER + ".status-observation"
 LAYOUT_SERVICE = LAYOUT_ID + ".resident"
@@ -91,6 +95,10 @@ LAYOUT_LOADS = frozenset((
     b"/System/Library/Frameworks/ServiceManagement.framework/Versions/A/ServiceManagement",
     b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
     b"/usr/lib/libobjc.A.dylib", b"/usr/lib/libSystem.B.dylib",
+))
+COCOA_LOADS = LAYOUT_LOADS | frozenset((
+    b"/System/Library/Frameworks/AppKit.framework/Versions/C/AppKit",
+    b"/System/Library/Frameworks/Security.framework/Versions/A/Security",
 ))
 CONTEXT_CASES = ("component", "product")
 CONTEXT_IDENTIFIERS = tuple(IDENTIFIER + ".installer-context." + case + ".v1" for case in CONTEXT_CASES)
@@ -664,8 +672,128 @@ def service_status_record(body, returncode, source, observer_sha, case, started,
     return value
 
 
+
+def service_cocoa_record(body, returncode, source, observer_sha, started, deadline):
+    """One closed status-only Cocoa startup, never registration or qualification."""
+    need(type(returncode) is int and returncode == 0 and type(body) is bytes
+         and body.endswith(b"\n") and body.count(b"\n") == 1, "cocoa-original-result")
+    value = decode(body, 2048)
+    returned = ("graphicSessionVerified", "didFinishLaunching", "stopReturned", "wakeEventPosted",
+                "runReturned", "callbacksCancelled", "delegateCleared", "delegateReleaseReturned",
+                "applicationReleaseReturned", "poolDrainReturned", "finalityKnown")
+    need(type(value) is dict and set(value) == {
+        "schemaVersion", "type", "sourceCommit", "observerSourceSha256", "case", "outcome",
+        "startedNs", "finishedNs", "bundle", "executable", "identifier", "plist", "observations",
+        "callbackCount", "windowsObserved", "registrationEntered", *returned,
+    }, "cocoa-record-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["type"] == "mrk-e2-service-cocoa-status-v1"
+         and identity(source, 40) and identity(observer_sha, 64)
+         and value["sourceCommit"] == source and value["observerSourceSha256"] == observer_sha
+         and value["case"] == "single" and value["outcome"] == "observed"
+         and all(value[key] == "expected-client" for key in ("bundle", "executable", "identifier"))
+         and value["plist"] == "expected-daemon", "cocoa-record-binding")
+    need(all(value[key] is True for key in returned) and value["registrationEntered"] is False
+         and type(value["callbackCount"]) is int and value["callbackCount"] == 1
+         and type(value["windowsObserved"]) is int and value["windowsObserved"] == 0,
+         "cocoa-record-finality")
+    first, last = decimal(value["startedNs"]), decimal(value["finishedNs"])
+    need(type(started) is int and type(deadline) is int
+         and 0 < started <= first <= last <= deadline <= MAX_RAW
+         and deadline - started == COCOA_SECONDS * 1_000_000_000
+         and last - first <= COCOA_SECONDS * 1_000_000_000, "cocoa-record-deadline")
+    rows = value["observations"]
+    need(type(rows) is list and len(rows) == 2, "cocoa-record-observations")
+    previous = first
+    for stage, row in zip(("before-cocoa", "did-finish-launching"), rows):
+        need(type(row) is dict and set(row) == {"stage", "status", "startedNs", "finishedNs",
+             "factoryReturned", "retainReturned", "statusReturned", "serviceReleaseReturned"}
+             and row["stage"] == stage and type(row["status"]) is str
+             and row["status"] in ("not-registered", "enabled", "requires-approval", "not-found")
+             and all(row[key] is True for key in ("factoryReturned", "retainReturned",
+                                                  "statusReturned", "serviceReleaseReturned")),
+             "cocoa-record-observation")
+        low, high = decimal(row["startedNs"]), decimal(row["finishedNs"])
+        need(previous <= low <= high <= last, "cocoa-record-sequence")
+        previous = high
+    return value
+
+
+def service_cocoa_data(value, source):
+    need(type(value) is dict and set(value) == {
+        "schemaVersion", "type", "sourceCommit", "observerSourceSha256", "selected", "started", "completed",
+        "clock", "startedNs", "deadlineNs", "enteredCases", "cases", "sameInstalledInputs",
+        "physicalLayoutOnly", "cocoaStartupOnly", "entryResponsibilityTested", "registrationEntered",
+        "productionIdentityQualified", "actualAppIntegrationQualified", "nativeLifecycleQualified",
+    }, "cocoa-public-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["type"] == COCOA_TYPE and identity(source, 40) and value["sourceCommit"] == source
+         and value["selected"] is True and value["clock"] == "CLOCK_MONOTONIC"
+         and (value["observerSourceSha256"] is None or identity(value["observerSourceSha256"], 64))
+         and all(type(value[key]) is bool for key in ("started", "completed", "sameInstalledInputs"))
+         and value["cocoaStartupOnly"] is True and value["physicalLayoutOnly"] is False
+         and all(value[key] is False for key in ("entryResponsibilityTested", "registrationEntered",
+                                                "productionIdentityQualified", "actualAppIntegrationQualified",
+                                                "nativeLifecycleQualified")), "cocoa-public-binding")
+    entered, cases = value["enteredCases"], value["cases"]
+    need(type(entered) is list and entered in ([], ["single"])
+         and type(cases) is list and len(cases) <= len(entered), "cocoa-public-order")
+    started, deadline = decimal(value["startedNs"]), decimal(value["deadlineNs"])
+    if not value["started"]:
+        need(started == deadline == 0 and not entered and not cases
+             and not value["completed"] and not value["sameInstalledInputs"], "cocoa-public-unentered")
+    else:
+        need(identity(value["observerSourceSha256"], 64) and value["sameInstalledInputs"]
+             and 0 < started < deadline <= MAX_RAW
+             and deadline - started == COCOA_SECONDS * 1_000_000_000, "cocoa-public-started")
+    for row in cases:
+        need(type(row) is dict and set(row) == {"case", "stdoutSha256", "record"}
+             and row["case"] == "single" and identity(row["stdoutSha256"], 64), "cocoa-public-case")
+        service_cocoa_record(canonical(row["record"]), 0, source, value["observerSourceSha256"], started, deadline)
+    need(not value["completed"] or value["started"] and value["sameInstalledInputs"]
+         and len(entered) == len(cases) == 1, "cocoa-public-completion")
+    return value
+
+
+def service_cocoa_result(value, source):
+    """Known observation completion; the original report/caller must still close."""
+    need(type(value) is dict and value.get("source") == source
+         and value.get("type") == "mrk-macos-e2-native-fixture-owner-v1"
+         and value.get("failure") is None and value.get("passed") is False
+         and value.get("outcome") == "failed" and value.get("native") is None
+         and all(value.get(key) is False for key in ("nativeEntered", "nativeOwnerReturned",
+             "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified"))
+         and all(value.get(key) is True for key in ("installerEntered", "installationReturnedSuccess",
+             "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired"))
+         and value.get("cleanupErrors") == [] and value.get("contextReceiptDiagnostic") is None,
+         "cocoa-completion-owner")
+    context = value.get("installerContext")
+    need(type(context) is dict and context.get("started") is False and context.get("completed") is False
+         and context.get("enteredCases") == [] and context.get("cases") == [], "cocoa-completion-no-context")
+    record = service_cocoa_data(value.get("serviceLayoutObservation"), source)
+    need(record["completed"], "cocoa-completion-required")
+    calls = value.get("originalCalls")
+    need(type(calls) is list and 2 <= len(calls) <= 64
+         and all(type(call) is dict and call.get("entered") is True and call.get("returned") is True
+                 and type(call.get("returncode")) is int and call["returncode"] == 0
+                 and type(call.get("role")) is str for call in calls), "cocoa-completion-originals")
+    need(sum(call["role"] == "service-layout-build" for call in calls) == 1
+         and sum(call["role"] == COCOA_ROLE for call in calls) == 1
+         and all(call["role"] not in ("native-run", "service-layout-single", "service-layout-nested")
+                 and not call["role"].startswith("context-") for call in calls), "cocoa-completion-only-route")
+    call = calls[-1]
+    need(call["role"] == COCOA_ROLE and type(call.get("workTimeoutSeconds")) is int
+         and 0 < call["workTimeoutSeconds"] <= COCOA_SECONDS
+         and type(call.get("outputLimitBytes")) is int and call["outputLimitBytes"] == 2048
+         and call.get("stdoutSha256") == record["cases"][0]["stdoutSha256"]
+         and call.get("stderrSha256") == digest(b""), "cocoa-completion-call-binding")
+    return record
+
+
 def service_layout_data(value, source):
     """Validate DATA shape only; an actual bound original call remains required."""
+    if type(value) is dict and value.get("type") == COCOA_TYPE:
+        return service_cocoa_data(value, source)
     need(type(value) is dict and set(value) == {
         "schemaVersion", "type", "sourceCommit", "observerSourceSha256", "selected", "started", "completed",
         "clock", "startedNs", "deadlineNs", "enteredCases", "cases", "pairedInstalledInputs",
@@ -716,7 +844,11 @@ def service_layout_finality(value, source):
         return False
 
 
-def service_layout_files():
+def service_layout_files(*, cocoa=False):
+    need(type(cocoa) is bool, "cocoa-files-selector")
+    if cocoa:
+        return {LAYOUT_CLIENTS[0] + suffix for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET, LAYOUT_PLIST,
+                                                        "/Contents/Info.plist", "/Contents/_CodeSignature/CodeResources")}
     leaves = {LAYOUT_HOST + "/Contents/" + name
               for name in ("MacOS/mrk-e2-status-host", "Info.plist", "_CodeSignature/CodeResources")}
     for root in LAYOUT_CLIENTS:
@@ -725,7 +857,11 @@ def service_layout_files():
     return leaves
 
 
-def service_layout_code():
+def service_layout_code(*, cocoa=False):
+    need(type(cocoa) is bool, "cocoa-code-selector")
+    if cocoa:
+        return ((LAYOUT_CLIENTS[0] + LAYOUT_TARGET, LAYOUT_SERVICE),
+                (LAYOUT_CLIENTS[0], LAYOUT_ID + ".client"))
     return tuple((root + LAYOUT_TARGET, LAYOUT_SERVICE) for root in LAYOUT_CLIENTS) + tuple(
         (root, LAYOUT_ID + ".client") for root in LAYOUT_CLIENTS) + ((LAYOUT_HOST, LAYOUT_ID + ".host"),)
 
@@ -2289,8 +2425,10 @@ METADATA_FLAGS = ("localApfs", "ownershipEnforced", "noAce", "closeReturned")
 METADATA_KEYS = {"schemaVersion", "type", "sourceCommit", "outcome", "originalClosesKnown", "rows"}
 
 
-def service_observer_macho(body, stager):
+def service_observer_macho(body, stager, *, cocoa=False):
     """Diagnostic-only public framework executable; ordinary entry stays unchanged."""
+    need(type(cocoa) is bool, "cocoa-image-selector")
+    loads = COCOA_LOADS if cocoa else LAYOUT_LOADS
     stager.macho(body, system_only=True)
     flags = struct.unpack_from("<I", body, 24)[0]
     need(flags & (0x4 | 0x80 | 0x200000) == (0x4 | 0x80 | 0x200000)
@@ -2325,7 +2463,7 @@ def service_observer_macho(body, stager):
             mains += 1
         offset += length
     need(mains == 1 and dyld == [b"/usr/lib/dyld"]
-         and len(libraries) == len(LAYOUT_LOADS) and set(libraries) == LAYOUT_LOADS,
+         and len(libraries) == len(loads) and set(libraries) == loads,
          "layout-image-system-closure")
 
 
@@ -2843,7 +2981,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -2938,7 +3076,7 @@ def package_payload(body, expected):
     raise Refused("fixture-cpio-count")
 
 
-def fixture_package(body, expected, *, service_layout=False):
+def fixture_package(body, expected, *, service_layout=False, service_cocoa=False):
     """Fixed flat package, no scripts/relocation; complete payload correspondence."""
     import xml.etree.ElementTree as ET
     import zlib
@@ -2994,10 +3132,13 @@ def fixture_package(body, expected, *, service_layout=False):
         need(not list(element) and not element.attrib and not (element.text or "").strip(),
              "fixture-package-relocation")
     bundle_names = {APP: IDENTIFIER, NESTED: IDENTIFIER + ".client"}
-    need(type(service_layout) is bool, "layout-package-selector")
+    need(type(service_layout) is bool and type(service_cocoa) is bool
+         and (not service_cocoa or service_layout), "layout-package-selector")
     if service_layout:
-        bundle_names.update({root: LAYOUT_ID + ".client" for root in LAYOUT_CLIENTS})
-        bundle_names[LAYOUT_HOST] = LAYOUT_ID + ".host"
+        bundle_names.update({root: LAYOUT_ID + ".client" for root in
+                             (LAYOUT_CLIENTS[:1] if service_cocoa else LAYOUT_CLIENTS)})
+        if not service_cocoa:
+            bundle_names[LAYOUT_HOST] = LAYOUT_ID + ".host"
     for element in info.findall(".//bundle"):
         path = element.get("path")
         if path is not None:
@@ -3028,9 +3169,11 @@ def bundle_info(identifier, executable):
 class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
-    def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False):
-        need(type(service_layout) is bool and type(context_receipts) is bool
-             and not (service_layout and context_receipts), "layout-operation-selector")
+    def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
+                 service_cocoa=False):
+        need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
+             and sum((service_layout, context_receipts, service_cocoa)) <= 1, "layout-operation-selector")
+        self.service_cocoa_selected = service_cocoa
         self.owner, self.source, self.stager = owner, source, stager
         self.work, self.environment = work, environment
         self.scratch = work / "e2-native-fixture"
@@ -3077,6 +3220,10 @@ class Operation:
             "productionIdentityQualified": False, "actualAppIntegrationQualified": False,
             "nativeLifecycleQualified": False,
         }
+        if service_cocoa:
+            self.service_layout.update(type=COCOA_TYPE, selected=True, physicalLayoutOnly=False,
+                                       cocoaStartupOnly=True, sameInstalledInputs=False)
+            del self.service_layout["pairedInstalledInputs"]
 
     def mkdir(self, path, mode=0o700):
         need(mode in (0o700, 0o755), "scratch-directory-requested-mode")
@@ -3895,21 +4042,24 @@ class Operation:
                     '-DMRK_OBSERVER_SOURCE_SHA256="' + observer_sha + '"',
                     str(CHECKOUT / LAYOUT_SOURCE), "-framework", "Foundation", "-framework", "ServiceManagement",
                     "-framework", "CoreFoundation", "-lobjc", "-o", str(output)]
+            if self.service_cocoa_selected:
+                argv += ["-DMRK_E2_SERVICE_COCOA_STARTUP=1", "-framework", "AppKit", "-framework", "Security"]
             self.command("service-layout-build", argv, dict(self.native_environment(),
                          DEVELOPER_DIR=self.environment["DEVELOPER_DIR"]), cwd=CHECKOUT, timeout=30)
             original, body = self.outputs.file(output, 1024 * 1024, modes=(0o700, 0o755))
-            service_observer_macho(body, self.stager)
-            for root in LAYOUT_CLIENTS:
+            service_observer_macho(body, self.stager, cocoa=self.service_cocoa_selected)
+            for root in (LAYOUT_CLIENTS[:1] if self.service_cocoa_selected else LAYOUT_CLIENTS):
                 for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET):
                     self.write_payload(root + suffix, body, 0o755)
                 self.write_payload(root + "/Contents/Info.plist",
                                    plistlib.dumps(bundle_info(LAYOUT_ID + ".client", "mrk-e2-status-observer"),
                                                   sort_keys=True), 0o444)
                 self.write_payload(root + LAYOUT_PLIST, service_layout_plist(), 0o444)
-            self.write_payload(LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host", body, 0o755)
-            self.write_payload(LAYOUT_HOST + "/Contents/Info.plist",
-                               plistlib.dumps(bundle_info(LAYOUT_ID + ".host", "mrk-e2-status-host"),
-                                              sort_keys=True), 0o444)
+            if not self.service_cocoa_selected:
+                self.write_payload(LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host", body, 0o755)
+                self.write_payload(LAYOUT_HOST + "/Contents/Info.plist",
+                                   plistlib.dumps(bundle_info(LAYOUT_ID + ".host", "mrk-e2-status-host"),
+                                                  sort_keys=True), 0o444)
             need(self.outputs.read(original) == body and self.source.read(LAYOUT_SOURCE) == source_body,
                  "layout-compiler-source-changed")
             self.artifacts["service-status-observer"] = {
@@ -3932,13 +4082,14 @@ class Operation:
                 (IMAGES["resident"], SERVICE + ".image"), (RESIDENT, SERVICE),
                 (NESTED, IDENTIFIER + ".client"), (APP, IDENTIFIER))
         if self.service_layout["selected"]:
-            code += service_layout_code()
+            code += service_layout_code(cocoa=self.service_cocoa_selected)
         payload = self.scratch / "payload"
         # codesign also inherits the private umask. Supply only its two exact
         # fresh signature directories ourselves instead of normalizing a tree.
         signature_dirs = (APP + "/Contents/_CodeSignature", CONTENTS + "_CodeSignature")
         if self.service_layout["selected"]:
-            signature_dirs += tuple(root + "/Contents/_CodeSignature" for root in (*LAYOUT_CLIENTS, LAYOUT_HOST))
+            roots = LAYOUT_CLIENTS[:1] if self.service_cocoa_selected else (*LAYOUT_CLIENTS, LAYOUT_HOST)
+            signature_dirs += tuple(root + "/Contents/_CodeSignature" for root in roots)
         for relative in signature_dirs:
             self.mkdir(payload / relative, 0o755)
         for index, (relative, identifier) in enumerate(code):
@@ -3965,9 +4116,10 @@ class Operation:
         expected = {ENTRY, CLIENT, RESIDENT, IMAGES["client"], IMAGES["resident"], PLIST, GATE,
                     APP + "/Contents/Info.plist", CONTENTS + "Info.plist",
                     APP + "/Contents/_CodeSignature/CodeResources", CONTENTS + "_CodeSignature/CodeResources"}
-        layout_files = service_layout_files() if self.service_layout["selected"] else set()
-        layout_executables = ({root + suffix for root in LAYOUT_CLIENTS for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET)}
-                              | {LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host"}) if layout_files else set()
+        layout_files = service_layout_files(cocoa=self.service_cocoa_selected) if self.service_layout["selected"] else set()
+        layout_roots = LAYOUT_CLIENTS[:1] if self.service_cocoa_selected else LAYOUT_CLIENTS
+        layout_executables = ({root + suffix for root in layout_roots for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET)}
+                              | (set() if self.service_cocoa_selected else {LAYOUT_HOST + "/Contents/MacOS/mrk-e2-status-host"})) if layout_files else set()
         expected.update(layout_files)
         expected_dirs = {""}
         for name in expected:
@@ -4016,7 +4168,7 @@ class Operation:
             if relative in IMAGES.values():
                 fixture_image_macho(body, next(role for role, name in IMAGES.items() if name == relative))
             elif relative in layout_executables:
-                service_observer_macho(body, self.stager)
+                service_observer_macho(body, self.stager, cocoa=self.service_cocoa_selected)
             elif executable:
                 self.stager.entry_macho(body)
             elif relative == GATE:
@@ -4026,10 +4178,10 @@ class Operation:
             if relative in layout_files:
                 if relative in (root + LAYOUT_PLIST for root in LAYOUT_CLIENTS):
                     need(0 < len(body) <= 4096 and body == service_layout_plist(), "layout-plist-original")
-                # Reuse the finite 13 originals, both in package/signature POST
+                # Reuse the fixed 13 (physical) or five (Cocoa) originals in POST
                 # and in observation PRE/POST. Do not accumulate duplicate FDs.
                 layout_originals[relative] = entry
-        if layout_files:
+        if layout_files and not self.service_cocoa_selected:
             service_layout_paired(found)
         book.check()
         return found
@@ -4138,7 +4290,7 @@ class Operation:
         need(type(components) is list and 0 < len(components) <= 4, "package-components")
         bundle_names = {APP, NESTED}
         if self.service_layout["selected"]:
-            bundle_names.update((*LAYOUT_CLIENTS, LAYOUT_HOST))
+            bundle_names.update(LAYOUT_CLIENTS[:1] if self.service_cocoa_selected else (*LAYOUT_CLIENTS, LAYOUT_HOST))
         pending, seen = [(row, 0) for row in components], set()
         while pending:
             row, depth = pending.pop()
@@ -4161,7 +4313,8 @@ class Operation:
                      "--ownership", "recommended", "--component-plist", str(component_path),
                      "--compression", "legacy", str(output)], self.native_environment(), cwd=self.scratch, timeout=90)
         self.package_entry, body = self.outputs.file(output, 4 * IMAGE_LIMIT, modes=(0o600, 0o644))
-        self.package = fixture_package(body, self.stage_roster, service_layout=self.service_layout["selected"])
+        self.package = fixture_package(body, self.stage_roster, service_layout=self.service_layout["selected"],
+                                       service_cocoa=self.service_cocoa_selected)
         need(self.payload_roster(payload, installed=False) == self.stage_roster, "package-inputs-changed")
         self.publish("package-binding.json", canonical(self.package))
 
@@ -4197,7 +4350,7 @@ class Operation:
              "installed-receipt-binding")
         code = (IMAGES["client"], IMAGES["resident"], RESIDENT, NESTED, APP)
         if self.service_layout["selected"]:
-            code += tuple(relative for relative, _identifier in service_layout_code())
+            code += tuple(relative for relative, _identifier in service_layout_code(cocoa=self.service_cocoa_selected))
         for index, relative in enumerate(code):
             self.command("installed-signature-" + str(index),
                          ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", "--deep", str(ROOT / relative)],
@@ -4205,7 +4358,8 @@ class Operation:
         need(self.payload_roster(ROOT, installed=True) == actual, "installed-originals-changed")
 
     def service_layout_inputs(self):
-        need(set(self.service_layout_originals) == service_layout_files(), "layout-installed-originals")
+        need(set(self.service_layout_originals) == service_layout_files(cocoa=self.service_cocoa_selected),
+             "layout-installed-originals")
         self.source.book.check()
         self.outputs.check()
         self.protected.check()
@@ -4213,9 +4367,12 @@ class Operation:
             body = self.protected.read(original)
             row = self.stage_roster[relative]
             need(len(body) == row["bytes"] and digest(body) == row["sha256"], "layout-installed-bytes")
-        service_layout_paired(self.stage_roster)
+        if not self.service_cocoa_selected:
+            service_layout_paired(self.stage_roster)
 
     def observe_service_layout(self):
+        if self.service_cocoa_selected:
+            return self.observe_service_cocoa()
         value = self.service_layout
         need(value["selected"] and not value["started"] and self.installed
              and self.package is not None and self.native is None and not self.native_entered
@@ -4257,6 +4414,48 @@ class Operation:
             service_layout_data(value, self.environment["GITHUB_SHA"])
         value["completed"] = True
         service_layout_data(value, self.environment["GITHUB_SHA"])
+
+    def observe_service_cocoa(self):
+        value = self.service_layout
+        need(self.service_cocoa_selected and value["type"] == COCOA_TYPE and value["selected"]
+             and not value["started"] and self.installed and self.package is not None
+             and self.native is None and not self.native_entered and not self.installer_context["started"]
+             and all(call["returned"] and call["returncode"] == 0 for call in self.calls),
+             "cocoa-admission-prerequisites")
+        self.service_layout_inputs()
+        origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        deadline = origin + COCOA_SECONDS * 1_000_000_000
+        need(0 < origin < deadline <= MAX_RAW, "cocoa-phase-clock")
+        value.update(started=True, startedNs=str(origin), deadlineNs=str(deadline), sameInstalledInputs=True)
+        cwd = self.outputs.directory(self.scratch / "cwd")
+        need(os.listdir(cwd["fd"]) == [], "cocoa-empty-cwd")
+        before = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        timeout = context_timeout(deadline, before, COCOA_SECONDS)
+        count = len(self.calls)
+        try:
+            result = self.call(COCOA_ROLE, [str(ROOT / (LAYOUT_CLIENTS[0] + LAYOUT_EXECUTABLE))],
+                               self.native_environment(), cwd=self.scratch / "cwd", timeout=timeout, limit=2048)
+        finally:
+            if len(self.calls) > count:
+                need(len(self.calls) == count + 1 and self.calls[count]["role"] == COCOA_ROLE
+                     and self.calls[count]["entered"] is True, "cocoa-original-call-entry")
+                value["enteredCases"].append("single")
+        self.service_layout_inputs()
+        returned = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        context_timeout(deadline, returned, COCOA_SECONDS)
+        need(not result.stderr and os.listdir(cwd["fd"]) == [], "cocoa-output-correspondence")
+        if not result.stdout and not result.stderr:
+            if result.returncode == 78:
+                raise Refused("cocoa-graphic-session-unavailable")
+            if result.returncode == 79:
+                raise Refused("cocoa-security-session-query-failed")
+        record = service_cocoa_record(result.stdout, result.returncode, self.environment["GITHUB_SHA"],
+                                      value["observerSourceSha256"], origin, deadline)
+        need(before <= decimal(record["startedNs"]) <= decimal(record["finishedNs"]) <= returned,
+             "cocoa-original-clock-correspondence")
+        value["cases"].append({"case": "single", "stdoutSha256": digest(result.stdout), "record": record})
+        value["completed"] = True
+        service_cocoa_data(value, self.environment["GITHUB_SHA"])
 
     def run_native(self):
         need(self.installed and self.package is not None and self.stage_roster
@@ -4399,7 +4598,8 @@ class Operation:
                        and producer_signing_rust_tests_data(self.producer_signing_rust_tests) is not None
                        and self.package_producer_rust_tests is not None
                        and package_producer_rust_tests_data(self.package_producer_rust_tests) is not None)
-        passed = (failure is None and native_passed and self.native_entered and self.native_returned
+        passed = (not self.service_layout["selected"] and failure is None
+                  and native_passed and self.native_entered and self.native_returned
                   and unit_passed and installer_unit_passed and mac8_passed and self.installer_context["completed"]
                   and self.sources_closed and self.outputs_closed and self.protected_closed
                   and self.scratch_retired and not self.cleanup_errors
@@ -4514,7 +4714,8 @@ def main():
         book.check()
         operation = Operation(owner, source, stager, work, os.environ,
                               service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT],
-                              context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT])
+                              context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT],
+                              service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -4531,6 +4732,13 @@ def main():
                 # completion output from a provisional/unknown final result.
                 context_observation = None
         context_completed = operation.context_receipts_selected and context_observation is not None
+        cocoa_completed = False
+        if operation.service_cocoa_selected:
+            try:
+                service_cocoa_result(value, os.environ["GITHUB_SHA"])
+                cocoa_completed = True
+            except BaseException:
+                cocoa_completed = False  # Retain actual failure; never repair completion.
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")
         report.publish(work / "e2-native-result.json", body)
@@ -4550,7 +4758,7 @@ def main():
         report.finish()
         print("E2 fixture evidence finalization failed; do not accept a provisional result.", file=sys.stderr)
         return 1
-    return 0 if value["passed"] or context_completed else 77 if value["outcome"] == "unavailable" else 1
+    return 0 if value["passed"] or context_completed or cocoa_completed else 77 if value["outcome"] == "unavailable" else 1
 
 
 if __name__ == "__main__":
