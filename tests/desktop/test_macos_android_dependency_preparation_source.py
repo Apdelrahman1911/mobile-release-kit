@@ -999,6 +999,25 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                          source_nomination['resources'])
         self.assertEqual(len(real_inputs['inventoryRows']), 345)
         self.assertEqual(sum(row[4] for row in real_inputs['inventoryRows']), 209839014)
+        # A includes discovery-only POMs; B must match the complete reviewed
+        # locked-cache baseline, never an arbitrary subset of A or ignored POMs.
+        expected_b = b.b_inventory_document(real_inputs)
+        self.assertEqual(len(expected_b['rows']), 334)
+        self.assertEqual(sum(row['bytes'] for row in expected_b['rows']), 209802940)
+        self.assertEqual(len(b.B_DISCOVERY_ONLY_POMS), 11)
+        fields = ('group', 'name', 'version', 'artifact', 'bytes', 'sha256')
+        expected_rows = tuple(tuple(row[field] for field in fields) for row in expected_b['rows'])
+        self.assertEqual(set(real_inputs['inventoryRows']) - set(expected_rows), set(b.B_DISCOVERY_ONLY_POMS))
+        with self.assertRaisesRegex(b.Refused, '^b-fixed-a-inventory$'):
+            b.b_inventory_document(dict(real_inputs, inventoryRows=real_inputs['inventoryRows'][:-1]))
+        for excluded in b.B_DISCOVERY_ONLY_POMS:
+            changed = tuple(row[:-1] + ('0' * 64,) if row == excluded else row
+                            for row in real_inputs['inventoryRows'])
+            with self.subTest(discovery_pom=excluded[:4]), self.assertRaisesRegex(b.Refused, '^b-discovery-only-poms$'):
+                b.b_inventory_document(dict(real_inputs, inventoryRows=changed))
+        selected_exclusion = ((('classpath', (b.B_DISCOVERY_ONLY_POMS[0][:3],)),), ())
+        with self.assertRaisesRegex(b.Refused, '^b-discovery-only-poms$'):
+            b.b_inventory_document(dict(real_inputs, lockStates=selected_exclusion))
         self.assertEqual(sum(len(real_inputs['raw'][name]) for name in
                              ('buildscript-gradle.lockfile', 'app-gradle.lockfile')), 6892)
         root_states, app_states = real_inputs['lockStates']
@@ -1173,7 +1192,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             value['commands'][5]['role'] = 'android-dependency-locked-task'
             value['commands'][5]['argvSha256'] = helper.digest(normal.encoded(locked_task))
             cleanup_inputs = {'nomination': synthetic, 'originals': {name: (1,) * 9 for name in helper.B_DATA_ROSTER},
-                              'inventoryRows': ()}
+                              'inventoryRows': real_inputs['inventoryRows'], 'lockStates': real_inputs['lockStates']}
             value.update(aInputStatement=helper.b_input_statement(synthetic),
                          aInputOriginals={name: [1] * 9 for name in helper.B_DATA_ROSTER},
                          lockOriginals={relative: [[1] * 9, synthetic['resources'][resource][1]]
@@ -1354,7 +1373,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         # Complete B orchestration uses only explicit in-memory tool/reader DATA.
         # Run the actual prepare body, but never a vendor, SDK or network owner.
         # Both late original changes and semantic cache drift forbid a receipt.
-        for failure in (None, 'inventory', 'inventory-publisher', 'inventory-clock', 'late-lock', 'late-input', 'early-input', 'early-finish'):
+        for failure in (None, 'inventory', 'inventory-missing', 'inventory-extra', 'inventory-pom', 'inventory-publisher', 'inventory-clock', 'late-lock', 'late-input', 'early-input', 'early-finish'):
             with self.subTest(b_replay=failure), tempfile.TemporaryDirectory(prefix='b-replay-flow-', dir=scratch) as temporary:
                 clocks, events, calls, emitted = [], [], [], []
                 counters = {'input': 0, 'lock': 0}
@@ -1365,7 +1384,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 identities = {name: (1, index, stat.S_IFREG | 0o600, os.getuid(), os.getgid(), 1, len(raw), 1, 1)
                               for index, (name, raw) in enumerate(raw_inputs.items(), 1)}
                 input_b = {'nomination': nominated_b, 'raw': raw_inputs, 'originals': identities,
-                    'inventoryRows': (('inert.synthetic', 'artifact', '1.0', 'artifact-1.0.jar', 1, 'a' * 64),)}
+                    'inventoryRows': real_inputs['inventoryRows'], 'lockStates': real_inputs['lockStates']}
                 lock_b = {relative: (identities[name], flow.digest(raw_inputs[name]))
                           for name, relative in (('buildscript-gradle.lockfile', 'buildscript-gradle.lockfile'),
                                                  ('app-gradle.lockfile', 'app/gradle.lockfile'))}
@@ -1416,7 +1435,10 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                         ['/usr/bin/git', '-C', str(flow.SOURCE), 'status', '--porcelain=v1', '--untracked-files=all'], 10, 16384)
                 def cache_inventory(work, verification, clock):
                     clock.check(); document = flow.b_inventory_document(input_b)
-                    if failure and failure.startswith('inventory'): document['rows'][0]['bytes'] += 1
+                    if failure == 'inventory-missing': document['rows'].pop()
+                    elif failure == 'inventory-extra': document['rows'].append(dict(document['rows'][0]))
+                    elif failure == 'inventory-pom': document['rows'].append(dict(zip(fields, flow.B_DISCOVERY_ONLY_POMS[0])))
+                    elif failure and failure.startswith('inventory'): document['rows'][0]['bytes'] += 1
                     return document
                 def capture(work, name, raw, *, clock=None):
                     if name == 'evidence/inventory-drift.json':
@@ -1445,8 +1467,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 except BaseException as error: caught = error
                 receipts = [json.loads(raw) for name, raw in emitted if name == 'evidence/receipt.json']
                 drift = [json.loads(raw) for name, raw in emitted if name == 'evidence/inventory-drift.json']
-                if failure == 'inventory':
-                    expected_drift = flow.b_inventory_document(input_b); expected_drift['rows'][0]['bytes'] += 1
+                if failure in ('inventory', 'inventory-missing', 'inventory-extra', 'inventory-pom'):
+                    expected_drift = cache_inventory(None, None, clocks[-1])
                     self.assertEqual(drift, [{'status': 'refused', 'reason': 'b-inventory-drift',
                         'source': sha, 'inventory': expected_drift}])
                 else: self.assertEqual(drift, [])
@@ -1470,7 +1492,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 self.assertEqual(calls[5][2:], (900, 2 << 20))
                 if failure is not None:
                     self.assertIsInstance(caught, flow.Refused)
-                    self.assertEqual(str(caught), {'inventory': 'b-inventory-drift', 'inventory-publisher': 'b-inventory-drift',
+                    self.assertEqual(str(caught), {'inventory': 'b-inventory-drift', 'inventory-missing': 'b-inventory-drift',
+                        'inventory-extra': 'b-inventory-drift', 'inventory-pom': 'b-inventory-drift', 'inventory-publisher': 'b-inventory-drift',
                         'inventory-clock': 'b-inventory-drift', 'late-lock': 'inert-late-lock-post', 'late-input': 'inert-late-input-post'}[failure])
                     self.assertEqual(receipts, []); self.assertIsNone(returned)
                     self.assertIn('evidence/failed-commands.json', [name for name, raw in emitted])

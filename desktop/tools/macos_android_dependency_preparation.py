@@ -1275,11 +1275,92 @@ def b_lock_post(work, originals, clock):
         raw, identity = read(work / 'run/project' / relative, 32 << 10, clock=clock)
         need(identity == before and digest(raw) == sha, 'b-lock-original-post')
 
+# Gradle 8.14.5 --write-locks discovers these unselected POM versions (and
+# two parent POMs). Normal locked resolution need not fetch them. This is the
+# exact reviewed A/B difference, NOT a general POM/cache exclusion policy.
+# Keep actual inventory untouched: extra, missing or changed rows still refuse.
+B_DISCOVERY_ONLY_POMS = (('com.google.errorprone',
+  'error_prone_annotations',
+  '2.11.0',
+  'error_prone_annotations-2.11.0.pom',
+  2163,
+  '0261ca01f2d2e9ac2ae2ece75d42c56323b385fb294b6bc943f62ef4e92ddf08'),
+ ('com.google.errorprone',
+  'error_prone_annotations',
+  '2.3.1',
+  'error_prone_annotations-2.3.1.pom',
+  1784,
+  '3edce6b711ba368efe16b9b7aacb0214fbd648414cb9b965953a2e7ed89a819a'),
+ ('com.google.errorprone',
+  'error_prone_parent',
+  '2.11.0',
+  'error_prone_parent-2.11.0.pom',
+  10734,
+  '8283f0cb44c624a79d330b6fd80b8b8a715a68b3685c9a951c3de837d4540551'),
+ ('com.google.errorprone',
+  'error_prone_parent',
+  '2.3.1',
+  'error_prone_parent-2.3.1.pom',
+  4952,
+  '767525d9a81129cd081968382980336327be4162b1e2251a182911daa733c123'),
+ ('com.google.j2objc',
+  'j2objc-annotations',
+  '1.3',
+  'j2objc-annotations-1.3.pom',
+  2762,
+  '5faca824ba115bee458730337dfdb2fcea46ba2fd774d4304edbf30fa6a3f055'),
+ ('com.google.protobuf',
+  'protobuf-java',
+  '3.22.3',
+  'protobuf-java-3.22.3.pom',
+  1554,
+  '186ea794150f5b42aea7ec6041df373d1d8a8a831624f58a55debb6043ec7312'),
+ ('io.grpc',
+  'grpc-core',
+  '1.57.0',
+  'grpc-core-1.57.0.pom',
+  2695,
+  '8184045f5791e00cf2cdbcf5e8846afd48f5cf7e5a4f38fb5b8303c7b2efe55b'),
+ ('io.grpc',
+  'grpc-netty',
+  '1.57.0',
+  'grpc-netty-1.57.0.pom',
+  2543,
+  'ed9dfdd7b1ed4356afb3c5d1407dedb634c8602fb410479b480ad8c1139ee17b'),
+ ('io.grpc',
+  'grpc-protobuf',
+  '1.57.0',
+  'grpc-protobuf-1.57.0.pom',
+  2701,
+  'c0dcb8c67fd01daa63256f0f8b68d3707ceb7ca85cdaab7a3c6c3ff460e13dd1'),
+ ('io.grpc',
+  'grpc-stub',
+  '1.57.0',
+  'grpc-stub-1.57.0.pom',
+  1788,
+  '6d4459487c621dff31510a88829063631e915d2dcc774d71928418116e59a88d'),
+ ('org.checkerframework',
+  'checker-qual',
+  '2.5.8',
+  'checker-qual-2.5.8.pom',
+  2398,
+  '33ac6a0f1341ae96647c7d4465f4aa3d24fe97d2697bcee2ceae6fc8b5ef2c3c'))
+
+
 def b_inventory_document(inputs):
+    rows = inputs['inventoryRows']
+    need(len(rows) == len(set(rows)) == 345 and sum(row[4] for row in rows) == 209839014,
+         'b-fixed-a-inventory')
+    selected = {gav for states in inputs['lockStates'] for _, gavs in states for gav in gavs}
+    need(all(rows.count(row) == 1 and row[:3] not in selected for row in B_DISCOVERY_ONLY_POMS),
+         'b-discovery-only-poms')
+    expected = [row for row in rows if row not in B_DISCOVERY_ONLY_POMS]
+    need(len(expected) == 334 and sum(row[4] for row in expected) == 209802940,
+         'b-fixed-locked-inventory')
     fields = ('group', 'name', 'version', 'artifact', 'bytes', 'sha256')
     return {'classification': 'actual-cache-artifacts-not-independent-task-resolution-graph',
             'locksAreOriginalGradleTaskOutputs': False, 'locksAreReviewedAInputs': True,
-            'rows': [dict(zip(fields, row)) for row in inputs['inventoryRows']]}
+            'rows': [dict(zip(fields, row)) for row in expected]}
 
 
 def b_input_statement(nomination):
