@@ -164,7 +164,7 @@ ENGINEERING_DIAGNOSTIC_REGIONS = (('    @MainActor private var packagedRequireDi
   '            throw refusal\n'))
 ENGINEERING_MAIN_BEGIN = '    // Engineering main only: actual embedded UI and current-core reference data.\n'
 ENGINEERING_MAIN_END = '    // End engineering main fixture; ordinary installed cases below are unchanged.\n\n'
-ENGINEERING_MAIN_SHA256 = '40b7c619718364a9f901c6c2f36f82e807681ea9c64732a12c75b3b50c084d16'
+ENGINEERING_MAIN_SHA256 = 'c77731ba526d68ed2f0dea3b8a111ecbec1b9177f176458205f2a1cd65558753'
 ENGINEERING_BEFORE_SWIFT_SHA256 = 'c463302b56cee2da043d1cbb9ce87f03f1d92118759cf3c3127ed25dc48f0dad'
 ENGINEERING_CORE_GUIDE_SHA256 = '7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478'
 ENGINEERING_SHARED_REGIONS = (('        private let clock: CaseClock\n        private let reply = LaunchReply()',
@@ -734,6 +734,30 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                                                                           'changedEngineeringDiagnostic'), 1),
                         engineering_source.replace(current, original, 1) + current):
                 with self.assertRaises(AssertionError): self.restored_engineering_main(bad)
+
+        # Exact diagnostic-only insertion: six same-guide samples, each guarded
+        # by the existing remaining()/original-owner check BEFORE its query.
+        observations = '        // Six pre-check samples of this same guide, not a fallback or atomic snapshot.\n        for property in ["label", "title"] {\n            let kinds: [(String, XCUIElement.ElementType)] = [("any", .any), ("button", .button), ("checkBox", .checkBox)]\n            for (kind, type) in kinds {\n                _ = try remaining(1) // Same original owners/clock; a latched failure stops sampling.\n                let count = guide.descendants(matching: type).matching(\n                    NSPredicate(format: "%K BEGINSWITH %@", property, "Android upload keystore")).count\n                print("MRK_MACOS_ENGINEERING_GUIDE_QUERY=v1;property=\\(property);type=\\(kind);matches=\\(min(count, 5));exceedsFour=\\(count > 4 ? 1 : 0);nonAtomic=1")\n            }\n        }\n'
+        self.assertEqual(case.count(observations), 1)
+        self.assertLess(case.index('let guide = try waitElement('), case.index(observations))
+        self.assertLess(case.index(observations), case.index('_ = try unique(controls(guide, [.checkBox]'))
+        # Removing ONLY these samples recovers the exact previously accepted
+        # engineering block, including Android/Apple selectors and all Quit code.
+        self.assertEqual(digest(engineering.replace(observations, '', 1).encode()),
+                         '40b7c619718364a9f901c6c2f36f82e807681ea9c64732a12c75b3b50c084d16')
+        for changed in (observations.replace('"label", "title"', '"value", "title"', 1),
+                        observations.replace('("checkBox", .checkBox)', '("checkBox", .button)', 1),
+                        observations.replace('Android upload keystore', 'unreviewed prefix', 1),
+                        observations.replace('                _ = try remaining(1)', '                // missing guard', 1),
+                        observations.replace('nonAtomic=1', 'nonAtomic=0', 1)):
+            self.assertNotEqual(changed, observations)
+            with self.assertRaises(AssertionError):
+                self.restored_engineering_main(engineering_source.replace(observations, changed, 1))
+        for changed_source in (engineering_source.replace(observations, '', 1),
+                               engineering_source.replace(observations, observations + observations, 1),
+                               engineering_source.replace(observations, '', 1).replace('        apple.click()',
+                                                                                     observations + '        apple.click()', 1)):
+            with self.assertRaises(AssertionError): self.restored_engineering_main(changed_source)
 
         names = ('desktop/src/App.tsx', 'desktop/src/pages/Credentials.tsx', 'desktop/src/bridge.ts',
                  'desktop/src/releaseInputGuidance.ts', 'desktop/src-tauri/src/runtime.rs', 'desktop/engine_bootstrap.py',

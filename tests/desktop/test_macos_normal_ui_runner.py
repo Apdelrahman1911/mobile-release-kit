@@ -2516,6 +2516,97 @@ class NormalPhaseDataTests(unittest.TestCase):
             MODULE.normal_failure_diagnostics("test", engineering_selection,
                 subprocess.CompletedProcess([], 65, b"x" * (1048576 + 1), b""), engineering=True)
 
+        # Six finite samples describe the SAME fixed guide, not a selector or
+        # atomic catalogue result. A prefix remains a prefix, never six zero rows.
+        guide_tuples = tuple((prop, kind) for prop in ("label", "title") for kind in ("any", "button", "checkBox"))
+        guide_rows = [(f"MRK_MACOS_ENGINEERING_GUIDE_QUERY=v1;property={prop};type={kind};matches={index};"
+                       f"exceedsFour={int(index == 5)};nonAtomic=1").encode() + (b"\r\n" if index % 2 else b"\n")
+                      for index, (prop, kind) in enumerate(guide_tuples)]
+        guide_expected = [{"stream": "stdout", "kind": "guide", "property": prop, "elementType": kind,
+                           "matches": index, "exceedsFour": index == 5, "nonAtomic": True}
+                          for index, (prop, kind) in enumerate(guide_tuples)]
+        for length in range(7):
+            raw = b"".join(guide_rows[:length])
+            partial = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess(["fixed-original"], 65, raw, b""), engineering=True)
+            self.assertEqual(partial["queryObservations"], guide_expected[:length])
+            self.assertEqual(partial["status"], "classified" if length else "unclassified")
+            self.assertEqual(partial["requireObservations"], [])
+            self.assertIsNone(partial["dashboardReadiness"])
+            self.assertFalse(any(partial["markers"].values()))
+            self.assertFalse(partial["findingsTruncated"])
+            self.assertEqual(partial["originalReturncode"], 65)
+        reverse = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess(["fixed-original"], 65, b"".join(reversed(guide_rows)), b""), engineering=True)
+        self.assertEqual(reverse["queryObservations"], list(reversed(guide_expected)))
+
+        guide_row = guide_rows[0]
+        invalid_guides = (
+            guide_row[:-1], guide_row.replace(b"v1", b"v2"), guide_row.replace(b"label", b"value"),
+            guide_row.replace(b"type=any", b"type=window"), guide_row.replace(b"type=any", b"type=checkbox"),
+            *(guide_row.replace(b"matches=0", b"matches=" + token) for token in (b"-1", b"01", b"+1", b"6", b"true")),
+            guide_row.replace(b"exceedsFour=0", b"exceedsFour=1"),
+            guide_rows[5].replace(b"exceedsFour=1", b"exceedsFour=0"),
+            guide_row.replace(b"exceedsFour=0", b"exceedsFour=true"),
+            guide_row.replace(b"nonAtomic=1", b"nonAtomic=0"),
+            guide_row.replace(b"nonAtomic=1", b"nonAtomic=true"),
+            b"prefix " + guide_row, b" " + guide_row, guide_row[:-1] + b" \n",
+            guide_row[:-1] + b";private=" + secret + b"\n", guide_row.replace(b";type=", b"\n;type="),
+            guide_row + guide_row, guide_row + guide_row.replace(b"matches=0", b"matches=2"),
+            guide_row + guide_row[:-1], b"MRK_MACOS_ENGINEERING_GUIDE", b"MRK_MACOS_ENGINEERING_",
+            b"noise\ntrailing MRK_MACOS_ENGINEERING_GUIDE_",
+        )
+        for raw in invalid_guides:
+            for surrounding in (b"".join(guide_rows) + raw, raw + b"".join(guide_rows)):
+                with self.subTest(guide_marker=raw[:100]):
+                    rejected = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                        subprocess.CompletedProcess(["fixed-original"], 65, surrounding, native_error), engineering=True)
+                    self.assertEqual(rejected["queryObservations"], [])  # No valid-neighbor salvage/deduplication.
+                    self.assertEqual(rejected["status"], "unavailable")
+                    self.assertEqual(rejected["errorCodes"], observed["errorCodes"])
+                    self.assertFalse(rejected["findingsTruncated"])
+                    self.assertEqual(rejected["originalReturncode"], 65)
+                    self.assertNotIn(secret, MODULE.encoded(rejected))
+        for stdout, stderr in ((b"", guide_row), (b"".join(guide_rows), guide_row),
+                               (guide_row, guide_row[:-1]), (guide_row, b"MRK_MACOS_ENGINEERING_GUIDE")):
+            rejected = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess(["fixed-original"], 65, stdout, stderr), engineering=True)
+            self.assertEqual(rejected["queryObservations"], [])
+            self.assertEqual(rejected["status"], "unavailable")
+        for phase, selection in (("build", None), ("query", None), ("summary", engineering_selection)):
+            outside = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess(["fixed-original"], 65, guide_row, b""), engineering=True)
+            self.assertEqual(outside["queryObservations"], [])
+            self.assertEqual(outside["status"], "unavailable")
+        # New engineering namespace cannot change ordinary four-row retention,
+        # including its deliberate repeat preservation and truncation signal.
+        ordinary_guides = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+            subprocess.CompletedProcess(["fixed-original"], 65, query * 5 + b"".join(guide_rows), b""))
+        for key in many:
+            if key not in ("stdoutBytes", "stdoutSha256"):
+                self.assertEqual(ordinary_guides[key], many[key])
+
+        # Fill every engineering category to its retained maximum, with longest
+        # fixed public scalars, without borrowing the ordinary four-row budget.
+        guide_maximum = b"".join((f"MRK_MACOS_ENGINEERING_GUIDE_QUERY=v1;property={prop};type={kind};"
+                                 "matches=4;exceedsFour=0;nonAtomic=1\n").encode() for prop, kind in guide_tuples)
+        codes_maximum = b"".join(f"Error Domain=FBSOpenApplicationServiceErrorDomain Code={-2147483648 + i}\n".encode()
+                                 for i in range(8))
+        sites_maximum = b"".join(f"NormalAppUITests.swift:{line}:4096: error: {engineering_case} : PRIVATE\n".encode()
+                                 for line in range(65532, 65536))
+        require_maximum = b"MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line=65535;check=actionable\n"
+        maximum = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess(["fixed-original"], 65,
+                guide_maximum + codes_maximum + sites_maximum + require_maximum, b""), engineering=True)
+        self.assertEqual([len(maximum[key]) for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations")],
+                         [8, 4, 6, 1])
+        self.assertEqual(maximum["queryObservations"], [dict(row, matches=4, exceedsFour=False) for row in guide_expected])
+        self.assertEqual(maximum["requireObservations"], [{"source": "NormalAppUITests.swift", "line": 65535, "check": "actionable"}])
+        self.assertEqual(maximum["status"], "classified")
+        self.assertFalse(maximum["findingsTruncated"])
+        self.assertLessEqual(len(MODULE.encoded(maximum)) + 1, 4096)
+        self.assertNotIn(b"PRIVATE", MODULE.encoded(maximum))
+
         engineering_work = Path("/Users/runner/work/_temp/mrk-macos-engineering-ui.ABCDef12")
         engineering_tmp = str(engineering_work / "normal-ui/tmp") + "/"
         request = MODULE.engineering_request(["--engineering-main-test", "--work", str(engineering_work)], engineering_tmp)

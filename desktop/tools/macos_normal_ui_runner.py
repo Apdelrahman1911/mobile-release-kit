@@ -860,6 +860,10 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     engineering_pattern = (re.escape(engineering_namespace) + rb"=v1;line=([1-9][0-9]{0,4});"
                            rb"check=(condition|singleton|actionable)")
     engineering_candidates, engineering_candidate = 0, None
+    guide_namespace = b"MRK_MACOS_ENGINEERING_GUIDE_QUERY"
+    guide_pattern = (re.escape(guide_namespace) + rb"=v1;property=(label|title);type=(any|button|checkBox)"
+                     rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
+    guide_rows, guide_seen, guide_invalid = [], set(), False
 
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
@@ -891,6 +895,24 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             record, offset = body[offset:end], end + 1
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
+            if engineering and (guide_namespace in record or (record and guide_namespace.startswith(record))
+                    or (not complete and any(record.endswith(guide_namespace[:size])
+                                             for size in range(1, len(guide_namespace))))):
+                match = re.fullmatch(guide_pattern, record) if engineering_require and complete and stream == "stdout" else None
+                if match is None:
+                    guide_invalid = True
+                else:
+                    key = (match.group(1), match.group(2))
+                    count, exceeds = int(match.group(3)), match.group(4) == b"1"
+                    if key in guide_seen or exceeds != (count == 5):
+                        guide_invalid = True
+                    else:
+                        guide_seen.add(key)  # Exactly two properties by three types: at most six rows.
+                        guide_rows.append({"stream": "stdout", "kind": "guide", "property": key[0].decode("ascii"),
+                            "elementType": key[1].decode("ascii"), "matches": count,
+                            "exceedsFour": exceeds, "nonAtomic": True})
+                # Still examine other fixed namespaces on this record; a malformed
+                # mixed/partial line cannot hide a duplicate first-failure marker.
             if engineering_require and (engineering_namespace in record
                     or (record and engineering_namespace.startswith(record))
                     or (not complete and any(record.endswith(engineering_namespace[:size])
@@ -929,6 +951,8 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             if exceeds == (count == 5):
                 retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
+    if engineering_require and not guide_invalid:
+        value["queryObservations"] = guide_rows  # Partial sets stay partial/nonAtomic, never padded or authoritative.
     if engineering_require and engineering_candidates:
         if engineering_candidates == 1 and engineering_candidate is not None:
             value["requireObservations"].append(engineering_candidate)
@@ -941,7 +965,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if (site["check"] == "condition" and site["line"] == dashboard_candidate["line"]
                 and dashboard_candidate["stream"] == "stdout"):
             value["dashboardReadiness"] = dashboard_candidate
-    value["status"] = ("unavailable" if require_invalid else "classified" if any(value[key]
+    value["status"] = ("unavailable" if require_invalid or guide_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations")) else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value

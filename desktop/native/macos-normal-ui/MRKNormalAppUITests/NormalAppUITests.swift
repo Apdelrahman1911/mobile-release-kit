@@ -840,6 +840,16 @@ final class NormalAppUITests: XCTestCase {
         _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Private by design.")), in: renderer)
         let guide = try waitElement(named(renderer, "Credential and signing asset guides"), in: renderer,
                                    failures: ["The native service is unavailable", "The field catalogue could not be loaded"])
+        // Six pre-check samples of this same guide, not a fallback or atomic snapshot.
+        for property in ["label", "title"] {
+            let kinds: [(String, XCUIElement.ElementType)] = [("any", .any), ("button", .button), ("checkBox", .checkBox)]
+            for (kind, type) in kinds {
+                _ = try remaining(1) // Same original owners/clock; a latched failure stops sampling.
+                let count = guide.descendants(matching: type).matching(
+                    NSPredicate(format: "%K BEGINSWITH %@", property, "Android upload keystore")).count
+                print("MRK_MACOS_ENGINEERING_GUIDE_QUERY=v1;property=\(property);type=\(kind);matches=\(min(count, 5));exceedsFour=\(count > 4 ? 1 : 0);nonAtomic=1")
+            }
+        }
         // WebKit exposes aria-pressed buttons as Cocoa checkboxes, retaining toggle state.
         _ = try unique(controls(guide, [.checkBox], label: "Android upload keystore", prefix: true),
                        "actual core Android guide is missing or repeated")
