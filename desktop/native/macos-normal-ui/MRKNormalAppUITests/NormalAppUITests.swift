@@ -1328,6 +1328,646 @@ final class NormalAppUITests: XCTestCase {
             try checkDirectory(directory)
             return result
         }
+        // Fixed positive Android output custody. No current Profile enters it.
+        // Call begin at the real parsed review, start immediately before the ONE
+        // Start action, and finish only after the same real terminal result says
+        // complete / work removed / artifacts retained-local-result. The caller's
+        // check closure is the existing original case deadline/owner check.
+        struct AndroidBuildIdentity: Equatable {
+            let operationID: String
+            let ownerGeneration: String
+            init(operationID: String, ownerGeneration: String) throws {
+                for value in [operationID, ownerGeneration] {
+                    try LocalFixture.need(value.range(of: #"^[0-9a-f]{32}$"#, options: .regularExpression) != nil,
+                                          "Android current build identity shape")
+                }
+                self.operationID = operationID; self.ownerGeneration = ownerGeneration
+            }
+        }
+        struct AndroidOutputSummary: Equatable {
+            let entries: Int
+            let nameBytes: Int
+            let logicalBytes: Int64
+            let moduleBytes: Int64
+            let censusSHA256: String
+            let artifactSHA256: String
+            let artifactBytes: Int64
+        }
+        private enum AndroidOutputStage: Equatable { case reviewed, running, complete }
+        private struct AndroidOutputState {
+            let identity: AndroidBuildIdentity
+            var stage: AndroidOutputStage
+            var summary: AndroidOutputSummary?
+        }
+        private var androidOutput: AndroidOutputState?
+        private var androidClosing = false
+        private static let androidOutputRoots = ["project/app/build", "project/.mobile-release", "project/build"]
+        private static let androidAAB = "project/app/build/outputs/bundle/release/app-release.aab"
+        private static let androidReport = "project/build/reports/problems/problems-report.html"
+        private static let androidEntryLimit = 100_000
+        private static let androidNameLimit = 2 * 1024 * 1024
+        private static let androidRelativeLimit = 2048
+        private static let androidDepthLimit = 32
+        private static let androidAABLimit: Int64 = 64 * 1024 * 1024
+        private static let androidModuleLimit: Int64 = 1024 * 1024 * 1024
+        private static let androidLogicalLimit: Int64 = 2 * 1024 * 1024 * 1024
+        private static let androidReportLimit: Int64 = 16 * 1024 * 1024
+
+        private func androidInputPost(_ check: () throws -> Void) throws {
+            try check()
+            try Self.need(closeErrors.isEmpty, "Android earlier consuming close failed")
+            for directory in anchors { try checkDirectory(directory) }
+            for directory in directories.values { try checkDirectory(directory) }
+            for path in current.keys.sorted() {
+                try check()
+                let old = current[path]!
+                let observed: File
+                if path == Self.androidVerificationPath { observed = try readAndroidVerificationOriginal() }
+                else { observed = try read(path) }
+                try Self.need(old.bytes == observed.bytes && old.facts == observed.facts,
+                              "Android immutable input changed")
+            }
+            try Self.need(closeErrors.isEmpty, "Android input consuming close failed")
+        }
+        private func androidInputRoster(outputsMayExist: Bool) throws {
+            let leaves = Set(current.keys), expectedDirectories = Set(Self.ancestors(leaves))
+            try Self.need(Set(directories.keys) == expectedDirectories, "Android input directory roster")
+            for path in expectedDirectories.sorted() {
+                guard let original = directories[path] else { throw Refusal.condition("fixture: Android input parent absent") }
+                let prefix = path.isEmpty ? "" : path + "/"
+                let expected = Set(leaves.union(expectedDirectories).compactMap { item -> String? in
+                    guard item.hasPrefix(prefix), item != path else { return nil }
+                    let rest = String(item.dropFirst(prefix.count)); return rest.contains("/") ? nil : rest
+                })
+                let admittedOutputs = Set(Self.androidOutputRoots.compactMap { item -> String? in
+                    let (parent, name) = Self.parts(item); return outputsMayExist && parent == path ? name : nil
+                })
+                let actual = try children(original)
+                try Self.need(actual.subtracting(admittedOutputs) == expected,
+                              "Android unexpected input-adjacent output")
+            }
+            try Self.need(closeErrors.isEmpty, "Android input roster consuming close failed")
+        }
+        func beginAndroidOutputObservation(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
+            try Self.need(androidOutput == nil && acceptedStages.isEmpty,
+                          "Android output observation repeated or mixed with Save")
+            // Unconfigured ordinary profiles cannot activate this seam. Future
+            // positive input admission owns actual reviewed project/locks/keys;
+            // this is not an alternate input materializer or a DATA nomination.
+            try Self.need(current[Self.androidVerificationPath] != nil
+                && current["project/buildscript-gradle.lockfile"] != nil
+                && current["project/app/gradle.lockfile"] != nil
+                && current["project/app/src/main/AndroidManifest.xml"] != nil,
+                "Android positive input prerequisites absent")
+            try androidInputPost(check)
+            try androidInputRoster(outputsMayExist: false)
+            for path in Self.androidOutputRoots {
+                let (parent, name) = Self.parts(path)
+                guard let original = directories[parent] else { throw Refusal.condition("fixture: Android output parent absent") }
+                var s = stat(); let result = fstatat(original.fd, name, &s, AT_SYMLINK_NOFOLLOW), code = errno
+                try Self.need(result == -1 && code == ENOENT, "Android output existed before review")
+            }
+            try check()
+            androidOutput = AndroidOutputState(identity: identity, stage: .reviewed, summary: nil)
+        }
+        func confirmAndroidStart(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
+            guard var state = androidOutput, state.stage == .reviewed, state.identity == identity else {
+                throw Refusal.condition("fixture: Android original Start identity or state differs")
+            }
+            try androidInputPost(check); try androidInputRoster(outputsMayExist: false); try check()
+            state.stage = .running; androidOutput = state
+        }
+        func assertAndroidRunning(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
+            guard let state = androidOutput, state.stage == .running, state.identity == identity else {
+                throw Refusal.condition("fixture: Android running original identity differs")
+            }
+            try androidInputPost(check)
+            // Work is still changing. No output census or closed claim here.
+        }
+
+        private static func androidOutputNamed(_ parent: Int32, _ name: String) throws -> StatFacts {
+            var value = stat()
+            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,
+                     "Android output named binding unavailable")
+            return StatFacts(value)
+        }
+        private func androidOutputDirectoryPost(_ original: Directory) throws {
+            let observed = try Self.facts(original.fd)
+            try Self.need(original.facts.sameDirectory(observed), "Android output original directory changed")
+            if let parent = original.parent {
+                try Self.need(observed.sameDirectory(Self.androidOutputNamed(parent, original.name)),
+                              "Android output named directory changed")
+            }
+        }
+        private struct AndroidCensus {
+            var entries = 0
+            var nameBytes = 0
+            var logicalBytes: Int64 = 0
+            var moduleBytes: Int64 = 0
+            var identities: Set<String> = []
+            var digest = SHA256()
+            var projectAAB = false
+            var artifactSHA256: String?
+            var artifactBytes: Int64?
+        }
+        private func androidOutputNames(_ directory: Directory, path: String, entryLimit: Int,
+                                        census: inout AndroidCensus, check: () throws -> Void) throws -> [String] {
+            try check(); try androidOutputDirectoryPost(directory)
+            let before = try Self.facts(directory.fd)
+            let fd = openat(directory.fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            try Self.need(fd >= 0, "Android census enumeration open")
+            guard let stream = fdopendir(fd) else {
+                if Darwin.close(fd) != 0 { closeErrors.append("android-census-open-close") }
+                throw Refusal.condition("fixture: Android census enumeration conversion")
+            }
+            var names: [String] = [], canonical: Set<String> = []
+            do {
+                while true {
+                    try check(); errno = 0
+                    guard let entry = readdir(stream) else {
+                        try Self.need(errno == 0, "Android census enumeration failed"); break
+                    }
+                    let length = Int(entry.pointee.d_namlen)
+                    try Self.need(length > 0 && length <= Int(NAME_MAX), "Android output name length")
+                    let bytes = withUnsafePointer(to: &entry.pointee.d_name) {
+                        $0.withMemoryRebound(to: UInt8.self, capacity: Int(NAME_MAX) + 1) {
+                            Array(UnsafeBufferPointer(start: $0, count: length))
+                        }
+                    }
+                    guard let name = String(bytes: bytes, encoding: .utf8), !bytes.contains(0) else {
+                        throw Refusal.condition("fixture: Android output name encoding")
+                    }
+                    if name == "." || name == ".." { continue }
+                    let relative = path + "/" + name
+                    try Self.need(!name.contains("/") && !name.contains("\\")
+                        && !name.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
+                        && relative.utf8.count <= Self.androidRelativeLimit
+                        && census.entries < entryLimit && census.nameBytes <= Self.androidNameLimit - relative.utf8.count,
+                        "Android output census name or entry bound")
+                    let key = name.precomposedStringWithCanonicalMapping.lowercased()
+                    try Self.need(canonical.insert(key).inserted, "Android output canonical duplicate")
+                    census.entries += 1; census.nameBytes += relative.utf8.count; names.append(name)
+                }
+                try Self.need(before == Self.facts(directory.fd), "Android output roster changed")
+                try androidOutputDirectoryPost(directory)
+            } catch {
+                if closedir(stream) != 0 { closeErrors.append("android-census-close") }
+                throw error
+            }
+            if closedir(stream) != 0 { closeErrors.append("android-census-close") }
+            try Self.need(closeErrors.isEmpty, "Android output enumeration consuming close failed")
+            return names.sorted()
+        }
+        private func androidOutputWalk(_ parent: Directory, name: String, path: String, depth: Int,
+                                       identity: AndroidBuildIdentity, entryLimit: Int,
+                                       census: inout AndroidCensus, check: () throws -> Void) throws {
+            try check(); try androidOutputDirectoryPost(parent)
+            try Self.need(depth <= Self.androidDepthLimit, "Android output depth bound")
+            let fd = openat(parent.fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            try Self.need(fd >= 0, "Android output original open")
+            do {
+                let before = try Self.facts(fd), kind = before.mode & mode_t(S_IFMT)
+                try Self.need(before == Self.androidOutputNamed(parent.fd, name)
+                    && (kind == mode_t(S_IFDIR) || kind == mode_t(S_IFREG))
+                    && before.uid == getuid() && before.gid == getgid() && before.flags == 0
+                    && before.device == parent.facts.device && before.mode & 0o7022 == 0,
+                    "Android output type owner mode or binding")
+                let originalKey = String(before.device) + ":" + String(before.inode)
+                try Self.need(census.identities.insert(originalKey).inserted, "Android output original alias")
+                let artifact = "project/.mobile-release/desktop-android-build/" + identity.operationID + "/artifacts/app-release.aab"
+                if kind == mode_t(S_IFDIR) {
+                    let directory = Directory(fd: fd, parent: parent.fd, name: name, facts: before)
+                    let names = try androidOutputNames(directory, path: path, entryLimit: entryLimit, census: &census, check: check)
+                    if path == "project/.mobile-release" {
+                        try Self.need(names == ["desktop-android-build"], "Android private root output roster")
+                    } else if path == "project/.mobile-release/desktop-android-build" {
+                        try Self.need(names == [identity.operationID], "Android operation output roster")
+                    } else if path == "project/.mobile-release/desktop-android-build/" + identity.operationID {
+                        try Self.need(names == ["artifacts"], "Android work or journal remains")
+                    } else if path == "project/.mobile-release/desktop-android-build/" + identity.operationID + "/artifacts" {
+                        try Self.need(names == ["app-release.aab"], "Android retained artifact roster")
+                    } else if path == "project/build" {
+                        try Self.need(names == ["reports"], "Android root build output roster")
+                    } else if path == "project/build/reports" {
+                        try Self.need(names == ["problems"], "Android report parent roster")
+                    } else if path == "project/build/reports/problems" {
+                        try Self.need(names == ["problems-report.html"], "Android report output roster")
+                    } else {
+                        try Self.need(path == "project/app/build" || path.hasPrefix("project/app/build/"),
+                                      "Android unrecognized output directory")
+                    }
+                    if path.hasPrefix("project/.mobile-release") {
+                        try Self.need(before.mode & 0o7777 == 0o700, "Android private output directory mode")
+                    }
+                    if path == "project/app/build/outputs/bundle/release" {
+                        try Self.need(names.filter { $0.hasSuffix(".aab") } == ["app-release.aab"], "Android project AAB candidate roster")
+                    }
+                    for child in names {
+                        try androidOutputWalk(directory, name: child, path: path + "/" + child, depth: depth + 1,
+                                              identity: identity, entryLimit: entryLimit, census: &census, check: check)
+                    }
+                } else {
+                    try Self.need(before.links == 1 && before.bytes >= 0, "Android output regular leaf shape")
+                    let size = Int64(before.bytes)
+                    try Self.need(size <= Self.androidLogicalLimit - census.logicalBytes, "Android output total byte bound")
+                    census.logicalBytes += size
+                    if path.hasPrefix("project/app/build/") {
+                        try Self.need(size <= Self.androidModuleLimit - census.moduleBytes, "Android module output byte bound")
+                        census.moduleBytes += size
+                    } else {
+                        try Self.need(path == artifact || path == Self.androidReport, "Android unrecognized output leaf")
+                    }
+                    if path == Self.androidReport { try Self.need(size <= Self.androidReportLimit, "Android report byte bound") }
+                    if path == Self.androidAAB || path == artifact {
+                        try Self.need(size > 0 && size <= Self.androidAABLimit, "Android AAB byte bound")
+                        if path == artifact { try Self.need(before.mode & 0o7777 == 0o600, "Android captured AAB mode") }
+                        var hash = SHA256(), total: Int64 = 0, buffer = [UInt8](repeating: 0, count: 64 * 1024)
+                        while true {
+                            try check()
+                            let count = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!, $0.count) }
+                            try Self.need(count >= 0, "Android AAB original read")
+                            if count == 0 { break }
+                            try Self.need(Int64(count) <= Self.androidAABLimit - total, "Android AAB read bound")
+                            total += Int64(count); hash.update(data: Data(buffer.prefix(count)))
+                        }
+                        try Self.need(total == size, "Android AAB exact EOF")
+                        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+                        if path == artifact { census.artifactSHA256 = digest; census.artifactBytes = size }
+                        else { census.projectAAB = true } // Signed and unsigned hashes need not equal.
+                    }
+                }
+                try Self.need(before == Self.facts(fd) && before == Self.androidOutputNamed(parent.fd, name), "Android output original POST")
+                try androidOutputDirectoryPost(parent); try check()
+                let row = try JSONSerialization.data(withJSONObject: [path, Self.wireFacts(before)], options: [.sortedKeys, .withoutEscapingSlashes])
+                census.digest.update(data: row); census.digest.update(data: Data([10]))
+            } catch {
+                if Darwin.close(fd) != 0 { closeErrors.append("android-output-close") }
+                throw error
+            }
+            if Darwin.close(fd) != 0 { closeErrors.append("android-output-close") }
+            try Self.need(closeErrors.isEmpty, "Android output consuming close failed")
+        }
+        private func scanAndroidOutputs(_ identity: AndroidBuildIdentity, entryLimit: Int = LocalFixture.androidEntryLimit,
+                                        check: () throws -> Void) throws -> AndroidOutputSummary {
+            // Tests may LOWER only this existing finite limit; no production
+            // caller can increase the fixed ceiling or change roots/policy.
+            try Self.need(entryLimit > 0 && entryLimit <= Self.androidEntryLimit, "Android census limit selection")
+            try androidInputPost(check); try androidInputRoster(outputsMayExist: true)
+            var census = AndroidCensus()
+            for path in Self.androidOutputRoots {
+                let (parent, name) = Self.parts(path)
+                guard let original = directories[parent] else { throw Refusal.condition("fixture: Android output parent absent") }
+                var s = stat(); let result = fstatat(original.fd, name, &s, AT_SYMLINK_NOFOLLOW), code = errno
+                if path == "project/build" && result == -1 && code == ENOENT { continue }
+                try Self.need(result == 0 && StatFacts(s).mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "Android output root absent or type")
+                try Self.need(census.entries < entryLimit && census.nameBytes <= Self.androidNameLimit - path.utf8.count,
+                              "Android root census bound")
+                census.entries += 1; census.nameBytes += path.utf8.count
+                try androidOutputWalk(original, name: name, path: path, depth: 0, identity: identity,
+                                      entryLimit: entryLimit, census: &census, check: check)
+            }
+            try androidInputPost(check); try androidInputRoster(outputsMayExist: true); try check()
+            guard census.projectAAB, let digest = census.artifactSHA256, let size = census.artifactBytes else {
+                throw Refusal.condition("fixture: Android required AAB observations absent")
+            }
+            return AndroidOutputSummary(entries: census.entries, nameBytes: census.nameBytes,
+                logicalBytes: census.logicalBytes, moduleBytes: census.moduleBytes,
+                censusSHA256: census.digest.finalize().map { String(format: "%02x", $0) }.joined(),
+                artifactSHA256: digest, artifactBytes: size)
+        }
+        func finishAndroidOutputObservation(_ identity: AndroidBuildIdentity, artifactBytes: Int64,
+                                            artifactSHA256: String, check: () throws -> Void) throws -> AndroidOutputSummary {
+            guard var state = androidOutput, state.stage == .running, state.identity == identity else {
+                throw Refusal.condition("fixture: Android terminal original identity differs")
+            }
+            try Self.need(artifactBytes > 0 && artifactBytes <= Self.androidAABLimit
+                && artifactSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+                "Android parsed terminal artifact shape")
+            let result = try scanAndroidOutputs(identity, check: check)
+            try Self.need(result.artifactBytes == artifactBytes && result.artifactSHA256 == artifactSHA256,
+                          "Android current terminal artifact differs")
+            try check(); state.stage = .complete; state.summary = result; androidOutput = state
+            return result
+        }
+        func assertAndroidOutputClosure(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
+            guard let state = androidOutput, state.stage == .complete, state.identity == identity, let summary = state.summary else {
+                throw Refusal.condition("fixture: Android output closure is not terminal")
+            }
+            try Self.need(try scanAndroidOutputs(identity, check: check) == summary, "Android retained output changed")
+        }
+        func closeAndroidOriginals(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
+            var primary: Error?
+            do { try assertAndroidOutputClosure(identity, check: check); androidClosing = true }
+            catch { primary = error }
+            do { try closeOriginals() } catch { if primary == nil { primary = error } }
+            // A consuming close may complete late; it cannot inherit the earlier
+            // census clock observation. Always check, without replacing primary.
+            do { try check() } catch { if primary == nil { primary = error } }
+            androidOutput = nil; androidClosing = false
+            if let primary { throw primary }
+        }
+        // End fixed positive Android output custody.
+
+        // Native DATA-only regression of the same scanner; no app, Gradle,
+        // project command, signing material, product lease or success receipt.
+        static func exerciseAndroidOutputCustodyData() throws {
+            let started = ProcessInfo.processInfo.systemUptime
+            var last = started
+            func check() throws {
+                let now = ProcessInfo.processInfo.systemUptime
+                try need(now.isFinite && now >= last && now - started < 30, "Android output DATA case deadline")
+                last = now
+            }
+            let identity = try AndroidBuildIdentity(operationID: String(repeating: "a", count: 32),
+                                                     ownerGeneration: String(repeating: "b", count: 32))
+            for scenario in ["valid", "late-close", "extra-operation", "work", "journal", "project-cache", "extra-artifact",
+                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {
+                try check()
+                let fixture = LocalFixture()
+                let temporary = open("/private/tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                try need(temporary >= 0, "Android output DATA temporary original")
+                var template = Array("/private/tmp/mrk-normal-output-data-XXXXXX".utf8CString)
+                let root = template.withUnsafeMutableBufferPointer { buffer -> String? in
+                    guard let made = mkdtemp(buffer.baseAddress!) else { return nil }
+                    return String(cString: made)
+                }
+                guard let root else {
+                    _ = Darwin.close(temporary) // Creation failure remains primary; consuming close is not retried.
+                    throw Refusal.condition("fixture: Android output DATA private root creation")
+                }
+                fixture.rootPath = root
+                let rootName = String(fixture.rootPath.dropFirst("/private/tmp/".count))
+                var createdRoot = stat()
+                let rootNamed = fstatat(temporary, rootName, &createdRoot, AT_SYMLINK_NOFOLLOW)
+                let cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil
+                let cleanupRoot = openat(temporary, rootName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                var created: [String] = []
+                var cleanupRows: [String: StatFacts] = [:]
+                var primary: Error?
+                func parent(_ path: String) throws -> (Int32, String, [Int32]) {
+                    let parts = path.split(separator: "/").map(String.init)
+                    var fd = cleanupRoot, adopted: [Int32] = [], relative = ""
+                    do {
+                        for part in parts.dropLast() {
+                            let next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                            try need(next >= 0, "Android output DATA cleanup parent")
+                            adopted.append(next)
+                            relative = relative.isEmpty ? part : relative + "/" + part
+                            guard let expected = cleanupRows[relative] else {
+                                throw Refusal.condition("fixture: Android DATA original parent row absent")
+                            }
+                            try need(expected.sameDirectory(facts(next)) && expected.sameDirectory(named(fd, part)),
+                                     "Android DATA original parent replaced")
+                            fd = next
+                        }
+                        return (fd, parts.last!, adopted)
+                    } catch {
+                        for original in adopted.reversed() { _ = Darwin.close(original) }
+                        throw error
+                    }
+                }
+                func closeTemporary(_ values: [Int32]) throws {
+                    var failed = false
+                    for fd in values.reversed() { if Darwin.close(fd) != 0 { failed = true } }
+                    try need(!failed, "Android output DATA temporary consuming close")
+                }
+                func makeDirectory(_ path: String, input: Bool) throws {
+                    let (parentFD, name, opened) = try parent(path)
+                    do {
+                        try need(mkdirat(parentFD, name, 0o700) == 0, "Android output DATA mkdir")
+                        let facts = try named(parentFD, name)
+                        created.append(path); cleanupRows[path] = facts
+                        if input {
+                            let (parentPath, _) = parts(path)
+                            guard let original = fixture.directories[parentPath] else {
+                                throw Refusal.condition("fixture: Android DATA input parent missing")
+                            }
+                            fixture.directories[path] = try fixture.adoptDirectory(
+                                openat(original.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+                                parent: original.fd, name: name)
+                        }
+                    } catch { try? closeTemporary(opened); throw error }
+                    try closeTemporary(opened)
+                }
+                func makeFile(_ path: String, _ bytes: Data, input: Bool = false) throws {
+                    let (parentFD, name, opened) = try parent(path)
+                    var original: Int32?
+                    do {
+                        let fd = openat(parentFD, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                        try need(fd >= 0, "Android output DATA create leaf")
+                        original = fd; created.append(path)
+                        cleanupRows[path] = try facts(fd)
+                        try bytes.withUnsafeBytes { raw in
+                            var offset = 0
+                            while offset < raw.count {
+                                try check()
+                                let count = Darwin.write(fd, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                                try need(count > 0, "Android output DATA leaf write"); offset += count
+                            }
+                        }
+                        cleanupRows[path] = try facts(fd)
+                        if input {
+                            fixture.originals[path] = bytes
+                            fixture.current[path] = try path == androidVerificationPath
+                                ? fixture.readAndroidVerificationOriginal() : fixture.read(path)
+                        }
+                    } catch {
+                        if let fd = original { _ = Darwin.close(fd) }
+                        try? closeTemporary(opened); throw error
+                    }
+                    var failed = false
+                    if let fd = original, Darwin.close(fd) != 0 { failed = true }
+                    do { try closeTemporary(opened) } catch { failed = true }
+                    try need(!failed, "Android output DATA creation consuming close")
+                }
+                func refused(_ reason: String, _ body: () throws -> Void) throws {
+                    var observed = false
+                    do { try body() }
+                    catch Refusal.condition(let message) { observed = message == "fixture: " + reason }
+                    try need(observed, "Android output DATA exact refusal missing")
+                }
+                do {
+                    try need(cleanupRoot >= 0, "Android output DATA cleanup original")
+                    guard let initialRoot = cleanupFacts else { throw Refusal.condition("fixture: Android DATA created root facts absent") }
+                    try need(initialRoot.mode & 0o7777 == 0o700 && initialRoot.uid == getuid()
+                        && initialRoot.gid == getgid() && initialRoot.flags == 0
+                        && initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                        && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),
+                        "Android output DATA private original root differs")
+                    fixture.directories[""] = try fixture.adoptDirectory(
+                        openat(temporary, rootName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: temporary, name: rootName)
+                    try need(fixture.directories[""]!.facts == initialRoot
+                        && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),
+                        "Android DATA adopted root is not the original")
+                    for path in ["project", "project/app", "project/app/src", "project/app/src/main", "project/gradle"] {
+                        try makeDirectory(path, input: true)
+                    }
+                    try makeFile("project/app/src/main/AndroidManifest.xml", Data("inert input\n".utf8), input: true)
+                    try makeFile("project/buildscript-gradle.lockfile", Data("inert root lock DATA, not nominated\n".utf8), input: true)
+                    try makeFile("project/app/gradle.lockfile", Data("inert app lock DATA, not nominated\n".utf8), input: true)
+                    try makeFile(androidVerificationPath, fixture.androidVerificationResource(), input: true)
+                    try fixture.beginAndroidOutputObservation(identity, check: check)
+                    try fixture.confirmAndroidStart(identity, check: check)
+                    try fixture.assertAndroidRunning(identity, check: check)
+                    if scenario == "repeated-start" {
+                        try refused("Android original Start identity or state differs") { try fixture.confirmAndroidStart(identity, check: check) }
+                    }
+                    let operation = "project/.mobile-release/desktop-android-build/" + identity.operationID
+                    for path in ["project/app/build", "project/app/build/outputs", "project/app/build/outputs/bundle",
+                                 "project/app/build/outputs/bundle/release", "project/.mobile-release",
+                                 "project/.mobile-release/desktop-android-build", operation, operation + "/artifacts",
+                                 "project/build", "project/build/reports", "project/build/reports/problems"] {
+                        try makeDirectory(path, input: false)
+                    }
+                    let captured = Data("signed-shaped census DATA, not an actual AAB\n".utf8)
+                    try makeFile(androidAAB, Data("different unsigned census DATA\n".utf8))
+                    try makeFile(operation + "/artifacts/app-release.aab", captured)
+                    try makeFile(androidReport, Data("private HTML is metadata only\n".utf8))
+                    let artifactDigest = SHA256.hash(data: captured).map { String(format: "%02x", $0) }.joined()
+                    switch scenario {
+                    case "extra-operation": try makeDirectory("project/.mobile-release/desktop-android-build/" + String(repeating: "c", count: 32), input: false)
+                    case "work": try makeDirectory(operation + "/work", input: false)
+                    case "journal": try makeDirectory("project/.mobile-release/build-inputs", input: false)
+                    case "project-cache": try makeDirectory("project/.gradle", input: false)
+                    case "extra-artifact": try makeFile(operation + "/artifacts/extra.aab", Data([1]))
+                    case "symlink":
+                        let path = "project/app/build/link", (fd, name, opened) = try parent(path)
+                        do {
+                            try need(symlinkat("/private/tmp", fd, name) == 0, "Android DATA symlink setup")
+                            created.append(path); cleanupRows[path] = try named(fd, name)
+                        } catch { try? closeTemporary(opened); throw error }
+                        try closeTemporary(opened)
+                    case "hardlink":
+                        let path = "project/app/build/alias", (fd, name, opened) = try parent(path)
+                        do {
+                            try need(linkat(cleanupRoot, androidAAB, fd, name, 0) == 0, "Android DATA hardlink setup")
+                            created.append(path); cleanupRows[path] = try named(fd, name)
+                        } catch { try? closeTemporary(opened); throw error }
+                        try closeTemporary(opened)
+                    case "depth":
+                        var path = "project/app/build"
+                        for _ in 1...33 { path += "/d"; try makeDirectory(path, input: false) }
+                    case "mode", "input":
+                        let path = scenario == "mode" ? androidAAB : "project/app/src/main/AndroidManifest.xml"
+                        let (fd, name, opened) = try parent(path)
+                        do {
+                            try need(fchmodat(fd, name, 0o622, 0) == 0, "Android DATA mode mutation")
+                            cleanupRows[path] = try named(fd, name)
+                        } catch { try? closeTemporary(opened); throw error }
+                        try closeTemporary(opened)
+                    default: break
+                    }
+                    if scenario == "valid" || scenario == "late-close" {
+                        let census = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(captured.count),
+                                                                               artifactSHA256: artifactDigest, check: check)
+                        try need(census.entries > 0 && census.logicalBytes > 0, "Android DATA census accounting")
+                        try need(try fixture.scanAndroidOutputs(identity, entryLimit: census.entries, check: check) == census,
+                                 "Android DATA exact entry limit")
+                        try refused("Android output census name or entry bound") { _ = try fixture.scanAndroidOutputs(identity, entryLimit: census.entries - 1, check: check) }
+                        try fixture.assertAndroidOutputClosure(identity, check: check)
+                        // Real missing-name fstatat failures must remain closed
+                        // messages, even with a live held original directory.
+                        let hidden = "private-name-not-for-diagnostics"
+                        try refused("Android output named binding unavailable") {
+                            _ = try androidOutputNamed(cleanupRoot, hidden)
+                        }
+                        let held = fixture.directories["project/app"]!
+                        let moved = Directory(fd: held.fd, parent: held.parent, name: hidden, facts: held.facts)
+                        try refused("Android output named binding unavailable") {
+                            try fixture.androidOutputDirectoryPost(moved)
+                        }
+                        if scenario == "late-close" {
+                            var closedChecked = false
+                            try refused("Android DATA closed deadline refusal") {
+                                try fixture.closeAndroidOriginals(identity) {
+                                    try check()
+                                    if fixture.descriptors.isEmpty {
+                                        closedChecked = true
+                                        throw Refusal.condition("fixture: Android DATA closed deadline refusal")
+                                    }
+                                }
+                            }
+                            try need(closedChecked && fixture.androidOutput == nil && !fixture.androidClosing,
+                                     "Android DATA late close did not clear state and refuse")
+                        } else { try fixture.closeAndroidOriginals(identity, check: check) }
+                        // Outputs survive production close; only this DATA test's
+                        // separately held, fixed-roster cleanup below removes them.
+                        try need(faccessat(cleanupRoot, operation + "/artifacts/app-release.aab", F_OK, AT_EACCESS) == 0,
+                                 "Android DATA production close deleted output")
+                    } else if scenario == "repeated-start" {
+                        // The second Start was refused above; no successful case is claimed.
+                    } else if scenario == "identity" {
+                        let wrong = try AndroidBuildIdentity(operationID: String(repeating: "d", count: 32), ownerGeneration: identity.ownerGeneration)
+                        try refused("Android terminal original identity differs") { _ = try fixture.finishAndroidOutputObservation(wrong, artifactBytes: Int64(captured.count), artifactSHA256: artifactDigest, check: check) }
+                    } else {
+                        let reasons = ["extra-operation": "Android operation output roster", "work": "Android work or journal remains",
+                            "journal": "Android private root output roster", "project-cache": "Android unexpected input-adjacent output",
+                            "extra-artifact": "Android retained artifact roster", "symlink": "Android output original open",
+                            "hardlink": "Android output regular leaf shape", "depth": "Android output depth bound",
+                            "mode": "Android output type owner mode or binding",
+                            "input": "leaf shape/mode/limit", "wrong-result": "Android current terminal artifact differs"]
+                        guard let reason = reasons[scenario] else { throw Refusal.condition("fixture: Android DATA scenario unmapped") }
+                        try refused(reason) { _ = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(captured.count),
+                            artifactSHA256: scenario == "wrong-result" ? String(repeating: "0", count: 64) : artifactDigest, check: check) }
+                        if scenario == "wrong-result" {
+                            var closedChecked = false
+                            try refused("Android output closure is not terminal") {
+                                try fixture.closeAndroidOriginals(identity) {
+                                    try check()
+                                    if fixture.descriptors.isEmpty {
+                                        closedChecked = true
+                                        throw Refusal.condition("fixture: Android DATA later close refusal")
+                                    }
+                                }
+                            }
+                            try need(closedChecked && fixture.androidOutput == nil && !fixture.androidClosing,
+                                     "Android DATA primary closure failure was masked or state retained")
+                        }
+                    }
+                } catch { primary = error }
+                // Consume production FDs even after every setup/assertion error.
+                // Running/refused state deliberately has no successful closure.
+                if !fixture.descriptors.isEmpty {
+                    fixture.androidOutput = nil // DATA-test teardown only, never an operation result.
+                    do { try fixture.closeOriginals() } catch { if primary == nil { primary = error } }
+                }
+                if cleanupRoot >= 0 {
+                    for path in created.reversed() {
+                        do {
+                            let (fd, name, opened) = try parent(path)
+                            do {
+                                guard let expected = cleanupRows[path] else { throw Refusal.condition("fixture: Android DATA cleanup row absent") }
+                                let observed = try named(fd, name)
+                                try need(expected.device == observed.device && expected.inode == observed.inode
+                                    && expected.uid == observed.uid && expected.mode & mode_t(S_IFMT) == observed.mode & mode_t(S_IFMT),
+                                    "Android DATA cleanup original differs")
+                                let directory = observed.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                                try need(unlinkat(fd, name, directory ? AT_REMOVEDIR : 0) == 0, "Android DATA fixed original removal")
+                            } catch { try? closeTemporary(opened); throw error }
+                            try closeTemporary(opened)
+                        } catch { if primary == nil { primary = error } }
+                    }
+                    do {
+                        if let expected = cleanupFacts {
+                            try need(expected.sameDirectory(facts(cleanupRoot)) && expected.sameDirectory(named(temporary, rootName)),
+                                     "Android DATA cleanup root replaced")
+                            try need(unlinkat(temporary, rootName, AT_REMOVEDIR) == 0, "Android DATA private root retirement")
+                        }
+                    } catch { if primary == nil { primary = error } }
+                    if Darwin.close(cleanupRoot) != 0 && primary == nil { primary = Refusal.condition("fixture: Android DATA cleanup root close") }
+                } else if let expected = cleanupFacts {
+                    do {
+                        try need(expected.uid == getuid() && expected.mode & 0o7777 == 0o700
+                            && expected == named(temporary, rootName), "Android DATA unopened cleanup root differs")
+                        try need(unlinkat(temporary, rootName, AT_REMOVEDIR) == 0, "Android DATA unopened private root retirement")
+                    } catch { if primary == nil { primary = error } }
+                }
+                if Darwin.close(temporary) != 0 && primary == nil { primary = Refusal.condition("fixture: Android DATA temporary close") }
+                if let primary { throw primary }
+                try check()
+            }
+        }
+
         // A one-case transfer of observation custody, never a product lease. The
         // original parent still holds these exact files throughout XCTest.
         private var savedVersionPending = false
@@ -1876,6 +2516,7 @@ final class NormalAppUITests: XCTestCase {
             acceptedStages.insert(stage)
         }
         func closeOriginals() throws {
+            let missingAndroidClosure = androidOutput != nil && !androidClosing
             // Consume each original exactly once, including after partial setup.
             // Never retry close or search/reopen a replacement descriptor.
             while let fd = descriptors.popLast() {
@@ -1883,10 +2524,35 @@ final class NormalAppUITests: XCTestCase {
             }
             directories.removeAll(); anchors.removeAll()
             applicationSupport = nil; applicationDirectory = nil; vaultDirectory = nil
+            try Self.need(!missingAndroidClosure, "Android final output observation was not joined before close")
             try Self.need(closeErrors.isEmpty, "original close errors: " + closeErrors.joined(separator: ","))
         }
     }
 
+
+    // Read only the ordinary parsed-current Build details within the caller's
+    // exact review or original-status container, never the three panels globally.
+    @MainActor private func androidCurrentBuildIdentity(_ container: XCUIElement) throws -> LocalFixture.AndroidBuildIdentity {
+        let details = try unique(container.descendants(matching: .group).matching(identifier: "Build details"),
+                                 "current Android Build details missing or repeated")
+        var values: [String] = []
+        for prefix in ["Build operation ID: ", "Build owner generation: "] {
+            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+                                   "current Android build identity field missing or repeated")
+            let label = field.label
+            try require(field.isHittable && label.hasPrefix(prefix), "current Android build identity is not visible")
+            let value = String(label.dropFirst(prefix.count))
+            try require(value.range(of: #"^[0-9a-f]{32}$"#, options: .regularExpression) != nil,
+                        "current Android build identity shape differs")
+            values.append(value)
+        }
+        return try LocalFixture.AndroidBuildIdentity(operationID: values[0], ownerGeneration: values[1])
+    }
+
+    // Explicit DATA-only native selection; not an Android-positive application case.
+    func testPositiveAndroidOutputCustodyData() throws {
+        try LocalFixture.exerciseAndroidOutputCustodyData()
+    }
 
     @MainActor private var ownedFixture: LocalFixture?
     @MainActor private var journeyDeadline: TimeInterval?

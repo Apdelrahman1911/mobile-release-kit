@@ -377,7 +377,30 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def restored_android_output_and_xml(self, swift: str) -> str:
+        # Exact reviewed insertions only; never broaden historical owner hashes.
+        # The separate existing native DATA case exercises the real Swift DFS.
+        for begin, end, expected in (('        // Fixed positive Android output custody. No current Profile enters it.', '        // A one-case transfer of observation custody, never a product lease.', '72deebe04548ac88948e562d51e3c45e74da2c417746e77000e05609a74e0008'), ("    // Read only the ordinary parsed-current Build details within the caller's", '    @MainActor private var ownedFixture: LocalFixture?', '23e0e04b5416b60dcdddb44d6c0013ae5b52f6e0d690da8da4bcf6603d40e567')):
+            self.assertEqual(swift.count(begin), 1)
+            self.assertEqual(swift.count(end), 1)
+            start, finish = swift.index(begin), swift.index(end, swift.index(begin))
+            self.assertEqual(digest(swift[start:finish].encode()), expected)
+            swift = swift[:start] + swift[finish:]
+        for line in ('            let missingAndroidClosure = androidOutput != nil && !androidClosing\n', '            try Self.need(!missingAndroidClosure, "Android final output observation was not joined before close")\n'):
+            self.assertEqual(swift.count(line), 1)
+            swift = swift.replace(line, "", 1)
+        self.assertEqual(digest(swift.encode()), "2c2f47ace92b094365ac93a661b6e944d54b25a363a7d53f0b8350d420b9d93b")
+        begin, end, expected = ('        // Fixed public XML prerequisite only.', '        private func children(_ directory: Directory) throws -> Set<String> {', '12ae200158270a950eb25af3272ac798631e846e2e82c5b7a482987e39b09a7b')
+        self.assertEqual(swift.count(begin), 1)
+        self.assertEqual(swift.count(end), 1)
+        start, finish = swift.index(begin), swift.index(end, swift.index(begin))
+        self.assertEqual(digest(swift[start:finish].encode()), expected)
+        swift = swift[:start] + swift[finish:]
+        self.assertEqual(digest(swift.encode()), "dd1c74e980a587b848b8a8965c1883f746374526a523cafbc7386769e198ab4a")
+        return swift
+
     def restored_engineering_main(self, swift: str) -> str:
+        swift = self.restored_android_output_and_xml(swift)
         for begin, end, expected_hash in SAVED_VERSION_SWIFT_INSERTIONS:
             self.assertEqual(swift.count(begin), 1)
             self.assertEqual(swift.count(end), 1)

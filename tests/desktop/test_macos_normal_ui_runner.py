@@ -209,8 +209,8 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertLess(readback.index("try checkDirectory(original)"), readback.index("return observed"))
         # These are dormant fixed prerequisite readers, not an implicit larger
         # limit in any current profile or an added Android-positive selection.
-        self.assertEqual(source.count("androidVerificationResource("), 1)
-        self.assertEqual(source.count("readAndroidVerificationOriginal("), 1)
+        self.assertEqual(source.count("androidVerificationResource("), 2)
+        self.assertEqual(source.count("readAndroidVerificationOriginal("), 3)
         self.assertIn("enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery }", source)
         generic = source.split("private func read(_ path: String) throws -> File {", 1)[1].split("private func readLeaf(", 1)[0]
         self.assertIn("return try readLeaf(original, name: name)", generic)
@@ -222,6 +222,116 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn("bytes.count <= 32 * 1024", prepare)
         self.assertIn("<= 256 * 1024", prepare)
         self.assertNotIn("androidVerification", prepare)
+
+    def test_android_output_custody_is_bounded_without_activating_a_profile(self):
+        # SOURCE assertions are not the separately selected native DATA test.
+        # In particular they never duplicate/execute a Python version of the DFS.
+        source = SWIFT.read_text(encoding="utf-8")
+        begin = "        // Fixed positive Android output custody. No current Profile enters it."
+        end = "        // A one-case transfer of observation custody, never a product lease."
+        self.assertEqual(source.count(begin), 1)
+        block = begin + source.split(begin, 1)[1].split(end, 1)[0]
+        production, data_test = block.split("        // Native DATA-only regression of the same scanner;", 1)
+        for literal in (
+            'private static let androidOutputRoots = ["project/app/build", "project/.mobile-release", "project/build"]',
+            'private static let androidReport = "project/build/reports/problems/problems-report.html"',
+            'private static let androidEntryLimit = 100_000', 'private static let androidNameLimit = 2 * 1024 * 1024',
+            'private static let androidRelativeLimit = 2048', 'private static let androidDepthLimit = 32',
+            'private static let androidAABLimit: Int64 = 64 * 1024 * 1024',
+            'private static let androidModuleLimit: Int64 = 1024 * 1024 * 1024',
+            'private static let androidLogicalLimit: Int64 = 2 * 1024 * 1024 * 1024',
+            'private static let androidReportLimit: Int64 = 16 * 1024 * 1024',
+            'case reviewed, running, complete', 'state.identity == identity',
+            'current[Self.androidVerificationPath] != nil', 'current["project/buildscript-gradle.lockfile"] != nil',
+            'current["project/app/gradle.lockfile"] != nil', 'if path == Self.androidVerificationPath',
+            'observed = try readAndroidVerificationOriginal()', 'outputsMayExist: false',
+            'actual.subtracting(admittedOutputs) == expected', 'readAndroidVerificationOriginal()',
+            'let bytes = withUnsafePointer(to: &entry.pointee.d_name)', 'String(bytes: bytes, encoding: .utf8)',
+            'canonical.insert(key).inserted', 'census.identities.insert(originalKey).inserted',
+            'O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC', 'O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC',
+            'before.links == 1 && before.bytes >= 0', 'before.uid == getuid() && before.gid == getgid()',
+            'before.device == parent.facts.device && before.mode & 0o7022 == 0',
+            'names == [identity.operationID]', 'names == ["artifacts"]', 'names == ["app-release.aab"]',
+            'names == ["desktop-android-build"]', 'names == ["reports"]', 'names == ["problems"]',
+            'names == ["problems-report.html"]', 'before.mode & 0o7777 == 0o600',
+            'before.mode & 0o7777 == 0o700', 'count: 64 * 1024', 'if count == 0 { break }',
+            'total == size', 'before == Self.facts(fd) && before == Self.androidOutputNamed(parent.fd, name)',
+            'try androidOutputDirectoryPost(parent); try check()', 'census.projectAAB = true',
+            'result.artifactBytes == artifactBytes && result.artifactSHA256 == artifactSHA256',
+            'scanAndroidOutputs(identity, check: check) == summary', 'androidClosing = true',
+            'do { try closeOriginals() } catch { if primary == nil { primary = error } }',
+        ):
+            with self.subTest(required=literal):
+                self.assertIn(literal, production)
+        for forbidden in ('FileManager', 'removeItem', 'unlinkat(', 'mkdirat(', 'Process(', 'shell', 'glob(',
+                          'try?', 'Data(contentsOf:', 'project/.gradle', 'sdkmanager', 'chmod('):
+            self.assertNotIn(forbidden, production)
+        walk = production.split('private func androidOutputWalk(', 1)[1].split('private func scanAndroidOutputs(', 1)[0]
+        failure, success = walk.split('} catch {', 1)[1].split('\n            if Darwin.close(fd)', 1)
+        self.assertLess(failure.index('Darwin.close(fd)'), failure.index('throw error'))
+        self.assertLess(success.index('closeErrors.append'), success.index('closeErrors.isEmpty'))
+        self.assertNotIn('Self.named(', walk)
+        self.assertNotIn('checkDirectory(', walk)
+        enumeration = production.split('private func androidOutputNames(', 1)[1].split('private func androidOutputWalk(', 1)[0]
+        self.assertNotIn('checkDirectory(', enumeration)
+        self.assertIn('androidOutputDirectoryPost(directory)', enumeration)
+        fixed_named = production.split('private static func androidOutputNamed(', 1)[1].split('private func androidOutputDirectoryPost(', 1)[0]
+        self.assertIn('"Android output named binding unavailable"', fixed_named)
+        self.assertNotIn('+ name', fixed_named)
+        close = production.split('func closeAndroidOriginals(', 1)[1]
+        self.assertLess(close.index('try closeOriginals()'), close.index('do { try check() }'))
+        self.assertLess(close.index('do { try check() }'), close.index('androidOutput = nil; androidClosing = false'))
+        self.assertIn('do { try check() } catch { if primary == nil { primary = error } }', close)
+        self.assertIn('initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName)', data_test)
+        self.assertIn('fixture.directories[""]!.facts == initialRoot', data_test)
+        self.assertNotIn('cleanupFacts = try facts(', data_test)
+        self.assertIn('Android DATA closed deadline refusal', data_test)
+        self.assertIn('Android DATA primary closure failure was masked or state retained', data_test)
+        self.assertIn('private-name-not-for-diagnostics', data_test)
+        self.assertIn('fixture.androidOutputDirectoryPost(moved)', data_test)
+        scan = production.split('private func scanAndroidOutputs(', 1)[1].split('func finishAndroidOutputObservation(', 1)[0]
+        self.assertEqual(scan.count('try androidInputPost(check)'), 2)
+        self.assertEqual(scan.count('try androidInputRoster(outputsMayExist: true)'), 2)
+        finish = production.split('func finishAndroidOutputObservation(', 1)[1].split('func assertAndroidOutputClosure(', 1)[0]
+        self.assertLess(finish.index('let result = try scanAndroidOutputs'), finish.index('state.stage = .complete'))
+        self.assertLess(finish.index('result.artifactSHA256 == artifactSHA256'), finish.index('state.stage = .complete'))
+        for label in ('"valid"', '"late-close"', '"extra-operation"', '"work"', '"journal"', '"project-cache"',
+                      '"extra-artifact"', '"symlink"', '"hardlink"', '"depth"', '"mode"', '"input"',
+                      '"wrong-result"', '"identity"', '"repeated-start"'):
+            self.assertIn(label, data_test)
+        for required in ('entryLimit: census.entries,', 'entryLimit: census.entries - 1,',
+                         'message == "fixture: " + reason', 'created.reversed()', 'AT_REMOVEDIR',
+                         'fixture.closeAndroidOriginals(identity, check: check)',
+                         'Android DATA production close deleted output', 'now - started < 30',
+                         'if primary == nil { primary = error }', 'if let primary { throw primary }'):
+            self.assertIn(required, data_test)
+        self.assertNotIn('FileManager', data_test)
+        self.assertNotIn('XCUIApplication', data_test)
+        native = """    // Explicit DATA-only native selection; not an Android-positive application case.
+    func testPositiveAndroidOutputCustodyData() throws {
+        try LocalFixture.exerciseAndroidOutputCustodyData()
+    }
+
+"""
+        self.assertEqual(source.count(native), 1)
+        identity_begin = "    // Read only the ordinary parsed-current Build details within the caller's"
+        identity = identity_begin + source.split(identity_begin, 1)[1].split(native, 1)[0]
+        self.assertIn('container.descendants(matching: .group).matching(identifier: "Build details")', identity)
+        self.assertIn('["Build operation ID: ", "Build owner generation: "]', identity)
+        self.assertIn('field.isHittable && label.hasPrefix(prefix)', identity)
+        self.assertIn('^[0-9a-f]{32}$', identity)
+        self.assertIn('LocalFixture.AndroidBuildIdentity(operationID: values[0], ownerGeneration: values[1])', identity)
+        restored = source.replace(block, '', 1).replace(identity, '', 1).replace(native, '', 1)
+        restored = restored.replace('            let missingAndroidClosure = androidOutput != nil && !androidClosing\n', '', 1)
+        restored = restored.replace('            try Self.need(!missingAndroidClosure, "Android final output observation was not joined before close")\n', '', 1)
+        self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(),
+                         "2c2f47ace92b094365ac93a661b6e944d54b25a363a7d53f0b8350d420b9d93b")
+        # The explicit native DATA route is now reviewed; ordinary application
+        # selections must still exclude it. No Android-positive UI profile is enabled.
+        self.assertEqual(MODULE.OUTPUT_DATA_METHOD, MODULE.CLASS + 'testPositiveAndroidOutputCustodyData')
+        self.assertNotIn(MODULE.OUTPUT_DATA_RESULT, MODULE.NORMAL_SELECTIONS)
+        for methods, _, _ in MODULE.NORMAL_SELECTIONS.values():
+            self.assertNotIn('testPositiveAndroidOutputCustodyData', methods)
 
     def test_ui_target_requests_boolean_false_sandbox_at_build_time(self):
         # Source intent only; the actual generated signature is admitted separately.

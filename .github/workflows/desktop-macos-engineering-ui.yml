@@ -339,10 +339,10 @@ jobs:
 
   xctest-compile:
     if: github.ref == 'refs/heads/verify/desktop-macos-xctest-compile'
-    name: External XCTest compile only / no product or UI execution
+    name: External XCTest compile and fixed filesystem DATA / no product execution
     runs-on: macos-26
-    # Step ceilings 2+3+3+1+9+2+2 = 22 minutes, plus three minutes reserve.
-    timeout-minutes: 25
+    # Step ceilings 2+3+3+1+9+7+2+2 = 29 minutes, plus three minutes reserve.
+    timeout-minutes: 32
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -435,8 +435,36 @@ jobs:
           [[ "$original_status" == 0 ]] || exit "$original_status"
           [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
           /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+      - name: Execute only the fixed external XCTest filesystem DATA case
+        id: data
+        timeout-minutes: 7
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_WORK: ${{ steps.work.outputs.root }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
+          # Bash counts 1024-byte blocks; normal_file_limit checks both exact limits.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=github-hosted-macos26-arm64 \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --normal-output-data-test \
+            > "$MRK_MACOS_WORK/normal-ui/output-data.wrapper.stdout" 2> "$MRK_MACOS_WORK/normal-ui/output-data.wrapper.stderr"
+          original_status=$?
+          set -e
+          printf '%s\n' "$original_status" > "$MRK_MACOS_WORK/normal-ui/output-data.status"
+          [[ "$original_status" == 0 ]] || exit "$original_status"
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
       # Missing receipts are unavailable, never pass. Full logs remain private.
-      - name: Retain only bounded external XCTest compile evidence
+      - name: Retain only bounded external XCTest compile and DATA evidence
         id: evidence
         if: always() && steps.work.outcome == 'success'
         timeout-minutes: 2
@@ -453,11 +481,14 @@ jobs:
             ${{ steps.work.outputs.root }}/normal-ui/toolchain.failure-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/build.failure-diagnostics.json
             ${{ steps.work.outputs.root }}/normal-ui/build.status
+            ${{ steps.work.outputs.root }}/normal-ui/output-data.command-admission.json
+            ${{ steps.work.outputs.root }}/normal-ui/output-data-test.failure-diagnostics.json
+            ${{ steps.work.outputs.root }}/normal-ui/output-data.status
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
-      - name: Remove only this successful compile's original private products
-        if: success() && steps.build.outcome == 'success' && steps.evidence.outcome == 'success'
+      - name: Remove only the successful compile and DATA original private products
+        if: success() && steps.build.outcome == 'success' && steps.data.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 2
         shell: bash
         env:
@@ -471,7 +502,8 @@ jobs:
           /usr/bin/git -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv --exit-code --quiet HEAD --
           "$MRK_PYTHON" -I -S -B - <<'PY_CLEAN'
           # No product/UI cleanup CLI is applicable; reuse only fd-safe rmtree.
-          import json, os, re, shutil, stat
+          import hashlib, json, os, re, shutil, stat
+          from pathlib import Path
           from contextlib import ExitStack
           assert shutil.rmtree.avoids_symlink_attacks
           work = os.environ['MRK_MACOS_WORK']
@@ -486,6 +518,188 @@ jobs:
                   assert key not in result
                   result[key] = value
               return result
+          ARM_TARGET = "aarch64-apple-darwin"
+
+          INTEL_TARGET = "x86_64-apple-darwin"
+
+          PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
+
+          TARGET = "MRKNormalAppUITests"
+
+          CLASS = TARGET + "/NormalAppUITests/"
+
+          PACKAGED_METHOD = CLASS + "testPackagedEntryLaunchCancelAndQuit"
+
+          RUNNER = "Debug/MRKNormalAppUITests-Runner.app"
+
+          OUTPUT_DATA_METHOD = CLASS + "testPositiveAndroidOutputCustodyData"
+
+          OUTPUT_DATA_RESULT = "output-data-test.xcresult"
+
+          OUTPUT_DATA_SCOPE = "external-xctest-output-filesystem-data-only"
+
+          TOOLCHAIN_QUERIES = (
+              ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
+              ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
+              ("sdkVersion", "sdk-version.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version")),
+              ("sdkBuild", "sdk-build.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version")),
+          )
+
+          class Refused(Exception):
+              """Only closed public labels escape native main."""
+
+          def need(value, reason):
+              if not value:
+                  raise Refused(reason)
+
+          def sha(body):
+              return hashlib.sha256(body).hexdigest()
+
+          def encoded(value):
+              return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+
+          def document(body):
+              need(type(body) is bytes and 0 < len(body) <= 65536, "result-json-bound")
+              value = json.loads(body.decode("utf-8", "strict"), object_pairs_hook=pairs,
+                  parse_constant=lambda _: (_ for _ in ()).throw(Refused("result-json-number")))
+              need(type(value) is dict, "result-json-object")
+              return value
+
+          def normal_target_data(target=ARM_TARGET):
+              """Closed requested target DATA; native context must independently match."""
+              need(type(target) is str and target in (ARM_TARGET, INTEL_TARGET), "normal-fixed-target")
+              return (("arm64", "github-hosted-macos26-arm64") if target == ARM_TARGET else
+                      ("x86_64", "github-hosted-macos26-x86_64"))
+
+          def normal_build_arguments(derived, *, target=ARM_TARGET):
+              machine, _ = normal_target_data(target)
+              return ["/usr/bin/xcodebuild", "build-for-testing", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
+                  "-configuration", "Debug", "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
+                  "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
+                  "COMPILER_INDEX_STORE_ENABLE=NO"] + (["ARCHS=x86_64"] if target == INTEL_TARGET else [])
+
+          def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False):
+              machine, _ = normal_target_data(target)
+              need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
+              need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
+              need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
+                   and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60)), "output-data-fixed-test-selection")
+              need(output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+                   any(tuple(methods) == tuple(CLASS + method for method in selection[0])
+                       and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
+                   "fixed-test-selection")
+              need(allowance in (60, 300) and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
+              return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
+                  "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
+                  "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
+                  "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                  "-default-test-execution-time-allowance", str(allowance),
+                  "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
+
+          def output_data_clock(value, seconds):
+              need(type(value) is dict and set(value) == {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                   and value["postCloseDeadlineRequired"] is True, "output-data-clock")
+              need(all(type(value[key]) is str and re.fullmatch(r"[0-9]{1,20}", value[key])
+                       for key in ("startNs", "deadlineNs", "beforePublicationNs")), "output-data-clock-values")
+              need(int(value["startNs"]) <= int(value["beforePublicationNs"]) < int(value["deadlineNs"])
+                   and int(value["deadlineNs"]) - int(value["startNs"]) == seconds * 10**9, "output-data-clock-bound")
+
+          def output_data_records(commands, expected):
+              need(type(commands) is list and len(commands) == len(expected), "output-data-command-count")
+              for row, (role, cap, limit, argv) in zip(commands, expected, strict=True):
+                  need(type(row) is dict and set(row) == {"role", "returncode", "timeoutSeconds", "roleCapSeconds",
+                      "outputLimitBytes", "argvSha256", "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256"}, "output-data-command-fields")
+                  need(row["role"] == role and type(row["returncode"]) is int and row["returncode"] == 0
+                       and type(row["timeoutSeconds"]) is int and 1 <= row["timeoutSeconds"] <= cap
+                       and type(row["roleCapSeconds"]) is int and row["roleCapSeconds"] == cap
+                       and type(row["outputLimitBytes"]) is int and row["outputLimitBytes"] == limit, "output-data-command-values")
+                  need(all(type(row[key]) is int and 0 <= row[key] <= limit for key in ("stdoutBytes", "stderrBytes"))
+                       and row["stdoutBytes"] + row["stderrBytes"] <= limit
+                       and all(type(row[key]) is str and re.fullmatch(r"[0-9a-f]{64}", row[key])
+                               for key in ("argvSha256", "stdoutSha256", "stderrSha256"))
+                       and row["argvSha256"] == sha(encoded(argv)), "output-data-command-original")
+              need(commands[0]["stdoutSha256"] == commands[-1]["stdoutSha256"], "output-data-source-command-post")
+
+          def output_data_source_argv(source):
+              return ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                  "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
+                  "desktop/tools/macos_normal_ui_runner.py"]
+
+          def output_data_build_receipt(value, source, normal, roster):
+              expected = dict(schemaVersion=1, scope="normal-ui-original-command-admission-only", phase="build",
+                  resultBundle=None, originalCommandRole="normal-ui-build", originalReturncode=0,
+                  target=ARM_TARGET, sourceCommit=source, sourceRosterSha256=roster, sourcePrePostMatched=True,
+                  originalCommandReturned=True, fileLimitBytes=[32 * 1024**3] * 2,
+                  receiptPolicy="exclusive0600-readback-consuming-close")
+              need(type(value) is dict and set(value) == set(expected) | {"commands", "phaseClock"}, "output-data-build-fields")
+              need(all(type(value[key]) is type(wanted) and value[key] == wanted for key, wanted in expected.items()), "output-data-build-values")
+              output_data_clock(value["phaseClock"], 450)
+              source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
+              commands = [source_command, *[("normal-toolchain-" + key, 15, 4096, list(argv)) for key, _, argv in TOOLCHAIN_QUERIES],
+                          ("normal-ui-build", 240, 1048576, normal_build_arguments(normal / "DerivedData")), source_command]
+              output_data_records(value["commands"], commands)
+
+          def output_data_success_receipt(value, source, normal, build_raw):
+              """Fixed success DATA only; actual wrapper zero is a separate workflow gate."""
+              build = document(build_raw)
+              roster = build.get("sourceRosterSha256")
+              need(type(roster) is str and re.fullmatch(r"[0-9a-f]{64}", roster), "output-data-build-roster")
+              output_data_build_receipt(build, source, normal, roster)
+              expected = dict(schemaVersion=1, scope=OUTPUT_DATA_SCOPE, phase="output-data", resultBundle=OUTPUT_DATA_RESULT,
+                  originalCommandRole="one-admitted-ui-test", originalReturncode=0, target=ARM_TARGET, sourceCommit=source,
+                  sourceRosterSha256=roster, sourcePrePostMatched=True, originalCommandReturned=True,
+                  buildReceiptSha256=sha(build_raw), fileLimitBytes=[1024**3] * 2,
+                  receiptPolicy="exclusive0600-readback-consuming-close")
+              need(type(value) is dict and set(value) == set(expected) | {"runnerAdmission", "observation", "commands", "phaseClock"},
+                   "output-data-success-fields")
+              need(all(type(value[key]) is type(wanted) and value[key] == wanted for key, wanted in expected.items()),
+                   "output-data-success-values")
+              output_data_clock(value["phaseClock"], 345)
+              runner = value["runnerAdmission"]
+              fixed = dict(schemaVersion=1, scope="actual-generated-xctrunner-admission-only",
+                  runnerPath=str(normal / "DerivedData/Build/Products" / RUNNER), strictCodesignOriginalZero=True,
+                  reSignedOrRepaired=False, originalProductsPrePostMatched=True, originalClosesCompleted=True)
+              need(type(runner) is dict and set(runner) == set(fixed) | {"xctestrunPath", "runnerExecutable", "testExecutable", "xctestrun",
+                   "productEntryCount", "productRosterSha256", "entitlementsSha256", "appSandboxEntitlement"}, "output-data-runner-fields")
+              need(all(type(runner[key]) is type(wanted) and runner[key] == wanted for key, wanted in fixed.items())
+                   and type(runner["appSandboxEntitlement"]) is str and runner["appSandboxEntitlement"] in ("absent", "false")
+                   and type(runner["productEntryCount"]) is int and 5 <= runner["productEntryCount"] <= 4096,
+                   "output-data-runner-values")
+              manifest = runner["xctestrunPath"]
+              need(type(manifest) is str and len(manifest) <= 2048
+                   and Path(manifest).parent == normal / "DerivedData/Build/Products"
+                   and re.fullmatch(r"MRKNormalAppUI_macosx[0-9A-Za-z_.-]+\.xctestrun", Path(manifest).name), "output-data-manifest")
+              for key in ("runnerExecutable", "testExecutable", "xctestrun"):
+                  row = runner[key]
+                  need(type(row) is list and len(row) == 3 and row[0] == "file" and type(row[1]) is list and len(row[1]) == 9
+                       and all(type(part) is str and re.fullmatch(r"[0-9]{1,20}", part) for part in row[1])
+                       and stat.S_ISREG(int(row[1][2])) and int(row[1][5]) == 1 and 0 < int(row[1][6]) <= 256 * 1024**2
+                       and type(row[2]) is str and re.fullmatch(r"[0-9a-f]{64}", row[2]), "output-data-runner-original-row")
+              need(all(type(runner[key]) is str and re.fullmatch(r"[0-9a-f]{64}", runner[key])
+                       for key in ("productRosterSha256", "entitlementsSha256")), "output-data-runner-digest")
+              observation = value["observation"]
+              fixed_observation = dict(testIdentifier=OUTPUT_DATA_METHOD,
+                  testCounts={"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0},
+                  oneOriginalAttemptObserved=True, productReady=False)
+              need(type(observation) is dict and set(observation) == set(fixed_observation) | {"nativeSummarySha256", "nativeTestTreeSha256"}
+                   and encoded({key: observation[key] for key in fixed_observation}) == encoded(fixed_observation)
+                   and all(type(observation[key]) is str and re.fullmatch(r"[0-9a-f]{64}", observation[key])
+                           for key in ("nativeSummarySha256", "nativeTestTreeSha256")), "output-data-observation")
+              source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
+              query = ["/usr/bin/xcrun", "xcresulttool", "get", "test-results"]
+              tail = ["--path", str(normal / OUTPUT_DATA_RESULT), "--compact"]
+              expected_commands = [source_command,
+                  ("verify-generated-runner", 30, 1048576, ["/usr/bin/codesign", "--verify", "--strict", runner["runnerPath"]]),
+                  ("generated-runner-entitlements", 30, 1048576, ["/usr/bin/codesign", "-d", "--entitlements", ":-", runner["runnerPath"]]),
+                  ("one-admitted-ui-test", 120, 1048576, xcode_test_arguments(manifest, normal / OUTPUT_DATA_RESULT,
+                      (OUTPUT_DATA_METHOD,), 60, output_data=True)),
+                  ("normal-ui-summary", 30, 262144, query + ["summary"] + tail),
+                  ("normal-ui-test-tree", 30, 262144, query + ["tests"] + tail), source_command]
+              output_data_records(value["commands"], expected_commands)
+              need(value["commands"][0]["stdoutSha256"] == build["commands"][0]["stdoutSha256"]
+                   and value["commands"][4]["stdoutSha256"] == observation["nativeSummarySha256"]
+                   and value["commands"][5]["stdoutSha256"] == observation["nativeTestTreeSha256"]
+                   and value["commands"][2]["stdoutSha256"] == runner["entitlementsSha256"], "output-data-original-digest-joins")
           with ExitStack() as stack:
               def directory(name, parent=None, expected=None):
                   fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
@@ -517,7 +731,8 @@ jobs:
                       os.close(fd)
               # The step gate proves actual wrapper success; this persisted status alone never does.
               assert read('build.status', 4) == b'0\n'
-              value = json.loads(read('build.command-admission.json', 32768), object_pairs_hook=pairs,
+              build_raw = read('build.command-admission.json', 32768)
+              value = json.loads(build_raw, object_pairs_hook=pairs,
                                  parse_constant=lambda _: (_ for _ in ()).throw(ValueError('number')))
               expected = dict(schemaVersion=1, scope='normal-ui-original-command-admission-only', phase='build',
                   resultBundle=None, originalCommandRole='normal-ui-build', originalReturncode=0,
@@ -555,8 +770,12 @@ jobs:
                       assert re.fullmatch(r'[0-9a-f]{64}', command[key])
               assert commands[0]['argvSha256'] == commands[-1]['argvSha256']
               assert commands[0]['stdoutSha256'] == commands[-1]['stdoutSha256']
-              # Admit BOTH task-owned children before the first deletion. Symlinks are refused.
-              children = ('DerivedData', 'tmp')
+              # Both real wrappers and bounded upload completed before this step.
+              assert read('output-data.status', 4) == b'0\n'
+              data = document(read('output-data.command-admission.json', 32768))
+              output_data_success_receipt(data, os.environ['GITHUB_SHA'], Path(work) / 'normal-ui', build_raw)
+              # Preflight ALL exact owned compiler/result children before any deletion.
+              children = ('DerivedData', 'tmp', 'output-data-test.xcresult')
               admitted = {}
               for name in children:
                   s = os.stat(name, dir_fd=normal, follow_symlinks=False)

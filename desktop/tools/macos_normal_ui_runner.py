@@ -371,11 +371,13 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
-    need(engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
+         and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60)), "output-data-fixed-test-selection")
+    need(output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
@@ -388,15 +390,18 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
+    need(type(output_data) is bool and (not output_data or (not engineering and target == ARM_TARGET
+         and tuple(methods) == (OUTPUT_DATA_METHOD,) and allowance == 60 and timeout == 120)), "output-data-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
         command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
-                   if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target))
+                   if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
+                   if output_data else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target))
         products.check()
         original = call("one-admitted-ui-test", command, timeout)
         products.check()
@@ -546,6 +551,10 @@ def normal_request(arguments, temporary):
     if arguments == ["--normal-build"]:
         value = dict(phase="build", derived=normal / "DerivedData", result=None,
                      methods=(), allowance=None, timeout=240, phaseSeconds=450)
+    elif arguments == ["--normal-output-data-test"]:
+        need(target == ARM_TARGET, "output-data-arm-only")
+        value = dict(phase="test", derived=normal / "DerivedData", result=normal / OUTPUT_DATA_RESULT,
+                     methods=(OUTPUT_DATA_METHOD,), allowance=60, timeout=120, phaseSeconds=345, outputData=True)
     elif len(arguments) == 2 and arguments[0] == "--normal-summary":
         need(arguments[1] in NORMAL_SELECTIONS, "normal-summary-selection")
         value = dict(phase="summary", derived=normal / "DerivedData", result=normal / arguments[1],
@@ -619,9 +628,11 @@ def original_command(value, argv, limit):
 
 
 class NormalPhase:
-    def __init__(self, owner, environment, root, clock):
+    def __init__(self, owner, environment, root, clock, *, retain_nonzero=False):
+        need(type(retain_nonzero) is bool, "normal-nonzero-retention-mode")
         self.owner, self.environment, self.root, self.clock = owner, environment, root, clock
         self.records = []
+        self.retain_nonzero, self.first_nonzero = retain_nonzero, None
 
     def call(self, role, argv, seconds, limit=1024 * 1024):
         try:
@@ -629,6 +640,8 @@ class NormalPhase:
             value = self.owner.run_owned(argv, environ=self.environment, cwd=self.root, timeout=actual,
                                         capture=True, text=False, output_limit=limit)
             original_command(value, argv, limit)
+            if self.retain_nonzero and self.first_nonzero is None and value.returncode != 0:
+                self.first_nonzero = value  # Exact admitted original, before any later clock/format/close can fail.
             self.records.append({"role": role, "returncode": value.returncode,
                 "timeoutSeconds": actual, "roleCapSeconds": seconds, "outputLimitBytes": limit,
                 "argvSha256": sha(encoded(argv)), "stdoutBytes": len(value.stdout), "stdoutSha256": sha(value.stdout),
@@ -1131,8 +1144,262 @@ class NativeQueryFailure(Exception):
         self.original = original
 
 
+# One fixed filesystem DATA case, deliberately outside ordinary UI selections.
+OUTPUT_DATA_METHOD = CLASS + "testPositiveAndroidOutputCustodyData"
+OUTPUT_DATA_RESULT = "output-data-test.xcresult"
+OUTPUT_DATA_SCOPE = "external-xctest-output-filesystem-data-only"
+
+
+def output_data_clock(value, seconds):
+    need(type(value) is dict and set(value) == {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+         and value["postCloseDeadlineRequired"] is True, "output-data-clock")
+    need(all(type(value[key]) is str and re.fullmatch(r"[0-9]{1,20}", value[key])
+             for key in ("startNs", "deadlineNs", "beforePublicationNs")), "output-data-clock-values")
+    need(int(value["startNs"]) <= int(value["beforePublicationNs"]) < int(value["deadlineNs"])
+         and int(value["deadlineNs"]) - int(value["startNs"]) == seconds * 10**9, "output-data-clock-bound")
+
+
+def output_data_records(commands, expected):
+    need(type(commands) is list and len(commands) == len(expected), "output-data-command-count")
+    for row, (role, cap, limit, argv) in zip(commands, expected, strict=True):
+        need(type(row) is dict and set(row) == {"role", "returncode", "timeoutSeconds", "roleCapSeconds",
+            "outputLimitBytes", "argvSha256", "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256"}, "output-data-command-fields")
+        need(row["role"] == role and type(row["returncode"]) is int and row["returncode"] == 0
+             and type(row["timeoutSeconds"]) is int and 1 <= row["timeoutSeconds"] <= cap
+             and type(row["roleCapSeconds"]) is int and row["roleCapSeconds"] == cap
+             and type(row["outputLimitBytes"]) is int and row["outputLimitBytes"] == limit, "output-data-command-values")
+        need(all(type(row[key]) is int and 0 <= row[key] <= limit for key in ("stdoutBytes", "stderrBytes"))
+             and row["stdoutBytes"] + row["stderrBytes"] <= limit
+             and all(type(row[key]) is str and re.fullmatch(r"[0-9a-f]{64}", row[key])
+                     for key in ("argvSha256", "stdoutSha256", "stderrSha256"))
+             and row["argvSha256"] == sha(encoded(argv)), "output-data-command-original")
+    need(commands[0]["stdoutSha256"] == commands[-1]["stdoutSha256"], "output-data-source-command-post")
+
+
+def output_data_source_argv(source):
+    return ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+        "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
+        "desktop/tools/macos_normal_ui_runner.py"]
+
+
+def output_data_build_receipt(value, source, normal, roster):
+    expected = dict(schemaVersion=1, scope="normal-ui-original-command-admission-only", phase="build",
+        resultBundle=None, originalCommandRole="normal-ui-build", originalReturncode=0,
+        target=ARM_TARGET, sourceCommit=source, sourceRosterSha256=roster, sourcePrePostMatched=True,
+        originalCommandReturned=True, fileLimitBytes=[32 * 1024**3] * 2,
+        receiptPolicy="exclusive0600-readback-consuming-close")
+    need(type(value) is dict and set(value) == set(expected) | {"commands", "phaseClock"}, "output-data-build-fields")
+    need(all(type(value[key]) is type(wanted) and value[key] == wanted for key, wanted in expected.items()), "output-data-build-values")
+    output_data_clock(value["phaseClock"], 450)
+    source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
+    commands = [source_command, *[("normal-toolchain-" + key, 15, 4096, list(argv)) for key, _, argv in TOOLCHAIN_QUERIES],
+                ("normal-ui-build", 240, 1048576, normal_build_arguments(normal / "DerivedData")), source_command]
+    output_data_records(value["commands"], commands)
+
+
+def output_data_success_receipt(value, source, normal, build_raw):
+    """Fixed success DATA only; actual wrapper zero is a separate workflow gate."""
+    build = document(build_raw)
+    roster = build.get("sourceRosterSha256")
+    need(type(roster) is str and re.fullmatch(r"[0-9a-f]{64}", roster), "output-data-build-roster")
+    output_data_build_receipt(build, source, normal, roster)
+    expected = dict(schemaVersion=1, scope=OUTPUT_DATA_SCOPE, phase="output-data", resultBundle=OUTPUT_DATA_RESULT,
+        originalCommandRole="one-admitted-ui-test", originalReturncode=0, target=ARM_TARGET, sourceCommit=source,
+        sourceRosterSha256=roster, sourcePrePostMatched=True, originalCommandReturned=True,
+        buildReceiptSha256=sha(build_raw), fileLimitBytes=[1024**3] * 2,
+        receiptPolicy="exclusive0600-readback-consuming-close")
+    need(type(value) is dict and set(value) == set(expected) | {"runnerAdmission", "observation", "commands", "phaseClock"},
+         "output-data-success-fields")
+    need(all(type(value[key]) is type(wanted) and value[key] == wanted for key, wanted in expected.items()),
+         "output-data-success-values")
+    output_data_clock(value["phaseClock"], 345)
+    runner = value["runnerAdmission"]
+    fixed = dict(schemaVersion=1, scope="actual-generated-xctrunner-admission-only",
+        runnerPath=str(normal / "DerivedData/Build/Products" / RUNNER), strictCodesignOriginalZero=True,
+        reSignedOrRepaired=False, originalProductsPrePostMatched=True, originalClosesCompleted=True)
+    need(type(runner) is dict and set(runner) == set(fixed) | {"xctestrunPath", "runnerExecutable", "testExecutable", "xctestrun",
+         "productEntryCount", "productRosterSha256", "entitlementsSha256", "appSandboxEntitlement"}, "output-data-runner-fields")
+    need(all(type(runner[key]) is type(wanted) and runner[key] == wanted for key, wanted in fixed.items())
+         and type(runner["appSandboxEntitlement"]) is str and runner["appSandboxEntitlement"] in ("absent", "false")
+         and type(runner["productEntryCount"]) is int and 5 <= runner["productEntryCount"] <= 4096,
+         "output-data-runner-values")
+    manifest = runner["xctestrunPath"]
+    need(type(manifest) is str and len(manifest) <= 2048
+         and Path(manifest).parent == normal / "DerivedData/Build/Products"
+         and re.fullmatch(r"MRKNormalAppUI_macosx[0-9A-Za-z_.-]+\.xctestrun", Path(manifest).name), "output-data-manifest")
+    for key in ("runnerExecutable", "testExecutable", "xctestrun"):
+        row = runner[key]
+        need(type(row) is list and len(row) == 3 and row[0] == "file" and type(row[1]) is list and len(row[1]) == 9
+             and all(type(part) is str and re.fullmatch(r"[0-9]{1,20}", part) for part in row[1])
+             and stat.S_ISREG(int(row[1][2])) and int(row[1][5]) == 1 and 0 < int(row[1][6]) <= 256 * 1024**2
+             and type(row[2]) is str and re.fullmatch(r"[0-9a-f]{64}", row[2]), "output-data-runner-original-row")
+    need(all(type(runner[key]) is str and re.fullmatch(r"[0-9a-f]{64}", runner[key])
+             for key in ("productRosterSha256", "entitlementsSha256")), "output-data-runner-digest")
+    observation = value["observation"]
+    fixed_observation = dict(testIdentifier=OUTPUT_DATA_METHOD,
+        testCounts={"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0},
+        oneOriginalAttemptObserved=True, productReady=False)
+    need(type(observation) is dict and set(observation) == set(fixed_observation) | {"nativeSummarySha256", "nativeTestTreeSha256"}
+         and encoded({key: observation[key] for key in fixed_observation}) == encoded(fixed_observation)
+         and all(type(observation[key]) is str and re.fullmatch(r"[0-9a-f]{64}", observation[key])
+                 for key in ("nativeSummarySha256", "nativeTestTreeSha256")), "output-data-observation")
+    source_command = ("normal-ui-source-roster", 15, 1048576, output_data_source_argv(source))
+    query = ["/usr/bin/xcrun", "xcresulttool", "get", "test-results"]
+    tail = ["--path", str(normal / OUTPUT_DATA_RESULT), "--compact"]
+    expected_commands = [source_command,
+        ("verify-generated-runner", 30, 1048576, ["/usr/bin/codesign", "--verify", "--strict", runner["runnerPath"]]),
+        ("generated-runner-entitlements", 30, 1048576, ["/usr/bin/codesign", "-d", "--entitlements", ":-", runner["runnerPath"]]),
+        ("one-admitted-ui-test", 120, 1048576, xcode_test_arguments(manifest, normal / OUTPUT_DATA_RESULT,
+            (OUTPUT_DATA_METHOD,), 60, output_data=True)),
+        ("normal-ui-summary", 30, 262144, query + ["summary"] + tail),
+        ("normal-ui-test-tree", 30, 262144, query + ["tests"] + tail), source_command]
+    output_data_records(value["commands"], expected_commands)
+    need(value["commands"][0]["stdoutSha256"] == build["commands"][0]["stdoutSha256"]
+         and value["commands"][4]["stdoutSha256"] == observation["nativeSummarySha256"]
+         and value["commands"][5]["stdoutSha256"] == observation["nativeTestTreeSha256"]
+         and value["commands"][2]["stdoutSha256"] == runner["entitlementsSha256"], "output-data-original-digest-joins")
+
+
+def output_data_read_build(phase, normal, source, roster):
+    parent = open_directory(normal)
+    fd = None
+    primary = None
+    result = None
+    try:
+        parent_identity = full9(os.fstat(parent))[:5]
+        need(parent_identity[3:] == (os.getuid(), os.getgid()) and stat.S_IMODE(parent_identity[2]) == 0o700,
+             "output-data-private-parent")
+        fd = os.open("build.command-admission.json", os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+        raw, facts, digest = original_body(fd, 32768, collect=True)
+        need(facts[3:5] == (os.getuid(), os.getgid()) and stat.S_IMODE(facts[2]) == 0o600
+             and full9(os.stat("build.command-admission.json", dir_fd=parent, follow_symlinks=False)) == facts,
+             "output-data-build-original")
+        output_data_build_receipt(document(raw), source, normal, roster)
+        need(full9(os.stat(normal, follow_symlinks=False))[:5] == parent_identity
+             and full9(os.fstat(parent))[:5] == parent_identity, "output-data-private-parent-post")
+        result = digest
+    except BaseException as error:
+        primary = error
+    finally:
+        for original in (fd, parent):
+            if original is not None:
+                try:
+                    os.close(original)
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
+        try:
+            phase.clock.check()
+        except BaseException as error:
+            if primary is None:
+                primary = error
+    if primary is not None:
+        raise primary
+    return result
+
+
+def output_data_result(stdout, summary_body, tests_body):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1048576
+         and type(summary_body) is bytes and 0 < len(summary_body) <= 262144
+         and type(tests_body) is bytes and 0 < len(tests_body) <= 262144, "output-data-result-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testPositiveAndroidOutputCustodyData]"
+    attempts = [line for line in lines if line.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1]),
+         "output-data-one-original-attempt")
+    need("MRK_MACOS_UI_ORIGINAL=" not in text and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text,
+         "output-data-not-product-ui")
+    summary = document(summary_body)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(summary.get(key)) is int and summary[key] == count for key, count in counts.items()), "output-data-exact-one-pass")
+    roots = document(tests_body).get("testNodes")
+    need(type(roots) is list and 0 < len(roots) <= 16, "output-data-tree-root")
+    pending, visited, cases = [(node, (), 0) for node in roots], 0, 0
+    while pending:
+        node, ancestors, depth = pending.pop()
+        visited += 1
+        need(type(node) is dict and visited <= 128 and depth <= 12, "output-data-tree-bound")
+        name, kind, children = node.get("name"), node.get("nodeType"), node.get("children", [])
+        need(type(name) is str and type(kind) is str and type(children) is list and len(children) <= 16, "output-data-tree-node")
+        if kind == "Test Case":
+            need(TARGET in ancestors and node.get("result") == "Passed" and not children
+                 and name == "testPositiveAndroidOutputCustodyData()"
+                 and node.get("nodeIdentifier") in {"NormalAppUITests/testPositiveAndroidOutputCustodyData()", OUTPUT_DATA_METHOD + "()"},
+                 "output-data-exact-selected-case")
+            cases += 1
+        else:
+            pending.extend((child, ancestors + (name,), depth + 1) for child in children)
+    need(cases == 1, "output-data-tree-one-case")
+    return {"testIdentifier": OUTPUT_DATA_METHOD, "testCounts": counts,
+        "nativeSummarySha256": sha(summary_body), "nativeTestTreeSha256": sha(tests_body),
+        "oneOriginalAttemptObserved": True, "productReady": False}
+
+
+def execute_output_data_phase(phase, request, source, file_limit):
+    need(request["target"] == ARM_TARGET and request["methods"] == (OUTPUT_DATA_METHOD,)
+         and request["allowance"] == 60 and request["timeout"] == 120 and request["phaseSeconds"] == 345,
+         "output-data-fixed-request")
+    normal, result = request["derived"].parent, request["result"]
+    before = normal_source_state(phase, source)
+    roster = sha(encoded(before))
+    build_digest = output_data_read_build(phase, normal, source, roster)
+    original, runner = run_admitted_test(phase.call, request["derived"], result, (OUTPUT_DATA_METHOD,), 60, 120,
+                                        output_data=True)
+    if original.returncode != 0:
+        return original  # No success receipt, query, cleanup, or synthetic pass after a failed original.
+    result_fd = open_directory(result)
+    primary = None
+    bodies = []
+    failed_query = None
+    try:
+        result_facts = full9(os.fstat(result_fd))
+        need(result_facts[3:5] == (os.getuid(), os.getgid()) and not result_facts[2] & 0o022
+             and full9(os.stat(result, follow_symlinks=False)) == result_facts, "output-data-result-original")
+        for kind, role in (("summary", "normal-ui-summary"), ("tests", "normal-ui-test-tree")):
+            query = phase.call(role, ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", kind,
+                                     "--path", str(result), "--compact"], 30, 262144)
+            if query.returncode != 0:
+                failed_query = query
+                break
+            need(full9(os.fstat(result_fd)) == full9(os.stat(result, follow_symlinks=False)) == result_facts,
+                 "output-data-result-post")
+            bodies.append(query.stdout)
+    except BaseException as error:
+        primary = error
+    finally:
+        try:
+            os.close(result_fd)
+        except BaseException as error:
+            if primary is None:
+                primary = error
+        try:
+            phase.clock.check()
+        except BaseException as error:
+            if primary is None:
+                primary = error
+    if primary is not None:
+        raise primary
+    if failed_query is not None:
+        return failed_query
+    observation = output_data_result(original.stdout, *bodies)
+    need(normal_source_state(phase, source) == before, "output-data-source-pre-post")
+    facts = dict(schemaVersion=1, scope=OUTPUT_DATA_SCOPE, phase="output-data", resultBundle=OUTPUT_DATA_RESULT,
+        originalCommandRole="one-admitted-ui-test", originalReturncode=0, target=ARM_TARGET, sourceCommit=source,
+        sourceRosterSha256=roster, sourcePrePostMatched=True, originalCommandReturned=True,
+        buildReceiptSha256=build_digest, runnerAdmission=runner, observation=observation,
+        commands=phase.records, fileLimitBytes=list(file_limit), phaseClock=phase.clock.before_publication(),
+        receiptPolicy="exclusive0600-readback-consuming-close")
+    exclusive_output(normal / "output-data.command-admission.json", encoded(facts) + b"\n", 32768)
+    phase.clock.check()
+    return original
+
+
 def execute_normal_phase(phase, request, source, file_limit):
     """Original owner/source checks shared by fixed build, test and summary."""
+    if request.get("outputData") is True:
+        return execute_output_data_phase(phase, request, source, file_limit)
     target = request["target"]
     normal_target_data(target)
     mode, derived, result = request["phase"], request["derived"], request["result"]
@@ -1199,7 +1466,7 @@ def failure_base(phase, selection, original, *, engineering=False):
     # Diagnostic dispatch only: native/ordinary selection admission is unchanged.
     need(type(engineering) is bool and phase in ("build", "test", "summary", "query")
          and (selection is None if phase in ("build", "query") else
-              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS),
+              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection == OUTPUT_DATA_RESULT),
          "normal-diagnostic-selection")
     cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
@@ -1228,6 +1495,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     codes = (rb"(?:\A|(?<=[ \t\r\n({\x5b]))Error[ \t]{1,8}Domain=(" + b"|".join(re.escape(x) for x in domains)
              + rb")[ \t]{1,8}Code=(-?(?:0|[1-9][0-9]{0,9}))(?=\Z|[ \t\r\n,;\"')}\x5d])")
     methods = (("testEngineeringMainCatalogueAndQuit",) if engineering else
+               ("testPositiveAndroidOutputCustodyData",) if selection == OUTPUT_DATA_RESULT else
                NORMAL_SELECTIONS[selection][0]) if selection is not None else ()
     method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
     case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
@@ -1390,13 +1658,18 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     return value
 
 
-def publish_failure_diagnostics(request, original, *, query=False):
+def publish_failure_diagnostics(request, original, *, query=False, role=None):
     phase = "query" if query else request["phase"]
     selection = None if phase in ("build", "query") else request["result"].name
     # Validate before formatting: caller must already hold a genuine returned nonzero original.
     unavailable = failure_base(phase, selection, original)
+    if request.get("outputData") is True:
+        need(role in ("one-admitted-ui-test", "normal-ui-summary", "normal-ui-test-tree"), "output-data-failed-role")
+        unavailable["originalCommandRole"] = role
     try:
         value = normal_failure_diagnostics(phase, selection, original)
+        if request.get("outputData") is True:
+            value["originalCommandRole"] = role
         body = encoded(value) + b"\n"
         need(len(body) <= 4096, "normal-diagnostic-output-bound")
     except Exception:
@@ -1467,7 +1740,7 @@ ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
                           "src/mobile_release/owned_process.py")
 ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
     "saved-version-source-roster", "saved-version-core-interrupt",
-    "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test",
+    "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test", "normal-ui-test-tree",
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
 
 
@@ -2177,7 +2450,8 @@ def main():
         stage = "loader"
         owner = load_normal_owner(root)
         stage = "phase"
-        phase = NormalPhase(owner, environment, root, clock)
+        phase = (NormalPhase(owner, environment, root, clock, retain_nonzero=True)
+                 if request.get("outputData") is True else NormalPhase(owner, environment, root, clock))
         records = phase.records
         try:
             stage = "execute"
@@ -2203,7 +2477,7 @@ def main():
             if engineering:
                 publish_engineering_failure(request, engineering_native_failure(request, original, owner, records))
             else:
-                publish_failure_diagnostics(request, original)
+                publish_failure_diagnostics(request, original, role=records[-1]["role"] if request.get("outputData") is True else None)
         stage = "publication"
         sys.stdout.buffer.write(original.stdout)  # Workflow keeps these full originals PRIVATE.
         sys.stderr.buffer.write(original.stderr)
@@ -2215,9 +2489,25 @@ def main():
     except BaseException as error:
         if phase is not None:
             phase.clock.failed = True
+        if request is not None and request.get("outputData") is True and phase is not None and phase.first_nonzero is not None:
+            retained_status = phase.first_nonzero.returncode
+            try:
+                failure = normal_admission_failure(stage, error, owner, records)
+                body = encoded(classify_normal_admission_failure(encoded(failure))) + b"\n"
+                exclusive_output(request["derived"].parent / "output-data-test.failure-diagnostics.json", body, 4096)
+                sys.stderr.write(encoded(failure).decode("ascii") + "\n")
+            except BaseException:
+                pass  # Optional diagnostics cannot mask the FIRST admitted native nonzero.
+            return retained_status
         failure = normal_admission_failure(stage, error, owner, records)
         if engineering and request is not None:
             publish_engineering_failure(request, failure)
+        if request is not None and request.get("outputData") is True and phase is not None:
+            try:
+                body = encoded(classify_normal_admission_failure(encoded(failure))) + b"\n"
+                exclusive_output(request["derived"].parent / "output-data-test.failure-diagnostics.json", body, 4096)
+            except BaseException:
+                pass  # Diagnostic publication cannot replace the original failure.
         sys.stderr.write(encoded(failure).decode("ascii") + "\n")
         return 1
 
