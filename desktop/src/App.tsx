@@ -176,6 +176,7 @@ export function App() {
     metadataControllerRef.current?.beforeWorkspaceAction(action);
     releaseInputControllerRef.current?.beforeWorkspaceAction(action);
     imageControllerRef.current?.beforeWorkspaceAction(action);
+    editControllerRef.current?.beforeWorkspaceAction(action);
     const previous = workspaceRef.current;
     const next = workspaceReducer(previous, action);
     if (next === previous) return;
@@ -213,6 +214,10 @@ export function App() {
     otherEditReason: (projectId) => savedCommandBusy() ?? (diagnosticsControllerRef.current ? diagnosticsOwnerReason(diagnosticsControllerRef.current.getSnapshot()) : null) ??
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
+    selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
+    recoveryUnavailable: () => passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+      !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null,
+    onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
     onRecoveryRequired: (attention) => dispatch({ type: 'config-save-recovery', projectId: attention.projectId, attention }),
   }));
@@ -467,6 +472,7 @@ export function App() {
     diagnostics.beginConnection();
     releaseEvidence.beginConnection();
     metadataText.beginConnection();
+    configEdit.serviceIntent();
     setLoading(true);
     setBootError(null);
     setCatalogError(null);
@@ -593,6 +599,7 @@ export function App() {
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
+      editControllerRef.current?.shutdownIntent();
       versionEditControllerRef.current?.shutdownIntent();
       metadataControllerRef.current?.shutdownIntent();
       imageControllerRef.current?.shutdownIntent();
@@ -607,7 +614,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -622,7 +629,8 @@ export function App() {
         ? 'The application is shutting down.' : null);
   const chooseDisabled = chooseReason !== null;
 
-  const loadSnapshot = async (projectId: string) => {
+  const loadSnapshot = async (projectId: string, recoveryReload = false) => {
+    configEdit.snapshotIntent(projectId);
     metadataImages.snapshotIntent(projectId);
     versionEdit.snapshotIntent(projectId);
     metadataText.snapshotIntent(projectId);
@@ -635,7 +643,7 @@ export function App() {
     const requestId = ++requests.current;
     passivePending.current += 1; setPassivePending(passivePending.current);
     try {
-      dispatch({ type: 'snapshot-start', projectId, requestId });
+      dispatch({ type: 'snapshot-start', projectId, requestId, recoveryReload });
       const snapshot = await api.snapshot(projectId);
       dispatch({ type: 'snapshot-done', projectId, requestId, snapshot, observedAt: Date.now() });
     } catch (error) {
@@ -644,6 +652,7 @@ export function App() {
   };
 
   const chooseProject = async () => {
+    configEdit.selectionIntent();
     metadataImages.selectionIntent();
     versionEdit.selectionIntent();
     retirePathPicker();
@@ -845,6 +854,10 @@ export function App() {
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
+          onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
+          recoveryReason={workspace.selectedId ? configEdit.inspectRecoveryReason(workspace.selectedId) : 'Select an original registered project first.'}
+          recoveryApplyBinding={configEdit.currentRecoveryApplyBinding()} onRecoveryClose={() => configEdit.requestRecoveryClose()}
+          onRecoveryReload={(projectId) => { if (!configEdit.getSnapshot().status?.active && !configEdit.getSnapshot().nativeBlocked) void loadSnapshot(projectId, true); }}
           onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { const projectId = configEdit.getSnapshot().attempt?.binding.projectId; if (projectId) dispatch({ type: 'config-save-intent', projectId }); releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding); }}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
         {page !== 'github' && workflowPanel(false)}

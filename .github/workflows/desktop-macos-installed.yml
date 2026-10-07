@@ -57,7 +57,7 @@ jobs:
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
       # Final signed M comes only from the fixed configured SOURCE nomination.
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f15bd0246673d0aeffea4d4643146c1d6a3359ef3c7896c0280a3b700cf9f787
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0
       # Independently accepted paired supplier six pins; each signed target requires a new final M.
       MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
       MRK_MACOS_PYTHON_SUPPLIER_SHA256: ${{ matrix.supplier_receipt }}
@@ -105,7 +105,7 @@ jobs:
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
           # Fresh supplier pins never replace the separate current-core source binding.
-          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f15bd0246673d0aeffea4d4643146c1d6a3359ef3c7896c0280a3b700cf9f787 ]] || exit 1
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0 ]] || exit 1
           [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
           [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
           [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1

@@ -402,6 +402,22 @@ fn workflow_intent_matches(projection: &EditProjection, recovery: bool) -> bool 
     projection.domain == EditDomain::GitHubWorkflows
         && projection.workflow.as_ref().is_some_and(|detail| detail.recovery.is_some() == recovery)
 }
+fn configuration_recovery_admitted(domain: EditDomain, installed: bool, registered: bool) -> bool {
+    // Supplied facts only; normal-Save fixture qualification is not one of them.
+    domain == EditDomain::Configuration && installed && registered
+}
+fn configuration_intent_matches(projection: &EditProjection, recovery: bool) -> bool {
+    projection.configuration_valid() && projection.recovery.is_some() == recovery
+}
+fn configuration_recovery_complete(projection: &EditProjection) -> bool {
+    if !configuration_intent_matches(projection, true) || !projection.apply_submitted || projection.phase != Phase::Final
+        || projection.native_reason != Reason::None || projection.native_finality != NativeFinality::Settled || projection.late_settled { return false; }
+    let Some(recovery) = &projection.recovery else { return false; };
+    let Some(core) = &projection.core_outcome else { return false; };
+    core.reason == CoreReason::None && core.resources == ResourceState::Settled && core.journal == Journal::Clean
+        && recovery.terminal_admissible(true, core) && recovery.prepared.as_ref()
+            .and_then(|prepared| prepared.view.expected_success()).is_some_and(|effect| effect == core.effect)
+}
 fn workflow_recovery_complete(projection: &EditProjection) -> bool {
     if !workflow_intent_matches(projection, true) || !projection.apply_submitted || projection.phase != Phase::Final
         || projection.native_reason != Reason::None || projection.native_finality != NativeFinality::Settled || projection.late_settled { return false; }
@@ -462,6 +478,12 @@ fn request_bytes(domain: EditDomain, session: &str, seq: u32, op: &str, params: 
         EditDomain::MetadataImages => images_wire::request(session, seq, op, params),
     }
 }
+fn request_with_configuration_intent(domain: EditDomain, recovery: bool, session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u8>, BridgeError> {
+    if recovery {
+        if domain != EditDomain::Configuration { return Err(invalid_owner()); }
+        wire::recovery_request(session, seq, op, params)
+    } else { request_bytes(domain, session, seq, op, params) }
+}
 enum DomainStatus { Configuration(ConfigEditStatus), GitHubWorkflows(WorkflowEditStatus), MetadataText(MetadataTextEditStatus), ReleaseVersion(ReleaseVersionEditStatus), MetadataImages(MetadataImagesEditStatus) }
 impl DomainStatus {
     fn configuration(self) -> Result<ConfigEditStatus, BridgeError> {
@@ -480,7 +502,7 @@ impl DomainStatus {
         match self { Self::MetadataImages(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
 }
-enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission), WorkflowRecovery, SavedTextRecovery }
+enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission), WorkflowRecovery, SavedTextRecovery, ConfigurationRecovery }
 enum ImageOpen { Import(images_wire::ImportData), Recover }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredEditRoot {
@@ -489,7 +511,7 @@ pub(crate) struct RegisteredEditRoot {
 // Keep existing workflow callers/fixtures bound to their original API. The
 // shared root proof is not a domain permit; admission and tickets remain tagged.
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool }
+pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool, configuration_recovery: bool }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -808,7 +830,7 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Rec
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
-    domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool,
+    domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool, configuration_recovery: bool,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1126,8 +1148,8 @@ mod installed_macos_observation {
     }
     fn reviewing_state(inner: &Inner, r: &Registry, a: &ActiveOwner) -> bool {
         healthy(inner, r) && !r.document_lost && !r.stopping
-            && a.session.domain == EditDomain::Configuration && a.projection.domain == EditDomain::Configuration
-            && a.projection.session_id == a.session.id && a.projection.owner_generation == r.generation
+            && a.session.domain == EditDomain::Configuration && !a.session.configuration_recovery
+            && configuration_intent_matches(&a.projection, false) && a.projection.session_id == a.session.id && a.projection.owner_generation == r.generation
             && a.projection.phase == Phase::Reviewing && a.opened && a.prepared && !a.terminal && !a.unknown
             && a.claimed_seq == 1 && a.phase_end.is_none() && a.cleanup_start.is_none()
             && !a.projection.apply_submitted && a.projection.core_outcome.is_none()
@@ -1303,6 +1325,7 @@ impl Inner {
         let status = ConfigEditStatus { schema_version: 1, window_generation: r.generation.clone(), status_revision: r.revision,
             capability: self.capability(r, EditDomain::Configuration), active,
             last_terminal: r.last.as_ref().filter(|p| p.domain == EditDomain::Configuration).cloned() };
+        if status.active.iter().chain(status.last_terminal.iter()).any(|projection| !projection.configuration_valid()) { return Err(BridgeError::protocol()); }
         wire::bounded(&status, wire::STATUS_LIMIT)?;
         Ok(status)
     }
@@ -1440,7 +1463,9 @@ impl Inner {
             same_original: Arc::ptr_eq(&a.session, owner),
             same_domain: installed_domains_match(owner.domain, a.projection.domain, slots.domain()),
             same_identity: a.projection.session_id == owner.id && a.projection.owner_generation == r.generation
-                && installed_registration_matches(owner.domain, owner.registration.is_some()),
+                && installed_registration_matches(owner.domain, owner.registration.is_some())
+                && (!owner.configuration_recovery || configuration_recovery_admitted(owner.domain,
+                    installed_edit_selected(owner.domain, &self.runtime), owner.registration.is_some())),
             document_live: r.window.is_some() && r.document_bound && !r.document_lost,
             opening: a.projection.phase == Phase::Opening && !a.opened && !a.prepared && !a.terminal && !a.unknown
                 && a.claimed_seq == 0 && !a.projection.apply_submitted && a.cleanup_start.is_none(),
@@ -1562,7 +1587,7 @@ impl EditOwner {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             InstalledEditFinality::MetadataImages(_) => return None,
         };
-        (last.domain == EditDomain::Configuration && last.session_id == session_id && facts.session_id == session_id
+        (configuration_intent_matches(last, false) && last.session_id == session_id && facts.session_id == session_id
             && facts.project_id == last.project_id && facts.owner_generation == last.owner_generation
             && last.phase == Phase::Final && last.native_finality == NativeFinality::Settled && !last.late_settled)
             .then(|| facts.clone())
@@ -1709,6 +1734,25 @@ impl EditOwner {
     pub(crate) fn open_published(&self, publisher: &RegistrationPublisher, window: &str, project_id: String, root: PathBuf) -> Result<ConfigEditStatus, BridgeError> {
         self.open_domain(Some(publisher), window, project_id, root, EditDomain::Configuration, None, None, None, None)?.configuration()
     }
+    pub(crate) fn configuration_recovery_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
+        if !installed_edit_selected(EditDomain::Configuration, &self.inner.runtime) { return Err(invalid_owner()); }
+        self.registered_open_ticket_for_intent(window, EditDomain::Configuration, true)
+    }
+    pub(crate) fn open_configuration_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        project_id: String, registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ConfigEditStatus, BridgeError> {
+        if !ticket.configuration_recovery || ticket.domain != EditDomain::Configuration { return Err(invalid_owner()); }
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::Configuration, Some(registration), Some(ticket), None, None)?.configuration()
+    }
+    pub(crate) fn prepare_configuration_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        args: wire::PrepareConfigurationRecovery, registration: RegisteredEditRoot) -> Result<ConfigEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::Configuration, &args.session_id, &args.revision,
+            (0, 0), json!({"revision":&args.revision,"intent":"recover"}), Some(registration), Some(SavedTextSubmission::ConfigurationRecovery))?.configuration()
+    }
+    pub(crate) fn apply_configuration_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        session_id: &str, plan_token: &str, registration: RegisteredEditRoot) -> Result<ConfigEditStatus, BridgeError> {
+        self.apply_domain_intent(Some(publisher), window, EditDomain::Configuration, session_id, plan_token, Some(registration), true)?.configuration()
+    }
     pub(crate) fn workflow_open_ticket(&self, window: &str) -> Result<WorkflowOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::GitHubWorkflows)
     }
@@ -1734,11 +1778,15 @@ impl EditOwner {
     }
     fn registered_open_ticket(&self, window: &str, domain: EditDomain) -> Result<RegisteredOpenTicket, BridgeError> {
         if !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
+        self.registered_open_ticket_for_intent(window, domain, false)
+    }
+    fn registered_open_ticket_for_intent(&self, window: &str, domain: EditDomain, configuration_recovery: bool) -> Result<RegisteredOpenTicket, BridgeError> {
+        if configuration_recovery != (domain == EditDomain::Configuration) { return Err(invalid_owner()); }
         { let r = self.inner.lock(); self.inner.admission(&r, window, domain)?; }
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false })
+        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false, configuration_recovery })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
@@ -1859,28 +1907,34 @@ impl EditOwner {
             Some(permit) // This same original permit must still be installed at spawn.
         } else { None };
         #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        if ticket.as_ref().is_some_and(|ticket| ticket.saved_text_recovery) { return Err(invalid_owner()); }
+        if ticket.as_ref().is_some_and(|ticket| ticket.saved_text_recovery || ticket.configuration_recovery) { return Err(invalid_owner()); }
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
-        let (id, executor, workflow_recovery, saved_text_recovery) = match (domain, ticket) {
+        let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-                (nonce()?, executor, false, false)
+                (nonce()?, executor, false, false, false)
             },
-            (EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
+            (EditDomain::Configuration | EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
                 if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner)
+                    && ticket.configuration_recovery == (domain == EditDomain::Configuration)
                     && (!ticket.workflow_recovery || domain == EditDomain::GitHubWorkflows)
                     && (!ticket.saved_text_recovery || matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion))
-                    => (ticket.id, ticket.executor, ticket.workflow_recovery, ticket.saved_text_recovery),
+                    => (ticket.id, ticket.executor, ticket.workflow_recovery, ticket.saved_text_recovery, ticket.configuration_recovery),
             _ => return Err(invalid_owner()),
         };
+        if configuration_recovery && !configuration_recovery_admitted(domain, installed_edit_selected(domain, &self.inner.runtime), registration.is_some()) {
+            return Err(invalid_owner()); // No development-runtime or normal-Save fixture fallback.
+        }
         if saved_text_recovery && metadata.is_some() { return Err(invalid_owner()); }
         let image_details = match images.as_ref() {
             Some(ImageOpen::Import(data)) => Some(data.details()), Some(ImageOpen::Recover) => Some(images_wire::Details::recovery()), None => None,
         };
         let image_recovery = image_details.as_ref().is_some_and(|detail| detail.intent == images_wire::Intent::Recover);
         let mut params = match (domain, registration.as_ref(), metadata.as_ref(), images) {
-            (EditDomain::Configuration, None, None, None) => json!({"root": root}),
+            (EditDomain::Configuration, None, None, None) if !configuration_recovery => json!({"root": root}),
+            (EditDomain::Configuration, Some(binding), None, None) if configuration_recovery => json!({"root":root,
+                "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
             (EditDomain::GitHubWorkflows | EditDomain::ReleaseVersion, Some(binding), None, None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
             (EditDomain::MetadataText, Some(binding), None, None) if saved_text_recovery => json!({"root":root,
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
@@ -1892,13 +1946,13 @@ impl EditOwner {
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"intent":"recover"}),
             _ => return Err(invalid_owner()),
         };
-        if workflow_recovery || saved_text_recovery { params["intent"] = json!("recover"); }
-        let bytes = request_bytes(domain, &id, 0, "open", params)?;
+        if workflow_recovery || saved_text_recovery || configuration_recovery { params["intent"] = json!("recover"); }
+        let bytes = request_with_configuration_intent(domain, configuration_recovery, &id, 0, "open", params)?;
         let (commands, receiver) = mpsc::channel(1);
         let (stop, _) = watch::channel(false);
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
-        let session = Arc::new(Session { domain, registration, saved_text_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+        let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1940,7 +1994,8 @@ impl EditOwner {
                 && !(r.domain_blocks.may_recover(&project_id, domain)
                     && (domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)
                         || domain == EditDomain::GitHubWorkflows && workflow_recovery && r.workflow_recovery_projects.contains(&project_id)
-                        || saved_text_recovery && matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion))) {
+                        || saved_text_recovery && matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion)
+                        || configuration_recovery && domain == EditDomain::Configuration)) {
                 return Err(BridgeError::new("pending_state", "This project requires its separately authorized recovery; an import cannot retry it."));
             }
             let now = Instant::now();
@@ -1955,7 +2010,7 @@ impl EditOwner {
                     metadata_text: if domain == EditDomain::MetadataText && saved_text_recovery { Some(metadata_wire::Details::recovery()) }
                         else { metadata.map(metadata_wire::Details::new) },
                     release_version: (domain == EditDomain::ReleaseVersion).then(|| if saved_text_recovery { version_wire::Details::recovery() } else { version_wire::Details::default() }),
-                    metadata_images: image_details,
+                    metadata_images: image_details, recovery: configuration_recovery.then(wire::RecoveryDetails::default),
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
                     core_outcome: None, native_reason: Reason::None, native_finality: NativeFinality::Pending, late_settled: false } });
@@ -2057,7 +2112,8 @@ impl EditOwner {
         let result = (|| {
         if !wire::token(session_id) || !wire::token(revision)
             || domain != EditDomain::Configuration && (counters.0 == u32::MAX || counters.1 == u32::MAX) { return Err(BridgeError::invalid()); }
-        let bytes = request_bytes(domain, session_id, 1, "prepare", params)?;
+        let configuration_recovery = matches!(submission.as_ref(), Some(SavedTextSubmission::ConfigurationRecovery));
+        let bytes = request_with_configuration_intent(domain, configuration_recovery, session_id, 1, "prepare", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
             self.inner.admission(&r, window, domain)?;
@@ -2065,6 +2121,8 @@ impl EditOwner {
             let generation = r.generation.clone();
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Editing || a.prepare_counters.is_some() || !a.opened { return Err(invalid_owner()); }
+            if a.session.configuration_recovery != configuration_recovery
+                || domain == EditDomain::Configuration && !configuration_intent_matches(&a.projection, configuration_recovery) { return Err(invalid_owner()); }
             if a.session.registration != registration {
                 self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner());
             }
@@ -2073,7 +2131,7 @@ impl EditOwner {
             };
             // Wrong revisions do not revise an original checkout or renew time.
             if a.projection.revision() != Some(revision) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
+                if a.session.configuration_recovery || matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             match (domain, submission) {
@@ -2096,7 +2154,11 @@ impl EditOwner {
                 (EditDomain::MetadataText | EditDomain::ReleaseVersion, Some(SavedTextSubmission::SavedTextRecovery))
                     if a.session.saved_text_recovery && saved_text_recovery(&a.projection).and_then(|recovery| recovery.checkout.as_ref())
                         .is_some_and(|checkout| checkout.view.state == saved_recovery::State::Recoverable && checkout.view.valid(domain)) => {},
-                (EditDomain::Configuration, None) => {},
+                (EditDomain::Configuration, None) if !a.session.configuration_recovery && configuration_intent_matches(&a.projection, false) => {},
+                (EditDomain::Configuration, Some(SavedTextSubmission::ConfigurationRecovery))
+                    if a.session.configuration_recovery && counters == (0, 0) && configuration_intent_matches(&a.projection, true)
+                        && a.projection.recovery.as_ref().and_then(|recovery| recovery.checkout.as_ref())
+                            .is_some_and(|checkout| checkout.view.state == wire::RecoveryState::Recoverable && checkout.view.valid()) => {},
                 (EditDomain::GitHubWorkflows, None) if workflow_intent_matches(&a.projection, false) => {},
                 (EditDomain::GitHubWorkflows, Some(SavedTextSubmission::WorkflowRecovery))
                     if workflow_intent_matches(&a.projection, true) && a.projection.workflow.as_ref()
@@ -2170,15 +2232,16 @@ impl EditOwner {
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
-        if recovery_intent && !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion) { return Err(invalid_owner()); }
+        if recovery_intent && !matches!(domain, EditDomain::Configuration | EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion) { return Err(invalid_owner()); }
         let params = if recovery_intent { json!({"planToken": plan_token, "intent":"recover"}) } else { json!({"planToken": plan_token}) };
-        let bytes = request_bytes(domain, session_id, 2, "apply", params)?;
+        let bytes = request_with_configuration_intent(domain, domain == EditDomain::Configuration && recovery_intent, session_id, 2, "apply", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
             if r.window.as_deref() != Some(window) || r.document_lost { return Err(invalid_owner()); }
             // Repeated exact Apply is observation only, including terminal/Unknown.
             let existing = r.active.as_ref().map(|a| &a.projection).filter(|p| p.domain == domain && p.session_id == session_id)
                 .or_else(|| r.last.as_ref().filter(|p| p.domain == domain && p.session_id == session_id));
+            if domain == EditDomain::Configuration && existing.is_some_and(|p| !configuration_intent_matches(p, recovery_intent)) { return Err(invalid_owner()); }
             if domain == EditDomain::GitHubWorkflows && existing.is_some_and(|p| !workflow_intent_matches(p, recovery_intent)) {
                 return Err(invalid_owner()); // Even exact repeated tokens cannot cross intent.
             }
@@ -2192,8 +2255,9 @@ impl EditOwner {
             let generation = r.generation.clone();
             let a = r.active.as_mut().filter(|a| a.session.domain == domain && a.session.id == session_id && a.projection.owner_generation == generation).ok_or_else(invalid_owner)?;
             if a.projection.phase != Phase::Reviewing || !a.prepared { return Err(invalid_owner()); }
+            if domain == EditDomain::Configuration && a.session.configuration_recovery != recovery_intent { return Err(invalid_owner()); }
             if a.session.registration != registration || a.projection.plan_token() != Some(plan_token) {
-                if matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
+                if a.session.configuration_recovery || matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); }
                 return Err(invalid_owner());
             }
             let Some(phase_end) = claim_phase(a.review_end, now) else {
@@ -2254,6 +2318,17 @@ impl EditOwner {
         publication.finish();
         result
     }
+    pub(crate) fn configuration_recovery_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
+        self.registered_edit_project(window, session_id, EditDomain::Configuration)
+    }
+    // Observation-only normal-Save hooks must never consume recovery status.
+    pub(crate) fn normal_configuration_session(&self, window: &str, session_id: &str) -> bool {
+        let r = self.inner.lock();
+        r.window.as_deref() == Some(window) && r.document_bound && !r.document_lost
+            && r.active.as_ref().map(|a| &a.projection).into_iter().chain(r.last.iter())
+                .any(|projection| projection.session_id == session_id && projection.owner_generation == r.generation
+                    && configuration_intent_matches(projection, false))
+    }
     pub(crate) fn workflow_project(&self, window: &str, session_id: &str) -> Result<String, BridgeError> {
         self.registered_edit_project(window, session_id, EditDomain::GitHubWorkflows)
     }
@@ -2272,7 +2347,8 @@ impl EditOwner {
         let projection = r.active.as_ref().map(|a| &a.projection).filter(|p| p.session_id == session_id)
             .or_else(|| r.last.as_ref().filter(|p| p.session_id == session_id)).ok_or_else(invalid_owner)?;
         if projection.domain != domain || projection.owner_generation != r.generation
-            || !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages) { return Err(invalid_owner()); }
+            || !(matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages)
+                || domain == EditDomain::Configuration && configuration_intent_matches(projection, true)) { return Err(invalid_owner()); }
         Ok(projection.project_id.clone())
     }
 
@@ -2506,7 +2582,7 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                         count += 1;
                         let parsed = if count <= 3 {
                             match owner.domain {
-                                EditDomain::Configuration => wire::decode(&frame, &owner.id),
+                                EditDomain::Configuration => wire::decode_with_intent(&frame, &owner.id, owner.configuration_recovery),
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
                                 EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
                                 EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
@@ -2550,6 +2626,10 @@ fn terminal_sequence(seq: u32, claimed: u32, prepared: bool, cleaning: bool) -> 
     if cleaning { seq >= lowest && seq <= claimed } else { seq == claimed }
 }
 fn terminal_projection_admissible(projection: &EditProjection, plan_token: Option<&str>, core: &wire::CoreEditOutcome) -> bool {
+    if projection.domain == EditDomain::Configuration && projection.recovery.is_some() {
+        return configuration_intent_matches(projection, true) && plan_token == projection.plan_token()
+            && projection.recovery.as_ref().is_some_and(|recovery| recovery.terminal_admissible(projection.apply_submitted, core));
+    }
     if let Some(recovery) = saved_text_recovery(projection) {
         return plan_token == projection.plan_token() && recovery.terminal_admissible(projection.apply_submitted, core);
     }
@@ -2606,7 +2686,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
     if !invalid {
         match frame {
             ChildFrame::Opened(opened) => {
-                if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
+                if owner.configuration_recovery || !configuration_intent_matches(&a.projection, false) || a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
                 else {
                     a.opened = true;
                     a.projection.checkout = Some(Checkout { revision: opened.revision, base: opened.base });
@@ -2614,7 +2694,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                 }
             }
             ChildFrame::Prepared(prepared) => {
-                if !a.opened || a.prepared || a.claimed_seq != 1
+                if owner.configuration_recovery || !configuration_intent_matches(&a.projection, false) || !a.opened || a.prepared || a.claimed_seq != 1
                     || a.projection.checkout.as_ref().map(|c| c.revision.as_str()) != Some(prepared.revision.as_str()) {
                     invalid = true;
                 } else if let Some((draft_revision, baseline_generation)) = a.prepare_counters {
@@ -2636,6 +2716,30 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
                     owner.fixture_schedule.accepted_terminal(seq);
                 }
+            }
+            ChildFrame::ConfigurationRecoveryOpened(opened) => {
+                if !owner.configuration_recovery || !configuration_intent_matches(&a.projection, true)
+                    || a.opened || a.prepared || a.claimed_seq != 0 || !opened.recovery.valid() { invalid = true; }
+                else if let Some(recovery) = a.projection.recovery.as_mut() {
+                    recovery.checkout = Some(wire::RecoveryCheckout { revision: opened.revision, view: opened.recovery });
+                    a.opened = true;
+                    if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                } else { invalid = true; }
+            }
+            ChildFrame::ConfigurationRecoveryPrepared(prepared) => {
+                if !owner.configuration_recovery || !configuration_intent_matches(&a.projection, true)
+                    || !a.opened || a.prepared || a.claimed_seq != 1 || a.prepare_counters != Some((0, 0))
+                    || a.projection.revision() != Some(prepared.revision.as_str()) || !prepared.recovery.valid()
+                    || prepared.recovery.state != wire::RecoveryState::Recoverable { invalid = true; }
+                else if let Some(recovery) = a.projection.recovery.as_mut() {
+                    if !recovery.checkout.as_ref().is_some_and(|checkout| checkout.view == prepared.recovery) { invalid = true; }
+                    else {
+                        recovery.prepared = Some(wire::RecoveryPrepared { revision: prepared.revision,
+                            plan_token: prepared.plan_token, view: prepared.recovery });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
             }
             ChildFrame::WorkflowRecoveryOpened(opened) => {
                 if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
@@ -3715,7 +3819,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-        if settled && installed_edit_selected(owner.domain, &inner.runtime) && startup.returned {
+        if settled && installed_edit_selected(owner.domain, &inner.runtime) && startup.returned && !owner.configuration_recovery {
             if let (Some(write), Some(out), Some(err)) = (&book.write_end, &book.out_end, &book.err_end) {
                 if !write.failed && !out.failed && !err.failed && err.bytes == 0 {
                     installed_observed = match owner.domain {
@@ -3840,6 +3944,11 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             r.installed_final = if !a.unknown {
                 installed_observed.and_then(|facts| facts.bind_original(&a.projection))
             } else { None };
+        }
+        if configuration_recovery_complete(&a.projection)
+            && r.domain_blocks.clear_domain(&a.projection.project_id, EditDomain::Configuration)
+            && !r.workflow_recovery_projects.contains(&a.projection.project_id) && !r.image_recovery_projects.contains(&a.projection.project_id) {
+            r.blocked_projects.remove(&a.projection.project_id);
         }
         if saved_text_recovery_complete(&a.projection)
             && r.domain_blocks.clear_domain(&a.projection.project_id, a.projection.domain)
@@ -4407,7 +4516,7 @@ mod workflow_domain_tests {
             template_set:workflow_wire::TemplateSet { core_version:"0.3.0".into(),resource_version:1,resource_sha256:"a".repeat(64) },
             tooling:workflow_wire::Tooling { repository:"example/toolkit".into(),sha:"0".repeat(40),
                 schema_reference:format!("https://raw.githubusercontent.com/example/toolkit/{}/schemas/project.schema.json","0".repeat(40)),state:"format-only".into() } };
-        EditProjection { domain:EditDomain::GitHubWorkflows,metadata_text:None,release_version:None,metadata_images:None,workflow:Some(workflow_wire::Details {
+        EditProjection { domain:EditDomain::GitHubWorkflows,recovery:None,metadata_text:None,release_version:None,metadata_images:None,workflow:Some(workflow_wire::Details {
             checkout:Some(workflow_wire::Checkout { revision:REVISION.into(),observed }),
             prepared:Some(workflow_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),conflict:None,recovery:None }),
             project_id:"project-1".into(),session_id:SESSION.into(),owner_generation:GENERATION.into(),phase:Phase::Reviewing,
@@ -4500,6 +4609,98 @@ mod workflow_domain_tests {
         creates.apply_submitted = false;
         assert!(!terminal_projection_admissible(&creates,Some(PLAN),&installed));
     }
+    fn configuration_recovery_projection(action: wire::RecoveryAction) -> EditProjection {
+        let mut projection=projection(false);projection.domain=EditDomain::Configuration;projection.workflow=None;
+        let summary=wire::RecoverySummary {size:2,mode:0o640,sha256:"a".repeat(64)};
+        let view=wire::RecoveryView {schema_version:1,kind:"recovery".into(),state:wire::RecoveryState::Recoverable,
+            action:Some(action),transaction_id:Some("c".repeat(32)),
+            files:[("configuration","release/mobile-release.json"),("root-ignore",".gitignore")].into_iter().map(|(id,path)|
+                wire::RecoveryFile {id:id.into(),path:path.into(),action:if action==wire::RecoveryAction::Rollback {wire::RecoveryFileAction::Restore} else {wire::RecoveryFileAction::Preserve},
+                    before:Some(summary.clone()),after:Some(summary.clone())}).collect(),
+            private_cleanup:wire::RecoveryCleanup {file_count:6,directory_count:1,scope:"inspected-configuration-journal-only".into()}};
+        assert!(view.valid());
+        projection.recovery=Some(wire::RecoveryDetails {checkout:Some(wire::RecoveryCheckout {revision:REVISION.into(),view:view.clone()}),
+            prepared:Some(wire::RecoveryPrepared {revision:REVISION.into(),plan_token:PLAN.into(),view})});
+        projection
+    }
+    #[test]
+    fn configuration_recovery_requires_correlated_action_and_original_finality() {
+        for (action,effect,pending_effect) in [(wire::RecoveryAction::Rollback,Effect::RolledBack,Effect::NotStarted),
+            (wire::RecoveryAction::CommittedCleanup,Effect::Committed,Effect::Committed),
+            (wire::RecoveryAction::RolledBackCleanup,Effect::RolledBack,Effect::RolledBack),
+            (wire::RecoveryAction::PreparingCleanup,Effect::NotStarted,Effect::NotStarted)] {
+            let mut success=configuration_recovery_projection(action);
+            assert!(configuration_intent_matches(&success,true));assert!(!configuration_intent_matches(&success,false));
+            assert_eq!(success.revision(),Some(REVISION));assert_eq!(success.plan_token(),Some(PLAN));
+            let pending=outcome(pending_effect,Journal::RecoveryRequired,CoreReason::PendingState);
+            assert!(terminal_projection_admissible(&success,Some(PLAN),&pending));
+            assert!(!configuration_recovery_complete(&success));
+            let mut inspecting=success.clone();inspecting.recovery.as_mut().unwrap().prepared=None;
+            assert!(terminal_projection_admissible(&inspecting,None,&pending));
+            assert!(!terminal_projection_admissible(&inspecting,None,&outcome(effect.clone(),Journal::Clean,CoreReason::None)));
+            success.apply_submitted=true;success.phase=Phase::Final;success.native_finality=NativeFinality::Settled;
+            success.core_outcome=Some(outcome(effect,Journal::Clean,CoreReason::None));
+            assert!(configuration_recovery_complete(&success));
+            assert!(terminal_projection_admissible(&success,Some(PLAN),success.core_outcome.as_ref().unwrap()));
+            assert!(!terminal_projection_admissible(&success,Some(REVISION),success.core_outcome.as_ref().unwrap()));
+            for change in 0..16 {
+                let mut bad=success.clone();
+                match change {
+                    0=>bad.apply_submitted=false,1=>bad.phase=Phase::Finalizing,2=>bad.native_reason=Reason::Discarded,
+                    3=>bad.native_finality=NativeFinality::Unknown,4=>bad.late_settled=true,
+                    5=>bad.core_outcome.as_mut().unwrap().reason=CoreReason::FilesystemError,
+                    6=>{let core=bad.core_outcome.as_mut().unwrap();core.resources=ResourceState::Unknown;core.reason=CoreReason::CustodyUnknown;},
+                    7=>{let core=bad.core_outcome.as_mut().unwrap();core.journal=Journal::RecoveryRequired;core.reason=CoreReason::PendingState;},
+                    8=>bad.recovery.as_mut().unwrap().prepared=None,9=>bad.recovery.as_mut().unwrap().checkout=None,
+                    10=>bad.recovery.as_mut().unwrap().prepared.as_mut().unwrap().revision="d".repeat(32),
+                    11=>bad.recovery.as_mut().unwrap().prepared.as_mut().unwrap().view.transaction_id=Some("d".repeat(32)),
+                    12=>bad.checkout=Some(Checkout {revision:REVISION.into(),base:Value::Null}),
+                    13=>bad.domain=EditDomain::GitHubWorkflows,
+                    14=>bad.core_outcome.as_mut().unwrap().effect=Effect::Unchanged,
+                    _=>bad.recovery.as_mut().unwrap().prepared.as_mut().unwrap().plan_token=REVISION.into(),
+                }
+                assert!(!configuration_recovery_complete(&bad),"{action:?}/{change}");
+            }
+            let dto=serde_json::to_value(&success).unwrap();
+            assert!(dto.get("recovery").is_some());assert_eq!(dto["checkout"],Value::Null);assert_eq!(dto["prepared"],Value::Null);
+            for method in [success.workflow_projection().is_err(),success.metadata_text_projection().is_err(),
+                success.release_version_projection().is_err(),success.metadata_images_projection().is_err()] {assert!(method);}
+        }
+    }
+    #[test]
+    fn configuration_recovery_keeps_one_domain_block_and_registered_request_intent() {
+        for domain in [EditDomain::Configuration,EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion,EditDomain::MetadataImages] {
+            for installed in [false,true] { for registered in [false,true] {
+                assert_eq!(configuration_recovery_admitted(domain,installed,registered),domain==EditDomain::Configuration && installed && registered);
+            } }
+        }
+        assert!(qualified(EditDomain::Configuration,true)); // Original normal-Save fixture remains separate.
+        assert!(!configuration_recovery_admitted(EditDomain::Configuration,false,true));
+        for foreign in [EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion,EditDomain::MetadataImages] {
+            let mut reasons=DomainBlocks::default();assert!(reasons.record("project-1",EditDomain::Configuration,false,true));
+            assert!(reasons.may_recover("project-1",EditDomain::Configuration));
+            assert!(reasons.record("project-1",foreign,true,true));
+            assert!(!reasons.may_recover("project-1",EditDomain::Configuration));
+            assert!(!reasons.clear_domain("project-1",EditDomain::Configuration));
+            assert!(reasons.may_recover("project-1",foreign));
+        }
+        for (unattributed,settled) in [(true,true),(false,false)] {
+            let mut reasons=DomainBlocks::default();assert!(reasons.record("project-1",EditDomain::Configuration,unattributed,settled));
+            assert!(!reasons.may_recover("project-1",EditDomain::Configuration));
+        }
+        let mut reasons=DomainBlocks::default();assert!(reasons.record("project-1",EditDomain::Configuration,false,true));
+        assert!(reasons.clear_domain("project-1",EditDomain::Configuration));assert!(reasons.0.is_empty());
+        let original=json!({"root":"/inert/project"});
+        assert_eq!(request_with_configuration_intent(EditDomain::Configuration,false,SESSION,0,"open",original.clone()).unwrap(),
+            wire::request(SESSION,0,"open",original.clone()).unwrap());
+        assert!(request_with_configuration_intent(EditDomain::Configuration,true,SESSION,0,"open",original).is_err());
+        let registered=json!({"root":"/inert/project","registeredIdentity":{"device":"1","inode":"2","mode":0o40700,"uid":1000,"gid":1000},"intent":"recover"});
+        assert!(request_with_configuration_intent(EditDomain::Configuration,true,SESSION,0,"open",registered.clone()).is_ok());
+        assert!(request_with_configuration_intent(EditDomain::Configuration,false,SESSION,0,"open",registered.clone()).is_err());
+        for domain in [EditDomain::GitHubWorkflows,EditDomain::MetadataText,EditDomain::ReleaseVersion,EditDomain::MetadataImages] {
+            assert!(request_with_configuration_intent(domain,true,SESSION,0,"open",registered.clone()).is_err());
+        }
+    }
     #[test]
     fn configuration_wire_and_projection_never_gain_workflow_authority_fields() {
         let params = json!({"root":"/inert/project"});
@@ -4514,7 +4715,7 @@ mod workflow_domain_tests {
         let mut configuration = p; configuration.domain = EditDomain::Configuration; configuration.workflow = None;
         assert!(configuration.workflow_projection().is_err());
         let encoded = serde_json::to_value(configuration).unwrap();
-        assert!(encoded.get("domain").is_none()); assert!(encoded.get("workflow").is_none());
+        assert!(encoded.get("domain").is_none()); assert!(encoded.get("workflow").is_none()); assert!(encoded.get("recovery").is_none());
         assert!(encoded.get("metadata_text").is_none());
         assert!(encoded.get("conflict").is_none()); assert_eq!(encoded["checkout"],Value::Null);
     }

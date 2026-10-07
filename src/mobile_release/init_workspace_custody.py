@@ -390,7 +390,7 @@ class InitRootLease:
                  profile: TypedEditProfile = TypedEditProfile.CONFIGURATION,
                  registered_identity: dict[str, int] | None = None,
                  image_recovery: bool = False, workflow_recovery: bool = False,
-                 saved_text_recovery: bool = False) -> None:
+                 saved_text_recovery: bool = False, configuration_recovery: bool = False) -> None:
         if type(cancellation) is not DefaultCancellation or type(profile) is not TypedEditProfile:
             raise _failure("invalid_params")
         if type(image_recovery) is not bool or image_recovery and profile is not TypedEditProfile.METADATA_IMAGES:
@@ -402,10 +402,14 @@ class InitRootLease:
                 or saved_text_recovery and (image_recovery or workflow_recovery
                     or profile not in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION))):
             raise _failure("invalid_params")
+        if (type(configuration_recovery) is not bool or configuration_recovery and
+                (image_recovery or workflow_recovery or saved_text_recovery
+                 or profile is not TypedEditProfile.CONFIGURATION)):
+            raise _failure("invalid_params")
         cancellation._check_owner()
         if threading.current_thread() is not threading.main_thread():
             raise _failure("invalid_params")
-        if profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+        if configuration_recovery or profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                        TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
             if (type(registered_identity) is not dict
                     or set(registered_identity) != {"device", "inode", "mode", "uid", "gid"}
@@ -431,7 +435,8 @@ class InitRootLease:
         self._image_targets: ImageTargets | None = None
         self._image_recovery_mode = image_recovery
         self._image_recovery: Any = None
-        self._workflow_recovery_mode = workflow_recovery
+        self._configuration_recovery_mode = configuration_recovery
+        self._workflow_recovery_mode = workflow_recovery or configuration_recovery
         self._workflow_recovery: Any = None
         self._workflow_recovery_journal = "unknown"
         self._workflow_recovery_effect = "not_started"
@@ -504,7 +509,7 @@ class InitRootLease:
             raise _failure("custody_unknown", unknown=True)
         try:
             self.directory.check()
-            if self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
+            if self._configuration_recovery_mode or self._profile in (TypedEditProfile.GITHUB_WORKFLOWS, TypedEditProfile.METADATA_TEXT,
                                 TypedEditProfile.RELEASE_VERSION, TypedEditProfile.METADATA_IMAGES):
                 # Rust registration carries full st_mode, not S_IMODE. Read the
                 # original retained root descriptor before any target capture;
@@ -786,8 +791,11 @@ class InitRootLease:
         """Same original custody, disjoint current-inspection recovery intent."""
         from .github_workflow_recovery import WorkflowRecoveryRevision
         self.check()
-        if (not self._workflow_recovery_mode or self._profile is not TypedEditProfile.GITHUB_WORKFLOWS
-                or self._image_recovery_mode or self._active is not None or self._revision is not None):
+        selected = (TypedEditProfile.CONFIGURATION if self._configuration_recovery_mode
+                    else TypedEditProfile.GITHUB_WORKFLOWS)
+        if (not self._workflow_recovery_mode or self._profile is not selected
+                or self._image_recovery_mode or self._saved_text_recovery_mode
+                or self._active is not None or self._revision is not None):
             raise _failure("invalid_params")
         if revision is None:
             if self._capture_claimed or self._workflow_recovery is not None:
@@ -796,7 +804,8 @@ class InitRootLease:
         else:
             if (type(revision) is not WorkflowRecoveryRevision or revision is not self._workflow_recovery
                     or getattr(revision, "_identity", None) is not revision
-                    or getattr(revision, "_lease", None) is not self or self._rechecks >= 2):
+                    or getattr(revision, "_lease", None) is not self
+                    or getattr(revision, "_profile", None) is not selected or self._rechecks >= 2):
                 raise _failure("invalid_params")
             self._rechecks += 1
         owner = LockedInitScope(self)

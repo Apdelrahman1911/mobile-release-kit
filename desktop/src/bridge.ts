@@ -489,6 +489,9 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       } catch (error) { throw githubSetupError(error); }
     },
     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+    openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+    prepareConfigRecovery: (sessionId, revision) => call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, intent: 'recover' }),
+    applyConfigRecovery: (sessionId, planToken) => call<ConfigEditStatus>('apply_config_edit', { sessionId, planToken, intent: 'recover' }),
     prepareConfigEdit: ({ sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }) =>
       call<ConfigEditStatus>('prepare_config_edit', { sessionId, revision, expectedBase, draft, draftRevision, baselineGeneration }),
     applyConfigEdit: (sessionId, planToken) => call<ConfigEditStatus>('apply_config_edit', { sessionId, planToken }),

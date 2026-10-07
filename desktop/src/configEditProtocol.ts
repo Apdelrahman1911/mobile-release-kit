@@ -1,7 +1,7 @@
 // Renderer checks of the frozen native DTO, not configuration/ignore policy.
 // No file read, payload preparation, native capability or finality is invented.
 import { sameJson } from './catalog.ts';
-import type { ConfigEditProjection, ConfigEditStatus, CoreEditOutcome, JsonObject, JsonValue, PreparedConfigView } from './types.ts';
+import type { ConfigEditProjection, ConfigEditStatus, CoreEditOutcome, ConfigRecoveryView, JsonObject, JsonValue, PreparedConfigView } from './types.ts';
 
 export const U32_MAX = 0xffff_ffff;
 const CONFIG_BYTES = 512 * 1024;
@@ -173,12 +173,58 @@ function outcome(value: unknown): value is CoreEditOutcome {
   return true;
 }
 
+export function configRecoveryView(value: unknown): value is ConfigRecoveryView {
+  if (!keys(value, ['schemaVersion', 'kind', 'state', 'action', 'transactionId', 'files', 'privateCleanup']) ||
+      value.schemaVersion !== 1 || value.kind !== 'recovery' || !oneOf(value.state, ['idle', 'conflict', 'recoverable']) ||
+      !keys(value.privateCleanup, ['fileCount', 'directoryCount', 'scope']) ||
+      value.privateCleanup.scope !== 'inspected-configuration-journal-only' ||
+      !isU32(value.privateCleanup.fileCount) || !isU32(value.privateCleanup.directoryCount) ||
+      value.privateCleanup.directoryCount > 1 || value.privateCleanup.fileCount + value.privateCleanup.directoryCount > 16 ||
+      !Array.isArray(value.files) || !boundedJson(value, 4096, 256, 10)) return false;
+  if (value.state !== 'recoverable') return value.action === null && value.transactionId === null && value.files.length === 0 &&
+    value.privateCleanup.fileCount === 0 && value.privateCleanup.directoryCount === 0;
+  if (!token(value.transactionId) || !oneOf(value.action, ['preparing_cleanup', 'rollback', 'committed_cleanup', 'rolled_back_cleanup']) || value.files.length !== 2) return false;
+  return value.files.every((row, index) => {
+    const limit = index === 0 ? CONFIG_BYTES : IGNORE_BYTES;
+    const fact = (item: unknown): item is { size: number; mode: number; sha256: string } => keys(item, ['size', 'mode', 'sha256']) &&
+      isU32(item.size) && item.size <= limit && isU32(item.mode) && item.mode <= 0o777 && typeof item.sha256 === 'string' && /^[0-9a-f]{64}$/.test(item.sha256);
+    if (!keys(row, ['id', 'path', 'action', 'before', 'after']) || row.id !== ['configuration', 'root-ignore'][index] ||
+        row.path !== ['release/mobile-release.json', '.gitignore'][index] || !(row.before === null || fact(row.before)) ||
+        !(row.after === null || fact(row.after) && row.after.size > 0) || row.before === null && row.after === null) return false;
+    if (row.before === null && row.after && (row.after.mode & ~0o644) !== 0 || row.before && row.after && row.before.mode !== row.after.mode) return false;
+    return row.action === (value.action !== 'rollback' || row.after === null ? 'preserve' : row.before === null ? 'remove' : 'restore');
+  });
+}
+
+function recoveryDetails(value: unknown): boolean {
+  if (!keys(value, ['checkout', 'prepared'])) return false;
+  const checkout = value.checkout, prepared = value.prepared;
+  if (checkout !== null && (!keys(checkout, ['revision', 'view']) || !token(checkout.revision) || !configRecoveryView(checkout.view))) return false;
+  return prepared === null || keys(prepared, ['revision', 'planToken', 'view']) && token(prepared.revision) && token(prepared.planToken) &&
+    prepared.planToken !== prepared.revision && configRecoveryView(prepared.view) && prepared.view.state === 'recoverable' &&
+    record(checkout) && checkout.revision === prepared.revision && sameJson(checkout.view as JsonValue, prepared.view as unknown as JsonValue);
+}
+
+export function configRecoveryResult(value: ConfigEditProjection): boolean {
+  const core = value.coreOutcome, selected = value.recovery;
+  if (!selected?.checkout || !selected.prepared || selected.prepared.revision !== selected.checkout.revision ||
+      selected.prepared.view.state !== 'recoverable' || !value.applySubmitted || value.phase !== 'final' ||
+      value.nativeFinality !== 'settled' || value.nativeReason !== 'none' || value.lateSettled ||
+      !core || core.reason !== 'none' || core.resources !== 'settled' || core.journal !== 'clean') return false;
+  const effect = { preparing_cleanup: 'not_started', rollback: 'rolled_back', committed_cleanup: 'committed', rolled_back_cleanup: 'rolled_back' };
+  return selected.prepared.view.action !== null && core.effect === effect[selected.prepared.view.action];
+}
+
 function projection(value: unknown): value is ConfigEditProjection {
-  if (!keys(value, ['projectId', 'sessionId', 'ownerGeneration', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled']) ||
+  if (!keys(value, ['projectId', 'sessionId', 'ownerGeneration', 'phase', 'reviewRemainingMs', 'checkout', 'prepared', 'applySubmitted', 'coreOutcome', 'nativeReason', 'nativeFinality', 'lateSettled'], ['recovery']) ||
       !text(value.projectId, 128) || value.projectId.length === 0 || !token(value.sessionId) || !token(value.ownerGeneration) ||
       !oneOf(value.phase, phases) || !isU32(value.reviewRemainingMs) || typeof value.applySubmitted !== 'boolean' || typeof value.lateSettled !== 'boolean' ||
       !oneOf(value.nativeReason, nativeReasons) || !oneOf(value.nativeFinality, ['pending', 'settled', 'unknown']) ||
       !(value.coreOutcome === null || outcome(value.coreOutcome))) return false;
+  const recovering = Object.hasOwn(value, 'recovery');
+  if (recovering && (value.checkout !== null || value.prepared !== null || !recoveryDetails(value.recovery))) return false;
+  const checkout = recovering ? (value.recovery as unknown as { checkout: unknown }).checkout : value.checkout;
+  const prepared = recovering ? (value.recovery as unknown as { prepared: unknown }).prepared : value.prepared;
   if (value.checkout !== null && (!keys(value.checkout, ['revision', 'base']) || !token(value.checkout.revision) ||
       !(value.checkout.base === null || (record(value.checkout.base) && boundedJson(value.checkout.base, CONFIG_BYTES, 8000, 28))))) return false;
   if (value.prepared !== null && (!keys(value.prepared, ['revision', 'planToken', 'draftRevision', 'baselineGeneration', 'view']) ||
@@ -189,13 +235,13 @@ function projection(value: unknown): value is ConfigEditProjection {
   } else if (value.phase === 'unknown') {
     if (value.nativeFinality !== 'unknown') return false;
   } else if (value.nativeFinality !== 'pending' || value.lateSettled) return false;
-  if (value.phase === 'opening' && (value.checkout !== null || value.prepared !== null || value.applySubmitted)) return false;
-  if (['editing', 'preparing', 'reviewing', 'applying'].includes(value.phase as string) && value.checkout === null) return false;
-  if (['editing', 'preparing'].includes(value.phase as string) && (value.prepared !== null || value.applySubmitted)) return false;
-  if (['reviewing', 'applying'].includes(value.phase as string) && value.prepared === null) return false;
+  if (value.phase === 'opening' && (checkout !== null || prepared !== null || value.applySubmitted)) return false;
+  if (['editing', 'preparing', 'reviewing', 'applying'].includes(value.phase as string) && checkout === null) return false;
+  if (['editing', 'preparing'].includes(value.phase as string) && (prepared !== null || value.applySubmitted)) return false;
+  if (['reviewing', 'applying'].includes(value.phase as string) && prepared === null) return false;
   if (value.phase === 'reviewing' && value.applySubmitted) return false;
   if (value.phase === 'applying' && !value.applySubmitted) return false;
-  if (value.applySubmitted && value.prepared === null) return false;
+  if (value.applySubmitted && prepared === null) return false;
   if (['opening', 'editing', 'preparing', 'reviewing'].includes(value.phase as string) && value.coreOutcome !== null) return false;
   const result = value as unknown as ConfigEditProjection;
   if (result.prepared && result.checkout && result.prepared.view.preview.comparison.baseProvided !== (result.checkout.base !== null)) return false;
@@ -203,14 +249,15 @@ function projection(value: unknown): value is ConfigEditProjection {
     if (result.coreOutcome === null) {
       // Only a known-settled refusal before a child was acquired can lack a
       // core receipt. A spawned engine's missing terminal is native Unknown.
-      if (result.checkout !== null || result.prepared !== null || result.applySubmitted || result.nativeReason === 'none') return false;
+      if (checkout !== null || prepared !== null || result.applySubmitted || result.nativeReason === 'none') return false;
     } else if (result.coreOutcome.resources === 'unknown' || result.coreOutcome.effect === 'unknown' || result.coreOutcome.journal === 'unknown') return false;
   }
-  if (result.coreOutcome && ['committed', 'rolled_back', 'unchanged'].includes(result.coreOutcome.effect)) {
+  if (!recovering && result.coreOutcome && ['committed', 'rolled_back', 'unchanged'].includes(result.coreOutcome.effect)) {
     if (!result.checkout || !result.prepared || !result.applySubmitted) return false;
     const noWrites = result.prepared.view.files.every((item) => item.action === 'preserve');
     if (result.coreOutcome.effect === 'unchanged' ? !noWrites : noWrites) return false;
   }
+  if (recovering && result.coreOutcome?.effect === 'unchanged') return false;
   return true;
 }
 
@@ -235,7 +282,7 @@ export function parseConfigEditStatus(value: unknown): ConfigEditStatus | null {
 // does not try to reproduce child wait/EOF/durability/close qualification.
 export function normalEditResult(value: ConfigEditProjection): 'saved' | 'unchanged' | null {
   const core = value.coreOutcome;
-  if (value.phase !== 'final' || value.nativeFinality !== 'settled' || value.nativeReason !== 'none' ||
+  if (value.recovery || value.phase !== 'final' || value.nativeFinality !== 'settled' || value.nativeReason !== 'none' ||
       value.lateSettled || !core || core.resources !== 'settled' || core.reason !== 'none' || !value.applySubmitted ||
       !value.checkout || !value.prepared || value.prepared.revision !== value.checkout.revision) return null;
   const noWrites = value.prepared.view.files.every((item) => item.action === 'preserve');
@@ -254,6 +301,9 @@ function sameProjectionFacts(first: ConfigEditProjection, second: ConfigEditProj
 
 export function projectionProgress(first: ConfigEditProjection, next: ConfigEditProjection): boolean {
   if (first.sessionId !== next.sessionId || first.projectId !== next.projectId || first.ownerGeneration !== next.ownerGeneration ||
+      (Boolean(first.recovery) !== Boolean(next.recovery)) ||
+      (first.recovery?.checkout != null && !equal(first.recovery.checkout, next.recovery?.checkout)) ||
+      (first.recovery?.prepared != null && !equal(first.recovery.prepared, next.recovery?.prepared)) ||
       (first.checkout !== null && !equal(first.checkout, next.checkout)) ||
       (first.prepared !== null && !equal(first.prepared, next.prepared)) ||
       (first.applySubmitted && !next.applySubmitted) || (first.lateSettled && !next.lateSettled)) return false;

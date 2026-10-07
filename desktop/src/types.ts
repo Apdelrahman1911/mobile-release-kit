@@ -357,6 +357,22 @@ export interface PreparedConfigView {
   ignoreAdditions: FixedIgnoreLine[];
   preview: ConfigPreview;
 }
+export type ConfigRecoveryAction = 'preparing_cleanup' | 'rollback' | 'committed_cleanup' | 'rolled_back_cleanup';
+export interface ConfigRecoveryFact { size: number; mode: number; sha256: string }
+export interface ConfigRecoveryView {
+  schemaVersion: 1;
+  kind: 'recovery';
+  state: 'idle' | 'conflict' | 'recoverable';
+  action: ConfigRecoveryAction | null;
+  transactionId: string | null;
+  files: { id: 'configuration' | 'root-ignore'; path: 'release/mobile-release.json' | '.gitignore';
+    action: 'preserve' | 'remove' | 'restore'; before: ConfigRecoveryFact | null; after: ConfigRecoveryFact | null }[];
+  privateCleanup: { fileCount: number; directoryCount: number; scope: 'inspected-configuration-journal-only' };
+}
+export interface ConfigRecoveryDetails {
+  checkout: { revision: string; view: ConfigRecoveryView } | null;
+  prepared: { revision: string; planToken: string; view: ConfigRecoveryView } | null;
+}
 export interface ConfigEditProjection {
   projectId: string;
   sessionId: string;
@@ -365,6 +381,8 @@ export interface ConfigEditProjection {
   reviewRemainingMs: number;
   checkout: { revision: string; base: JsonObject | null } | null;
   prepared: { revision: string; planToken: string; draftRevision: number; baselineGeneration: number; view: PreparedConfigView } | null;
+  // Omitted on the normal wire; explicit recovery never fabricates normal details.
+  recovery?: ConfigRecoveryDetails;
   applySubmitted: boolean;
   coreOutcome: CoreEditOutcome | null;
   nativeReason: NativeEditReason;
@@ -407,6 +425,9 @@ export interface DesktopApi extends AssetSessionApi, GitHubWorkflowEditApi, GitH
   proposeGitHubSetup(request: GitHubSetupRequest): Promise<GitHubSetupResult>;
   environmentRequirements(request: EnvironmentRequest): Promise<EnvironmentResult>;
   openConfigEdit(projectId: string): Promise<ConfigEditStatus>;
+  openConfigRecovery(projectId: string): Promise<ConfigEditStatus>;
+  prepareConfigRecovery(sessionId: string, revision: string): Promise<ConfigEditStatus>;
+  applyConfigRecovery(sessionId: string, planToken: string): Promise<ConfigEditStatus>;
   prepareConfigEdit(request: PrepareConfigEditRequest): Promise<ConfigEditStatus>;
   applyConfigEdit(sessionId: string, planToken: string): Promise<ConfigEditStatus>;
   closeConfigEdit(sessionId: string): Promise<ConfigEditStatus>;

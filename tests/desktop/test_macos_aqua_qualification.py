@@ -12311,7 +12311,7 @@ class LocalEditsAquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count("      MRK_MACOS_RUNNER: ${{ matrix.runner }}\n"), 1)
         self.assertIn('case "$MRK_MACOS_TARGET" in', admission)
         self.assertIn("*) exit 1 ;;", admission)
-        source_pin = "f15bd0246673d0aeffea4d4643146c1d6a3359ef3c7896c0280a3b700cf9f787"
+        source_pin = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
         self.assertEqual(workflow.count("      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + source_pin + "\n"), 1)
         self.assertEqual(admission.count('"$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + source_pin), 1)
         expected_suppliers = (('aarch64-apple-darwin', 'macos-26', 'arm64', 'ARM64', '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d', 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695', '158cdff422e3837f7ab5e6192af76a578faf6fab', '37467019389', '1', '11415902210'), ('x86_64-apple-darwin', 'macos-26-intel', 'x86_64', 'X64', 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b', '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd', '079ab2a2c8fef88f01bf909e7669c685f07e1375', '37476532238', '1', '11419502465'))

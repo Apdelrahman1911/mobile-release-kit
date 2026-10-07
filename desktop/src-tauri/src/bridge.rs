@@ -471,6 +471,24 @@ impl DesktopBridge {
         document.workflow_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
             bridge.edits.open_workflow_published(publisher, window, project_id, registration, ticket))
     }
+    pub(crate) fn open_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryOpen) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let ticket = self.edits.configuration_recovery_open_ticket(window)?;
+        let selected = args.project_id.clone();
+        document.configuration_recovery_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_configuration_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_protocol::PrepareConfigurationRecovery) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_configuration_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_configuration_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::edit_commands::ConfigurationRecoveryApply) -> Result<crate::edit_protocol::ConfigEditStatus, BridgeError> {
+        document.configuration_recovery_admit_published(|bridge| bridge.edits.configuration_recovery_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_configuration_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
     pub(crate) fn open_workflow_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         args: crate::edit_commands::WorkflowRecoveryOpen) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         let ticket = self.edits.workflow_recovery_open_ticket(window)?;

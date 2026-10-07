@@ -541,3 +541,28 @@ def discard_config_edit(authority: ConfigCheckout | PreparedConfigEdit) -> None:
     object.__setattr__(checkout, "_state", _RETIRED)
     if checkout._prepared is not None:
         object.__setattr__(checkout._prepared, "_state", _RETIRED)
+
+
+def capture_configuration_recovery(lease):
+    """Inspect the two fixed configuration effects under registered custody."""
+    from .github_workflow_recovery import _capture_recovery
+    from .init_transaction import TypedEditProfile
+    return _capture_recovery(lease, TypedEditProfile.CONFIGURATION)
+
+
+def prepare_configuration_recovery(lease, checkout, expected_revision):
+    from .github_workflow_recovery import _prepare_recovery
+    from .init_transaction import TypedEditProfile
+    return _prepare_recovery(lease, checkout, expected_revision, TypedEditProfile.CONFIGURATION)
+
+
+def apply_configuration_recovery(lease, plan):
+    from .github_workflow_recovery import _apply_recovery
+    from .init_transaction import TypedEditProfile
+    return _apply_recovery(lease, plan, TypedEditProfile.CONFIGURATION)
+
+
+def discard_configuration_recovery(authority):
+    from .github_workflow_recovery import _discard_recovery
+    from .init_transaction import TypedEditProfile
+    _discard_recovery(authority, TypedEditProfile.CONFIGURATION)

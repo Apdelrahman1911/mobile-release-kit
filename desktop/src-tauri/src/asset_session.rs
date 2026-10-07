@@ -3107,6 +3107,22 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(domain, project_id, |bridge, registered, _publisher| enqueue(bridge, registered))
     }
+    // Fixed recovery entry only. Normal configuration keeps its original path
+    // gate; it cannot obtain this registered-root authority through that API.
+    pub(crate) fn configuration_recovery_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
+        let result = (|| {
+            let mut state = self.lock();
+            let registered = self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,
+                project_id, None, &mut publisher)?;
+            enqueue(&self.inner.bridge, registered, &publisher)
+        })();
+        finish_registration_publisher(publisher); result
+    }
     pub(crate) fn workflow_edit_admit_published<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
@@ -3128,13 +3144,14 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ReleaseVersion, project_id, enqueue)
     }
-    // Only the four explicitly registered-root domains use this same mutex and
-    // proof. A proof never qualifies a writer or changes configuration custody.
+    // The normal registered domains remain closed. Configuration recovery has
+    // its separate fixed wrapper above, using this same original mutex/proof.
     fn registered_edit_admit_published<T>(
         &self, domain: crate::edit_protocol::EditDomain,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
     ) -> Result<T, BridgeError> {
+        if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }
         let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false)?;
         let result = (|| {
             let mut state = self.lock();
@@ -3148,8 +3165,8 @@ impl DocumentBinding {
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
         selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
-        if !matches!(domain, crate::edit_protocol::EditDomain::GitHubWorkflows | crate::edit_protocol::EditDomain::MetadataText
-            | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
+        if !matches!(domain, crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::GitHubWorkflows
+            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
         self.expire(state, Instant::now());
         if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
@@ -7041,6 +7058,39 @@ mod tests {
     use super::*;
     #[test]
     fn project_path_shares_exclusions_but_not_asset_authority_or_synthetic_finality() { assert_project_path_document_contracts(); }
+    #[test]
+    fn configuration_recovery_reuses_registered_gate_and_excludes_normal_save_observations() {
+        // SOURCE wiring only: these assertions do not construct a document,
+        // register a root, grant an SDK permission or claim a native result.
+        let source=include_str!("asset_session.rs");
+        let body=|start,end| source.split_once(start).unwrap().1.split_once(end).unwrap().0;
+        let recovery=body("pub(crate) fn configuration_recovery_admit_published<T>(", "pub(crate) fn workflow_edit_admit_published<T>(");
+        assert!(recovery.contains("self.lock()"));assert!(recovery.contains("self.registered_edit_root_locked_published(&mut state, crate::edit_protocol::EditDomain::Configuration,"));
+        assert!(recovery.find("registered_edit_root_locked_published").unwrap()<recovery.find("enqueue(&self.inner.bridge").unwrap());
+        assert!(recovery.contains("finish_registration_publisher(publisher)"));assert!(!recovery.contains("drop(state)") && !recovery.contains(".await"));
+        let normal=body("fn registered_edit_admit_published<T>(", "fn registered_edit_root_locked_published(");
+        assert!(normal.find("if domain == crate::edit_protocol::EditDomain::Configuration { return Err(BridgeError::invalid()); }").unwrap()<normal.find(".reserve(").unwrap());
+        let gate=body("fn registered_edit_root_locked_published(", "pub(crate) fn workflow_fixture_publish(");
+        for required in ["state.lifetime.original_bound()","state.lost_observed","state.unknown || state.exhausted","state.stopping",
+            "state.maintenance.closed()","state.quit_pending","self.inner.bridge.android_build.ensure_idle()?",
+            "self.inner.bridge.project_recovery.ensure_idle()?","self.inner.bridge.diagnostics.ensure_idle()?",
+            "self.inner.bridge.native_project(&id)","document_lost_published(MAIN, Some(&*publisher))"] { assert!(gate.contains(required),"{required}"); }
+        assert!(gate.find("publisher.accept(").unwrap()<gate.find("native_project(&id)").unwrap());
+        let shell=include_str!("shell.rs");
+        for (start,end,branch,hook) in [("async fn open_config_edit(","async fn prepare_config_edit(","return state.bridge.open_configuration_recovery","q.open_request"),
+            ("async fn prepare_config_edit(","async fn apply_config_edit(","return state.bridge.prepare_configuration_recovery","q.prepare_request"),
+            ("async fn apply_config_edit(","async fn close_config_edit(","return state.bridge.apply_configuration_recovery","q.apply_request")] {
+            let body=shell.split_once(start).unwrap().1.split_once(end).unwrap().0;
+            assert!(body.find(branch).unwrap()<body.find(hook).unwrap());
+            assert!(body.contains("configuration_edit_admit_published("));
+        }
+        assert!(shell.contains("normal_configuration_session(window, &args.session_id) { q.close_request(); }"));
+        assert!(shell.contains(".all(|projection| projection.recovery.is_none())"));
+        let bridge=include_str!("bridge.rs");
+        let open=bridge.split_once("pub(crate) fn open_configuration_recovery(").unwrap().1.split_once("pub(crate) fn prepare_configuration_recovery(").unwrap().0;
+        assert!(open.find("configuration_recovery_open_ticket(window)?").unwrap()<open.find("configuration_recovery_admit_published(").unwrap());
+        assert!(open.contains("registration, ticket)"));assert!(!open.contains("project_root("));
+    }
     fn token(byte: char) -> Token { Token(byte.to_string().repeat(32)) }
     pub(super) fn empty_state() -> DocumentState {
         DocumentState { lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,

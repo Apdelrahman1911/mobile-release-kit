@@ -783,7 +783,10 @@ fn not_closing(state: &ShellState) -> Result<(), BridgeError> {
 async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::open(request_body(&request)?)?;
+    let args = match edit_commands::configuration_open(request_body(&request)?)? {
+        edit_commands::ConfigurationOpen::Edit(args) => args,
+        edit_commands::ConfigurationOpen::Recover(args) => return state.bridge.open_configuration_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.open_request(&args.project_id); }
     // The same real document gate checks quit and retires saved consent/STOP
@@ -797,7 +800,10 @@ async fn open_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, st
 async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::prepare(request_body(&request)?)?;
+    let args = match edit_commands::configuration_prepare(request_body(&request)?)? {
+        edit_commands::ConfigurationPrepare::Edit(args) => args,
+        edit_commands::ConfigurationPrepare::Recover(args) => return state.bridge.prepare_configuration_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.prepare_request(&args); }
     let result = state.document.configuration_edit_admit_published(|bridge, publisher| bridge.edits.prepare_published(publisher, window, args));
@@ -809,7 +815,10 @@ async fn prepare_config_edit(webview: Webview, request: tauri::ipc::Request<'_>,
 async fn apply_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ConfigEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::apply(request_body(&request)?)?;
+    let args = match edit_commands::configuration_apply(request_body(&request)?)? {
+        edit_commands::ConfigurationApply::Edit(args) => args,
+        edit_commands::ConfigurationApply::Recover(args) => return state.bridge.apply_configuration_recovery(&state.document, window, args),
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.apply_request(&args.session_id, &args.plan_token); }
     let result = state.document.configuration_edit_admit_published(|bridge, publisher| bridge.edits.apply_published(publisher, window, &args.session_id, &args.plan_token));
@@ -823,7 +832,9 @@ async fn close_config_edit(webview: Webview, request: tauri::ipc::Request<'_>, s
     let window = edit_window(&webview)?;
     let args = edit_commands::close(request_body(&request)?)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-    if let Some(q) = &state.observation { q.close_request(); }
+    if let Some(q) = &state.observation {
+        if state.bridge.edits.normal_configuration_session(window, &args.session_id) { q.close_request(); }
+    }
     // The original document may stop during quit. Document loss already sends
     // STOP from native lifecycle handling; later renderers have status only.
     state.bridge.edits.close(window, &args.session_id)
@@ -837,7 +848,11 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
         state.bridge.edits.status()
     }.await;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
-    if let (Some(q), Ok(status)) = (&state.observation, &result) { q.edit_status(status, &state.bridge.edits); }
+    if let (Some(q), Ok(status)) = (&state.observation, &result) {
+        if status.active.iter().chain(status.last_terminal.iter()).all(|projection| projection.recovery.is_none()) {
+            q.edit_status(status, &state.bridge.edits);
+        }
+    }
     fixture_result!(observed, edit, &result);
     result
 }

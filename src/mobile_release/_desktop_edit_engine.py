@@ -19,7 +19,9 @@ from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKF
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
 from .config_edit import (ConfigEditFailure, CoreEditOutcome, apply_config_edit,
-                          capture_config_edit, discard_config_edit, prepare_config_edit)
+                          capture_config_edit, discard_config_edit, prepare_config_edit,
+                          capture_configuration_recovery, prepare_configuration_recovery,
+                          apply_configuration_recovery, discard_configuration_recovery)
 from .errors import ValidationError
 from .github_workflow_edit import (WorkflowConflict, apply_github_workflow_edit,
                                    capture_github_workflow_edit, discard_github_workflow_edit,
@@ -82,6 +84,7 @@ class _Engine:
         self.image_intent: str | None = None
         self.workflow_intent: str | None = None
         self.saved_text_recovery = False
+        self.configuration_recovery = False
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
@@ -104,7 +107,7 @@ class _Engine:
                                        "invalid_params" if isinstance(error, ProtocolError) else "filesystem_error")
         # pending_state from a read-only recovery inspection is not a first
         # failure. Latch this actual failure without losing inspected facts.
-        if self.domain == "github_workflows" and self.workflow_intent == "recover" and self.lease is not None:
+        if (self.configuration_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
             workflow_recovery_outcome(self.lease, reason=proposed.reason)
         if self.saved_text_recovery and self.lease is not None:
             saved_text_recovery_outcome(self.lease, reason=proposed.reason)
@@ -119,7 +122,7 @@ class _Engine:
             effect, journal, resources = current.effect, current.journal, current.resources
         else:
             effect, journal, resources = proposed.effect, proposed.journal, proposed.resources
-        if (self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and native is not None:
+        if (self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and native is not None:
             reason = native.reason  # Its recovery ledger, not display pending_state, owns the first actual failure.
         else:
             reason = (current.reason if current is not None and current.reason != "none" else
@@ -133,12 +136,14 @@ class _Engine:
             # Inspected attention is not a failed save. Keep its original ledger;
             # do not relax normal CoreEditOutcome or synthesize a primary error.
             return saved_text_recovery_outcome(self.lease)
-        if self.domain == "github_workflows" and self.workflow_intent == "recover" and self.lease is not None:
+        if (self.configuration_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
             observed = workflow_recovery_outcome(self.lease)
             return CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
         return CoreEditOutcome("not_started", "not_created", "settled", "none")
 
     def _check_workflow_intent(self, request: EditRequest) -> None:
+        if self.domain == "configuration" and (request.params.get("intent") == "recover") != self.configuration_recovery:
+            raise ProtocolError("Configuration edit and recovery intents cannot be exchanged")
         if self.domain in {"metadata_text", "release_version"} and (request.params.get("intent") == "recover") != self.saved_text_recovery:
             raise ProtocolError("Saved-text edit and recovery intents cannot be exchanged")
         if self.domain == "github_workflows" and request.params.get("intent", "edit") != self.workflow_intent:
@@ -165,7 +170,10 @@ class _Engine:
                     else:
                         discard_metadata_images_edit(self.authority)
                 elif self.domain == "configuration":
-                    discard_config_edit(self.authority)
+                    if self.configuration_recovery:
+                        discard_configuration_recovery(self.authority)
+                    else:
+                        discard_config_edit(self.authority)
                 else:
                     raise ProtocolError("Invalid fixed edit domain")
         actions = [retire]
@@ -210,6 +218,7 @@ class _Engine:
         self.guard.check()
         root = _root(request.params["root"])
         self.saved_text_recovery = self.domain in {"metadata_text", "release_version"} and request.params.get("intent") == "recover"
+        self.configuration_recovery = self.domain == "configuration" and request.params.get("intent") == "recover"
         if self.domain == "github_workflows":
             self.workflow_intent = request.params.get("intent", "edit")
             # The closed lease compares all five facts to raw original fstat on
@@ -235,7 +244,10 @@ class _Engine:
                 registered_identity=registered_identity(request.params["registeredIdentity"]),
                 image_recovery=self.image_intent == "recover")
         elif self.domain == "configuration":
-            self.lease = InitRootLease(root, cancellation=self.guard)
+            self.lease = (InitRootLease(root, cancellation=self.guard,
+                registered_identity=registered_identity(request.params["registeredIdentity"]),
+                configuration_recovery=True) if self.configuration_recovery else
+                InitRootLease(root, cancellation=self.guard))
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.lease.acquire()
@@ -261,7 +273,8 @@ class _Engine:
                 finally:
                     del images
         elif self.domain == "configuration":
-            checkout = capture_config_edit(self.lease)
+            checkout = (capture_configuration_recovery(self.lease) if self.configuration_recovery else
+                        capture_config_edit(self.lease))
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = checkout
@@ -284,7 +297,8 @@ class _Engine:
             opened = response(request, "opened", {"intent": checkout.intent, "revision": checkout.revision,
                 "baseline": checkout.baseline, "view": checkout.view, "scopeResources": "settled"})
         elif self.domain == "configuration":
-            opened = response(request, "opened", {"revision": checkout.revision, "base": checkout.base,
+            details = {"recovery": checkout.view} if self.configuration_recovery else {"base": checkout.base}
+            opened = response(request, "opened", {"revision": checkout.revision, **details,
                                                   "scopeResources": "settled"})
         else:
             raise ProtocolError("Invalid fixed edit domain")
@@ -326,12 +340,14 @@ class _Engine:
                 plan = prepare_metadata_images_edit(self.lease, checkout, request.params["revision"],
                     request.params["expectedBaseline"], request.params["choices"])
         elif self.domain == "configuration":
-            plan = prepare_config_edit(self.lease, checkout, request.params["revision"],
-                                       request.params["expectedBase"], request.params["draft"])
+            plan = (prepare_configuration_recovery(self.lease, checkout, request.params["revision"])
+                    if self.configuration_recovery else
+                    prepare_config_edit(self.lease, checkout, request.params["revision"],
+                                        request.params["expectedBase"], request.params["draft"]))
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = plan
-        details = {"recovery" if self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover" else "view": plan.view}
+        details = {"recovery" if self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover" else "view": plan.view}
         prepared = response(request, "prepared", {"revision": plan.revision, "planToken": plan.token,
                                                    **details, "scopeResources": "settled"})
         self.input.idle()
@@ -365,7 +381,8 @@ class _Engine:
             else:
                 self.outcome = apply_metadata_images_edit(self.lease, plan)
         elif self.domain == "configuration":
-            self.outcome = apply_config_edit(self.lease, plan)
+            self.outcome = (apply_configuration_recovery(self.lease, plan) if self.configuration_recovery else
+                            apply_config_edit(self.lease, plan))
         else:
             raise ProtocolError("Invalid fixed edit domain")
 
@@ -373,7 +390,7 @@ class _Engine:
         if self.last_request is None:
             raise ProtocolError("No accepted edit request")
         outcome = self.outcome
-        if outcome is None and (self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover"):
+        if outcome is None and (self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover"):
             outcome = self._discard_outcome()
         if outcome is None and self.domain == "metadata_images" and self.image_intent == "recover" and self.lease is not None:
             observed = self.lease.last_outcome

@@ -1,10 +1,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { canApplyEdit, currentApplyBinding, editNotice, nativeReviewPath, nativeStartReason, noOpPlan, saveHelp } from '../configEdit.ts';
-import type { ConfigEditState, EditApplyBinding } from '../configEdit.ts';
+import type { ConfigEditState, EditApplyBinding, ConfigRecoveryApplyBinding } from '../configEdit.ts';
 import type { ProjectSession } from '../drafts.ts';
 import { valueSummary } from '../preparation.ts';
+import { sameJson } from '../catalog.ts';
 import { savedSetupRevision } from '../setupGuidance.ts';
-import type { Catalog, HelpContent, PreparedConfigView } from '../types.ts';
+import type { Catalog, HelpContent, PreparedConfigView, ConfigRecoveryView } from '../types.ts';
 import { Badge, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
@@ -62,12 +63,19 @@ interface SaveProps {
   onCheck: () => void;
   onClose: () => void;
   onApply: (binding: EditApplyBinding) => boolean;
+  onInspectRecovery: (projectId: string) => boolean;
+  onRecoveryApply: (binding: ConfigRecoveryApplyBinding) => boolean;
+  onRecoveryClose: () => void;
+  onRecoveryReload: (projectId: string) => void;
+  recoveryReason: string | null;
+  recoveryApplyBinding: ConfigRecoveryApplyBinding | null;
   onShowProject: (projectId: string) => void;
   onReviewVersion: (projectId: string) => void;
   onHelp: (help: HelpContent) => void;
 }
 
-export function ConfigSave({ state, projects, catalog, selectedId, detailed, onCheck, onClose, onApply, onShowProject, onReviewVersion, onHelp }: SaveProps) {
+export function ConfigSave(props: SaveProps) {
+  const { state, projects, catalog, selectedId, detailed, onCheck, onClose, onApply, onShowProject, onReviewVersion, onHelp } = props;
   const [confirmation, setConfirmation] = useState<EditApplyBinding | null>(null);
   const attempt = state.attempt;
   const owner = state.unknownEvidence ?? attempt?.projection ?? state.status?.active ?? state.status?.lastTerminal ?? null;
@@ -87,7 +95,7 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
   useEffect(() => {
     if (confirmation && (!canApplyEdit(state, project, confirmation) || selectedId !== projectId || !detailed)) setConfirmation(null);
   }, [state, project, confirmation, selectedId, projectId, detailed]);
-  if (!notice && (!detailed || state.mode !== 'native')) return null;
+  if (!notice && !state.recovery && (!detailed || state.mode !== 'native')) return null;
   const reason = nativeStartReason(state);
   return <section className="card native-save-panel" aria-label="Native configuration save">
     <SectionHeading title={notice?.title ?? 'Native configuration saving'} description={project ? `Save session for ${project.project.name}. Drafts remain separate for each project.` : 'Native capability and original-owner status; never a browser simulation.'}>
@@ -110,6 +118,49 @@ export function ConfigSave({ state, projects, catalog, selectedId, detailed, onC
       <button type="button" className="button secondary" onClick={() => onReviewVersion(project.project.id)}>Next: review version values<Icon name="arrow" size={16} /></button>
     </div></div>}
     {showReview && !terminal && <p className="save-note">Editing this draft before Apply invalidates this review and closes its session. Newer edits after submission remain in memory. The native absolute lifetime is nonrenewable; a timer or status read never grants more authority.</p>}
+    <ConfigurationRecovery {...props} />
     {confirmation && owner?.prepared && <ApplyConfirmation view={owner.prepared.view} binding={confirmation} projectPath={project?.project.path ?? null} allowed={canApplyEdit(state, project, confirmation)} onCancel={() => setConfirmation(null)} onConfirm={() => { onApply(confirmation); setConfirmation(null); }} />}
   </section>;
+}
+
+function RecoveryFiles({ view }: { view: ConfigRecoveryView }) {
+  const fact = (row: ConfigRecoveryView['files'][number]['before']) => row === null ? 'Absent' : `${row.size} bytes · mode ${row.mode.toString(8)} · SHA-256 ${row.sha256}`;
+  return <div className="review-table-wrap"><table className="review-table"><caption>Inspected fixed configuration recovery</caption><thead><tr><th>File</th><th>Effect</th><th>Original</th><th>Transaction content</th></tr></thead>
+    <tbody>{view.files.map((file) => <tr key={file.id}><th><code>{file.path}</code></th><td>{file.action}</td><td><code>{fact(file.before)}</code></td><td><code>{fact(file.after)}</code></td></tr>)}</tbody></table>
+    <p>Private cleanup: {view.privateCleanup.fileCount} inspected files and {view.privateCleanup.directoryCount} inspected directories. This is not authority over other files or incomplete legacy journals.</p></div>;
+}
+function RecoveryConfirmation({ view, binding, allowed, onCancel, onConfirm }: { view: ConfigRecoveryView; binding: ConfigRecoveryApplyBinding; allowed: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const dialog = useRef<HTMLDialogElement>(null), title = useId(), checkbox = useId();
+  const [checked, setChecked] = useState(false);
+  useEffect(() => { const node = dialog.current; if (node && !node.open) node.showModal(); return () => { if (node?.open) node.close(); }; }, []);
+  return <dialog ref={dialog} className="save-confirm-dialog" aria-labelledby={title} onCancel={onCancel}><div className="dialog-content">
+    <h2 id={title}>Confirm configuration recovery?</h2><p>One inspected <strong>{binding.action}</strong> operation, not a Save of your draft. The original files and journal must still match.</p>
+    <RecoveryFiles view={view} /><label htmlFor={checkbox}><input id={checkbox} type="checkbox" checked={checked} onChange={(event) => setChecked(event.target.checked)} />I reviewed these exact restore/remove/preserve effects and private cleanup. This does not save my draft.</label>
+    {!allowed && <p role="alert">The project, observation, service or confirmation context changed. This review cannot be applied.</p>}
+    <div className="button-row"><button type="button" autoFocus className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!checked || !allowed} onClick={onConfirm}>Apply inspected recovery once</button></div>
+  </div></dialog>;
+}
+function ConfigurationRecovery({ state, projects, selectedId, detailed, onInspectRecovery, onRecoveryApply, onRecoveryClose, onRecoveryReload, recoveryReason, recoveryApplyBinding }: SaveProps) {
+  const [confirmation, setConfirmation] = useState<{ binding: ConfigRecoveryApplyBinding; view: ConfigRecoveryView } | null>(null);
+  const project = selectedId ? projects[selectedId] : null, recovery = state.recovery;
+  const owner = recovery?.projection, selected = recovery?.binding.projectId === selectedId;
+  const view = selected ? owner?.recovery?.prepared?.view ?? owner?.recovery?.checkout?.view : null;
+  const allowed = !!confirmation && !!recoveryApplyBinding && sameJson(confirmation.binding as unknown as import('../types.ts').JsonValue, recoveryApplyBinding as unknown as import('../types.ts').JsonValue);
+  useEffect(() => { if (confirmation && (!allowed || !detailed || !selected)) setConfirmation(null); }, [confirmation, allowed, detailed, selected]);
+  if (!detailed || !project) return null;
+  return <div className="save-review" aria-label="Configuration transaction recovery"><h3>Configuration recovery</h3>
+    <p>Inspect only this registered project's complete two-file journal. Inspect and Prepare do not write. Shared journal names do not prove which app created them; incomplete, mixed or changed records are preserved, never guessed or deleted.</p>
+    <button type="button" className="button secondary" disabled={recoveryReason !== null} title={recoveryReason ?? undefined} onClick={() => onInspectRecovery(project.project.id)}>Inspect configuration recovery</button>
+    {recoveryReason && <p className="save-note">{recoveryReason}</p>}
+    {view?.state === 'idle' && <p>No pending configuration journal was observed. This is not a Save or permission to erase earlier unknown evidence.</p>}
+    {view?.state === 'conflict' && <p className="review-caution">The journal cannot be completely qualified for these two files. Keep it and the original files unchanged. No Apply, forced repair or automatic retry is offered.</p>}
+    {view?.state === 'recoverable' && <><p>Inspected action: <strong>{view.action}</strong>. Closing keeps the journal; only Confirm can submit recovery.</p><RecoveryFiles view={view} /></>}
+    {selected && owner && <dl className="save-outcome-facts"><div><dt>Effect</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'}</dd></div><div><dt>Journal</dt><dd>{owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'}</dd></div><div><dt>Original finality</dt><dd>{owner.nativeFinality}</dd></div></dl>}
+    {selected && recovery?.succeeded && <p>That submitted recovery completed. Your draft, baseline and undo copies were not saved or replaced. Only a current completion clears matching attention; newer or unknown evidence remains blocked.</p>}
+    {selected && recoveryApplyBinding && view && <button type="button" className="button primary" onClick={() => setConfirmation({ binding: recoveryApplyBinding, view })}>Review recovery confirmation</button>}
+    {selected && recovery && !recovery.handled && !recovery.closeRequested && owner?.phase !== 'unknown' && <button type="button" className="button secondary" onClick={onRecoveryClose}>{recovery.applyClaimed ? 'Request cancellation' : 'Close recovery review'}</button>}
+    {project.saveRecoveryNeedsReload && <div className="notice notice-info"><p>Recovery is not Saved. Explicitly reload the saved observation before a new Save review. Reload keeps an existing draft and baseline; adopting a different baseline still requires the separate discard/reload action.</p>
+      <button type="button" className="button secondary" disabled={project.saveRecoveryRequired || project.snapshotRequest !== null || !!state.status?.active || state.nativeBlocked || state.integrityFailed || state.generationLost} onClick={() => onRecoveryReload(project.project.id)}>Reload saved observation after recovery</button></div>}
+    {confirmation && <RecoveryConfirmation view={confirmation.view} binding={confirmation.binding} allowed={allowed} onCancel={() => setConfirmation(null)} onConfirm={() => { onRecoveryApply(confirmation.binding); setConfirmation(null); }} />}
+  </div>;
 }

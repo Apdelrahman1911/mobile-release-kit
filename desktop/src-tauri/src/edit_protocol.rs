@@ -105,13 +105,19 @@ pub struct EditProjection {
     pub(crate) metadata_images: Option<crate::metadata_images_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
-    pub prepared: Option<Prepared>, pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
+    pub prepared: Option<Prepared>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<RecoveryDetails>,
+    pub apply_submitted: bool, pub core_outcome: Option<CoreEditOutcome>,
     pub native_reason: NativeEditReason, pub native_finality: NativeFinality, pub late_settled: bool,
 }
 impl EditProjection {
     pub(crate) fn revision(&self) -> Option<&str> {
         match self.domain {
-            EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::Configuration => match &self.recovery {
+                Some(recovery) => recovery.checkout.as_ref().map(|c| c.revision.as_str()),
+                None => self.checkout.as_ref().map(|c| c.revision.as_str()),
+            },
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.revision(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.revision(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.revision(),
@@ -120,16 +126,25 @@ impl EditProjection {
     }
     pub(crate) fn plan_token(&self) -> Option<&str> {
         match self.domain {
-            EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::Configuration => match &self.recovery {
+                Some(recovery) => recovery.prepared.as_ref().map(|p| p.plan_token.as_str()),
+                None => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            },
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.plan_token(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.plan_token(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.plan_token(),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
         }
     }
+    pub(crate) fn configuration_valid(&self) -> bool {
+        self.domain == EditDomain::Configuration && self.workflow.is_none() && self.metadata_text.is_none()
+            && self.release_version.is_none() && self.metadata_images.is_none()
+            && self.recovery.as_ref().is_none_or(|recovery|
+                self.checkout.is_none() && self.prepared.is_none() && recovery.valid())
+    }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.recovery.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
@@ -139,7 +154,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
         use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataText || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+        if self.domain != EditDomain::MetadataText || self.recovery.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -154,7 +169,7 @@ impl EditProjection {
     }
     pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
         use crate::release_version_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::ReleaseVersion || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
+        if self.domain != EditDomain::ReleaseVersion || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
         if detail.recovery.is_some() && (detail.checkout.is_some() || detail.prepared.is_some() || detail.submission.is_some()) { return Err(BridgeError::protocol()); }
@@ -166,7 +181,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_images_projection(&self) -> Result<crate::metadata_images_edit_protocol::Projection, BridgeError> {
         use crate::metadata_images_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataImages || self.workflow.is_some() || self.metadata_text.is_some()
+        if self.domain != EditDomain::MetadataImages || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
             || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
@@ -291,8 +306,136 @@ pub struct TerminalReply { pub plan_token: Option<String>, pub effect: Effect, p
 impl TerminalReply {
     pub fn outcome(&self) -> CoreEditOutcome { CoreEditOutcome { effect: self.effect.clone(), journal: self.journal.clone(), resources: self.resources.clone(), reason: self.reason.clone() } }
 }
+// Configuration recovery is a separate closed DATA projection, not a normal
+// Save checkout and not evidence of GUI provenance for a legacy init journal.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryAction { Rollback, CommittedCleanup, RolledBackCleanup, PreparingCleanup }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryState { Idle, Conflict, Recoverable }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryFileAction { Preserve, Remove, Restore }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverySummary { pub size: u32, pub mode: u32, pub sha256: String }
+impl RecoverySummary {
+    fn valid(&self, limit: u32, staged: bool) -> bool {
+        self.size <= limit && (!staged || self.size > 0) && self.mode <= 0o777
+            && self.sha256.len() == 64 && self.sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryFile {
+    pub id: String, pub path: String, pub action: RecoveryFileAction,
+    pub before: Option<RecoverySummary>, pub after: Option<RecoverySummary>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryCleanup { pub file_count: u32, pub directory_count: u32, pub scope: String }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryView {
+    pub schema_version: u32, pub kind: String, pub state: RecoveryState,
+    pub action: Option<RecoveryAction>, pub transaction_id: Option<String>,
+    pub files: Vec<RecoveryFile>, pub private_cleanup: RecoveryCleanup,
+}
+impl RecoveryView {
+    pub(crate) fn valid(&self) -> bool {
+        if self.schema_version != 1 || self.kind != "recovery" || bounded(self, 4096).is_err()
+            || self.private_cleanup.scope != "inspected-configuration-journal-only"
+            || self.private_cleanup.file_count > 16 || self.private_cleanup.directory_count > 1
+            || self.private_cleanup.file_count + self.private_cleanup.directory_count > 16 { return false; }
+        if self.state != RecoveryState::Recoverable {
+            return self.action.is_none() && self.transaction_id.is_none() && self.files.is_empty()
+                && self.private_cleanup.file_count == 0 && self.private_cleanup.directory_count == 0;
+        }
+        if self.action.is_none() || !self.transaction_id.as_deref().is_some_and(token)
+            || self.files.len() != 2 || self.private_cleanup.file_count < 2 { return false; }
+        self.files.iter().zip([("configuration", "release/mobile-release.json", CONFIG_LIMIT as u32),
+            ("root-ignore", ".gitignore", IGNORE_LIMIT)]).all(|(file, (id, path, limit))| {
+            let action = if self.action != Some(RecoveryAction::Rollback) || file.after.is_none() { RecoveryFileAction::Preserve }
+                else if file.before.is_none() { RecoveryFileAction::Remove } else { RecoveryFileAction::Restore };
+            file.id == id && file.path == path && file.action == action
+                && file.before.as_ref().is_none_or(|summary| summary.valid(limit, false))
+                && file.after.as_ref().is_none_or(|summary| summary.valid(limit, true))
+                && (file.before.is_some() || file.after.is_some())
+                && (file.before.is_some() || file.after.as_ref().is_some_and(|summary| summary.mode & !0o644 == 0))
+                && match (&file.before, &file.after) { (Some(before), Some(after)) => before.mode == after.mode, _ => true }
+        })
+    }
+    pub(crate) fn expected_success(&self) -> Option<Effect> {
+        if !self.valid() || self.state != RecoveryState::Recoverable { return None; }
+        Some(match self.action? {
+            RecoveryAction::CommittedCleanup => Effect::Committed,
+            RecoveryAction::Rollback | RecoveryAction::RolledBackCleanup => Effect::RolledBack,
+            RecoveryAction::PreparingCleanup => Effect::NotStarted,
+        })
+    }
+}
+fn recovery_shape(value: &Value) -> bool {
+    keys(value, &["schemaVersion", "kind", "state", "action", "transactionId", "files", "privateCleanup"])
+        && keys(&value["privateCleanup"], &["fileCount", "directoryCount", "scope"])
+        && value["files"].as_array().is_some_and(|files| files.len() <= 2 && files.iter().all(|file|
+            keys(file, &["id", "path", "action", "before", "after"])
+                && ["before", "after"].into_iter().all(|key| file[key].is_null()
+                    || keys(&file[key], &["size", "mode", "sha256"]))))
+}
+#[derive(Clone, Serialize)]
+pub struct RecoveryCheckout { pub revision: String, pub view: RecoveryView }
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryPrepared { pub revision: String, pub plan_token: String, pub view: RecoveryView }
+#[derive(Clone, Default, Serialize)]
+pub struct RecoveryDetails { pub checkout: Option<RecoveryCheckout>, pub prepared: Option<RecoveryPrepared> }
+impl RecoveryDetails {
+    pub(crate) fn valid(&self) -> bool {
+        self.checkout.as_ref().is_none_or(|checkout| token(&checkout.revision) && checkout.view.valid())
+            && self.prepared.as_ref().is_none_or(|prepared| token(&prepared.plan_token)
+                && prepared.plan_token != prepared.revision && self.checkout.as_ref().is_some_and(|checkout|
+                    prepared.revision == checkout.revision && prepared.view == checkout.view
+                        && prepared.view.state == RecoveryState::Recoverable))
+    }
+    pub(crate) fn terminal_admissible(&self, applied: bool, core: &CoreEditOutcome) -> bool {
+        if !self.valid() || !core.valid() || core.effect == Effect::Unchanged
+            || applied && self.prepared.is_none() || !applied && core.journal == Journal::Clean { return false; }
+        if let Some(checkout) = &self.checkout {
+            let view = &checkout.view;
+            let effect_valid = match view.action {
+                Some(RecoveryAction::CommittedCleanup) => core.effect == Effect::Committed,
+                Some(RecoveryAction::RolledBackCleanup) => core.effect == Effect::RolledBack,
+                Some(RecoveryAction::PreparingCleanup) => core.effect == Effect::NotStarted,
+                Some(RecoveryAction::Rollback) => core.effect == Effect::NotStarted
+                    || applied && matches!(core.effect, Effect::RolledBack | Effect::Unknown),
+                None => core.effect == Effect::NotStarted,
+            };
+            if !effect_valid || view.state == RecoveryState::Recoverable && core.journal == Journal::NotCreated { return false; }
+        }
+        if applied && core.reason == CoreReason::None {
+            return self.prepared.as_ref().and_then(|prepared| prepared.view.expected_success())
+                .is_some_and(|effect| core.effect == effect && core.journal == Journal::Clean && core.resources == ResourceState::Settled);
+        }
+        true
+    }
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryOpened { pub revision: String, pub recovery: RecoveryView, pub scope_resources: ResourceState }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryPreparedReply { pub revision: String, pub plan_token: String, pub recovery: RecoveryView, pub scope_resources: ResourceState }
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecoveryIntent { Recover }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PrepareConfigurationRecovery { pub session_id: String, pub revision: String, pub intent: RecoveryIntent }
+
 pub enum ChildFrame {
     Opened(Opened), Prepared(PreparedReply), Terminal(u32, TerminalReply),
+    ConfigurationRecoveryOpened(RecoveryOpened), ConfigurationRecoveryPrepared(RecoveryPreparedReply),
     WorkflowOpened(crate::github_workflow_edit_protocol::Opened),
     WorkflowPrepared(crate::github_workflow_edit_protocol::PreparedReply),
     WorkflowTerminal(u32, crate::github_workflow_edit_protocol::TerminalReply),
@@ -315,7 +458,8 @@ pub enum ChildFrame {
 impl ChildFrame {
     pub(crate) fn domain(&self) -> EditDomain {
         match self {
-            Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
+            Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..)
+                | Self::ConfigurationRecoveryOpened(_) | Self::ConfigurationRecoveryPrepared(_) => EditDomain::Configuration,
             Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..)
                 | Self::WorkflowRecoveryOpened(_) | Self::WorkflowRecoveryPrepared(_) => EditDomain::GitHubWorkflows,
             Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) | Self::MetadataTextRecoveryOpened(_) | Self::MetadataTextRecoveryPrepared(_) => EditDomain::MetadataText,
@@ -342,6 +486,56 @@ pub fn request(session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u
     let mut bytes = bounded(&value, REQUEST_LIMIT - 1)?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+pub(crate) fn recovery_request(session: &str, seq: u32, op: &str, params: Value) -> Result<Vec<u8>, BridgeError> {
+    if !token(session) || seq > 2 { return Err(BridgeError::invalid()); }
+    let legal = match (seq, op) {
+        (0, "open") => keys(&params, &["root", "registeredIdentity", "intent"]) && params["intent"] == "recover"
+            && params["root"].as_str().is_some_and(|s| s.len() <= 4096)
+            && serde_json::from_value::<crate::github_workflow_edit_protocol::RegisteredIdentity>(params["registeredIdentity"].clone()).is_ok_and(|identity| identity.valid()),
+        (1, "prepare") => keys(&params, &["revision", "intent"]) && params["intent"] == "recover"
+            && params["revision"].as_str().is_some_and(token),
+        (2, "apply") => keys(&params, &["planToken", "intent"]) && params["intent"] == "recover"
+            && params["planToken"].as_str().is_some_and(token),
+        (1 | 2, "discard") => keys(&params, &[]),
+        _ => false,
+    };
+    if !legal { return Err(BridgeError::invalid()); }
+    let value = json!({"protocol": PROTOCOL, "session": session, "seq": seq, "op": op, "params": params});
+    check_value(&value)?;
+    let mut bytes = bounded(&value, REQUEST_LIMIT - 1)?; bytes.push(b'\n'); Ok(bytes)
+}
+
+// Intent is captured in the original native Session. A child cannot select its
+// decoder by adding/removing a recovery field. Normal decode stays unchanged.
+pub(crate) fn decode_with_intent(bytes: &[u8], session: &str, recovery: bool) -> Result<ChildFrame, BridgeError> {
+    if !recovery { return decode(bytes, session); }
+    if bytes.len() > RESPONSE_LIMIT || !bytes.ends_with(b"\n") { return Err(BridgeError::protocol()); }
+    let body = &bytes[..bytes.len() - 1];
+    if body.first() != Some(&b'{') || body.last() != Some(&b'}') || body.iter().any(|b| matches!(*b, b'\r' | b'\n')) { return Err(BridgeError::protocol()); }
+    let value = strict_json(body)?;
+    if !keys(&value, &["protocol", "session", "seq", "kind", "result"]) || value["protocol"] != PROTOCOL || value["session"] != session { return Err(BridgeError::protocol()); }
+    let seq = value["seq"].as_u64().filter(|n| *n <= 2).ok_or_else(BridgeError::protocol)? as u32;
+    let raw = &value["result"];
+    match value["kind"].as_str() {
+        Some("opened") if seq == 0 => {
+            if !keys(raw, &["revision", "recovery", "scopeResources"]) || !recovery_shape(&raw["recovery"]) { return Err(BridgeError::protocol()); }
+            let result: RecoveryOpened = serde_json::from_value(raw.clone()).map_err(|_| BridgeError::protocol())?;
+            if !token(&result.revision) || result.scope_resources != ResourceState::Settled || !result.recovery.valid() { return Err(BridgeError::protocol()); }
+            Ok(ChildFrame::ConfigurationRecoveryOpened(result))
+        }
+        Some("prepared") if seq == 1 => {
+            if !keys(raw, &["revision", "planToken", "recovery", "scopeResources"]) || !recovery_shape(&raw["recovery"]) { return Err(BridgeError::protocol()); }
+            let result: RecoveryPreparedReply = serde_json::from_value(raw.clone()).map_err(|_| BridgeError::protocol())?;
+            if !token(&result.revision) || !token(&result.plan_token) || result.plan_token == result.revision
+                || result.scope_resources != ResourceState::Settled || !result.recovery.valid()
+                || result.recovery.state != RecoveryState::Recoverable { return Err(BridgeError::protocol()); }
+            Ok(ChildFrame::ConfigurationRecoveryPrepared(result))
+        }
+        Some("terminal") => decode(bytes, session), // Exact existing terminal grammar and outcome bounds.
+        _ => Err(BridgeError::protocol()),
+    }
 }
 
 pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
@@ -385,6 +579,116 @@ pub fn decode(bytes: &[u8], session: &str) -> Result<ChildFrame, BridgeError> {
 #[cfg(test)]
 mod ignore_vocabulary_tests {
     use super::*;
+    fn configuration_recovery_view(action: RecoveryAction) -> RecoveryView {
+        let summary = RecoverySummary { size: 2, mode: 0o640, sha256: "a".repeat(64) };
+        RecoveryView { schema_version: 1, kind: "recovery".into(), state: RecoveryState::Recoverable,
+            action: Some(action), transaction_id: Some("c".repeat(32)),
+            files: [("configuration", "release/mobile-release.json"), ("root-ignore", ".gitignore")].into_iter().map(|(id,path)|
+                RecoveryFile { id:id.into(),path:path.into(),
+                    action:if action == RecoveryAction::Rollback { RecoveryFileAction::Restore } else { RecoveryFileAction::Preserve },
+                    before:Some(summary.clone()),after:Some(summary.clone()) }).collect(),
+            private_cleanup: RecoveryCleanup { file_count:6,directory_count:1,scope:"inspected-configuration-journal-only".into() } }
+    }
+    #[test]
+    fn configuration_recovery_view_retains_exact_two_file_actions_and_bounds() {
+        for (action,effect) in [(RecoveryAction::Rollback,Effect::RolledBack), (RecoveryAction::CommittedCleanup,Effect::Committed),
+            (RecoveryAction::RolledBackCleanup,Effect::RolledBack), (RecoveryAction::PreparingCleanup,Effect::NotStarted)] {
+            let view = configuration_recovery_view(action);
+            assert!(view.valid()); assert_eq!(view.expected_success(),Some(effect));
+            for index in 0..2 {
+                let limit = if index == 0 { CONFIG_LIMIT as u32 } else { IGNORE_LIMIT };
+                let mut at = view.clone(); at.files[index].before.as_mut().unwrap().size=limit;
+                at.files[index].after.as_mut().unwrap().size=limit; assert!(at.valid());
+                for staged in [false,true] {
+                    let mut bad=at.clone();
+                    if staged { bad.files[index].after.as_mut().unwrap().size=limit+1; }
+                    else { bad.files[index].before.as_mut().unwrap().size=limit+1; }
+                    assert!(!bad.valid());
+                }
+                let mut zero=view.clone(); zero.files[index].before.as_mut().unwrap().size=0; assert!(zero.valid());
+                zero.files[index].after.as_mut().unwrap().size=0; assert!(!zero.valid());
+                let mut created=view.clone(); created.files[index].before=None;
+                created.files[index].action=if action==RecoveryAction::Rollback { RecoveryFileAction::Remove } else { RecoveryFileAction::Preserve };
+                assert!(created.valid()); created.files[index].after.as_mut().unwrap().mode=0o601; assert!(!created.valid());
+                let mut preserved=view.clone(); preserved.files[index].after=None;
+                preserved.files[index].action=RecoveryFileAction::Preserve; assert!(preserved.valid());
+            }
+            for change in 0..12 {
+                let mut bad=view.clone();
+                match change {
+                    0=>bad.files.swap(0,1), 1=>bad.files[0].id="preflight".into(),
+                    2=>bad.files[0].path=".github/workflows/mobile-preflight.yml".into(),
+                    3=>bad.private_cleanup.scope="inspected-workflow-journal-only".into(),
+                    4=>bad.private_cleanup.directory_count=2, 5=>bad.private_cleanup.file_count=16,
+                    6=>bad.transaction_id=Some("X".repeat(32)), 7=>bad.files[0].after.as_mut().unwrap().sha256="A".repeat(64),
+                    8=>bad.files[0].before.as_mut().unwrap().mode=0o4640,
+                    9=>bad.files[0].after.as_mut().unwrap().mode=0o600,
+                    10=>bad.files[0].action=if action==RecoveryAction::Rollback {RecoveryFileAction::Preserve} else {RecoveryFileAction::Restore},
+                    _=>{bad.files[0].before=None;bad.files[0].after=None;},
+                }
+                assert!(!bad.valid(),"{action:?}/{change}");
+            }
+        }
+        for state in [RecoveryState::Idle,RecoveryState::Conflict] {
+            let mut view=configuration_recovery_view(RecoveryAction::Rollback);
+            view.state=state;view.action=None;view.transaction_id=None;view.files.clear();
+            view.private_cleanup.file_count=0;view.private_cleanup.directory_count=0;
+            assert!(view.valid());assert_eq!(view.expected_success(),None);
+            view.private_cleanup.file_count=1;assert!(!view.valid());
+        }
+    }
+    #[test]
+    fn configuration_recovery_wire_is_closed_and_uses_retained_intent() {
+        let session="0".repeat(32);let revision="1".repeat(32);let plan="2".repeat(32);
+        let identity=json!({"device":"1","inode":"2","mode":0o40700,"uid":1000,"gid":1000});
+        let open=json!({"root":"/inert/project","registeredIdentity":identity,"intent":"recover"});
+        let prepare=json!({"revision":revision,"intent":"recover"});
+        let apply=json!({"planToken":plan,"intent":"recover"});
+        for (seq,op,params) in [(0,"open",open.clone()),(1,"prepare",prepare),(2,"apply",apply)] {
+            assert!(recovery_request(&session,seq,op,params.clone()).is_ok());
+            assert!(request(&session,seq,op,params.clone()).is_err());
+            let mut missing=params.clone();missing.as_object_mut().unwrap().remove("intent");
+            assert!(recovery_request(&session,seq,op,missing).is_err());
+            for value in [Value::Null,json!(false),json!("edit"),json!("Recover"),json!(["recover"])] {
+                let mut bad=params.clone();bad["intent"]=value;assert!(recovery_request(&session,seq,op,bad).is_err());
+            }
+            for key in ["force","files","draft","expectedBase","projectId"] {
+                let mut bad=params.clone();bad[key]=Value::Null;assert!(recovery_request(&session,seq,op,bad).is_err());
+            }
+        }
+        for bad_identity in [json!({}),json!({"device":"1","inode":"0","mode":0o40700,"uid":1000,"gid":1000}),
+            json!({"device":"01","inode":"2","mode":0o40700,"uid":1000,"gid":1000}),
+            json!({"device":"1","inode":"2","mode":0o100600,"uid":1000,"gid":1000})] {
+            let mut bad=open.clone();bad["registeredIdentity"]=bad_identity;assert!(recovery_request(&session,0,"open",bad).is_err());
+        }
+        for seq in [1,2] { assert_eq!(recovery_request(&session,seq,"discard",json!({})).unwrap(),request(&session,seq,"discard",json!({})).unwrap()); }
+        let frame=|seq,kind,result| { let mut bytes=serde_json::to_vec(&json!({"protocol":PROTOCOL,"session":session,"seq":seq,"kind":kind,"result":result})).unwrap();bytes.push(b'\n');bytes };
+        let view=serde_json::to_value(configuration_recovery_view(RecoveryAction::Rollback)).unwrap();
+        let opened=json!({"revision":revision,"recovery":view,"scopeResources":"settled"});
+        let prepared=json!({"revision":revision,"planToken":plan,"recovery":view,"scopeResources":"settled"});
+        assert!(matches!(decode_with_intent(&frame(0,"opened",opened.clone()),&session,true),Ok(ChildFrame::ConfigurationRecoveryOpened(_))));
+        assert!(matches!(decode_with_intent(&frame(1,"prepared",prepared.clone()),&session,true),Ok(ChildFrame::ConfigurationRecoveryPrepared(_))));
+        assert!(decode_with_intent(&frame(0,"opened",opened.clone()),&session,false).is_err());
+        assert!(decode_with_intent(&frame(1,"prepared",prepared.clone()),&session,false).is_err());
+        let normal=frame(0,"opened",json!({"revision":revision,"base":null,"scopeResources":"settled"}));
+        assert!(matches!(decode_with_intent(&normal,&session,false),Ok(ChildFrame::Opened(_))));
+        assert!(decode_with_intent(&normal,&session,true).is_err());
+        for field in ["action","transactionId","files","privateCleanup"] {
+            let mut bad=opened.clone();bad["recovery"].as_object_mut().unwrap().remove(field);
+            assert!(decode_with_intent(&frame(0,"opened",bad),&session,true).is_err());
+        }
+        let mut extra=opened.clone();extra["recovery"]["root"]=json!("/elsewhere");
+        assert!(decode_with_intent(&frame(0,"opened",extra),&session,true).is_err());
+        let mut unknown=opened;unknown["scopeResources"]=json!("unknown");
+        assert!(decode_with_intent(&frame(0,"opened",unknown),&session,true).is_err());
+        let mut same=prepared;same["planToken"]=json!(revision);
+        assert!(decode_with_intent(&frame(1,"prepared",same),&session,true).is_err());
+        let pending=json!({"planToken":null,"effect":"committed","journal":"recovery_required","resources":"settled","reason":"pending_state"});
+        assert!(matches!(decode_with_intent(&frame(0,"terminal",pending.clone()),&session,true),Ok(ChildFrame::Terminal(0,_))));
+        let mut lie=pending;lie["reason"]=json!("none");
+        assert!(decode_with_intent(&frame(0,"terminal",lie),&session,true).is_err());
+        let mut extra_line=normal;extra_line.push(b'\n');assert!(decode_with_intent(&extra_line,&session,true).is_err());
+    }
     fn proposed() -> PreparedConfigView {
         let assurance = json!({"basis":"schema-policy","projectCodeExecuted":false,"toolsProbed":false,"credentialsRead":false,
             "gitObserved":false,"storeContacted":false,"writesPerformed":false,"releaseReadiness":"unknown"});

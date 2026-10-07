@@ -684,5 +684,33 @@ class ConfigEditTests(unittest.TestCase):
                 passive_transaction.InitWorkspace(Path("/must-not-open"))
 
 
+
+class ConfigurationRecoveryFacadeTests(unittest.TestCase):
+    def test_four_lazy_facades_pass_only_the_fixed_configuration_profile(self):
+        # Only fixed private functions are inert here. Real object/profile
+        # mismatch and restoration are covered by the actual filesystem group.
+        module = ModuleType("mobile_release.github_workflow_recovery")
+        calls = []
+        sentinel = object()
+        def invoke(name):
+            def function(*args):
+                calls.append((name, args))
+                return sentinel
+            return function
+        for name in ("_capture_recovery", "_prepare_recovery", "_apply_recovery", "_discard_recovery"):
+            setattr(module, name, invoke(name))
+        lease, checkout, plan = object(), object(), object()
+        with patch.dict(sys.modules, {module.__name__: module}):
+            self.assertIs(edit.capture_configuration_recovery(lease), sentinel)
+            self.assertIs(edit.prepare_configuration_recovery(lease, checkout, _REVISION), sentinel)
+            self.assertIs(edit.apply_configuration_recovery(lease, plan), sentinel)
+            self.assertIsNone(edit.discard_configuration_recovery(plan))
+        profile = transaction.TypedEditProfile.CONFIGURATION
+        self.assertEqual(calls, [("_capture_recovery", (lease, profile)),
+            ("_prepare_recovery", (lease, checkout, _REVISION, profile)),
+            ("_apply_recovery", (lease, plan, profile)), ("_discard_recovery", (plan, profile))])
+        with self.assertRaises(TypeError):
+            edit.capture_configuration_recovery(lease, profile=transaction.TypedEditProfile.GITHUB_WORKFLOWS)
+
 if __name__ == "__main__":
     unittest.main()

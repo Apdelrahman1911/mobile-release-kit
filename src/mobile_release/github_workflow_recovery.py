@@ -1,4 +1,4 @@
-"""One explicit current-inspection recovery of the four GitHub workflow callers.
+"""One current-inspection recovery of two fixed, separately bound edit profiles.
 
 The shared legacy journal is not an Apply grant. A fresh untyped workspace
 borrows the registered root's original lock. This finite validator binds the
@@ -69,6 +69,7 @@ class _Entry:
 
 @dataclass(frozen=True, slots=True)
 class _Inspection:
+    profile: tx.TypedEditProfile
     state: str
     action: str
     root: tuple[int, ...]
@@ -115,13 +116,13 @@ def _current(workspace: tx.InitWorkspace, path: str, *, directory: bool = False)
         return _observed(workspace, parent, path.rsplit("/", 1)[-1], directory=directory)[0]
 
 
-def _plan_shape(plan: dict[str, Any]) -> None:
-    _need(tuple(row["path"] for row in plan["files"]) == _PROFILE.paths
-          and tuple(row["path"] for row in plan["directories"]) == _PROFILE.directories)
-    for row in plan["files"]:
+def _plan_shape(plan: dict[str, Any], profile: tx.TypedEditProfile) -> None:
+    _need(tuple(row["path"] for row in plan["files"]) == profile.paths
+          and tuple(row["path"] for row in plan["directories"]) == profile.directories)
+    for row, before_limit, after_limit in zip(plan["files"], profile.observation_limits, profile.payload_limits):
         before, after = row["before"], row["after"]
-        _need(before is None or before["size"] <= 1024 * 1024)
-        _need(after is None or 0 < after["size"] <= _LIMIT)
+        _need(before is None or before["size"] <= before_limit)
+        _need(after is None or 0 < after["size"] <= after_limit)
         _need(before is None or after is None or
               before["mode"] == after["mode"] and before["inode"] != after["inode"])
         _need(before is not None or after is not None and not after["mode"] & ~0o644)
@@ -142,6 +143,7 @@ def _preparing_public(workspace: tx.InitWorkspace, plan: dict[str, Any]) -> None
 
 def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
     """Read only. Shared-name incomplete legacy records are never classified."""
+    profile = _workspace_profile(workspace)
     with workspace.inspect_workflow_recovery_state() as (state, fd):
         if state is None:
             return None
@@ -149,11 +151,11 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
         private = _Fact(_freeze(workspace.private_identity), _full9(os.fstat(fd)))
         names = set(workspace._list(fd))
         _need(len(names) <= 16 and {"header.json", "plan.json"} <= names,
-              "The legacy journal lacks a complete workflow plan; preserve it without guessing")
+              "The legacy journal lacks a complete fixed-profile plan; preserve it without guessing")
         header_fact, header_raw = _observed(workspace, fd, "header.json", limit=tx.MAX_CONTROL_BYTES)
         plan_fact, plan_raw = _observed(workspace, fd, "plan.json", limit=tx.MAX_CONTROL_BYTES)
         plan = workspace._load(fd)
-        _plan_shape(plan)
+        _plan_shape(plan, profile)
         _need(header_raw == tx._json({key: plan[key] for key in ("schemaVersion", "transactionId", "root")})
               and plan_raw == tx._json(plan))
         terminal_names = names & {"COMMITTED", "ROLLED_BACK"}
@@ -216,8 +218,8 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
                 else:
                     _preparing_public(workspace, plan)
                 action = "preparing_cleanup"
-            public = {path: _current(workspace, path) for path in _PROFILE.paths}
-            parents = {path: _current(workspace, path, directory=True) for path in _PROFILE.directories}
+            public = {path: _current(workspace, path) for path in profile.paths}
+            parents = {path: _current(workspace, path, directory=True) for path in profile.directories}
         _need(set(workspace._list(fd)) == names)
         for name, entry in entries.items():
             fact, raw = _observed(workspace, fd, name, directory=entry.directory,
@@ -231,7 +233,7 @@ def _inspect(workspace: tx.InitWorkspace) -> _Inspection | None:
             _need(all(_current(workspace, path) == fact for path, fact in public.items())
                   and all(_current(workspace, path, directory=True) == fact for path, fact in parents.items()))
         _need(_full9(os.fstat(fd)) == private.raw)
-    return _Inspection(state, action, _full9(os.fstat(workspace.fd)), private,
+    return _Inspection(profile, state, action, _full9(os.fstat(workspace.fd)), private,
                        header_raw, plan_raw, tuple(sorted(entries.items())),
                        tuple(sorted(public.items())), tuple(sorted(parents.items())))
 
@@ -258,7 +260,9 @@ class _RestorationGuard:
               and workspace._scope is not None and workspace._typed_profile is None
               and workspace._workflow_recovery_mode
               and workspace._scope.lease is self.revision._lease
-              and workspace._scope.lease._workflow_recovery is self.revision)
+              and workspace._scope.lease._workflow_recovery is self.revision
+              and _workspace_profile(workspace) is self.revision._profile
+              and self.revision._inspection.profile is self.revision._profile)
 
     def _live(self, workspace: tx.InitWorkspace) -> None:
         self.check_workspace(workspace)
@@ -527,12 +531,13 @@ def recovery_outcome(lease: InitRootLease, workspace: tx.InitWorkspace | None = 
 
 
 class WorkflowRecoveryRevision(_shared._PrivateAuthority):
-    __slots__ = ("_identity", "_lease", "_inspection", "_applied")
+    __slots__ = ("_identity", "_lease", "_profile", "_inspection", "_applied")
 
     def recheck(self, workspace: tx.InitWorkspace) -> None:
         _need(type(workspace) is tx.InitWorkspace and workspace._workflow_recovery_mode
               and workspace._typed_profile is None and workspace._scope is not None
-              and workspace._scope.lease is self._lease and self._lease._workflow_recovery is self)
+              and workspace._scope.lease is self._lease and self._lease._workflow_recovery is self
+              and _workspace_profile(workspace) is self._profile and self._inspection.profile is self._profile)
         _need(_inspect(workspace) == self._inspection)
 
     def apply(self, workspace: tx.InitWorkspace) -> tx.InitApplyOutcome:
@@ -558,7 +563,7 @@ class WorkflowRecoveryRevision(_shared._PrivateAuthority):
 
 
 class WorkflowRecoveryCheckout(_shared._PrivateAuthority):
-    __slots__ = ("_identity", "_lease", "_revision", "_revision_token", "_view_json", "_state", "_prepared")
+    __slots__ = ("_identity", "_lease", "_profile", "_revision", "_revision_token", "_view_json", "_state", "_prepared")
 
     @property
     def revision(self) -> str:
@@ -585,10 +590,34 @@ class PreparedWorkflowRecovery(_shared._PrivateAuthority):
         return self._checkout.view
 
 
-def _lease_matches(lease: object) -> bool:
+def _lease_matches(lease: object, profile: tx.TypedEditProfile = _PROFILE) -> bool:
     from .init_workspace_custody import InitRootLease
-    return (type(lease) is InitRootLease and lease.profile is _PROFILE
-            and lease._workflow_recovery_mode and not lease._image_recovery_mode)
+    return (profile in (_PROFILE, tx.TypedEditProfile.CONFIGURATION)
+            and type(lease) is InitRootLease and lease.profile is profile
+            and lease._workflow_recovery_mode and not lease._image_recovery_mode
+            and not lease._saved_text_recovery_mode
+            and lease._configuration_recovery_mode is (profile is tx.TypedEditProfile.CONFIGURATION))
+
+
+def _workspace_profile(workspace: tx.InitWorkspace) -> tx.TypedEditProfile:
+    _need(type(workspace) is tx.InitWorkspace and workspace._scope is not None
+          and workspace._workflow_recovery_mode and workspace._typed_profile is None)
+    lease = workspace._scope.lease
+    _need(_lease_matches(lease, lease.profile))
+    return lease.profile
+
+
+def _configuration_read_limit(workspace: tx.InitWorkspace, name: str) -> int:
+    # Complete fixed names only; this narrows bytes, never grants a path or
+    # adopts an object. The inspection/guard still binds its original location.
+    _need(_workspace_profile(workspace) is tx.TypedEditProfile.CONFIGURATION)
+    if name in _CONTROLS:
+        return tx.MAX_CONTROL_BYTES
+    for index, (path, limit) in enumerate(zip(tx.TypedEditProfile.CONFIGURATION.paths,
+                                            tx.TypedEditProfile.CONFIGURATION.observation_limits)):
+        if name in (path.rsplit("/", 1)[-1], f"new-{index}", f"old-{index}"):
+            return limit
+    raise _Refused("Unrecognized configuration recovery input")
 
 
 def _checkout(value: object) -> bool:
@@ -609,18 +638,19 @@ def _failure(lease: InitRootLease, error: BaseException) -> CoreEditOutcome:
                            retained.reason)
 
 
-def _invalid(lease: object, reason: str = "invalid_params") -> CoreEditOutcome:
-    if not _lease_matches(lease):
+def _invalid(lease: object, reason: str = "invalid_params", *, profile: tx.TypedEditProfile = _PROFILE) -> CoreEditOutcome:
+    if not _lease_matches(lease, profile):
         return _shared._not_started(reason)
     value = recovery_outcome(lease, reason=reason)
     return CoreEditOutcome(value.effect, value.journal, value.resources, value.reason)
 
 
-def _view(captured: _Inspection | None, conflict: bool) -> dict[str, Any]:
+def _view(captured: _Inspection | None, conflict: bool, profile: tx.TypedEditProfile) -> dict[str, Any]:
     view: dict[str, Any] = {"schemaVersion": 1, "kind": "recovery",
         "state": "conflict" if conflict else "idle", "action": None, "transactionId": None,
         "files": [], "privateCleanup": {"fileCount": 0, "directoryCount": 0,
-                                       "scope": "inspected-workflow-journal-only"}}
+                                       "scope": ("inspected-configuration-journal-only" if profile is tx.TypedEditProfile.CONFIGURATION
+                                                 else "inspected-workflow-journal-only")}}
     if captured is None:
         return view
     plan = json.loads(captured.plan)
@@ -632,14 +662,14 @@ def _view(captured: _Inspection | None, conflict: bool) -> dict[str, Any]:
                                 {key: row["before"][key] for key in ("size", "mode", "sha256")},
                       "after": None if row["after"] is None else
                                {key: row["after"][key] for key in ("size", "mode", "sha256")}}
-                     for identity, row in zip(_IDS, plan["files"])]
+                     for identity, row in zip(("configuration", "root-ignore") if profile is tx.TypedEditProfile.CONFIGURATION else _IDS, plan["files"])]
     view["privateCleanup"].update(fileCount=sum(not entry.directory for _, entry in captured.entries),
                                   directoryCount=sum(entry.directory for _, entry in captured.entries))
     return view
 
 
-def capture_github_workflow_recovery(lease: InitRootLease) -> WorkflowRecoveryCheckout:
-    if not _lease_matches(lease):
+def _capture_recovery(lease: InitRootLease, profile: tx.TypedEditProfile) -> WorkflowRecoveryCheckout:
+    if not _lease_matches(lease, profile):
         _shared._reject("invalid_params")
     captured, revision, conflict = None, None, False
     try:
@@ -660,13 +690,13 @@ def capture_github_workflow_recovery(lease: InitRootLease) -> WorkflowRecoveryCh
                 elif captured.action == "rolled_back_cleanup":
                     lease._workflow_recovery_effect = "rolled_back"
                 revision = object.__new__(WorkflowRecoveryRevision)
-                for name, value in (("_identity", revision), ("_lease", lease), ("_inspection", captured), ("_applied", False)):
+                for name, value in (("_identity", revision), ("_lease", lease), ("_profile", profile), ("_inspection", captured), ("_applied", False)):
                     object.__setattr__(revision, name, value)
                 lease._workflow_recovery = revision
-        view = tx._json(_view(captured, conflict))
+        view = tx._json(_view(captured, conflict, profile))
         _need(len(view) <= 4096)
         checkout = object.__new__(WorkflowRecoveryCheckout)
-        for name, value in (("_identity", checkout), ("_lease", lease), ("_revision", revision),
+        for name, value in (("_identity", checkout), ("_lease", lease), ("_profile", profile), ("_revision", revision),
                             ("_revision_token", token), ("_view_json", view), ("_state", _shared._CAPTURED),
                             ("_prepared", None)):
             object.__setattr__(checkout, name, value)
@@ -675,17 +705,17 @@ def capture_github_workflow_recovery(lease: InitRootLease) -> WorkflowRecoveryCh
         raise ConfigEditFailure(_failure(lease, error)) from None
 
 
-def prepare_github_workflow_recovery(lease: InitRootLease, checkout: WorkflowRecoveryCheckout,
-                                     expected_revision: str) -> PreparedWorkflowRecovery:
+def _prepare_recovery(lease: InitRootLease, checkout: WorkflowRecoveryCheckout,
+                      expected_revision: str, profile: tx.TypedEditProfile) -> PreparedWorkflowRecovery:
     if not _checkout(checkout) or checkout._state != _shared._CAPTURED:
-        raise ConfigEditFailure(_invalid(lease))
+        raise ConfigEditFailure(_invalid(lease, profile=profile))
     object.__setattr__(checkout, "_state", _shared._PREPARING)
     try:
-        if (not _lease_matches(lease) or lease is not checkout._lease or checkout._revision is None
+        if (not _lease_matches(lease, profile) or lease is not checkout._lease or checkout._profile is not profile or checkout._revision is None
                 or type(expected_revision) is not str or _shared._TOKEN.fullmatch(expected_revision) is None):
-            raise ConfigEditFailure(_invalid(lease))
+            raise ConfigEditFailure(_invalid(lease, profile=profile))
         if expected_revision != checkout.revision:
-            raise ConfigEditFailure(_invalid(lease, "stale_revision"))
+            raise ConfigEditFailure(_invalid(lease, "stale_revision", profile=profile))
         with lease.workflow_recovery_scope(checkout._revision):
             pass  # Second read-only qualification; no mutation before confirmation.
         token = _shared.uuid.uuid4().hex
@@ -703,17 +733,17 @@ def prepare_github_workflow_recovery(lease: InitRootLease, checkout: WorkflowRec
         raise ConfigEditFailure(_failure(lease, error)) from None
 
 
-def apply_github_workflow_recovery(lease: InitRootLease, plan: PreparedWorkflowRecovery) -> CoreEditOutcome:
+def _apply_recovery(lease: InitRootLease, plan: PreparedWorkflowRecovery, profile: tx.TypedEditProfile) -> CoreEditOutcome:
     if (not _prepared(plan) or plan._state != _shared._PREPARED
             or plan._checkout._state != _shared._PREPARED):
-        return _invalid(lease)
+        return _invalid(lease, profile=profile)
     # Consume before lock acquisition. An old Apply token, failed recheck, or
     # lost return cannot become another recovery grant.
     object.__setattr__(plan, "_state", _shared._RETIRED)
     checkout = plan._checkout
     object.__setattr__(checkout, "_state", _shared._RETIRED)
-    if not _lease_matches(lease) or lease is not checkout._lease:
-        return _invalid(lease)
+    if not _lease_matches(lease, profile) or lease is not checkout._lease or checkout._profile is not profile:
+        return _invalid(lease, profile=profile)
     try:
         with lease.workflow_recovery_scope(checkout._revision) as workspace:
             result = workspace.apply_workflow_recovery(checkout._revision)
@@ -722,13 +752,32 @@ def apply_github_workflow_recovery(lease: InitRootLease, plan: PreparedWorkflowR
     return _shared._native_outcome(_shared._native_contract(), result)
 
 
-def discard_github_workflow_recovery(authority: WorkflowRecoveryCheckout | PreparedWorkflowRecovery) -> None:
+def _discard_recovery(authority: WorkflowRecoveryCheckout | PreparedWorkflowRecovery, profile: tx.TypedEditProfile) -> None:
     if _checkout(authority):
         checkout = authority
     elif _prepared(authority):
         checkout = authority._checkout
     else:
         _shared._reject("invalid_params")
+    if checkout._profile is not profile or not _lease_matches(checkout._lease, profile):
+        _shared._reject("invalid_params")
     object.__setattr__(checkout, "_state", _shared._RETIRED)
     if checkout._prepared is not None:
         object.__setattr__(checkout._prepared, "_state", _shared._RETIRED)
+
+
+def capture_github_workflow_recovery(lease: InitRootLease) -> WorkflowRecoveryCheckout:
+    return _capture_recovery(lease, _PROFILE)
+
+
+def prepare_github_workflow_recovery(lease: InitRootLease, checkout: WorkflowRecoveryCheckout,
+                                     expected_revision: str) -> PreparedWorkflowRecovery:
+    return _prepare_recovery(lease, checkout, expected_revision, _PROFILE)
+
+
+def apply_github_workflow_recovery(lease: InitRootLease, plan: PreparedWorkflowRecovery) -> CoreEditOutcome:
+    return _apply_recovery(lease, plan, _PROFILE)
+
+
+def discard_github_workflow_recovery(authority: WorkflowRecoveryCheckout | PreparedWorkflowRecovery) -> None:
+    _discard_recovery(authority, _PROFILE)

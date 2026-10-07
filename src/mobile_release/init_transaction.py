@@ -238,6 +238,12 @@ def _descriptor(name: str, flags: int, mode: int = 0o600, *, dir_fd: int,
 
 def _read(fd: int, name: str, limit: int = MAX_FILE_BYTES, *,
           owner: InitWorkspace | None = None) -> tuple[dict[str, Any], bytes] | None:
+    # Only the explicit registered configuration-recovery lease narrows these
+    # existing reads. Normal/workflow reads retain their exact prior limits.
+    if (owner is not None and owner._workflow_recovery_mode and owner._scope is not None
+            and owner._scope.lease._configuration_recovery_mode):
+        from .github_workflow_recovery import _configuration_read_limit
+        limit = min(limit, _configuration_read_limit(owner, name))
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     opened = False
     try:
@@ -449,7 +455,8 @@ class InitWorkspace:
         from .init_workspace_custody import LockedInitScope
         _require(type(scope) is LockedInitScope and scope.lease._workflow_recovery_mode
                  and not scope.lease._image_recovery_mode and not scope.lease._saved_text_recovery_mode
-                 and scope.lease.profile is TypedEditProfile.GITHUB_WORKFLOWS,
+                 and scope.lease.profile is (TypedEditProfile.CONFIGURATION
+                     if scope.lease._configuration_recovery_mode else TypedEditProfile.GITHUB_WORKFLOWS),
                  "workflow recovery requires its original registered lock scope")
         scope.check()
         workspace = cls(scope.lease.root)  # Fresh and deliberately untyped.

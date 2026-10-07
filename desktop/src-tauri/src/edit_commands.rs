@@ -72,6 +72,39 @@ pub(crate) fn status(body: &Value) -> Result<Status, BridgeError> { decode(body,
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigurationRecoveryOpen { pub project_id: String, pub intent: crate::edit_protocol::RecoveryIntent }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConfigurationRecoveryApply {
+    pub session_id: String, pub plan_token: String, pub intent: crate::edit_protocol::RecoveryIntent,
+}
+pub(crate) enum ConfigurationOpen { Edit(Open), Recover(ConfigurationRecoveryOpen) }
+pub(crate) enum ConfigurationPrepare { Edit(PrepareConfigEdit), Recover(crate::edit_protocol::PrepareConfigurationRecovery) }
+pub(crate) enum ConfigurationApply { Edit(Apply), Recover(ConfigurationRecoveryApply) }
+pub(crate) fn configuration_open(body: &Value) -> Result<ConfigurationOpen, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: ConfigurationRecoveryOpen = decode(body, 256)?;
+        if !crate::protocol::valid_id(&value.project_id) { return Err(BridgeError::invalid()); }
+        Ok(ConfigurationOpen::Recover(value))
+    } else { open(body).map(ConfigurationOpen::Edit) }
+}
+pub(crate) fn configuration_prepare(body: &Value) -> Result<ConfigurationPrepare, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: crate::edit_protocol::PrepareConfigurationRecovery = decode(body, 256)?;
+        if !token(&value.session_id) || !token(&value.revision) { return Err(BridgeError::invalid()); }
+        Ok(ConfigurationPrepare::Recover(value))
+    } else { prepare(body).map(ConfigurationPrepare::Edit) }
+}
+pub(crate) fn configuration_apply(body: &Value) -> Result<ConfigurationApply, BridgeError> {
+    if body.get("intent").is_some() {
+        let value: ConfigurationRecoveryApply = decode(body, 256)?;
+        if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
+        Ok(ConfigurationApply::Recover(value))
+    } else { apply(body).map(ConfigurationApply::Edit) }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct WorkflowRecoveryOpen {
     pub project_id: String,
     pub intent: crate::github_workflow_edit_protocol::RecoveryIntent,
@@ -180,6 +213,35 @@ mod tests {
         assert!(workflow_prepare(&bad).is_err());
         let mut bad = body; bad["toolingRepository"] = json!("é".repeat(71));
         assert!(workflow_prepare(&bad).is_err());
+    }
+
+    #[test]
+    fn configuration_recovery_commands_are_closed_and_preserve_normal_save() {
+        let open_body=json!({"projectId":"project-1","intent":"recover"});
+        let prepare_body=json!({"sessionId":SESSION,"revision":REVISION,"intent":"recover"});
+        let apply_body=json!({"sessionId":SESSION,"planToken":REVISION,"intent":"recover"});
+        assert!(matches!(configuration_open(&open_body),Ok(ConfigurationOpen::Recover(_))));
+        assert!(matches!(configuration_prepare(&prepare_body),Ok(ConfigurationPrepare::Recover(_))));
+        assert!(matches!(configuration_apply(&apply_body),Ok(ConfigurationApply::Recover(_))));
+        assert!(open(&open_body).is_err());assert!(prepare(&prepare_body).is_err());assert!(apply(&apply_body).is_err());
+        assert!(matches!(configuration_open(&json!({"projectId":"project-1"})),Ok(ConfigurationOpen::Edit(_))));
+        assert!(matches!(configuration_prepare(&json!({"sessionId":SESSION,"revision":REVISION,"expectedBase":null,
+            "draft":{},"draftRevision":u32::MAX,"baselineGeneration":0})),Ok(ConfigurationPrepare::Edit(_))));
+        assert!(matches!(configuration_apply(&json!({"sessionId":SESSION,"planToken":REVISION})),Ok(ConfigurationApply::Edit(_))));
+        for value in [Value::Null,json!(false),json!("edit"),json!("Recover"),json!(["recover"])] {
+            let mut open=open_body.clone();open["intent"]=value.clone();assert!(configuration_open(&open).is_err());
+            let mut prepare=prepare_body.clone();prepare["intent"]=value.clone();assert!(configuration_prepare(&prepare).is_err());
+            let mut apply=apply_body.clone();apply["intent"]=value;assert!(configuration_apply(&apply).is_err());
+        }
+        for key in ["root","registeredIdentity","files","force","draft","expectedBase","draftRevision","baselineGeneration"] {
+            let mut open=open_body.clone();open[key]=Value::Null;assert!(configuration_open(&open).is_err());
+            let mut prepare=prepare_body.clone();prepare[key]=Value::Null;assert!(configuration_prepare(&prepare).is_err());
+            let mut apply=apply_body.clone();apply[key]=Value::Null;assert!(configuration_apply(&apply).is_err());
+        }
+        assert!(configuration_prepare(&json!({"sessionId":SESSION,"revision":REVISION})).is_err());
+        assert!(configuration_apply(&json!({"sessionId":SESSION,"planToken":"not-a-token","intent":"recover"})).is_err());
+        assert!(close(&json!({"sessionId":SESSION,"intent":"recover"})).is_err());
+        assert!(status(&json!({"intent":"recover"})).is_err());
     }
 
     #[test]
