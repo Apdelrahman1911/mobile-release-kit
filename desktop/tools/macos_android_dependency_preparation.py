@@ -932,9 +932,10 @@ def inventory(work, verification, clock):
             'locksAreOriginalGradleTaskOutputs': True, 'rows': sorted(rows, key=lambda r: tuple(r.values()))}
 
 
-def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=None):
-    """Closed public facts from one returned stderr; never arbitrary message text."""
-    need(type(stderr) is bytes and len(stderr) <= 2 << 20, 'gradle-diagnostic-input-bound')
+def gradle_failure_projection(stderr, work, project_raw, verification, *, stdout=b'', clock=None):
+    """Closed public facts from both returned streams; never arbitrary message text."""
+    need(type(stderr) is bytes and type(stdout) is bytes and len(stderr) + len(stdout) <= 2 << 20,
+         'gradle-diagnostic-input-bound')
     for raw, name in ((project_raw, 'project-v1.json'), (verification, 'verification-v1.xml')):
         need(type(raw) is bytes and (len(raw), digest(raw)) == tuple(RESOURCES[
             'desktop/tools/android_dependency_preparation_data/' + name]), 'gradle-diagnostic-public-source')
@@ -984,7 +985,14 @@ def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=
         'javax.net.ssl.SSLException', 'javax.net.ssl.SSLHandshakeException',
         'java.security.cert.CertificateException', 'java.security.cert.CertPathValidatorException',
         'sun.security.provider.certpath.SunCertPathBuilderException'}
+    def public_class(value):
+        # Namespace syntax is bounded context, not independent origin proof.
+        return len(value) <= 221 and re.fullmatch(
+            r'(?:org[.]gradle|com[.]android|java|javax|groovy|org[.]codehaus[.]groovy)'
+            r'(?:[.][A-Za-z_$][A-Za-z0-9_$]{0,63}){1,12}', value) is not None
     symbols = {
+        'JdkImageTransform', 'android.useAndroidX', 'android.enableJetifier',
+        'core-for-system-modules.jar', 'javaCompiler', 'jlink',
         'dependencyVerificationMode', 'DependencyVerificationMode', 'LockMode', 'RepositoriesMode',
         'org.gradle.api.artifacts.dsl.LockMode', 'org.gradle.api.artifacts.verification.DependencyVerificationMode',
         'org.gradle.api.initialization.resolve.RepositoriesMode', 'STRICT', 'FAIL_ON_PROJECT_REPOS',
@@ -1000,6 +1008,17 @@ def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=
         ':app:releaseCompileClasspath', ':app:releaseRuntimeClasspath',
         ':app:compileReleaseJavaWithJavac', ':app:processReleaseResources', ':app:packageReleaseBundle'}
     templates = (
+        ('execution failed for task', 'task-execution-failed'),
+        ('read-only file system', 'filesystem-read-only'),
+        ('cannot run program', 'executable-launch-failed'),
+        ('bad cpu type', 'executable-cpu-unsupported'),
+        ('no such file or directory', 'filesystem-entry-missing'),
+        ('jdkimagetransform', 'jdk-image-transform-mentioned'),
+        ('android.useandroidx', 'androidx-property-mentioned'),
+        ('license for package', 'sdk-license-mentioned'),
+        ('licenses have not been accepted', 'sdk-license-not-accepted'),
+        ('a problem was found with the configuration of task', 'task-configuration-invalid'),
+        ('problems were found with the configuration of task', 'task-configuration-invalid'),
         ('a problem occurred evaluating', 'script-evaluation-failed'),
         ('a problem occurred configuring', 'project-configuration-failed'),
         ('could not compile', 'script-compilation-failed'),
@@ -1037,70 +1056,101 @@ def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=
         ('cannot allocate memory', 'memory-allocation-failed'),
         ('permission denied', 'filesystem-permission-denied'), ('operation not permitted', 'operation-not-permitted'))
     report = {'schemaVersion': 1, 'classification': 'bounded-public-gradle-failure-projection-not-rootcause-proof',
-        'stderrBytes': len(stderr), 'stderrSha256': digest(stderr), 'sections': [], 'causes': [],
+        'stderrBytes': len(stderr), 'stderrSha256': digest(stderr),
+        'stdoutBytes': len(stdout), 'stdoutSha256': digest(stdout), 'sections': [], 'causes': [], 'tasks': [], 'frames': [],
         'facts': [], 'locations': [], 'modules': [], 'symbols': [], 'repositories': [],
         'scan': {'lines': 0, 'longLines': 0, 'invalidLines': 0, 'unknownCauses': 0,
-                 'inputTruncated': False, 'factsTruncated': False}}
-    limits = {'sections': 4, 'causes': 16, 'facts': 32, 'locations': 8, 'modules': 8, 'symbols': 16, 'repositories': 2}
+                 'inputTruncated': False, 'factsTruncated': False, 'streamLines': {'stderr': 0, 'stdout': 0}}}
+    limits = {'sections': 4, 'causes': 16, 'facts': 32, 'locations': 8, 'modules': 8, 'symbols': 16, 'repositories': 2, 'tasks': 8, 'frames': 4}
+    def trim():
+        # Never discard all recognized detail merely because optional fields
+        # saturate. Preserve deepest causes/frames and actual failure markers.
+        while len(encoded(report)) > (12 << 10) - 512:
+            report['scan']['factsTruncated'] = True
+            for optional in ('symbols', 'repositories', 'modules', 'locations', 'facts', 'sections', 'tasks', 'frames', 'causes'):
+                if report[optional]:
+                    report[optional].pop(0); break
+            else: raise Refused('gradle-diagnostic-output-bound')
     def add(key, item):
         if item in report[key]: return
         if len(report[key]) == limits[key]:
             report['scan']['factsTruncated'] = True
-            if key == 'causes': report[key].pop(0)  # Keep the deepest bounded cause chain.
+            if key in ('causes', 'frames'): report[key].pop(0)  # Keep deepest public context.
             else: return
         report[key].append(item)
-    section = 'unspecified'; cause_index = 0; at = 0
+        trim()
+    cause_index = 0
     section_names = {'* Where:': 'where', '* What went wrong:': 'what-went-wrong',
                      '* Exception is:': 'exception', '* Try:': 'try'}
-    while at < len(stderr) and report['scan']['lines'] < 4096:
-        if clock: clock.check()
-        end = stderr.find(b'\n', at)
-        if end < 0: end = len(stderr)
-        length = end - at; start = at; at = min(end + 1, len(stderr))
-        report['scan']['lines'] += 1
-        if length > 4096:
-            report['scan']['longLines'] += 1; continue
-        raw = stderr[start:end].rstrip(b'\r')
-        if any(byte < 32 and byte != 9 for byte in raw):
-            report['scan']['invalidLines'] += 1; continue
-        try: line = raw.decode('utf-8', 'strict')
-        except UnicodeError:
-            report['scan']['invalidLines'] += 1; continue
-        stripped = line.strip()
-        if stripped in section_names:
-            section = section_names[stripped]; add('sections', section); continue
-        cause = re.match(r'^(?:Caused by:\s*)?([A-Za-z_$][A-Za-z0-9_.$]{0,220})(?::|$)', stripped)
-        if cause and '.' in cause[1]:
-            cause_index += 1
-            if cause[1] in classes:
-                add('causes', {'index': cause_index, 'class': cause[1], 'section': section})
-            else: report['scan']['unknownCauses'] += 1
-        lowered = line.lower()
-        for token, code in templates:
-            if token in lowered: add('facts', code)
-        http = re.search(r'Received status code (400|401|403|404|408|429|500|502|503|504)(?![0-9])', line)
-        if http: add('facts', 'http-' + http[1])
-        for host, label in (('dl.google.com', 'google-maven'), ('repo.maven.apache.org', 'maven-central')):
-            if re.search(r'(?<![A-Za-z0-9.-])' + re.escape(host) + r'(?![A-Za-z0-9.-])', line): add('repositories', label)
-        for symbol in sorted(symbols):
-            if re.search(r'(?<![A-Za-z0-9_.$:-])' + re.escape(symbol) + r'(?![A-Za-z0-9_.$:-])', line):
-                add('symbols', symbol)
-        for module in re.finditer(r'(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.+-]{1,80})(?![A-Za-z0-9_.+-])', line):
-            coordinate = module[1].rstrip('.')
-            if coordinate in coordinates:
-                fact = 'could-not-resolve' if 'could not resolve' in lowered else 'could-not-find' if 'could not find' in lowered else 'mentioned'
-                add('modules', {'coordinate': coordinate, 'fact': fact})
-        for relative, source_lines in sources.items():
-            absolute = str(work / 'run/project' / relative)
-            location = re.search(r'(?<![A-Za-z0-9_./-])' + re.escape(absolute) + r"(?:['\"] line: |:)([0-9]{1,5})(?![0-9])", line)
-            if location:
-                number = int(location[1])
-                if 1 <= number <= len(source_lines):
-                    public = source_lines[number - 1]
-                    add('locations', {'file': 'project/' + relative, 'line': number,
-                                      'sourceLine': public[:192], 'sourceLineTruncated': len(public) > 192})
-    report['scan']['inputTruncated'] = at < len(stderr)
-    report['recognition'] = 'recognized-public-facts' if any(report[k] for k in ('causes', 'facts', 'locations', 'modules', 'symbols')) else 'no-allowlisted-detail'
+    for stream, body in (('stderr', stderr), ('stdout', stdout)):
+        section = 'unspecified'; at = 0; frame_slots = 0
+        while at < len(body) and report['scan']['lines'] < 4096:
+            if clock: clock.check()
+            end = body.find(b'\n', at)
+            if end < 0: end = len(body)
+            length = end - at; start = at; at = min(end + 1, len(body))
+            report['scan']['lines'] += 1; report['scan']['streamLines'][stream] += 1
+            if length > 4096:
+                report['scan']['longLines'] += 1; frame_slots = 0; continue
+            raw = body[start:end].rstrip(b'\r')
+            if any(byte < 32 and byte != 9 for byte in raw):
+                report['scan']['invalidLines'] += 1; frame_slots = 0; continue
+            try: line = raw.decode('utf-8', 'strict')
+            except UnicodeError:
+                report['scan']['invalidLines'] += 1; frame_slots = 0; continue
+            stripped = line.strip()
+            if stripped in section_names:
+                section = section_names[stripped]; add('sections', section); frame_slots = 0; continue
+            cause = re.match(r'^(?:Caused by:\s*)?([A-Za-z_$][A-Za-z0-9_.$]{0,220})(?::|$)', stripped)
+            if cause and '.' in cause[1]:
+                cause_index += 1; frame_slots = 0
+                if cause[1] in classes or public_class(cause[1]):
+                    add('causes', {'index': cause_index, 'class': cause[1], 'section': section, 'stream': stream})
+                    frame_slots = 2
+                else: report['scan']['unknownCauses'] += 1
+            elif frame_slots:
+                frame = re.fullmatch(r'at ([A-Za-z_$][A-Za-z0-9_.$]{0,220})[.]'
+                    r'([A-Za-z_$][A-Za-z0-9_$]{0,63}|<init>|<clinit>)[(]'
+                    r'([A-Za-z_$][A-Za-z0-9_$]{0,95}[.](?:java|kt|groovy)):([1-9][0-9]{0,5})[)]', stripped)
+                if frame and public_class(frame[1]):
+                    add('frames', {'causeIndex': cause_index, 'class': frame[1], 'method': frame[2],
+                                   'file': frame[3], 'line': int(frame[4]), 'stream': stream})
+                    frame_slots -= 1
+                else: frame_slots = 0
+            if stream == 'stderr':
+                task = re.fullmatch(r"Execution failed for task '(:app:[A-Za-z_$][A-Za-z0-9_$]{0,95})'[.]", stripped)
+                marker = 'task-execution-failed'
+            else:
+                task = re.fullmatch(r'> Task (:app:[A-Za-z_$][A-Za-z0-9_$]{0,95}) FAILED', stripped)
+                marker = 'task-output-failed'
+            if task: add('tasks', {'task': task[1], 'stream': stream, 'marker': marker})
+            lowered = line.lower()
+            for token, code in templates:
+                if token in lowered: add('facts', code)
+            http = re.search(r'Received status code (400|401|403|404|408|429|500|502|503|504)(?![0-9])', line)
+            if http: add('facts', 'http-' + http[1])
+            for host, label in (('dl.google.com', 'google-maven'), ('repo.maven.apache.org', 'maven-central')):
+                if re.search(r'(?<![A-Za-z0-9.-])' + re.escape(host) + r'(?![A-Za-z0-9.-])', line): add('repositories', label)
+            for symbol in sorted(symbols):
+                if re.search(r'(?<![A-Za-z0-9_.$:-])' + re.escape(symbol) + r'(?![A-Za-z0-9_.$:-])', line):
+                    add('symbols', symbol)
+            for module in re.finditer(r'(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.+-]{1,80})(?![A-Za-z0-9_.+-])', line):
+                coordinate = module[1].rstrip('.')
+                if coordinate in coordinates:
+                    fact = 'could-not-resolve' if 'could not resolve' in lowered else 'could-not-find' if 'could not find' in lowered else 'mentioned'
+                    add('modules', {'coordinate': coordinate, 'fact': fact})
+            for relative, source_lines in sources.items():
+                absolute = str(work / 'run/project' / relative)
+                location = re.search(r'(?<![A-Za-z0-9_./-])' + re.escape(absolute) + r"(?:['\"] line: |:)([0-9]{1,5})(?![0-9])", line)
+                if location:
+                    number = int(location[1])
+                    if 1 <= number <= len(source_lines):
+                        public = source_lines[number - 1]
+                        add('locations', {'file': 'project/' + relative, 'line': number,
+                                          'sourceLine': public[:192], 'sourceLineTruncated': len(public) > 192})
+        if at < len(body): report['scan']['inputTruncated'] = True
+    report['recognition'] = 'recognized-public-facts' if any(report[k] for k in ('causes', 'frames', 'tasks', 'facts', 'locations', 'modules', 'symbols')) else 'no-allowlisted-detail'
+    trim()  # Final counter/recognition changes share the same aggregate bound.
     need(len(encoded(report)) <= (12 << 10) - 512, 'gradle-diagnostic-output-bound')
     return report
 
@@ -1108,11 +1158,12 @@ def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=
 def publish_gradle_failure(work, result, project_raw, verification, clock):
     """Failure-only diagnostic; caller still raises its original task refusal."""
     try:
-        value = gradle_failure_projection(result.stderr, work, project_raw, verification, clock=clock)
+        value = gradle_failure_projection(result.stderr, work, project_raw, verification, stdout=result.stdout, clock=clock)
     except BaseException:
         value = {'schemaVersion': 1, 'classification': 'bounded-public-gradle-failure-projection-not-rootcause-proof',
                  'recognition': 'projection-unavailable', 'stderrBytes': len(result.stderr),
-                 'stderrSha256': digest(result.stderr)}
+                 'stderrSha256': digest(result.stderr), 'stdoutBytes': len(result.stdout),
+                 'stdoutSha256': digest(result.stdout)}
     value.update(source=os.environ['GITHUB_SHA'], role='android-dependency-lock-task',
                  originalReturncode=result.returncode, originalTaskSuccess=False)
     try: publish_preparation(work, 'evidence/gradle-failure.json', encoded(value), clock=clock)

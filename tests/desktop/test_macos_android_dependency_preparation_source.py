@@ -904,6 +904,98 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertLessEqual(len(public.encode()), 12 << 10)
         for private in ('PRIVATE-', str(work), 'com.private', 'INTERNAL-MODULE', 'https://', 'token='):
             self.assertNotIn(private, public)
+        # Both original streams, previously omitted RuntimeException and direct
+        # public-source frames; no exception message or private task/path escapes.
+        stderr_context = ("* What went wrong:\nExecution failed for task ':app:processReleaseResources'.\n"
+            "* Exception is:\norg.gradle.api.tasks.TaskExecutionException: PRIVATE-OUTER\n"
+            "\tat org.gradle.api.tasks.TaskExecutionException.report(TaskExecutionException.java:41)\n"
+            "Caused by: java.lang.RuntimeException: PRIVATE-INNER\n"
+            "\tat com.android.build.gradle.internal.tasks.ResourceTask.run(ResourceTask.kt:73)\n"
+            "\tat com.android.build.gradle.internal.tasks.ResourceTask.invoke(ResourceTask.kt:74)\n"
+            "\tat com.android.build.gradle.internal.tasks.ResourceTask.extra(ResourceTask.kt:75)\n"
+            "Caused by: org.gradleSecret.PRIVATEError: PRIVATE-NAMESPACE\n"
+            "\tat com.private.Secret.call(/PRIVATE/PATH/File.java:7)\n"
+            "Execution failed for task ':private:PRIVATE_TASK'.\n").encode()
+        stdout_context = ("> Task :app:processReleaseResources FAILED\n"
+            "> Task :private:PRIVATE_TASK FAILED\n"
+            "> Task :app:PRIVATE/TASK FAILED\n"
+            "Read-only file system: /PRIVATE/PATH\n").encode()
+        context = helper.gradle_failure_projection(stderr_context, work, project_raw, verification, stdout=stdout_context)
+        self.assertEqual((context['stdoutBytes'], context['stdoutSha256']), (len(stdout_context), helper.digest(stdout_context)))
+        self.assertEqual(context['scan']['streamLines']['stderr'] + context['scan']['streamLines']['stdout'], context['scan']['lines'])
+        self.assertEqual([r['class'] for r in context['causes']],
+                         ['org.gradle.api.tasks.TaskExecutionException', 'java.lang.RuntimeException'])
+        self.assertEqual(context['scan']['unknownCauses'], 1)
+        self.assertEqual([(r['task'], r['stream']) for r in context['tasks']],
+                         [(':app:processReleaseResources', 'stderr'), (':app:processReleaseResources', 'stdout')])
+        self.assertEqual([(r['causeIndex'], r['file'], r['line']) for r in context['frames']],
+                         [(1, 'TaskExecutionException.java', 41), (2, 'ResourceTask.kt', 73), (2, 'ResourceTask.kt', 74)])
+        self.assertIn('filesystem-read-only', context['facts'])
+        self.assertNotIn('PRIVATE', helper.encoded(context).decode())
+        stdout_only = helper.gradle_failure_projection(b'', work, project_raw, verification, stdout=stdout_context)
+        self.assertEqual(stdout_only['tasks'][0]['stream'], 'stdout')
+        self.assertIn('filesystem-read-only', stdout_only['facts'])
+        shared = helper.gradle_failure_projection(b'x\n' * 4095, work, project_raw, verification,
+                                                  stdout=b'> Task :app:bundleRelease FAILED\nignored\n')
+        self.assertEqual(shared['scan']['lines'], 4096); self.assertTrue(shared['scan']['inputTruncated'])
+        self.assertEqual(shared['scan']['streamLines'], {'stderr': 4095, 'stdout': 1})
+        self.assertEqual(shared['tasks'][0]['task'], ':app:bundleRelease')
+        helper.gradle_failure_projection(b'x' * (1 << 20), work, project_raw, verification, stdout=b'y' * (1 << 20))
+        with self.assertRaisesRegex(helper.Refused, '^gradle-diagnostic-input-bound$'):
+            helper.gradle_failure_projection(b'x' * (1 << 20), work, project_raw, verification, stdout=b'y' * ((1 << 20) + 1))
+        for public in ('org.gradle', 'com.android', 'java', 'javax', 'groovy', 'org.codehaus.groovy'):
+            diagnostic = ('Caused by: ' + public + '.SomeException: PRIVATE\n'
+                '\tat ' + public + '.SomeClass.run(SomeClass.java:17)\n').encode()
+            admitted = helper.gradle_failure_projection(diagnostic, work, project_raw, verification)
+            self.assertEqual(admitted['causes'][0]['class'], public + '.SomeException')
+            self.assertEqual(admitted['frames'][0]['file'], 'SomeClass.java')
+        for invalid in ('org.gradleSecret.Hidden', 'com.androidPrivate.Hidden', 'private.Secret',
+                        'java..Hidden', 'java.' + 'x' * 65, 'org.gradle.' + 'x' * 221):
+            refused = helper.gradle_failure_projection(('Caused by: ' + invalid + ': PRIVATE\n').encode(), work, project_raw, verification)
+            self.assertEqual(refused['causes'], [])
+        for frame in ('at java.lang.Test.call(/private/Secret.java:1)', 'at java.lang.Test.call(Secret.java:0)',
+                      'at java.lang.Test.call(Secret.java:1000000)', 'at java.lang.Test.call(Secret.java:1) PRIVATE',
+                      'at java.lang.Test.' + 'm' * 65 + '(Secret.java:1)',
+                      'at java.lang.Test.call(Secret.java:1)\x00'):
+            refused = helper.gradle_failure_projection(('Caused by: java.lang.RuntimeException: PRIVATE\n' + frame + '\n').encode(),
+                                                       work, project_raw, verification)
+            self.assertEqual(refused['frames'], [])
+        # Worst-size admitted context must trim optional facts without dropping
+        # everything into an unavailable projection. Preserve deepest causes.
+        long_class = 'org.gradle.' + ('A' * 63 + '.') * 3 + 'B' * 18
+        saturated = []
+        for index in range(18):
+            saturated += ['Caused by: ' + long_class + ': PRIVATE',
+                'at ' + long_class + '.' + 'm' * 64 + '(' + 'F' * 96 + '.java:' + str(index + 1) + ')',
+                'at ' + long_class + '.' + 'n' * 64 + '(' + 'G' * 96 + '.kt:' + str(index + 1) + ')']
+        projection_ast = next(n for n in ast.parse((ROOT / 'desktop/tools/macos_android_dependency_preparation.py').read_bytes()).body
+                              if isinstance(n, ast.FunctionDef) and n.name == 'gradle_failure_projection')
+        source_literals = {n.targets[0].id: ast.literal_eval(n.value) for n in projection_ast.body
+                           if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                           and n.targets[0].id in ('templates', 'symbols')}
+        saturated += ['Context: ' + phrase for phrase, _ in source_literals['templates']]
+        saturated += ['Context: ' + symbol for symbol in sorted(source_literals['symbols'], key=len, reverse=True)]
+        import xml.etree.ElementTree as ET
+        coordinates = [':'.join(node.attrib[k] for k in ('group', 'name', 'version'))
+                       for node in ET.fromstring(verification).findall('{*}components/{*}component')]
+        saturated += ['Context: ' + coordinate for coordinate in sorted(coordinates, key=len, reverse=True)[:8]]
+        long_lines = []
+        for name, body in json.loads(project_raw)['files'].items():
+            if name.removeprefix('project/') in ('build.gradle', 'settings.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml'):
+                for number, line in enumerate(base64.b64decode(body).decode().splitlines(), 1):
+                    long_lines.append((len(line), name.removeprefix('project/'), number))
+        saturated += [str(work / 'run/project' / name) + ':' + str(number)
+                      for _, name, number in sorted(long_lines, reverse=True)[:8]]
+        stdout_tasks = ''.join('> Task :app:' + 'T' * 94 + str(i) + ' FAILED\n' for i in range(8)).encode()
+        saturated_value = helper.gradle_failure_projection(('\n'.join(saturated) + '\n').encode(), work, project_raw, verification,
+                                                          stdout=stdout_tasks)
+        self.assertLessEqual(len(helper.encoded(saturated_value)), (12 << 10) - 512)
+        self.assertEqual(saturated_value['recognition'], 'recognized-public-facts')
+        self.assertTrue(saturated_value['scan']['factsTruncated'])
+        self.assertEqual(saturated_value['causes'][-1]['index'], 18)
+        self.assertEqual([r['causeIndex'] for r in saturated_value['frames']], [17, 17, 18, 18])
+        self.assertEqual(len(saturated_value['tasks']), 8)
+        self.assertNotIn('PRIVATE', helper.encoded(saturated_value).decode())
         unknown = helper.gradle_failure_projection(b'PRIVATE-ONLY\nCaused by: com.private.Hidden: PRIVATE\n', work, project_raw, verification)
         self.assertEqual(unknown['recognition'], 'no-allowlisted-detail')
         self.assertEqual(unknown['scan']['unknownCauses'], 1)
@@ -923,7 +1015,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         def interrupted(*args, **kwargs): raise KeyboardInterrupt('PRIVATE-PARSER-FAULT')
         helper.gradle_failure_projection = interrupted
         helper.publish_preparation = lambda work, name, raw, clock: emitted.append((name, json.loads(raw)))
-        result = types.SimpleNamespace(returncode=1, stderr=stderr)
+        result = types.SimpleNamespace(returncode=1, stderr=stderr, stdout=b'')
         try:
             helper.publish_gradle_failure(work, result, project_raw, verification, Clock())
             self.assertEqual(emitted[0][0], 'evidence/gradle-failure.json')
