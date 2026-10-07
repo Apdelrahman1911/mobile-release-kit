@@ -105,6 +105,7 @@ jobs:
             ${{ steps.work.outputs.root }}/evidence/gradle-failure.json
             ${{ steps.work.outputs.root }}/evidence/receipt.json
             ${{ steps.work.outputs.root }}/evidence/inventory.json
+            ${{ steps.work.outputs.root }}/evidence/inventory-drift.json
             ${{ steps.work.outputs.root }}/evidence/buildscript-gradle.lockfile
             ${{ steps.work.outputs.root }}/evidence/app-gradle.lockfile
           if-no-files-found: error

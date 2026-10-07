@@ -135,6 +135,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertIn('2+3+3+1+37+2+2=50', workflow)
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('python-version: \'3.14.7\'', workflow)
+        self.assertEqual(workflow.count('${{ steps.work.outputs.root }}/evidence/inventory-drift.json\n'), 1)
         self.assertNotIn("macos_android_dependency_preparation.py observe-sdk", workflow)
         self.assertIn("macos_android_dependency_preparation.py prepare-b", workflow)
         self.assertIn("MRK_PREPARATION_EVIDENCE_UPLOAD", source)
@@ -657,6 +658,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             self.assertTrue(changed)
             with self.assertRaisesRegex(helper.Refused, '^preparation-output-bound$'):
                 helper.publish_preparation(work, '../outside', b'x')
+            (work / 'evidence').mkdir(mode=0o700)
+            with self.assertRaisesRegex(helper.Refused, '^preparation-output-bound$'):
+                helper.publish_preparation(work, 'evidence/inventory-drift.json', b'x' * ((1 << 20) + 1), clock=Clock())
+            self.assertFalse((work / 'evidence/inventory-drift.json').exists())
+            helper.publish_preparation(work, 'evidence/inventory-drift.json', b'x' * (1 << 20), clock=Clock())
+            self.assertEqual((work / 'evidence/inventory-drift.json').read_bytes(), b'x' * (1 << 20))
 
         # Tiny real readonly lifecycle; no archives or vendor code. The exact
         # source call-order assertion above covers placement after file sealing.
@@ -1347,7 +1354,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         # Complete B orchestration uses only explicit in-memory tool/reader DATA.
         # Run the actual prepare body, but never a vendor, SDK or network owner.
         # Both late original changes and semantic cache drift forbid a receipt.
-        for failure in (None, 'inventory', 'late-lock', 'late-input', 'early-input', 'early-finish'):
+        for failure in (None, 'inventory', 'inventory-publisher', 'inventory-clock', 'late-lock', 'late-input', 'early-input', 'early-finish'):
             with self.subTest(b_replay=failure), tempfile.TemporaryDirectory(prefix='b-replay-flow-', dir=scratch) as temporary:
                 clocks, events, calls, emitted = [], [], [], []
                 counters = {'input': 0, 'lock': 0}
@@ -1409,9 +1416,15 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                         ['/usr/bin/git', '-C', str(flow.SOURCE), 'status', '--porcelain=v1', '--untracked-files=all'], 10, 16384)
                 def cache_inventory(work, verification, clock):
                     clock.check(); document = flow.b_inventory_document(input_b)
-                    if failure == 'inventory': document['rows'][0]['bytes'] += 1
+                    if failure and failure.startswith('inventory'): document['rows'][0]['bytes'] += 1
                     return document
                 def capture(work, name, raw, *, clock=None):
+                    if name == 'evidence/inventory-drift.json':
+                        self.assertIs(clock, clocks[-1])
+                        if failure == 'inventory-publisher': raise KeyboardInterrupt('inert-diagnostic-publisher')
+                        if failure == 'inventory-clock':
+                            clock.failed = True
+                            clock.check()
                     if clock is not None: clock.check()
                     self.assertIs(type(raw), bytes); emitted.append((name, raw))
                 flow.N = types.SimpleNamespace(PhaseClock=ReplayClock, NormalPhase=ReplayPhase, load_normal_owner=lambda source: object())
@@ -1431,6 +1444,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 try: returned = flow.prepare(Path(temporary), private=object())
                 except BaseException as error: caught = error
                 receipts = [json.loads(raw) for name, raw in emitted if name == 'evidence/receipt.json']
+                drift = [json.loads(raw) for name, raw in emitted if name == 'evidence/inventory-drift.json']
+                if failure == 'inventory':
+                    expected_drift = flow.b_inventory_document(input_b); expected_drift['rows'][0]['bytes'] += 1
+                    self.assertEqual(drift, [{'status': 'refused', 'reason': 'b-inventory-drift',
+                        'source': sha, 'inventory': expected_drift}])
+                else: self.assertEqual(drift, [])
                 if failure in ('early-input', 'early-finish'):
                     self.assertIs(caught, initial_failure)
                     self.assertEqual(events, ['inputs']); self.assertEqual(calls, []); self.assertEqual(emitted, [])
@@ -1451,8 +1470,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 self.assertEqual(calls[5][2:], (900, 2 << 20))
                 if failure is not None:
                     self.assertIsInstance(caught, flow.Refused)
-                    self.assertEqual(str(caught), {'inventory': 'b-inventory-drift',
-                        'late-lock': 'inert-late-lock-post', 'late-input': 'inert-late-input-post'}[failure])
+                    self.assertEqual(str(caught), {'inventory': 'b-inventory-drift', 'inventory-publisher': 'b-inventory-drift',
+                        'inventory-clock': 'b-inventory-drift', 'late-lock': 'inert-late-lock-post', 'late-input': 'inert-late-input-post'}[failure])
                     self.assertEqual(receipts, []); self.assertIsNone(returned)
                     self.assertIn('evidence/failed-commands.json', [name for name, raw in emitted])
                 else:

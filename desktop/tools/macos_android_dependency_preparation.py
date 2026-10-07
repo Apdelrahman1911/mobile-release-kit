@@ -220,7 +220,7 @@ def publish_preparation(work, relative, raw, *, clock=None):
     limits = {'tool-roster.json': 4 << 20, 'directory-roster.json': 4 << 20,
         'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
         'evidence/failed-commands.json': 16384, 'evidence/gradle-failure.json': 12 << 10,
-        'evidence/inventory.json': 1 << 20,
+        'evidence/inventory.json': 1 << 20, 'evidence/inventory-drift.json': 1 << 20,
         'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
         'evidence/receipt.json': 16384, 'run/project/gradle/verification-metadata.xml': 128 << 10,
         'run/project/buildscript-gradle.lockfile': 32 << 10, 'run/project/app/gradle.lockfile': 32 << 10}
@@ -1602,6 +1602,14 @@ def prepare(work, *, private=None):
         need(result.returncode == 0, 'gradle-original-return')
         b_lock_post(work, lock_originals, clock); b_input_post(SOURCE, inputs, clock)
         actual = inventory(work, verification, clock)
+        if actual != b_inventory_document(inputs):
+            # Only checksum-admitted public Maven metadata, never private cache
+            # paths or tool output. Diagnostic failure cannot replace the drift.
+            try:
+                publish_preparation(work, 'evidence/inventory-drift.json', encoded({
+                    'status': 'refused', 'reason': 'b-inventory-drift',
+                    'source': os.environ['GITHUB_SHA'], 'inventory': actual}), clock=clock)
+            except BaseException: pass
         need(actual == b_inventory_document(inputs), 'b-inventory-drift')
         locks = {'buildscript-gradle.lockfile': inputs['raw']['buildscript-gradle.lockfile'],
                  'app/gradle.lockfile': inputs['raw']['app-gradle.lockfile']}
