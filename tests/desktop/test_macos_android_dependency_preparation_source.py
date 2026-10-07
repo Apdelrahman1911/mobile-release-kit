@@ -81,6 +81,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         bound = next(n for n in ast.walk(materializer) if isinstance(n, ast.Call) and len(n.args) == 2
                      and isinstance(n.args[1], ast.Constant) and n.args[1].value == 'fixture-decoded-bound')
         self.assertEqual(ast.literal_eval(bound.args[0].comparators[0]), total)
+        acquisition = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Acquisition')
+        seal = next(n for n in acquisition.body if isinstance(n, ast.FunctionDef) and n.name == 'seal')
+        seal_source = ast.get_source_segment(source, seal)
+        self.assertLess(seal_source.index("'osx-aapt2-member'"), seal_source.index('self.seal_sdk_root()'))
+        self.assertLess(seal_source.index('self.seal_sdk_root()'), seal_source.index('directories = encoded(self.directories)'))
+        self.assertNotIn('self.parent(', seal_source[seal_source.index('self.seal_sdk_root()'):])
         self.assertIn("'pythonExecutable': python_executable", source)
         self.assertIn("value['pythonExecutable'] == observed_python_executable()", source)
         for text in ('N.NormalPhase(', 'N.load_normal_owner(SOURCE)', 'C.compile_archive(',
@@ -613,6 +619,79 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(helper.Refused, '^preparation-output-bound$'):
                 helper.publish_preparation(work, '../outside', b'x')
 
+        # Tiny real readonly lifecycle; no archives or vendor code. The exact
+        # source call-order assertion above covers placement after file sealing.
+        readonly = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_sdk_readonly_data')
+        readonly.N = types.SimpleNamespace(PhaseClock=Clock); readonly.P = transport
+        with tempfile.TemporaryDirectory(prefix='sdk-sealed-', dir=scratch) as temporary:
+            work = Path(temporary); (work / 'tools').mkdir(mode=0o700)
+            a = readonly.Acquisition(work)
+            for relative in ('sdk/package/payload', 'gradle/placeholder'):
+                held, _ = a.parent(relative); readonly.close_chain(*held)
+            sdk = work / 'tools/sdk'; payload = sdk / 'package/payload'
+            payload.write_bytes(b'pin'); payload.chmod(0o444)
+            a.roster = [{'path': 'sdk/package/payload', 'bytes': 3, 'sha256': readonly.digest(b'pin'),
+                         'identity': list(readonly.nine(payload.stat()))}]
+            before = dict(a.directories)
+            try:
+                a.seal_sdk_root()
+                self.assertEqual(stat.S_IMODE(sdk.stat().st_mode), 0o500)
+                self.assertEqual(a.directories['sdk'], list(readonly.nine(sdk.stat())[:5]))
+                self.assertEqual({k: v for k, v in a.directories.items() if k != 'sdk'},
+                                 {k: v for k, v in before.items() if k != 'sdk'})
+                self.assertEqual(payload.read_bytes(), b'pin')
+                with self.assertRaises(PermissionError): (sdk / '.knownPackages').write_bytes(b'not-created')
+                self.assertFalse((sdk / '.knownPackages').exists())
+                for leaf, value in (('tool-roster.json', a.roster), ('directory-roster.json', a.directories)):
+                    (work / leaf).write_bytes(readonly.encoded(value)); (work / leaf).chmod(0o600)
+                self.assertEqual(readonly.tool_post(work, Clock()),
+                    readonly.digest(readonly.encoded(a.roster) + readonly.encoded(a.directories)))
+                sdk.chmod(0o700)
+                with self.assertRaisesRegex(readonly.Refused, '^tool-directory-post$'): readonly.tool_post(work, Clock())
+                (sdk / '.knownPackages').write_bytes(b'inert-unexpected'); sdk.chmod(0o500)
+                with self.assertRaisesRegex(readonly.Refused, '^tool-namespace-changed$'): readonly.tool_post(work, Clock())
+            finally: sdk.chmod(0o700)
+        for mutation in ('symlink', 'mode', 'identity', 'named-swap', 'chmod', 'close', 'chmod-and-close'):
+            with self.subTest(sdk_seal=mutation), tempfile.TemporaryDirectory(prefix='sdk-seal-fault-', dir=scratch) as temporary:
+                work = Path(temporary); (work / 'tools').mkdir(mode=0o700); sdk = work / 'tools/sdk'
+                sdk.mkdir(mode=0o700); outside = work / 'outside'; outside.mkdir(mode=0o700)
+                (outside / 'sentinel').write_bytes(b'unchanged')
+                a = readonly.Acquisition(work); a.directories = {'sdk': list(readonly.nine(sdk.stat())[:5])}
+                if mutation == 'symlink': sdk.rmdir(); sdk.symlink_to(outside, target_is_directory=True)
+                if mutation == 'mode': sdk.chmod(0o500)
+                if mutation == 'identity': a.directories['sdk'][1] += 1
+                opened, closed, chmods = [], [], []; original_os = readonly.os
+                primary = OSError('inert-chmod-primary')
+                def tracked_open(*args, **kwargs):
+                    fd = os.open(*args, **kwargs); opened.append(fd); return fd
+                def tracked_chmod(fd, mode):
+                    chmods.append(mode)
+                    if mutation in ('chmod', 'chmod-and-close'): raise primary
+                    os.fchmod(fd, mode)
+                    if mutation == 'named-swap': sdk.rename(work / 'tools/retained-sdk'); sdk.mkdir(mode=0o700)
+                def tracked_close(fd):
+                    closed.append(fd); os.close(fd)
+                    if mutation in ('close', 'chmod-and-close') and fd == opened[-1]:
+                        raise OSError('inert-consuming-close')
+                readonly.os = types.SimpleNamespace(**dict(vars(os), open=tracked_open, close=tracked_close, fchmod=tracked_chmod))
+                try:
+                    with self.assertRaises((OSError, readonly.Refused)) as caught: a.seal_sdk_root()
+                    if mutation in ('chmod', 'chmod-and-close'): self.assertIs(caught.exception, primary)
+                    if mutation == 'named-swap':
+                        self.assertIsInstance(caught.exception, readonly.Refused)
+                        self.assertEqual(str(caught.exception), 'sdk-seal-post')
+                finally:
+                    readonly.os = original_os
+                    rescued = [fd for fd in opened if fd not in closed]
+                    for fd in rescued: os.close(fd)
+                    for path in (sdk, work / 'tools/retained-sdk'):
+                        if path.exists() and not path.is_symlink(): path.chmod(0o700)
+                self.assertEqual(rescued, []); self.assertEqual(len(closed), len(set(closed)))
+                self.assertEqual(set(opened), set(closed))
+                if mutation in ('symlink', 'mode', 'identity'): self.assertEqual(chmods, [])
+                self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o700)
+                self.assertEqual((outside / 'sentinel').read_bytes(), b'unchanged')
+
     def test_a_transport_consuming_closes_and_final_caller_deadline(self):
         self.assertNotEqual(os.getuid(), 0)
         helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_transport_data')
@@ -907,6 +986,93 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                            {'postCloseDeadlineRequired': False}):
                 modified = dict(value, phaseClock=dict(value['phaseClock'], **change))
                 with self.subTest(clock=change), self.assertRaises(helper.Refused): helper.cleanup_receipt(work, modified, Clock())
+
+        # Fixed successful-disposal gate plus real SDK/roster/FD restoration.
+        # The receipt validator above is exercised separately with full inert
+        # records; here only that established predicate is an inert adapter.
+        disposal = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_sdk_disposal_data')
+        disposal.N = types.SimpleNamespace(PhaseClock=lambda seconds: Clock(), document=normal.document, pairs=normal.pairs)
+        for mutation in ('none', 'wrapper', 'upload', 'receipt', 'digest', 'tools-swap', 'sdk-swap',
+                         'sdk-mode', 'sdk-symlink', 'restore-chmod', 'restore-close', 'restore-primary-and-close'):
+            with self.subTest(sdk_disposal=mutation), tempfile.TemporaryDirectory(prefix='sdk-disposal-', dir=scratch) as temporary:
+                work = Path(temporary); evidence = work / 'evidence'; evidence.mkdir(mode=0o700)
+                for leaf in ('archives', 'tools', 'run'): (work / leaf).mkdir(mode=0o700)
+                sdk = work / 'tools/sdk'; sdk.mkdir(mode=0o700); sdk.chmod(0o500)
+                outside = work / 'outside'; outside.mkdir(mode=0o700); (outside / 'sentinel').write_bytes(b'kept')
+                dirs = {'sdk': list(disposal.nine(sdk.stat())[:5])}
+                raw_rows, raw_dirs = b'[]', disposal.encoded(dirs)
+                for leaf, body in (('tool-roster.json', raw_rows), ('directory-roster.json', raw_dirs)):
+                    (work / leaf).write_bytes(body); (work / leaf).chmod(0o600)
+                value = {'workIdentity': list(disposal.nine(work.stat())[:5]),
+                    'disposalIdentities': {leaf: list(disposal.nine((work / leaf).stat())[:5]) for leaf in ('archives', 'tools', 'run')},
+                    'toolRosterSha256': disposal.digest(raw_rows + raw_dirs)}
+                if mutation == 'digest': value['toolRosterSha256'] = '0' * 64
+                receipt = evidence / 'receipt.json'; receipt.write_bytes(disposal.encoded(value)); receipt.chmod(0o600)
+                if mutation == 'tools-swap': (work / 'tools').rename(work / 'old-tools'); (work / 'tools').mkdir(mode=0o700)
+                if mutation == 'sdk-swap': sdk.rename(work / 'tools/old-sdk'); sdk.mkdir(mode=0o700); sdk.chmod(0o500)
+                if mutation == 'sdk-mode': sdk.chmod(0o700)
+                if mutation == 'sdk-symlink': sdk.rmdir(); sdk.symlink_to(outside, target_is_directory=True)
+                private = disposal.admit_work(work); opened, closed, chmods, deleted = [], [], [], []
+                original = disposal.os, disposal.shutil, disposal.cleanup_receipt
+                fault = OSError('inert-restore-primary')
+                def validate(work, value, clock):
+                    if mutation == 'receipt': raise disposal.Refused('cleanup-receipt')
+                def tracked_open(*args, **kwargs):
+                    fd = os.open(*args, **kwargs); opened.append(fd); return fd
+                def tracked_chmod(fd, mode):
+                    chmods.append(mode)
+                    if mutation in ('restore-chmod', 'restore-primary-and-close'): raise fault
+                    os.fchmod(fd, mode)
+                def tracked_close(fd):
+                    closed.append(fd); os.close(fd)
+                    # Restrict the consuming fault to the separately adopted SDK
+                    # restoration FD; roster readers also use tracked originals.
+                    if mutation in ('restore-close', 'restore-primary-and-close') and chmods and fd == opened[-1]:
+                        raise OSError('inert-restoration-close')
+                def retire(leaf, *, dir_fd):
+                    self.assertEqual(chmods, [0o700])
+                    deleted.append(leaf); return original[1].rmtree(leaf, dir_fd=dir_fd)
+                retire.avoids_symlink_attacks = True
+                environment = {'MRK_PREPARATION_WRAPPER_RETURN': '1' if mutation == 'wrapper' else '0',
+                               'MRK_PREPARATION_EVIDENCE_UPLOAD': 'failure' if mutation == 'upload' else 'success'}
+                disposal.os = types.SimpleNamespace(**dict(vars(os), environ=environment,
+                    open=tracked_open, close=tracked_close, fchmod=tracked_chmod))
+                disposal.shutil = types.SimpleNamespace(rmtree=retire); disposal.cleanup_receipt = validate
+                test_primary = None
+                try:
+                    if mutation == 'none': disposal.cleanup(work, private=private)
+                    else:
+                        with self.assertRaises((OSError, disposal.Refused)) as caught: disposal.cleanup(work, private=private)
+                        if mutation in ('restore-chmod', 'restore-primary-and-close'): self.assertIs(caught.exception, fault)
+                except BaseException as error:
+                    test_primary = error; raise
+                finally:
+                    disposal.os, disposal.shutil, disposal.cleanup_receipt = original
+                    rescue_failure = None
+                    try: disposal.close_chain(private['fds'], private['originals'])
+                    except BaseException as error: rescue_failure = error
+                    finally:
+                        # Each owned temporary mode rescue runs even when a
+                        # close or another rescue fails; never mask the test.
+                        for path in (sdk, work / 'tools/old-sdk', work / 'old-tools/sdk'):
+                            try:
+                                if path.exists() and not path.is_symlink(): path.chmod(0o700)
+                            except BaseException as error:
+                                if rescue_failure is None: rescue_failure = error
+                    if test_primary is None and rescue_failure is not None: raise rescue_failure
+                # Descriptor numbers are reusable across separate finite reads;
+                # assert balanced adoptions only after guaranteed fixture rescue.
+                self.assertEqual(len(opened), len(closed))
+                self.assertEqual((outside / 'sentinel').read_bytes(), b'kept')
+                self.assertTrue(receipt.is_file())
+                if mutation == 'none':
+                    self.assertEqual(deleted, ['archives', 'tools', 'run'])
+                    self.assertEqual(chmods, [0o700])
+                    self.assertFalse(any((work / leaf).exists() for leaf in ('archives', 'tools', 'run')))
+                else:
+                    self.assertEqual(deleted, [])
+                    if not mutation.startswith('restore-'): self.assertEqual(chmods, [])
+                    self.assertTrue((work / 'archives').is_dir()); self.assertTrue((work / 'run').is_dir())
 
         # Inert prepare-path adapters prove that the admitted acquisition roster
         # must equal the first live tool POST BEFORE any Java/Gradle entry. These

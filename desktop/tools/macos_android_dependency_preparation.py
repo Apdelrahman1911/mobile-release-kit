@@ -742,6 +742,33 @@ class Acquisition:
                 except BaseException:
                     if primary is None: raise
 
+    def seal_sdk_root(self):
+        # All file-parent operations are complete. Only the fixed SDK root changes.
+        self.point(); held = chain(self.work / 'tools', retained=True)
+        fd = None; primary = None
+        try:
+            fd = os.open('sdk', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=held[0][-1])
+            before = nine(os.fstat(fd))
+            need(list(before[:5]) == self.directories.get('sdk')
+                 and before[:5] == nine(os.stat('sdk', dir_fd=held[0][-1], follow_symlinks=False))[:5]
+                 and stat.S_ISDIR(before[2]) and stat.S_IMODE(before[2]) == 0o700
+                 and before[3] == os.getuid(), 'sdk-seal-original')
+            self.point(); os.fchmod(fd, 0o500); os.fsync(fd)
+            after = nine(os.fstat(fd))
+            need(after[:2] + after[3:5] == before[:2] + before[3:5]
+                 and stat.S_ISDIR(after[2]) and stat.S_IMODE(after[2]) == 0o500
+                 and after[:5] == nine(os.stat('sdk', dir_fd=held[0][-1], follow_symlinks=False))[:5],
+                 'sdk-seal-post')
+            recheck_chain(*held); self.point()
+            self.directories['sdk'] = list(after[:5])
+        except BaseException as error:
+            primary = error; raise
+        finally:
+            try: close_chain(*held, file_fd=fd)
+            except BaseException:
+                if primary is None: raise
+
     def seal(self):
         need(self.files > 0 and len({r['path'] for r in self.roster}) == self.files, 'tool-roster')
         for row in self.roster:
@@ -765,6 +792,7 @@ class Acquisition:
         aapt = next(r for r in self.roster if r['path'] == 'gradle/native/aapt2/aapt2')
         need((aapt['bytes'], aapt['sha256'], aapt['vendorMode']) == (11143368,
              '213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e', 0o100755), 'osx-aapt2-member')
+        self.seal_sdk_root()
         raw = encoded(self.roster); need(len(raw) <= 4 << 20, 'tool-roster-bound')
         directories = encoded(self.directories)
         need(len(directories) <= 4 << 20, 'directory-roster-bound')
@@ -1335,6 +1363,58 @@ def cleanup_receipt(work, value, clock):
              and stat.S_IMODE(identity[2]) == 0o700, 'cleanup-directory-identity')
 
 
+def restore_sdk_for_cleanup(work, private, value, clock):
+    # No full tool rehash: extract SDK identity from these same authenticated raws.
+    rows, _ = read(work / 'tool-roster.json', 4 << 20, clock=clock)
+    dirs, _ = read(work / 'directory-roster.json', 4 << 20, clock=clock)
+    need(digest(rows + dirs) == value['toolRosterSha256'], 'cleanup-sdk-roster-binding')
+    directories = json.loads(dirs, object_pairs_hook=N.pairs,
+                             parse_constant=lambda _: (_ for _ in ()).throw(Refused('cleanup-sdk-roster-shape')))
+    need(type(directories) is dict and len(directories) <= ENTRIES, 'cleanup-sdk-roster-shape')
+    expected = directories.get('sdk')
+    need(type(expected) is list and len(expected) == 5
+         and all(type(v) is int and v >= 0 for v in expected)
+         and stat.S_ISDIR(expected[2]) and stat.S_IMODE(expected[2]) == 0o500
+         and expected[3] == os.getuid(), 'cleanup-sdk-roster-row')
+    fds, originals = private['fds'], private['originals']
+    tools_fd = sdk_fd = None; primary = None
+    try:
+        clock.check(); recheck_chain(fds, originals)
+        tools_fd = os.open('tools', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                           dir_fd=fds[-1])
+        tools_before = nine(os.fstat(tools_fd))[:5]
+        need(list(tools_before) == value['disposalIdentities']['tools']
+             and tools_before == nine(os.stat('tools', dir_fd=fds[-1], follow_symlinks=False))[:5],
+             'cleanup-sdk-tools-original')
+        sdk_fd = os.open('sdk', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=tools_fd)
+        before = nine(os.fstat(sdk_fd))[:5]
+        need(list(before) == expected
+             and before == nine(os.stat('sdk', dir_fd=tools_fd, follow_symlinks=False))[:5],
+             'cleanup-sdk-original')
+        clock.check(); os.fchmod(sdk_fd, 0o700); os.fsync(sdk_fd)
+        after = nine(os.fstat(sdk_fd))[:5]
+        need(after[:2] + after[3:] == before[:2] + before[3:]
+             and stat.S_ISDIR(after[2]) and stat.S_IMODE(after[2]) == 0o700
+             and after == nine(os.stat('sdk', dir_fd=tools_fd, follow_symlinks=False))[:5],
+             'cleanup-sdk-post')
+        need(nine(os.fstat(tools_fd))[:5] == tools_before
+             == nine(os.stat('tools', dir_fd=fds[-1], follow_symlinks=False))[:5], 'cleanup-sdk-tools-post')
+        recheck_chain(fds, originals); clock.check()
+    except BaseException as error:
+        primary = error; raise
+    finally:
+        failure = None
+        # Consume every adopted descriptor once; even a consuming close may fail.
+        closing = [tools_fd, sdk_fd]; tools_fd = sdk_fd = None
+        for fd in reversed(closing):
+            if fd is not None:
+                try: os.close(fd)
+                except BaseException:
+                    if failure is None: failure = Refused('original-close-unknown')
+        if primary is None and failure is not None: raise failure
+
+
 def cleanup(work, *, private=None):
     need(os.environ.get('MRK_PREPARATION_WRAPPER_RETURN') == '0'
          and os.environ.get('MRK_PREPARATION_EVIDENCE_UPLOAD') == 'success'
@@ -1345,6 +1425,10 @@ def cleanup(work, *, private=None):
     fds, originals = private['fds'], private['originals']
     recheck_chain(fds, originals); fd = fds[-1]
     need(list(nine(os.fstat(fd))[:5]) == value['workIdentity'] and shutil.rmtree.avoids_symlink_attacks, 'cleanup-owned-parent')
+    for leaf in ('archives', 'tools', 'run'):
+        need(list(nine(os.stat(leaf, dir_fd=fd, follow_symlinks=False))[:5]) == value['disposalIdentities'][leaf], 'cleanup-child-identity')
+    restore_sdk_for_cleanup(work, private, value, clock)
+    recheck_chain(fds, originals)
     for leaf in ('archives', 'tools', 'run'):
         need(list(nine(os.stat(leaf, dir_fd=fd, follow_symlinks=False))[:5]) == value['disposalIdentities'][leaf], 'cleanup-child-identity')
     for leaf in ('archives', 'tools', 'run'):
