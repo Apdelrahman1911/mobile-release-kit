@@ -1472,7 +1472,7 @@ def failure_base(phase, selection, original, *, engineering=False):
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
          and 1 <= original.returncode <= 255 and type(original.stdout) is bytes and type(original.stderr) is bytes
          and len(original.stdout) + len(original.stderr) <= cap, "normal-diagnostic-original")
-    return {"schemaVersion": 1, "scope": ("engineering-main-ui-failure-diagnostic-only" if engineering
+    value = {"schemaVersion": 1, "scope": ("engineering-main-ui-failure-diagnostic-only" if engineering
             else "normal-macos-ui-failure-diagnostic-only"), "phase": phase,
         "selection": selection, "originalReturncode": original.returncode,
         "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
@@ -1481,6 +1481,9 @@ def failure_base(phase, selection, original, *, engineering=False):
         "queryObservations": [], "requireObservations": [], "dashboardReadiness": None,
         "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
+    if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
+        value["outputDataFailure"] = None
+    return value
 
 
 def normal_failure_diagnostics(phase, selection, original, *, engineering=False):
@@ -1552,6 +1555,154 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                      rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
     guide_rows, guide_seen, guide_invalid = [], set(), False
 
+    # This supplement belongs only to the fixed DATA method. Never promote raw
+    # reason text, dynamic helper messages, or another test's output to a code.
+    output_eligible = "outputDataFailure" in value
+    output_namespace = b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE"
+    output_method = b"-[MRKNormalAppUITests.NormalAppUITests testPositiveAndroidOutputCustodyData"
+    output_scenarios = {name.encode("ascii"): name for name in (
+        'valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start')}
+    output_pattern = (re.escape(output_namespace) + rb"=v1;scenario=(" + b"|".join(output_scenarios)
+                      + rb");sample=after-cleanup-attempt;originalFailurePreserved=1")
+    output_condition = (rb'(?<![A-Za-z0-9_])condition\(("|\\")'
+                        rb'([\x20-\x21\x23-\x5b\x5d-\x7e]{1,128})\1\)')
+    output_codes = {
+        b'fixture: Android AAB byte bound': 'r001',
+        b'fixture: Android AAB exact EOF': 'r002',
+        b'fixture: Android AAB original read': 'r003',
+        b'fixture: Android AAB read bound': 'r004',
+        b'fixture: Android DATA adopted root is not the original': 'r005',
+        b'fixture: Android DATA census accounting': 'r006',
+        b'fixture: Android DATA cleanup original differs': 'r007',
+        b'fixture: Android DATA cleanup root close': 'r008',
+        b'fixture: Android DATA cleanup root replaced': 'r009',
+        b'fixture: Android DATA cleanup row absent': 'r010',
+        b'fixture: Android DATA closed deadline refusal': 'r011',
+        b'fixture: Android DATA created root facts absent': 'r012',
+        b'fixture: Android DATA exact entry limit': 'r013',
+        b'fixture: Android DATA fixed original removal': 'r014',
+        b'fixture: Android DATA hardlink setup': 'r015',
+        b'fixture: Android DATA input parent missing': 'r016',
+        b'fixture: Android DATA late close did not clear state and refuse': 'r017',
+        b'fixture: Android DATA later close refusal': 'r018',
+        b'fixture: Android DATA mode mutation': 'r019',
+        b'fixture: Android DATA original parent replaced': 'r020',
+        b'fixture: Android DATA original parent row absent': 'r021',
+        b'fixture: Android DATA primary closure failure was masked or state retained': 'r022',
+        b'fixture: Android DATA private root retirement': 'r023',
+        b'fixture: Android DATA production close deleted output': 'r024',
+        b'fixture: Android DATA scenario unmapped': 'r025',
+        b'fixture: Android DATA symlink setup': 'r026',
+        b'fixture: Android DATA temporary close': 'r027',
+        b'fixture: Android DATA unopened cleanup root differs': 'r028',
+        b'fixture: Android DATA unopened private root retirement': 'r029',
+        b'fixture: Android XML original consuming close failed': 'r030',
+        b'fixture: Android XML original content differs': 'r031',
+        b'fixture: Android XML resource consuming close failed': 'r032',
+        b'fixture: Android XML resource content or original changed': 'r033',
+        b'fixture: Android XML resource open failed': 'r034',
+        b'fixture: Android XML resource parent changed': 'r035',
+        b'fixture: Android XML resource parent open failed': 'r036',
+        b'fixture: Android XML resource parent shape or binding': 'r037',
+        b'fixture: Android XML resource read failed': 'r038',
+        b'fixture: Android XML resource read limit': 'r039',
+        b'fixture: Android XML resource shape, binding or exact length': 'r040',
+        b'fixture: Android captured AAB mode': 'r041',
+        b'fixture: Android census enumeration conversion': 'r042',
+        b'fixture: Android census enumeration failed': 'r043',
+        b'fixture: Android census enumeration open': 'r044',
+        b'fixture: Android census limit selection': 'r045',
+        b'fixture: Android current build identity shape': 'r046',
+        b'fixture: Android current terminal artifact differs': 'r047',
+        b'fixture: Android earlier consuming close failed': 'r048',
+        b'fixture: Android final output observation was not joined before close': 'r049',
+        b'fixture: Android immutable input changed': 'r050',
+        b'fixture: Android input consuming close failed': 'r051',
+        b'fixture: Android input directory roster': 'r052',
+        b'fixture: Android input parent absent': 'r053',
+        b'fixture: Android input roster consuming close failed': 'r054',
+        b'fixture: Android module output byte bound': 'r055',
+        b'fixture: Android operation output roster': 'r056',
+        b'fixture: Android original Start identity or state differs': 'r057',
+        b'fixture: Android output DATA case deadline': 'r058',
+        b'fixture: Android output DATA cleanup original': 'r059',
+        b'fixture: Android output DATA cleanup parent': 'r060',
+        b'fixture: Android output DATA create leaf': 'r061',
+        b'fixture: Android output DATA creation consuming close': 'r062',
+        b'fixture: Android output DATA exact refusal missing': 'r063',
+        b'fixture: Android output DATA leaf write': 'r064',
+        b'fixture: Android output DATA mkdir': 'r065',
+        b'fixture: Android output DATA private original root differs': 'r066',
+        b'fixture: Android output DATA private root creation': 'r067',
+        b'fixture: Android output DATA temporary consuming close': 'r068',
+        b'fixture: Android output DATA temporary original': 'r069',
+        b'fixture: Android output canonical duplicate': 'r070',
+        b'fixture: Android output census name or entry bound': 'r071',
+        b'fixture: Android output closure is not terminal': 'r072',
+        b'fixture: Android output consuming close failed': 'r073',
+        b'fixture: Android output depth bound': 'r074',
+        b'fixture: Android output enumeration consuming close failed': 'r075',
+        b'fixture: Android output existed before review': 'r076',
+        b'fixture: Android output name encoding': 'r077',
+        b'fixture: Android output name length': 'r078',
+        b'fixture: Android output named binding unavailable': 'r079',
+        b'fixture: Android output named directory changed': 'r080',
+        b'fixture: Android output observation repeated or mixed with Save': 'r081',
+        b'fixture: Android output original POST': 'r082',
+        b'fixture: Android output original alias': 'r083',
+        b'fixture: Android output original directory changed': 'r084',
+        b'fixture: Android output original open': 'r085',
+        b'fixture: Android output parent absent': 'r086',
+        b'fixture: Android output regular leaf shape': 'r087',
+        b'fixture: Android output root absent or type': 'r088',
+        b'fixture: Android output roster changed': 'r089',
+        b'fixture: Android output total byte bound': 'r090',
+        b'fixture: Android output type owner mode or binding': 'r091',
+        b'fixture: Android parsed terminal artifact shape': 'r092',
+        b'fixture: Android positive input prerequisites absent': 'r093',
+        b'fixture: Android private output directory mode': 'r094',
+        b'fixture: Android private root output roster': 'r095',
+        b'fixture: Android project AAB candidate roster': 'r096',
+        b'fixture: Android report byte bound': 'r097',
+        b'fixture: Android report output roster': 'r098',
+        b'fixture: Android report parent roster': 'r099',
+        b'fixture: Android required AAB observations absent': 'r100',
+        b'fixture: Android retained artifact roster': 'r101',
+        b'fixture: Android retained output changed': 'r102',
+        b'fixture: Android root build output roster': 'r103',
+        b'fixture: Android root census bound': 'r104',
+        b'fixture: Android running original identity differs': 'r105',
+        b'fixture: Android terminal original identity differs': 'r106',
+        b'fixture: Android unexpected input-adjacent output': 'r107',
+        b'fixture: Android unrecognized output directory': 'r108',
+        b'fixture: Android unrecognized output leaf': 'r109',
+        b'fixture: Android work or journal remains': 'r110',
+        b'fixture: admitted Android XML pin differs': 'r111',
+        b'fixture: an earlier consuming close failed': 'r112',
+        b'fixture: directory binding changed': 'r113',
+        b'fixture: directory entry changed': 'r114',
+        b'fixture: directory open failed': 'r115',
+        b'fixture: directory original changed': 'r116',
+        b'fixture: fixed Android XML original was not admitted': 'r117',
+        b'fixture: fixed Android XML resource absent or misplaced': 'r118',
+        b'fixture: fixed leaf changed during observation': 'r119',
+        b'fixture: fixed leaf open failed': 'r120',
+        b'fixture: fixed leaf read failed': 'r121',
+        b'fixture: fixed leaf read limit': 'r122',
+        b'fixture: leaf shape/mode/limit': 'r123',
+        b'fixture: missing fixed parent': 'r124',
+        b'fixture: not an original directory': 'r125',
+        b'fixture: original descriptor stat failed': 'r126',
+        b'fixture: owned roster changed during enumeration': 'r127',
+        b'fixture: owned roster conversion failed': 'r128',
+        b'fixture: owned roster limit/duplicate': 'r129',
+        b'fixture: owned roster open failed': 'r130',
+        b'fixture: owned roster read failed': 'r131',
+    } if output_eligible else {}
+    output_markers, output_failures = 0, 0
+    output_scenario = output_reason = output_site = None
+    output_invalid = False
+
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
             if len(value[key]) < maximum:
@@ -1582,6 +1733,37 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             record, offset = body[offset:end], end + 1
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
+            if output_eligible:
+                attempted_marker = (output_namespace in record or (record and output_namespace.startswith(record))
+                    or (not complete and any(record.endswith(output_namespace[:size])
+                                             for size in range(1, len(output_namespace)))))
+                if attempted_marker:
+                    output_markers = min(2, output_markers + 1)
+                    match = re.fullmatch(output_pattern, record) if complete and stream == "stdout" else None
+                    if output_markers != 1 or match is None:
+                        output_invalid = True
+                    else:
+                        output_scenario = output_scenarios[match.group(1)]
+                attempted_site = (b"NormalAppUITests.swift:" in record
+                                  and (output_method in record or not complete))
+                if attempted_site:
+                    output_failures = min(2, output_failures + 1)
+                    site = re.search(locations, record) if complete and stream == "stdout" else None
+                    if (output_failures != 1 or site is None or record.count(output_method) != 1
+                            or record.count(b"NormalAppUITests.swift:") != 1 or int(site.group(1)) > 65535
+                            or (site.group(2) is not None and int(site.group(2)) > 4096)):
+                        output_invalid = True
+                    else:
+                        output_site = (int(site.group(1)), int(site.group(2)) if site.group(2) is not None else None)
+                        payloads = record.count(b"condition(")
+                        if payloads:
+                            payload = re.search(output_condition, record[site.end():]) if payloads == 1 else None
+                            if payload is None:
+                                output_invalid = True
+                            else:
+                                output_reason = output_codes.get(payload.group(2))
+                # Do not continue: existing finite diagnostics retain their exact
+                # findings even when a mixed/partial DATA supplement is refused.
             if engineering and (guide_namespace in record or (record and guide_namespace.startswith(record))
                     or (not complete and any(record.endswith(guide_namespace[:size])
                                              for size in range(1, len(guide_namespace))))):
@@ -1652,8 +1834,15 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         if (site["check"] == "condition" and site["line"] == dashboard_candidate["line"]
                 and dashboard_candidate["stream"] == "stdout"):
             value["dashboardReadiness"] = dashboard_candidate
-    value["status"] = ("unavailable" if require_invalid or guide_invalid else "classified" if any(value[key]
-        for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations")) else "unclassified")
+    if output_eligible and not output_invalid and (output_scenario is not None or output_reason is not None):
+        value["outputDataFailure"] = {"scenario": output_scenario, "reasonCode": output_reason,
+            "source": "NormalAppUITests.swift", "method": "testPositiveAndroidOutputCustodyData",
+            "line": output_site[0] if output_site is not None else None,
+            "column": output_site[1] if output_site is not None else None,
+            "sample": "after-cleanup-attempt" if output_scenario is not None else None}
+    value["status"] = ("unavailable" if require_invalid or guide_invalid or output_invalid else "classified" if any(value[key]
+        for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
+        or value.get("outputDataFailure") is not None else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 

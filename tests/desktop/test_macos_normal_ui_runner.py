@@ -3114,6 +3114,320 @@ class NormalPhaseDataTests(unittest.TestCase):
                         self.assertEqual(diagnostic["nativeDiagnostics"]["status"], "unavailable")
                 if fault == "publication": self.assertIn(b"engineering-failure-diagnostic-publication-failed\n", errors.getvalue())
 
+        # Fixed Android DATA failure supplement: source literals only, never raw
+        # XCTest/private paths. It cannot turn the original65 into a test pass.
+        data_method = "testPositiveAndroidOutputCustodyData"
+        data_case = "-[MRKNormalAppUITests.NormalAppUITests " + data_method + "]"
+        data_namespace = b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE"
+        data_scenarios = ('valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start')
+        data_reasons = (
+            (b'fixture: Android AAB byte bound', 'r001'),
+            (b'fixture: Android AAB exact EOF', 'r002'),
+            (b'fixture: Android AAB original read', 'r003'),
+            (b'fixture: Android AAB read bound', 'r004'),
+            (b'fixture: Android DATA adopted root is not the original', 'r005'),
+            (b'fixture: Android DATA census accounting', 'r006'),
+            (b'fixture: Android DATA cleanup original differs', 'r007'),
+            (b'fixture: Android DATA cleanup root close', 'r008'),
+            (b'fixture: Android DATA cleanup root replaced', 'r009'),
+            (b'fixture: Android DATA cleanup row absent', 'r010'),
+            (b'fixture: Android DATA closed deadline refusal', 'r011'),
+            (b'fixture: Android DATA created root facts absent', 'r012'),
+            (b'fixture: Android DATA exact entry limit', 'r013'),
+            (b'fixture: Android DATA fixed original removal', 'r014'),
+            (b'fixture: Android DATA hardlink setup', 'r015'),
+            (b'fixture: Android DATA input parent missing', 'r016'),
+            (b'fixture: Android DATA late close did not clear state and refuse', 'r017'),
+            (b'fixture: Android DATA later close refusal', 'r018'),
+            (b'fixture: Android DATA mode mutation', 'r019'),
+            (b'fixture: Android DATA original parent replaced', 'r020'),
+            (b'fixture: Android DATA original parent row absent', 'r021'),
+            (b'fixture: Android DATA primary closure failure was masked or state retained', 'r022'),
+            (b'fixture: Android DATA private root retirement', 'r023'),
+            (b'fixture: Android DATA production close deleted output', 'r024'),
+            (b'fixture: Android DATA scenario unmapped', 'r025'),
+            (b'fixture: Android DATA symlink setup', 'r026'),
+            (b'fixture: Android DATA temporary close', 'r027'),
+            (b'fixture: Android DATA unopened cleanup root differs', 'r028'),
+            (b'fixture: Android DATA unopened private root retirement', 'r029'),
+            (b'fixture: Android XML original consuming close failed', 'r030'),
+            (b'fixture: Android XML original content differs', 'r031'),
+            (b'fixture: Android XML resource consuming close failed', 'r032'),
+            (b'fixture: Android XML resource content or original changed', 'r033'),
+            (b'fixture: Android XML resource open failed', 'r034'),
+            (b'fixture: Android XML resource parent changed', 'r035'),
+            (b'fixture: Android XML resource parent open failed', 'r036'),
+            (b'fixture: Android XML resource parent shape or binding', 'r037'),
+            (b'fixture: Android XML resource read failed', 'r038'),
+            (b'fixture: Android XML resource read limit', 'r039'),
+            (b'fixture: Android XML resource shape, binding or exact length', 'r040'),
+            (b'fixture: Android captured AAB mode', 'r041'),
+            (b'fixture: Android census enumeration conversion', 'r042'),
+            (b'fixture: Android census enumeration failed', 'r043'),
+            (b'fixture: Android census enumeration open', 'r044'),
+            (b'fixture: Android census limit selection', 'r045'),
+            (b'fixture: Android current build identity shape', 'r046'),
+            (b'fixture: Android current terminal artifact differs', 'r047'),
+            (b'fixture: Android earlier consuming close failed', 'r048'),
+            (b'fixture: Android final output observation was not joined before close', 'r049'),
+            (b'fixture: Android immutable input changed', 'r050'),
+            (b'fixture: Android input consuming close failed', 'r051'),
+            (b'fixture: Android input directory roster', 'r052'),
+            (b'fixture: Android input parent absent', 'r053'),
+            (b'fixture: Android input roster consuming close failed', 'r054'),
+            (b'fixture: Android module output byte bound', 'r055'),
+            (b'fixture: Android operation output roster', 'r056'),
+            (b'fixture: Android original Start identity or state differs', 'r057'),
+            (b'fixture: Android output DATA case deadline', 'r058'),
+            (b'fixture: Android output DATA cleanup original', 'r059'),
+            (b'fixture: Android output DATA cleanup parent', 'r060'),
+            (b'fixture: Android output DATA create leaf', 'r061'),
+            (b'fixture: Android output DATA creation consuming close', 'r062'),
+            (b'fixture: Android output DATA exact refusal missing', 'r063'),
+            (b'fixture: Android output DATA leaf write', 'r064'),
+            (b'fixture: Android output DATA mkdir', 'r065'),
+            (b'fixture: Android output DATA private original root differs', 'r066'),
+            (b'fixture: Android output DATA private root creation', 'r067'),
+            (b'fixture: Android output DATA temporary consuming close', 'r068'),
+            (b'fixture: Android output DATA temporary original', 'r069'),
+            (b'fixture: Android output canonical duplicate', 'r070'),
+            (b'fixture: Android output census name or entry bound', 'r071'),
+            (b'fixture: Android output closure is not terminal', 'r072'),
+            (b'fixture: Android output consuming close failed', 'r073'),
+            (b'fixture: Android output depth bound', 'r074'),
+            (b'fixture: Android output enumeration consuming close failed', 'r075'),
+            (b'fixture: Android output existed before review', 'r076'),
+            (b'fixture: Android output name encoding', 'r077'),
+            (b'fixture: Android output name length', 'r078'),
+            (b'fixture: Android output named binding unavailable', 'r079'),
+            (b'fixture: Android output named directory changed', 'r080'),
+            (b'fixture: Android output observation repeated or mixed with Save', 'r081'),
+            (b'fixture: Android output original POST', 'r082'),
+            (b'fixture: Android output original alias', 'r083'),
+            (b'fixture: Android output original directory changed', 'r084'),
+            (b'fixture: Android output original open', 'r085'),
+            (b'fixture: Android output parent absent', 'r086'),
+            (b'fixture: Android output regular leaf shape', 'r087'),
+            (b'fixture: Android output root absent or type', 'r088'),
+            (b'fixture: Android output roster changed', 'r089'),
+            (b'fixture: Android output total byte bound', 'r090'),
+            (b'fixture: Android output type owner mode or binding', 'r091'),
+            (b'fixture: Android parsed terminal artifact shape', 'r092'),
+            (b'fixture: Android positive input prerequisites absent', 'r093'),
+            (b'fixture: Android private output directory mode', 'r094'),
+            (b'fixture: Android private root output roster', 'r095'),
+            (b'fixture: Android project AAB candidate roster', 'r096'),
+            (b'fixture: Android report byte bound', 'r097'),
+            (b'fixture: Android report output roster', 'r098'),
+            (b'fixture: Android report parent roster', 'r099'),
+            (b'fixture: Android required AAB observations absent', 'r100'),
+            (b'fixture: Android retained artifact roster', 'r101'),
+            (b'fixture: Android retained output changed', 'r102'),
+            (b'fixture: Android root build output roster', 'r103'),
+            (b'fixture: Android root census bound', 'r104'),
+            (b'fixture: Android running original identity differs', 'r105'),
+            (b'fixture: Android terminal original identity differs', 'r106'),
+            (b'fixture: Android unexpected input-adjacent output', 'r107'),
+            (b'fixture: Android unrecognized output directory', 'r108'),
+            (b'fixture: Android unrecognized output leaf', 'r109'),
+            (b'fixture: Android work or journal remains', 'r110'),
+            (b'fixture: admitted Android XML pin differs', 'r111'),
+            (b'fixture: an earlier consuming close failed', 'r112'),
+            (b'fixture: directory binding changed', 'r113'),
+            (b'fixture: directory entry changed', 'r114'),
+            (b'fixture: directory open failed', 'r115'),
+            (b'fixture: directory original changed', 'r116'),
+            (b'fixture: fixed Android XML original was not admitted', 'r117'),
+            (b'fixture: fixed Android XML resource absent or misplaced', 'r118'),
+            (b'fixture: fixed leaf changed during observation', 'r119'),
+            (b'fixture: fixed leaf open failed', 'r120'),
+            (b'fixture: fixed leaf read failed', 'r121'),
+            (b'fixture: fixed leaf read limit', 'r122'),
+            (b'fixture: leaf shape/mode/limit', 'r123'),
+            (b'fixture: missing fixed parent', 'r124'),
+            (b'fixture: not an original directory', 'r125'),
+            (b'fixture: original descriptor stat failed', 'r126'),
+            (b'fixture: owned roster changed during enumeration', 'r127'),
+            (b'fixture: owned roster conversion failed', 'r128'),
+            (b'fixture: owned roster limit/duplicate', 'r129'),
+            (b'fixture: owned roster open failed', 'r130'),
+            (b'fixture: owned roster read failed', 'r131'),
+        )
+        self.assertEqual(len(data_reasons), 131)
+        self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 132)])
+        self.assertEqual(len({literal for literal, _ in data_reasons}), 131)
+        swift = SWIFT.read_text(encoding="utf-8")
+        data_swift = swift.split("        static func exerciseAndroidOutputCustodyData() throws {", 1)[1].split(
+            "        // A one-case transfer of observation custody", 1)[0]
+        closure = swift.split("        private static func facts(", 1)[1].split(
+            "        // A one-case transfer of observation custody", 1)[0]
+        closure += swift.split("        func closeOriginals() throws {", 1)[1].split("\n        }", 1)[0]
+        for literal, _ in data_reasons:
+            raw = literal.decode("ascii")
+            self.assertTrue(('"' + raw + '"') in closure or ('"' + raw.removeprefix("fixture: ") + '"') in closure, raw)
+        self.assertNotIn(b"fixture: named stat failed: ", dict(data_reasons))
+        self.assertNotIn(b"fixture: original close errors: ", dict(data_reasons))
+        scenario_source = re.search(r"for scenario in \[(.*?)\] \{", data_swift, re.S).group(1)
+        self.assertEqual(tuple(re.findall(r'"([a-z-]+)"', scenario_source)), data_scenarios)
+        marker_source = ('                if let primary {\n'
+            '                    print("MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE=v1;scenario=\\(scenario);sample=after-cleanup-attempt;originalFailurePreserved=1")\n'
+            '                    throw primary\n'
+            '                }\n'
+            '                try check()')
+        self.assertEqual(swift.count(data_namespace.decode() + "="), 1)
+        self.assertIn(marker_source, data_swift)
+        self.assertLess(data_swift.index('if Darwin.close(temporary) != 0 && primary == nil'), data_swift.index(marker_source))
+        refused_source = data_swift.split('                func refused(', 1)[1].split('\n                }\n                do {', 1)[0]
+        self.assertIn('catch let failure as Refusal {', refused_source)
+        self.assertIn('guard message == "fixture: " + reason else { throw failure }\n                            observed = true', refused_source)
+        self.assertIn('try need(observed, "Android output DATA exact refusal missing")', refused_source)
+        self.assertNotIn('throw Refusal.condition', refused_source)
+        self.assertNotIn('String(describing:', refused_source)
+
+        def data_marker(scenario="valid", ending=b"\n"):
+            return (b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE=v1;scenario=" + scenario.encode()
+                + b";sample=after-cleanup-attempt;originalFailurePreserved=1" + ending)
+
+        def data_error(literal, quote=b'"', ending=b"\n", line=1969, column=9):
+            site = f"NormalAppUITests.swift:{line}" + (f":{column}" if column is not None else "")
+            return (b"/Users/private/" + secret + b"/" + site.encode() + b": error: " + data_case.encode()
+                + b" : private XCTest wrapper " + secret + b" condition(" + quote + literal + quote
+                + b") private suffix " + secret + ending)
+
+        def data_diagnostic(stdout, stderr=b""):
+            return MODULE.normal_failure_diagnostics("test", MODULE.OUTPUT_DATA_RESULT,
+                subprocess.CompletedProcess(["fixed-original"], 65, stdout, stderr))
+
+        self.assertNotIn("outputDataFailure", value)
+        self.assertIsNone(MODULE.failure_base("test", MODULE.OUTPUT_DATA_RESULT,
+            subprocess.CompletedProcess([], 65, b"", b""))["outputDataFailure"])
+        expected_code = "r063"  # Only the no-error path now yields exact-refusal-missing.
+        known_literal = b"fixture: Android output DATA exact refusal missing"
+        for ordinal, (literal, code) in enumerate(data_reasons):
+            for quote, ending in ((b'"', b"\n"), (b'\\"', b"\r\n")):
+                with self.subTest(output_data_code=code, escaped=(quote != b'"')):
+                    scenario = data_scenarios[ordinal % len(data_scenarios)]
+                    raw = data_marker(scenario, ending) + data_error(literal, quote, ending)
+                    observed = data_diagnostic(raw)
+                    self.assertEqual(observed["outputDataFailure"], {"scenario": scenario, "reasonCode": code,
+                        "source": "NormalAppUITests.swift", "method": data_method, "line": 1969, "column": 9,
+                        "sample": "after-cleanup-attempt"})
+                    self.assertEqual(observed["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift",
+                        "method": data_method, "line": 1969, "column": 9}])
+                    self.assertEqual(observed["status"], "classified")
+                    self.assertEqual(observed["originalReturncode"], 65)
+                    self.assertEqual(observed["stdoutBytes"], len(raw))
+                    self.assertEqual(observed["stdoutSha256"], hashlib.sha256(raw).hexdigest())
+                    self.assertNotIn(secret, MODULE.encoded(observed))
+                    self.assertNotIn(literal, MODULE.encoded(observed))
+                    self.assertNotIn(b"/Users/private", MODULE.encoded(observed))
+                    self.assertLessEqual(len(MODULE.encoded(observed)) + 1, 4096)
+        data_good_marker, data_good_error = data_marker(), data_error(known_literal)
+        marker_only = data_diagnostic(data_good_marker)["outputDataFailure"]
+        self.assertEqual(marker_only, {"scenario": "valid", "reasonCode": None, "source": "NormalAppUITests.swift",
+            "method": data_method, "line": None, "column": None, "sample": "after-cleanup-attempt"})
+        reason_only = data_diagnostic(data_good_error)["outputDataFailure"]
+        self.assertEqual(reason_only, dict(marker_only, scenario=None, reasonCode=expected_code, line=1969, column=9, sample=None))
+        for unknown in (secret, b"fixture: named stat failed: PRIVATE", b"fixture: original close errors: PRIVATE",
+                        known_literal + b" PRIVATE", b"fixture: not a fixed source literal"):
+            observed = data_diagnostic(data_good_marker + data_error(unknown))
+            self.assertEqual(observed["outputDataFailure"], dict(marker_only, line=1969, column=9))
+            self.assertIsNone(data_diagnostic(data_error(unknown))["outputDataFailure"])
+            self.assertNotIn(unknown, MODULE.encoded(observed))
+        for line, column in ((1, None), (65535, 4096)):
+            observed = data_diagnostic(data_good_marker + data_error(known_literal, line=line, column=column))
+            self.assertEqual((observed["outputDataFailure"]["line"], observed["outputDataFailure"]["column"]), (line, column))
+        bad_markers = (data_good_marker[:-1], data_good_marker.replace(b"v1", b"v2"),
+            data_good_marker.replace(b"scenario=valid", b"scenario=PRIVATE"),
+            data_good_marker.replace(b"after-cleanup-attempt", b"cleanup-complete"),
+            data_good_marker.replace(b"Preserved=1", b"Preserved=0"),
+            b"prefix " + data_good_marker, b" " + data_good_marker, data_good_marker[:-1] + b" \n",
+            data_good_marker[:-1] + b";private=" + secret + b"\n",
+            data_good_marker.replace(b";sample=", b"\n;sample="), data_namespace, data_namespace[:-3],
+            b"trailing " + data_namespace[:-3], data_good_marker + data_good_marker,
+            data_good_marker + data_marker("identity"), data_good_marker + data_good_marker[:-1])
+        for raw in bad_markers:
+            for stdout in (data_good_error + data_good_marker + raw, raw + data_good_marker + data_good_error):
+                with self.subTest(output_data_bad_marker=raw[:80]):
+                    observed = data_diagnostic(stdout)
+                    self.assertIsNone(observed["outputDataFailure"])
+                    self.assertEqual(observed["status"], "unavailable")
+                    self.assertEqual(observed["originalReturncode"], 65)
+                    self.assertNotIn(secret, MODULE.encoded(observed))
+        malformed_errors = (data_good_error[:-1],
+            data_error(known_literal, line=0), data_error(known_literal, line=65536),
+            data_error(known_literal, line="01"), data_error(known_literal, column=4097),
+            data_error(known_literal, column=0), data_error(known_literal, column="01"),
+            data_good_error.replace(data_case.encode(), data_case[:-1].encode()),
+            data_good_error.replace(b'condition("', b'condition(\\"', 1),
+            data_good_error.replace(b'") private suffix', b'" private suffix'),
+            data_error(b"x" * 129), data_error(b"fixture: private\x00token"),
+            data_good_error[:-1] + b' condition("fixture: Android DATA mode mutation")\n',
+            data_good_error + data_good_error, data_good_error + data_error(b"fixture: Android DATA mode mutation"),
+            data_good_error + data_good_error[:-1],
+            data_good_error.rstrip(b"\n") + b" " + data_good_error)
+        for raw in malformed_errors:
+            with self.subTest(output_data_bad_site=raw[:80]):
+                observed = data_diagnostic(data_good_marker + raw)
+                self.assertIsNone(observed["outputDataFailure"])
+                self.assertEqual(observed["status"], "unavailable")
+                self.assertEqual(observed["originalReturncode"], 65)
+                self.assertNotIn(secret, MODULE.encoded(observed))
+        for stdout, stderr in ((b"", data_good_marker + data_good_error), (data_good_marker, data_good_error),
+                               (data_good_error, data_good_marker), (data_good_marker + data_good_error, data_good_marker),
+                               (data_good_marker + data_good_error, data_good_error), (data_good_marker, data_namespace[:-2])):
+            observed = data_diagnostic(stdout, stderr)
+            self.assertIsNone(observed["outputDataFailure"])
+            self.assertEqual(observed["status"], "unavailable")
+        for phase, selection, engineering in (("build", None, False), ("query", None, False),
+                ("summary", MODULE.OUTPUT_DATA_RESULT, False), ("test", "test.xcresult", False),
+                ("test", "engineering-test.xcresult", True)):
+            outside = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, data_good_marker + data_good_error, b""), engineering=engineering)
+            self.assertNotIn("outputDataFailure", outside)
+        wrong_method = data_good_error.replace(data_method.encode(), b"testLaunchCancelAndQuit")
+        self.assertIsNone(data_diagnostic(wrong_method)["outputDataFailure"])
+        self.assertEqual(data_diagnostic(data_good_marker + wrong_method)["outputDataFailure"], marker_only)
+        capped = data_good_marker + data_good_error
+        capped += b"x" * (1048576 - len(capped))
+        self.assertEqual(data_diagnostic(capped)["outputDataFailure"]["reasonCode"], expected_code)
+        with self.assertRaises(MODULE.Refused): data_diagnostic(capped + b"x")
+        # Existing finite findings survive a refused supplement, never repaired
+        # by a valid neighbor, a marker on stderr, or an incomplete tail.
+        unrelated = data_diagnostic(data_good_error + data_good_marker + data_good_marker,
+            b"Error Domain=NSPOSIXErrorDomain Code=2\n")
+        self.assertEqual(len(unrelated["sourceFailures"]), 1)
+        self.assertEqual(unrelated["errorCodes"], [{"stream": "stderr", "domain": "NSPOSIXErrorDomain", "code": 2}])
+        self.assertIsNone(unrelated["outputDataFailure"])
+        self.assertEqual(unrelated["status"], "unavailable")
+        data_request = {"phase": "test", "result": Path("/inert/output-data-test.xcresult"),
+            "derived": Path("/inert/DerivedData"), "outputData": True}
+        data_original = subprocess.CompletedProcess(["fixed-original"], 65, data_good_marker + data_good_error, b"")
+        for fault in ("none", "formatter", "oversize", "publication"):
+            with self.subTest(output_data_publisher=fault), ExitStack() as stack:
+                published = []
+                def publish_data(path, raw, cap):
+                    published.append((path, raw, cap))
+                    if fault == "publication": raise OSError(secret.decode())
+                stack.enter_context(patch.object(MODULE, "exclusive_output", side_effect=publish_data))
+                stack.enter_context(patch.object(MODULE.sys, "stderr", io.StringIO()))
+                if fault == "formatter": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(secret.decode())))
+                if fault == "oversize": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", return_value={"private": "x" * 5000}))
+                MODULE.publish_failure_diagnostics(data_request, data_original, role="one-admitted-ui-test")
+                self.assertEqual(data_original.returncode, 65)
+                self.assertEqual(len(published), 1)
+                self.assertEqual(published[0][0].name, "output-data-test.failure-diagnostics.json")
+                self.assertEqual(published[0][2], 4096)
+                self.assertLessEqual(len(published[0][1]), 4096)
+                self.assertNotIn(secret, published[0][1])
+                diagnostic = json.loads(published[0][1])
+                self.assertEqual(diagnostic["originalReturncode"], 65)
+                self.assertEqual(diagnostic["originalCommandRole"], "one-admitted-ui-test")
+                if fault in ("formatter", "oversize"):
+                    self.assertEqual(diagnostic["status"], "unavailable")
+                    self.assertIsNone(diagnostic["outputDataFailure"])
+                else: self.assertEqual(diagnostic["outputDataFailure"]["reasonCode"], expected_code)
+
     def test_dashboard_failure_diagnostics_preserve_finite_prewait_data(self):
         reasons = (
             "loading", "not-loaded", "bridge-unavailable", "selection-unavailable",

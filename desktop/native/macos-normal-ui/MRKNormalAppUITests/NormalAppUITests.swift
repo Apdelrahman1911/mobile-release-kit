@@ -1783,7 +1783,13 @@ final class NormalAppUITests: XCTestCase {
                 func refused(_ reason: String, _ body: () throws -> Void) throws {
                     var observed = false
                     do { try body() }
-                    catch Refusal.condition(let message) { observed = message == "fixture: " + reason }
+                    catch let failure as Refusal {
+                        switch failure {
+                        case .condition(let message):
+                            guard message == "fixture: " + reason else { throw failure }
+                            observed = true
+                        }
+                    }
                     try need(observed, "Android output DATA exact refusal missing")
                 }
                 do {
@@ -1963,7 +1969,10 @@ final class NormalAppUITests: XCTestCase {
                     } catch { if primary == nil { primary = error } }
                 }
                 if Darwin.close(temporary) != 0 && primary == nil { primary = Refusal.condition("fixture: Android DATA temporary close") }
-                if let primary { throw primary }
+                if let primary {
+                    print("MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE=v1;scenario=\(scenario);sample=after-cleanup-attempt;originalFailurePreserved=1")
+                    throw primary
+                }
                 try check()
             }
         }
