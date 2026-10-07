@@ -102,6 +102,7 @@ jobs:
             ${{ steps.work.outputs.root }}/acquisition.json
             ${{ steps.work.outputs.root }}/evidence/acquisition-commands.json
             ${{ steps.work.outputs.root }}/evidence/failed-commands.json
+            ${{ steps.work.outputs.root }}/evidence/gradle-failure.json
             ${{ steps.work.outputs.root }}/evidence/receipt.json
             ${{ steps.work.outputs.root }}/evidence/inventory.json
             ${{ steps.work.outputs.root }}/evidence/buildscript-gradle.lockfile

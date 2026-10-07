@@ -3,6 +3,7 @@
 Never native SDK observation, vendor execution, licence acceptance or acquisition.
 """
 import ast
+import base64
 import hashlib
 import json
 import importlib.util
@@ -762,18 +763,27 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         flow.acquisition_receipt = lambda work, clock: ({'toolRosterSha256': '1' * 64}, '2' * 64)
         flow.materialize = lambda *args: {}
         reached = ValueError('inert-first-vendor-entry')
-        for mismatch in (True, False):
+        for mismatch in (True, False, None):
             with self.subTest(live_roster_mismatch=mismatch), tempfile.TemporaryDirectory(prefix='a-roster-flow-', dir=scratch) as temporary:
                 calls = []
                 class Phase:
                     def __init__(self, *args): self.records = []
                     def call(self, role, *args):
                         calls.append(role)
+                        if mismatch is None:
+                            return types.SimpleNamespace(returncode=1 if role == 'android-dependency-lock-task' else 0, stderr=b'inert')
                         if role != 'android-public-tool-acquisition': raise reached
                         return types.SimpleNamespace(returncode=0)
                 flow.N = types.SimpleNamespace(PhaseClock=FlowClock, NormalPhase=Phase, load_normal_owner=lambda source: object())
                 flow.tool_post = lambda work, clock: ('3' if mismatch else '1') * 64
-                if mismatch:
+                def diagnostic_fault(*args): raise KeyboardInterrupt('inert-diagnostic-failure')
+                flow.publish_gradle_failure = diagnostic_fault
+                if mismatch is None:
+                    with self.assertRaisesRegex(flow.Refused, '^gradle-original-return$'):
+                        flow.prepare(Path(temporary), private=object())
+                    self.assertEqual(calls, ['android-public-tool-acquisition', 'android-dependency-jdk-version',
+                                            'android-dependency-gradle-version', 'android-dependency-lock-task'])
+                elif mismatch:
                     with self.assertRaisesRegex(flow.Refused, '^acquisition-live-tool-roster$'):
                         flow.prepare(Path(temporary), private=object())
                     self.assertEqual(calls, ['android-public-tool-acquisition'])
@@ -781,3 +791,70 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     with self.assertRaises(ValueError) as caught: flow.prepare(Path(temporary), private=object())
                     self.assertIs(caught.exception, reached)
                     self.assertEqual(calls, ['android-public-tool-acquisition', 'android-dependency-jdk-version'])
+
+        # One bounded realistic failure projection: nested public causes and
+        # SOURCE-derived locations/API/modules, never raw stderr or private text.
+        project_raw = (ROOT / 'desktop/tools/android_dependency_preparation_data/project-v1.json').read_bytes()
+        verification = (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_bytes()
+        work = Path('/case/PRIVATE-WORK-SENTINEL')
+        stderr = ("FAILURE: Build failed with an exception.\n* Where:\n"
+            "Build file '" + str(work / 'run/project/build.gradle') + "' line: 27\n"
+            "* What went wrong:\nA problem occurred evaluating root project 'PRIVATE-NAME-SENTINEL'.\n"
+            "> Could not find method dependencyLocking() for arguments [PRIVATE-ARG-SENTINEL].\n"
+            "> Could not resolve com.android.tools.build:gradle:8.9.2.\n"
+            "> Could not resolve com.private.secret:INTERNAL-MODULE:9.0.0.\n"
+            "* Exception is:\norg.gradle.api.GradleScriptException: PRIVATE-MESSAGE-SENTINEL\n"
+            "Caused by: org.codehaus.groovy.control.MultipleCompilationErrorsException: startup failed:\n"
+            "unable to resolve class org.gradle.api.artifacts.dsl.LockMode\n"
+            "Caused by: javax.net.ssl.SSLHandshakeException: PKIX path building failed\n"
+            "Could not GET 'https://dl.google.com/PRIVATE-URL-SENTINEL?token=PRIVATE-TOKEN-SENTINEL'.\n"
+            "Received status code 403 from server: PRIVATE-HEADER-SENTINEL\n"
+            "Caused by: com.private.SecretException: PRIVATE-CAUSE-SENTINEL\n").encode()
+        value = helper.gradle_failure_projection(stderr, work, project_raw, verification)
+        self.assertEqual(value['stderrBytes'], len(stderr)); self.assertEqual(value['stderrSha256'], helper.digest(stderr))
+        self.assertEqual(value['sections'], ['where', 'what-went-wrong', 'exception'])
+        self.assertEqual([r['class'] for r in value['causes']], ['org.gradle.api.GradleScriptException',
+            'org.codehaus.groovy.control.MultipleCompilationErrorsException', 'javax.net.ssl.SSLHandshakeException'])
+        self.assertEqual([r['index'] for r in value['causes']], [1, 2, 3])
+        self.assertEqual(value['scan']['unknownCauses'], 1)
+        self.assertTrue({'script-evaluation-failed', 'api-method-resolution-failed', 'script-startup-failed',
+                         'api-class-resolution-failed', 'tls-certification-path-failed', 'http-403'} <= set(value['facts']))
+        self.assertEqual(value['modules'], [{'coordinate': 'com.android.tools.build:gradle:8.9.2', 'fact': 'could-not-resolve'}])
+        self.assertIn('dependencyLocking', value['symbols'])
+        self.assertIn('org.gradle.api.artifacts.dsl.LockMode', value['symbols'])
+        self.assertEqual(value['repositories'], ['google-maven'])
+        self.assertEqual([(r['file'], r['line']) for r in value['locations']], [('project/build.gradle', 27)])
+        source = base64.b64decode(json.loads(project_raw)['files']['project/build.gradle']).decode().splitlines()
+        self.assertEqual(value['locations'][0]['sourceLine'], source[26])
+        public = helper.encoded(value).decode()
+        self.assertLessEqual(len(public.encode()), 12 << 10)
+        for private in ('PRIVATE-', str(work), 'com.private', 'INTERNAL-MODULE', 'https://', 'token='):
+            self.assertNotIn(private, public)
+        unknown = helper.gradle_failure_projection(b'PRIVATE-ONLY\nCaused by: com.private.Hidden: PRIVATE\n', work, project_raw, verification)
+        self.assertEqual(unknown['recognition'], 'no-allowlisted-detail')
+        self.assertEqual(unknown['scan']['unknownCauses'], 1)
+        self.assertNotIn('PRIVATE', helper.encoded(unknown).decode())
+        malformed = helper.gradle_failure_projection(b'x' * 4097 + b'\n\xff\n', work, project_raw, verification)
+        self.assertEqual((malformed['scan']['longLines'], malformed['scan']['invalidLines']), (1, 1))
+        truncated = helper.gradle_failure_projection(b'x\n' * 4097, work, project_raw, verification)
+        self.assertEqual(truncated['scan']['lines'], 4096); self.assertTrue(truncated['scan']['inputTruncated'])
+        with self.assertRaisesRegex(helper.Refused, '^gradle-diagnostic-input-bound$'):
+            helper.gradle_failure_projection(b'x' * ((2 << 20) + 1), work, project_raw, verification)
+        with self.assertRaisesRegex(helper.Refused, '^gradle-diagnostic-public-source$'):
+            helper.gradle_failure_projection(b'x', work, b'PRIVATE-SOURCE', verification)
+        # A parser interruption yields a finite unavailable projection; a failed
+        # publisher is swallowed without authorizing task success or new reads.
+        saved_projection, saved_publish = helper.gradle_failure_projection, helper.publish_preparation
+        emitted = []
+        def interrupted(*args, **kwargs): raise KeyboardInterrupt('PRIVATE-PARSER-FAULT')
+        helper.gradle_failure_projection = interrupted
+        helper.publish_preparation = lambda work, name, raw, clock: emitted.append((name, json.loads(raw)))
+        result = types.SimpleNamespace(returncode=1, stderr=stderr)
+        try:
+            helper.publish_gradle_failure(work, result, project_raw, verification, Clock())
+            self.assertEqual(emitted[0][0], 'evidence/gradle-failure.json')
+            self.assertEqual(emitted[0][1]['recognition'], 'projection-unavailable')
+            self.assertFalse(emitted[0][1]['originalTaskSuccess'])
+            helper.publish_preparation = interrupted
+            helper.publish_gradle_failure(work, result, project_raw, verification, Clock())
+        finally: helper.gradle_failure_projection, helper.publish_preparation = saved_projection, saved_publish

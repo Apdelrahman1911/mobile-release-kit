@@ -198,7 +198,8 @@ def publish_preparation(work, relative, raw, *, clock=None):
     """Only fixed A leaves; same retained-parent/original readback as diagnostics."""
     limits = {'tool-roster.json': 4 << 20, 'directory-roster.json': 4 << 20,
         'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
-        'evidence/failed-commands.json': 16384, 'evidence/inventory.json': 1 << 20,
+        'evidence/failed-commands.json': 16384, 'evidence/gradle-failure.json': 12 << 10,
+        'evidence/inventory.json': 1 << 20,
         'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
         'evidence/receipt.json': 16384, 'run/project/gradle/verification-metadata.xml': 128 << 10}
     for name in ('settings.gradle', 'build.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml',
@@ -920,6 +921,193 @@ def inventory(work, verification, clock):
             'locksAreOriginalGradleTaskOutputs': True, 'rows': sorted(rows, key=lambda r: tuple(r.values()))}
 
 
+def gradle_failure_projection(stderr, work, project_raw, verification, *, clock=None):
+    """Closed public facts from one returned stderr; never arbitrary message text."""
+    need(type(stderr) is bytes and len(stderr) <= 2 << 20, 'gradle-diagnostic-input-bound')
+    for raw, name in ((project_raw, 'project-v1.json'), (verification, 'verification-v1.xml')):
+        need(type(raw) is bytes and (len(raw), digest(raw)) == tuple(RESOURCES[
+            'desktop/tools/android_dependency_preparation_data/' + name]), 'gradle-diagnostic-public-source')
+    project = json.loads(project_raw)
+    sources = {}
+    for relative in ('build.gradle', 'settings.gradle', 'app/build.gradle',
+                     'app/src/main/java/org/example/saved/MainActivity.java'):
+        body = base64.b64decode(project['files']['project/' + relative], validate=True).decode('utf-8')
+        sources[relative] = body.splitlines()
+    ns = {'v': 'https://schema.gradle.org/dependency-verification'}
+    xml = ET.fromstring(verification)
+    coordinates = {':'.join(node.attrib[k] for k in ('group', 'name', 'version'))
+                   for node in xml.findall('v:components/v:component', ns)}
+    need(0 < len(coordinates) <= 386, 'gradle-diagnostic-public-coordinates')
+    classes = {
+        'org.gradle.api.GradleException', 'org.gradle.api.GradleScriptException',
+        'org.gradle.api.ProjectConfigurationException', 'org.gradle.api.InvalidUserCodeException',
+        'org.gradle.api.InvalidUserDataException', 'org.gradle.api.UnknownProjectException',
+        'org.gradle.api.UnknownTaskException', 'org.gradle.api.tasks.TaskExecutionException',
+        'org.gradle.api.internal.tasks.TaskDependencyResolveException',
+        'org.gradle.api.internal.tasks.compile.CompilationFailedException',
+        'org.gradle.api.internal.plugins.PluginApplicationException',
+        'org.gradle.api.internal.artifacts.ivyservice.TypedResolveException',
+        'org.gradle.api.internal.artifacts.ivyservice.DefaultLenientConfiguration$ArtifactResolveException',
+        'org.gradle.api.internal.artifacts.verification.exceptions.DependencyVerificationException',
+        'org.gradle.internal.exceptions.LocationAwareException',
+        'org.gradle.groovy.scripts.ScriptCompilationException',
+        'org.gradle.internal.locking.LockOutOfDateException',
+        'org.gradle.internal.resolve.ModuleVersionResolveException',
+        'org.gradle.internal.resolve.ModuleVersionNotFoundException',
+        'org.gradle.internal.resolve.ArtifactResolveException',
+        'org.gradle.internal.resource.ResourceException',
+        'org.gradle.internal.resource.transport.http.HttpErrorStatusCodeException',
+        'org.gradle.process.internal.ExecException', 'com.android.builder.errors.EvalIssueException',
+        'com.android.builder.internal.aapt.v2.Aapt2Exception',
+        'com.android.builder.internal.aapt.v2.Aapt2InternalException',
+        'org.codehaus.groovy.control.MultipleCompilationErrorsException',
+        'groovy.lang.MissingPropertyException', 'groovy.lang.MissingMethodException', 'groovy.lang.GroovyRuntimeException',
+        'org.gradle.internal.metaobject.AbstractDynamicObject$CustomMessageMissingMethodException',
+        'org.gradle.internal.metaobject.AbstractDynamicObject$CustomMessageMissingPropertyException',
+        'com.android.builder.sdk.LicenceNotAcceptedException', 'com.android.builder.sdk.InstallFailedException',
+        'java.lang.IllegalArgumentException', 'java.lang.IllegalStateException',
+        'java.lang.NoClassDefFoundError', 'java.lang.ClassNotFoundException',
+        'java.lang.UnsupportedClassVersionError', 'java.lang.OutOfMemoryError',
+        'java.io.IOException', 'java.io.FileNotFoundException',
+        'java.net.UnknownHostException', 'java.net.ConnectException', 'java.net.SocketTimeoutException',
+        'javax.net.ssl.SSLException', 'javax.net.ssl.SSLHandshakeException',
+        'java.security.cert.CertificateException', 'java.security.cert.CertPathValidatorException',
+        'sun.security.provider.certpath.SunCertPathBuilderException'}
+    symbols = {
+        'dependencyVerificationMode', 'DependencyVerificationMode', 'LockMode', 'RepositoriesMode',
+        'org.gradle.api.artifacts.dsl.LockMode', 'org.gradle.api.artifacts.verification.DependencyVerificationMode',
+        'org.gradle.api.initialization.resolve.RepositoriesMode', 'STRICT', 'FAIL_ON_PROJECT_REPOS',
+        'dependencyResolutionManagement', 'repositoriesMode', 'repositories', 'maven', 'url', 'uri',
+        'dependencyLocking', 'lockAllConfigurations', 'lockMode', 'configurations', 'classpath',
+        'resolutionStrategy', 'activateDependencyLocking', 'failOnDynamicVersions', 'failOnChangingVersions',
+        'allprojects', 'configureEach', 'android', 'namespace', 'compileSdk', 'buildToolsVersion',
+        'defaultConfig', 'applicationId', 'minSdk', 'targetSdk', 'versionCode', 'versionName',
+        'compileOptions', 'sourceCompatibility', 'targetCompatibility', 'buildFeatures', 'buildConfig',
+        'buildTypes', 'release', 'minifyEnabled', 'debuggable', 'JavaVersion', 'VERSION_17',
+        'android.aapt2FromMavenOverride', 'android.builder.sdkDownload', 'org.gradle.java.home',
+        'com.android.application', ':classpath', ':app', ':app:bundleRelease',
+        ':app:releaseCompileClasspath', ':app:releaseRuntimeClasspath',
+        ':app:compileReleaseJavaWithJavac', ':app:processReleaseResources', ':app:packageReleaseBundle'}
+    templates = (
+        ('a problem occurred evaluating', 'script-evaluation-failed'),
+        ('a problem occurred configuring', 'project-configuration-failed'),
+        ('could not compile', 'script-compilation-failed'),
+        ('startup failed:', 'script-startup-failed'),
+        ('unable to resolve class', 'api-class-resolution-failed'),
+        ('could not find method', 'api-method-resolution-failed'),
+        ('could not get unknown property', 'api-property-read-failed'),
+        ('could not set unknown property', 'api-property-write-failed'),
+        ('no signature of method', 'api-method-signature-failed'),
+        ('no such property:', 'api-property-missing'),
+        ('plugin with id', 'plugin-id-mentioned'),
+        ('was configured to prefer settings repositories', 'repository-policy-conflict'),
+        ('dependency verification failed', 'dependency-verification-failed'),
+        ('checksum', 'dependency-checksum-mentioned'),
+        ('dependency lock state', 'dependency-lock-state-mentioned'),
+        ('lock state is out of date', 'dependency-lock-state-outdated'),
+        ('could not resolve', 'dependency-resolution-failed'),
+        ('could not find', 'requested-item-not-found'),
+        ('sdk location not found', 'sdk-location-not-found'),
+        ('failed to find build tools revision', 'sdk-build-tools-missing'),
+        ('failed to find platform sdk', 'sdk-platform-missing'),
+        ('aapt2 daemon startup failed', 'aapt2-startup-failed'),
+        ('android resource linking failed', 'android-resource-link-failed'),
+        ('compilation failed', 'compilation-failed'),
+        ('pkix path building failed', 'tls-certification-path-failed'),
+        ('unable to find valid certification path', 'tls-certification-path-missing'),
+        ('handshake_failure', 'tls-handshake-failed'),
+        ('remote host terminated the handshake', 'tls-handshake-terminated'),
+        ('could not get resource', 'network-resource-get-failed'),
+        ("could not get 'http", 'network-get-failed'), ("could not head 'http", 'network-head-failed'),
+        ('read timed out', 'network-read-timeout'), ('connect timed out', 'network-connect-timeout'),
+        ('connection refused', 'network-connection-refused'),
+        ('no space left on device', 'disk-space-exhausted'), ('too many open files', 'file-descriptors-exhausted'),
+        ('java heap space', 'java-heap-exhausted'), ('gc overhead limit exceeded', 'java-gc-limit'),
+        ('cannot allocate memory', 'memory-allocation-failed'),
+        ('permission denied', 'filesystem-permission-denied'), ('operation not permitted', 'operation-not-permitted'))
+    report = {'schemaVersion': 1, 'classification': 'bounded-public-gradle-failure-projection-not-rootcause-proof',
+        'stderrBytes': len(stderr), 'stderrSha256': digest(stderr), 'sections': [], 'causes': [],
+        'facts': [], 'locations': [], 'modules': [], 'symbols': [], 'repositories': [],
+        'scan': {'lines': 0, 'longLines': 0, 'invalidLines': 0, 'unknownCauses': 0,
+                 'inputTruncated': False, 'factsTruncated': False}}
+    limits = {'sections': 4, 'causes': 16, 'facts': 32, 'locations': 8, 'modules': 8, 'symbols': 16, 'repositories': 2}
+    def add(key, item):
+        if item in report[key]: return
+        if len(report[key]) == limits[key]:
+            report['scan']['factsTruncated'] = True
+            if key == 'causes': report[key].pop(0)  # Keep the deepest bounded cause chain.
+            else: return
+        report[key].append(item)
+    section = 'unspecified'; cause_index = 0; at = 0
+    section_names = {'* Where:': 'where', '* What went wrong:': 'what-went-wrong',
+                     '* Exception is:': 'exception', '* Try:': 'try'}
+    while at < len(stderr) and report['scan']['lines'] < 4096:
+        if clock: clock.check()
+        end = stderr.find(b'\n', at)
+        if end < 0: end = len(stderr)
+        length = end - at; start = at; at = min(end + 1, len(stderr))
+        report['scan']['lines'] += 1
+        if length > 4096:
+            report['scan']['longLines'] += 1; continue
+        raw = stderr[start:end].rstrip(b'\r')
+        if any(byte < 32 and byte != 9 for byte in raw):
+            report['scan']['invalidLines'] += 1; continue
+        try: line = raw.decode('utf-8', 'strict')
+        except UnicodeError:
+            report['scan']['invalidLines'] += 1; continue
+        stripped = line.strip()
+        if stripped in section_names:
+            section = section_names[stripped]; add('sections', section); continue
+        cause = re.match(r'^(?:Caused by:\s*)?([A-Za-z_$][A-Za-z0-9_.$]{0,220})(?::|$)', stripped)
+        if cause and '.' in cause[1]:
+            cause_index += 1
+            if cause[1] in classes:
+                add('causes', {'index': cause_index, 'class': cause[1], 'section': section})
+            else: report['scan']['unknownCauses'] += 1
+        lowered = line.lower()
+        for token, code in templates:
+            if token in lowered: add('facts', code)
+        http = re.search(r'Received status code (400|401|403|404|408|429|500|502|503|504)(?![0-9])', line)
+        if http: add('facts', 'http-' + http[1])
+        for host, label in (('dl.google.com', 'google-maven'), ('repo.maven.apache.org', 'maven-central')):
+            if re.search(r'(?<![A-Za-z0-9.-])' + re.escape(host) + r'(?![A-Za-z0-9.-])', line): add('repositories', label)
+        for symbol in sorted(symbols):
+            if re.search(r'(?<![A-Za-z0-9_.$:-])' + re.escape(symbol) + r'(?![A-Za-z0-9_.$:-])', line):
+                add('symbols', symbol)
+        for module in re.finditer(r'(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.-]{1,100}:[A-Za-z0-9_.+-]{1,80})(?![A-Za-z0-9_.+-])', line):
+            coordinate = module[1].rstrip('.')
+            if coordinate in coordinates:
+                fact = 'could-not-resolve' if 'could not resolve' in lowered else 'could-not-find' if 'could not find' in lowered else 'mentioned'
+                add('modules', {'coordinate': coordinate, 'fact': fact})
+        for relative, source_lines in sources.items():
+            absolute = str(work / 'run/project' / relative)
+            location = re.search(r'(?<![A-Za-z0-9_./-])' + re.escape(absolute) + r"(?:['\"] line: |:)([0-9]{1,5})(?![0-9])", line)
+            if location:
+                number = int(location[1])
+                if 1 <= number <= len(source_lines):
+                    public = source_lines[number - 1]
+                    add('locations', {'file': 'project/' + relative, 'line': number,
+                                      'sourceLine': public[:192], 'sourceLineTruncated': len(public) > 192})
+    report['scan']['inputTruncated'] = at < len(stderr)
+    report['recognition'] = 'recognized-public-facts' if any(report[k] for k in ('causes', 'facts', 'locations', 'modules', 'symbols')) else 'no-allowlisted-detail'
+    need(len(encoded(report)) <= (12 << 10) - 512, 'gradle-diagnostic-output-bound')
+    return report
+
+
+def publish_gradle_failure(work, result, project_raw, verification, clock):
+    """Failure-only diagnostic; caller still raises its original task refusal."""
+    try:
+        value = gradle_failure_projection(result.stderr, work, project_raw, verification, clock=clock)
+    except BaseException:
+        value = {'schemaVersion': 1, 'classification': 'bounded-public-gradle-failure-projection-not-rootcause-proof',
+                 'recognition': 'projection-unavailable', 'stderrBytes': len(result.stderr),
+                 'stderrSha256': digest(result.stderr)}
+    value.update(source=os.environ['GITHUB_SHA'], role='android-dependency-lock-task',
+                 originalReturncode=result.returncode, originalTaskSuccess=False)
+    try: publish_preparation(work, 'evidence/gradle-failure.json', encoded(value), clock=clock)
+    except BaseException: pass  # Never mask the original task failure or reopen unknown output.
+
+
 def source_original(phase, suffix):
     value = phase.call('source-head-' + suffix, ['/usr/bin/git', '-C', str(SOURCE), 'rev-parse', 'HEAD'], 10, 4096)
     need(value.returncode == 0 and value.stdout == (os.environ['GITHUB_SHA'] + '\n').encode(), 'source-head')
@@ -971,6 +1159,9 @@ def prepare(work, *, private=None):
                            ('android-dependency-gradle-version', ['/bin/sh', str(work / 'tools/gradle/bin/gradle'), '--version'])]:
             result = phase.call(role, argv, 15, 8192); need(result.returncode == 0, 'tool-version-original-return')
         result = phase.call('android-dependency-lock-task', command, 900, 2 << 20)
+        if result.returncode != 0:
+            try: publish_gradle_failure(work, result, project_raw, verification, clock)
+            except BaseException: pass  # Even diagnostic interruption cannot replace the actual task refusal.
         need(result.returncode == 0, 'gradle-original-return')
         locks = {}
         for name in ('buildscript-gradle.lockfile', 'app/gradle.lockfile'):
