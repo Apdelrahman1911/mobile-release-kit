@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Three read-only Intel system-image observations, never supplier authority.
 
-Only Apple's selected dyld_info executes. No vendor image is dlopened, compiled,
+Only Apple's fixed root-admitted CLT dyld_info executes. No vendor image is dlopened, compiled,
 installed or qualified. A missing selected image is an ordinary negative result.
 """
 from __future__ import annotations
@@ -48,10 +48,8 @@ FILE_LIMIT = 8 * 1024 * 1024
 RECORD_LIMIT = 512 * 1024
 SYSTEM_PLIST = Path("/System/Library/CoreServices/SystemVersion.plist")
 XCRUN = Path("/usr/bin/xcrun")
-APPLICATIONS = Path("/Applications")
-TOOL_SUFFIX = "Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dyld_info"
-VERSIONED_XCODE = r"Xcode_[0-9]{1,3}(?:\.[0-9]{1,3}){0,2}\.app"
-TOOL_PATTERN = r"/Applications/(Xcode\.app|" + VERSIONED_XCODE + r")/" + re.escape(TOOL_SUFFIX)
+DEVELOPER_DIR = Path("/Library/Developer/CommandLineTools")
+SELECTED_TOOL = DEVELOPER_DIR / "usr/bin/dyld_info"
 ARCHES = ("x86_64", "x86_64h")
 PROVIDERS = (
     "/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM",
@@ -61,8 +59,9 @@ PROVIDERS = (
 ROLES = ("resolve-dyld-info", "provider-javavm", "provider-libgcc", "provider-ncurses")
 OPTIONS = ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths")
 ATTRIBUTES = ("upward", "delay-init", "weak-link", "re-export")
-DIRECTORY_SLOTS = ("applications", "bundle", "contents", "developer", "toolchains",
-                   "default-toolchain", "usr", "bin")
+DIRECTORY_SLOTS = ("library", "developer", "command-line-tools", "usr", "bin")
+DIRECTORY_PATHS = (Path("/Library"), Path("/Library/Developer"), DEVELOPER_DIR,
+                   DEVELOPER_DIR / "usr", SELECTED_TOOL.parent)
 DIAGNOSTIC_LIMIT = 1536
 DIAGNOSTIC_PHASES = ("host-admission", "source-admission", "host-system-version", "private-work",
                      "fixed-observations", "source-post", "publication")
@@ -176,18 +175,10 @@ def selected_tool_path(body):
     need(type(body) is bytes and 0 < len(body) <= 512, "selected-tool-output-bound")
     text = body.decode("ascii")
     need(text.endswith("\n") and text.count("\n") == 1
-         and re.fullmatch(TOOL_PATTERN, text[:-1]) is not None, "selected-tool-path")
+         and text[:-1] == str(SELECTED_TOOL), "selected-tool-path")
     path = Path(text[:-1])
     need(len(path.parts) <= 16 and str(path) == os.path.normpath(path), "selected-tool-spelling")
     return path
-
-
-def alias_bundle(text):
-    need(type(text) is str and 0 < len(text) <= 512 and text.isascii(), "selected-alias-text")
-    name = text.removeprefix("/Applications/")
-    need(re.fullmatch(VERSIONED_XCODE, name) is not None
-         and text in (name, "/Applications/" + name), "selected-alias-target")
-    return APPLICATIONS / name
 
 
 def root_ancestors(book, entry):
@@ -211,43 +202,17 @@ def system_tool(book, path):
 
 
 def selected_tool(book, selected):
-    # The resolver cannot authorize arbitrary paths or arbitrary realpath chains.
+    # No alternate developer root, resolver fallback, or alias is admissible.
     need(selected_tool_path((str(selected) + "\n").encode("ascii")) == selected,
          "selected-tool-admission")
-    parent = book.directory(APPLICATIONS)
-    need(parent["identity"][3] == 0 and not parent["identity"][2] & 0o022,
-         "selected-applications-root")
-    root_ancestors(book, parent)
-    bundle = APPLICATIONS / selected.parts[2]
-    info = os.stat(bundle.name, dir_fd=parent["fd"], follow_symlinks=False)
-    alias = None
-    canonical = selected
-    if stat.S_ISLNK(info.st_mode):
-        need(bundle.name == "Xcode.app" and info.st_uid == 0 and info.st_nlink == 1
-             and 0 < info.st_size <= 512, "selected-bundle-alias")
-        text = os.readlink(bundle.name, dir_fd=parent["fd"])
-        canonical = alias_bundle(text) / TOOL_SUFFIX
-        alias = {"parent": parent, "name": bundle.name, "identity": identity(info), "text": text}
-        need(identity(os.stat(bundle.name, dir_fd=parent["fd"], follow_symlinks=False)) == alias["identity"]
-             and os.readlink(bundle.name, dir_fd=parent["fd"]) == text, "selected-alias-post")
-    else:
-        need(stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and not info.st_mode & 0o022,
-             "selected-bundle-original")
-    tool = system_tool(book, canonical)  # No-follow rejects every other alias.
-    tool.update(selected=selected, alias=alias)
+    tool = system_tool(book, selected)  # Existing no-follow file/ancestor custody.
+    tool.update(selected=selected)
     tool_post(book, tool)
     return tool
 
 
 def tool_post(book, tool):
-    alias = tool["alias"]
-    if alias is not None:
-        parent = alias["parent"]
-        book.check_one(parent)
-        need(parent["identity"][3] == 0
-             and identity(os.stat(alias["name"], dir_fd=parent["fd"], follow_symlinks=False)) == alias["identity"]
-             and os.readlink(alias["name"], dir_fd=parent["fd"]) == alias["text"]
-             and alias_bundle(alias["text"]) / TOOL_SUFFIX == tool["path"], "selected-alias-changed")
+    need(tool["alias"] is None, "selected-tool-admission")
     root_ancestors(book, tool["entry"])
     body = book.read(tool["entry"])
     need(len(body) == tool["bytes"] and hashlib.sha256(body).hexdigest() == tool["sha256"],
@@ -375,15 +340,9 @@ def directory_refusal_data(fixture, book, deadline, first_new_entry, error):
         path = entry.get("path")
         if not isinstance(path, Path) or str(path) != os.path.normpath(path):
             return None
-        if path == APPLICATIONS:
-            slot = DIRECTORY_SLOTS[0]
-        else:
-            parts = path.parts
-            if (not 3 <= len(parts) <= 9 or parts[:2] != APPLICATIONS.parts
-                    or not (parts[2] == "Xcode.app" or re.fullmatch(VERSIONED_XCODE, parts[2], re.ASCII))
-                    or parts[3:] != tuple(TOOL_SUFFIX.split("/")[:-1])[:len(parts) - 3]):
-                return None
-            slot = DIRECTORY_SLOTS[len(parts) - 2]
+        if path not in DIRECTORY_PATHS:
+            return None
+        slot = DIRECTORY_SLOTS[DIRECTORY_PATHS.index(path)]
         parent = book.directories.get(path.parent)
         if (type(parent) is not dict or parent.get("path") != path.parent
                 or book.directories.get(path) is entry):
@@ -468,7 +427,8 @@ def emit_refusal(error, phase, progress, calls, tools, *, record_prepared,
 def observe_providers(fixture, book, owner, deadline, work, calls, tools, progress):
     """One fixed resolver and three independent queries through the existing owner."""
     environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(work / "home"),
-                   "TMPDIR": str(work / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
+                   "TMPDIR": str(work / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+                   "DEVELOPER_DIR": str(DEVELOPER_DIR)}
 
     def checkpoint():
         fixture.context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 30)
@@ -510,6 +470,11 @@ def observe_providers(fixture, book, owner, deadline, work, calls, tools, progre
 
     progress.update(stage="resolver-admission", role=ROLES[0], sourceSlot=None)
     tools["xcrun"] = system_tool(book, XCRUN)
+    # Refuse an absent/untrusted CLT installation before invoking a shim.
+    developer = book.directory(DEVELOPER_DIR)
+    need(developer["identity"][3] == 0 and stat.S_ISDIR(developer["identity"][2])
+         and not developer["identity"][2] & 0o022, "system-tool-root-ancestor")
+    root_ancestors(book, developer)
     result = command(ROLES[0], [str(XCRUN), "--find", "dyld_info"])
     progress["stage"] = "resolver-return"
     need(result.returncode == 0 and result.stderr == b"", "resolver-return-contract")

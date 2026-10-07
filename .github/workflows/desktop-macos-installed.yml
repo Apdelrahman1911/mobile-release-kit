@@ -3144,293 +3144,293 @@ jobs:
         with:
           name: desktop-macos-installed-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ steps.work.outputs.root }}/source-binding.json
-            ${{ steps.work.outputs.root }}/effective-rust-toolchain.json
-            ${{ steps.work.outputs.root }}/source-inventory.json
-            ${{ steps.work.outputs.root }}/data-contracts/mount.stdout
-            ${{ steps.work.outputs.root }}/data-contracts/mount.stderr
-            ${{ steps.work.outputs.root }}/data-contracts/mount.status
-            ${{ steps.work.outputs.root }}/data-contracts/apfs.stdout
-            ${{ steps.work.outputs.root }}/data-contracts/apfs.stderr
-            ${{ steps.work.outputs.root }}/data-contracts/apfs.status
-            ${{ steps.work.outputs.root }}/data-contracts/build.stdout
-            ${{ steps.work.outputs.root }}/data-contracts/build.stderr
-            ${{ steps.work.outputs.root }}/data-contracts/build.status
-            ${{ steps.work.outputs.root }}/data-contracts/rust.stdout
-            ${{ steps.work.outputs.root }}/data-contracts/rust.stderr
-            ${{ steps.work.outputs.root }}/data-contracts/rust.status
-            ${{ steps.work.outputs.root }}/data-contracts/python.stdout
-            ${{ steps.work.outputs.root }}/data-contracts/python.stderr
-            ${{ steps.work.outputs.root }}/data-contracts/python.status
-            ${{ steps.work.outputs.root }}/data-contracts/result.json
-            ${{ steps.work.outputs.root }}/normal-build.jsonl
-            ${{ steps.work.outputs.root }}/normal-build.status
-            ${{ steps.work.outputs.root }}/normal-build.stderr.tail.txt
-            ${{ steps.work.outputs.root }}/preview-result.json
-            ${{ steps.work.outputs.root }}/normal-ui/build-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/build-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/build-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/test-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/test-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/test-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-test-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/project-test-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/project-test-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/toolchain.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/build.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/build.admission-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/build.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/test.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/summary.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/summary.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-test.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-summary.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-summary.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.failure-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.command-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/build.status
-            ${{ steps.work.outputs.root }}/normal-ui/test.status
-            ${{ steps.work.outputs.root }}/normal-ui/test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/xcode-version.txt
-            ${{ steps.work.outputs.root }}/normal-ui/sdk-path.txt
-            ${{ steps.work.outputs.root }}/normal-ui/sdk-version.txt
-            ${{ steps.work.outputs.root }}/normal-ui/sdk-build.txt
-            ${{ steps.work.outputs.root }}/normal-ui/result.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.status
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-diagnostics.json
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/persistence-result.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-test.status
-            ${{ steps.work.outputs.root }}/normal-ui/project-test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/project-summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/project-result.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.status
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-safe-facts.json
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/diagnostics-result.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test-file-limit.status
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test-file-budget.status
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test-file-budget.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.status
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-test.runner-admission.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-safe-facts.json
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-summary.status
-            ${{ steps.work.outputs.root }}/normal-ui/saved-checks-result.json
-            ${{ steps.work.outputs.root }}/package-format-input.json
-            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
-            ${{ steps.work.outputs.root }}/package-format-prepare.json
-            ${{ steps.work.outputs.root }}/package-format-tar.status
-            ${{ steps.work.outputs.root }}/package-format-xar.status
-            ${{ steps.work.outputs.root }}/package-format-audit.json
-            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
-            ${{ steps.work.outputs.root }}/native-acl-compile.log
-            ${{ steps.work.outputs.root }}/native-acl-compile.status
-            ${{ steps.work.outputs.root }}/native-acl-probe.log
-            ${{ steps.work.outputs.root }}/native-acl-probe.status
-            ${{ steps.work.outputs.root }}/native-acl-cleanup.status
-            ${{ steps.work.outputs.root }}/native-acl-probe-result.json
-            ${{ steps.work.outputs.root }}/runtime-result.json
-            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json
-            ${{ steps.work.outputs.root }}/android-support-result.json
-            ${{ steps.work.outputs.root }}/vault-helper-build.status
-            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
-            ${{ steps.work.outputs.root }}/vault-helper-build.stderr
-            ${{ steps.work.outputs.root }}/vault-helper-signing.json
-            ${{ steps.work.outputs.root }}/android-helper-prepare.json
-            ${{ steps.work.outputs.root }}/android-helper-build.jsonl
-            ${{ steps.work.outputs.root }}/android-helper-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-build.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.status
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status
-            ${{ steps.work.outputs.root }}/android-helper-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.json
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-image.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json
-            ${{ steps.work.outputs.root }}/app-result.json
-            ${{ steps.work.outputs.root }}/input-result.json
-            ${{ steps.work.outputs.root }}/dialog-regressions.log
-            ${{ steps.work.outputs.root }}/dialog-regressions.status
-            ${{ steps.work.outputs.root }}/installer-finalizer-regression.log
-            ${{ steps.work.outputs.root }}/installer-finalizer-regression.status
-            ${{ steps.work.outputs.root }}/native-abi-regression.log
-            ${{ steps.work.outputs.root }}/native-abi-regression.status
-            ${{ steps.work.outputs.root }}/focused-regressions.json
-            ${{ steps.work.outputs.root }}/scripts-fixture-result.json
-            ${{ steps.work.outputs.root }}/package-fixture-audit.json
-            ${{ steps.work.outputs.root }}/installer-fixture-output.txt
-            ${{ steps.work.outputs.root }}/installer-fixture-output.status
-            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.json
-            ${{ steps.work.outputs.root }}/installer-fixture-log-cursor.status
-            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.json
-            ${{ steps.work.outputs.root }}/installer-fixture-log-capture.status
-            ${{ steps.work.outputs.root }}/installer-fixture-log-selected.txt
-            ${{ steps.work.outputs.root }}/installer-fixture-observation.json
-            ${{ steps.work.outputs.root }}/MobileReleaseKit-InstallerFixture-original.pkg
-            ${{ steps.work.outputs.root }}/package-fixture-prepare.json
-            ${{ steps.work.outputs.root }}/package-fixture-tar.status
-            ${{ steps.work.outputs.root }}/package-fixture-xar.status
-            ${{ steps.work.outputs.root }}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg
-            ${{ steps.work.outputs.root }}/scripts-result.json
-            ${{ steps.work.outputs.root }}/package-audit.json
-            ${{ steps.work.outputs.root }}/installation-observation.json
-            ${{ steps.work.outputs.root }}/installer-output.txt
-            ${{ steps.work.outputs.root }}/installer-output.status
-            ${{ steps.work.outputs.root }}/installer-log-cursor.json
-            ${{ steps.work.outputs.root }}/installer-log-cursor.status
-            ${{ steps.work.outputs.root }}/installer-log-capture.json
-            ${{ steps.work.outputs.root }}/installer-log-capture.status
-            ${{ steps.work.outputs.root }}/installer-log-selected.txt
-            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
-            ${{ steps.work.outputs.root }}/package-prepare.json
-            ${{ steps.work.outputs.root }}/package-tar.status
-            ${{ steps.work.outputs.root }}/package-xar.status
-            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
-            ${{ steps.work.outputs.root }}/packaging-selection.json
-            ${{ steps.work.outputs.root }}/producer-root/Install.pkg
-            ${{ steps.work.outputs.root }}/producer-root/producer.json
-            ${{ steps.work.outputs.root }}/producer-root/producer.sig
-            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg
-            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg
-            ${{ steps.work.outputs.root }}/package-request-id.txt
-            ${{ steps.work.outputs.root }}/android-helper-package-install.json
-            ${{ steps.work.outputs.root }}/android-helper-notarize-payload.json
-            ${{ steps.work.outputs.root }}/android-helper-finalize-package.json
-            ${{ steps.work.outputs.root }}/package-finalization.status
-            ${{ steps.work.outputs.root }}/image-finalization.status
-            ${{ steps.work.outputs.root }}/image-finalization.stdout
-            ${{ steps.work.outputs.root }}/image-finalization.stderr
-            ${{ steps.work.outputs.root }}/android-helper-finalize-image.json
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-notarytool.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-notarytool.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-notarytool.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-stapler.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-stapler.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-resolve-stapler.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-before.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-before.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-before.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-submit.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-submit.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-submit.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-log.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-log.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-log.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-staple.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-staple.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-staple.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-validate.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-validate.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-validate.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-after.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-after.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-signature-after.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-verify.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-verify.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-verify.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-attach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-attach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-attach.status
-            ${{ steps.work.outputs.root }}/android-helper-final-image-detach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-final-image-detach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-final-image-detach.status
-            ${{ steps.work.outputs.root }}/package-install.stdout
-            ${{ steps.work.outputs.root }}/package-install.stderr
-            ${{ steps.work.outputs.root }}/package-install.status
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.status
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status
-            ${{ steps.work.outputs.root }}/android-helper-installer.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer.status
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
+            ${{ format('{0}/source-binding.json
+            {0}/effective-rust-toolchain.json
+            {0}/source-inventory.json
+            {0}/data-contracts/mount.stdout
+            {0}/data-contracts/mount.stderr
+            {0}/data-contracts/mount.status
+            {0}/data-contracts/apfs.stdout
+            {0}/data-contracts/apfs.stderr
+            {0}/data-contracts/apfs.status
+            {0}/data-contracts/build.stdout
+            {0}/data-contracts/build.stderr
+            {0}/data-contracts/build.status
+            {0}/data-contracts/rust.stdout
+            {0}/data-contracts/rust.stderr
+            {0}/data-contracts/rust.status
+            {0}/data-contracts/python.stdout
+            {0}/data-contracts/python.stderr
+            {0}/data-contracts/python.status
+            {0}/data-contracts/result.json
+            {0}/normal-build.jsonl
+            {0}/normal-build.status
+            {0}/normal-build.stderr.tail.txt
+            {0}/preview-result.json
+            {0}/normal-ui/build-file-limit.status
+            {0}/normal-ui/build-file-budget.status
+            {0}/normal-ui/build-file-budget.json
+            {0}/normal-ui/test-file-limit.status
+            {0}/normal-ui/test-file-budget.status
+            {0}/normal-ui/test-file-budget.json
+            {0}/normal-ui/project-test-file-limit.status
+            {0}/normal-ui/project-test-file-budget.status
+            {0}/normal-ui/project-test-file-budget.json
+            {0}/normal-ui/persistence-test-file-limit.status
+            {0}/normal-ui/persistence-test-file-budget.status
+            {0}/normal-ui/persistence-test-file-budget.json
+            {0}/normal-ui/toolchain.failure-diagnostics.json
+            {0}/normal-ui/build.failure-diagnostics.json
+            {0}/normal-ui/build.admission-diagnostics.json
+            {0}/normal-ui/build.command-admission.json
+            {0}/normal-ui/test.failure-diagnostics.json
+            {0}/normal-ui/summary.failure-diagnostics.json
+            {0}/normal-ui/summary.command-admission.json
+            {0}/normal-ui/project-test.failure-diagnostics.json
+            {0}/normal-ui/project-summary.failure-diagnostics.json
+            {0}/normal-ui/project-summary.command-admission.json
+            {0}/normal-ui/persistence-test.failure-diagnostics.json
+            {0}/normal-ui/persistence-summary.failure-diagnostics.json
+            {0}/normal-ui/persistence-summary.command-admission.json
+            {0}/normal-ui/diagnostics-test.failure-diagnostics.json
+            {0}/normal-ui/diagnostics-summary.failure-diagnostics.json
+            {0}/normal-ui/diagnostics-summary.command-admission.json
+            {0}/normal-ui/saved-checks-test.failure-diagnostics.json
+            {0}/normal-ui/saved-checks-summary.failure-diagnostics.json
+            {0}/normal-ui/saved-checks-summary.command-admission.json
+            {0}/normal-ui/build.status
+            {0}/normal-ui/test.status
+            {0}/normal-ui/test.runner-admission.json
+            {0}/normal-ui/summary.status
+            {0}/normal-ui/xcode-version.txt
+            {0}/normal-ui/sdk-path.txt
+            {0}/normal-ui/sdk-version.txt
+            {0}/normal-ui/sdk-build.txt
+            {0}/normal-ui/result.json
+            {0}/normal-ui/persistence-test.status
+            {0}/normal-ui/persistence-test.runner-admission.json
+            {0}/normal-ui/persistence-diagnostics.json
+            {0}/normal-ui/persistence-summary.status
+            {0}/normal-ui/persistence-result.json
+            {0}/normal-ui/project-test.status
+            {0}/normal-ui/project-test.runner-admission.json
+            {0}/normal-ui/project-summary.status
+            {0}/normal-ui/project-result.json
+            {0}/normal-ui/diagnostics-test-file-limit.status
+            {0}/normal-ui/diagnostics-test-file-budget.status
+            {0}/normal-ui/diagnostics-test-file-budget.json
+            {0}/normal-ui/diagnostics-test.status
+            {0}/normal-ui/diagnostics-test.runner-admission.json
+            {0}/normal-ui/diagnostics-safe-facts.json
+            {0}/normal-ui/diagnostics-summary.status
+            {0}/normal-ui/diagnostics-result.json
+            {0}/normal-ui/saved-checks-test-file-limit.status
+            {0}/normal-ui/saved-checks-test-file-budget.status
+            {0}/normal-ui/saved-checks-test-file-budget.json
+            {0}/normal-ui/saved-checks-test.status
+            {0}/normal-ui/saved-checks-test.runner-admission.json
+            {0}/normal-ui/saved-checks-safe-facts.json
+            {0}/normal-ui/saved-checks-summary.status
+            {0}/normal-ui/saved-checks-result.json
+            {0}/package-format-input.json
+            {0}/PackageFormat-original.pkg
+            {0}/package-format-prepare.json
+            {0}/package-format-tar.status
+            {0}/package-format-xar.status
+            {0}/package-format-audit.json
+            {0}/package-format-final/PackageFormat.pkg
+            {0}/native-acl-compile.log
+            {0}/native-acl-compile.status
+            {0}/native-acl-probe.log
+            {0}/native-acl-probe.status
+            {0}/native-acl-cleanup.status
+            {0}/native-acl-probe-result.json
+            {0}/runtime-result.json
+            {0}/fresh-python-transport-result.json
+            {0}/android-support-result.json
+            {0}/vault-helper-build.status
+            {0}/vault-helper-build.jsonl
+            {0}/vault-helper-build.stderr
+            {0}/vault-helper-signing.json
+            {0}/android-helper-prepare.json
+            {0}/android-helper-build.jsonl
+            {0}/android-helper-build.stderr
+            {0}/android-helper-build.status
+            {0}/android-helper-resident-image-sign.stdout
+            {0}/android-helper-resident-image-sign.stderr
+            {0}/android-helper-resident-image-sign.status
+            {0}/android-helper-resident-image-verify-signed.stdout
+            {0}/android-helper-resident-image-verify-signed.stderr
+            {0}/android-helper-resident-image-verify-signed.status
+            {0}/android-helper-entry-build.stdout
+            {0}/android-helper-entry-build.stderr
+            {0}/android-helper-entry-build.status
+            {0}/android-helper-desktop-facade-build.stdout
+            {0}/android-helper-desktop-facade-build.stderr
+            {0}/android-helper-desktop-facade-build.status
+            {0}/android-helper-resident-facade-build.stdout
+            {0}/android-helper-resident-facade-build.stderr
+            {0}/android-helper-resident-facade-build.status
+            {0}/android-helper-verify-before-resident-image.stdout
+            {0}/android-helper-verify-before-resident-image.stderr
+            {0}/android-helper-verify-before-resident-image.status
+            {0}/android-helper-verify-after-resident-image.stdout
+            {0}/android-helper-verify-after-resident-image.stderr
+            {0}/android-helper-verify-after-resident-image.status
+            {0}/android-helper-sign.stdout
+            {0}/android-helper-sign.stderr
+            {0}/android-helper-sign.status
+            {0}/android-helper-verify-signed.stdout
+            {0}/android-helper-verify-signed.stderr
+            {0}/android-helper-verify-signed.status
+            {0}/android-helper-verify-before.stdout
+            {0}/android-helper-verify-before.stderr
+            {0}/android-helper-verify-before.status
+            {0}/android-helper-verify-after.stdout
+            {0}/android-helper-verify-after.stderr
+            {0}/android-helper-verify-after.status
+            {0}/android-helper-verify-before.json
+            {0}/android-helper-verify-after.json
+            {0}/android-helper-sign-vault-helper.json
+            {0}/android-helper-sign-desktop-image.json
+            {0}/android-helper-sign-desktop-payload.json
+            {0}/android-helper-sign-root-app.json
+            {0}/android-helper-sign-root-installer.json
+            {0}/app-result.json
+            {0}/input-result.json
+            {0}/dialog-regressions.log
+            {0}/dialog-regressions.status
+            {0}/installer-finalizer-regression.log
+            {0}/installer-finalizer-regression.status
+            {0}/native-abi-regression.log
+            {0}/native-abi-regression.status
+            {0}/focused-regressions.json
+            {0}/scripts-fixture-result.json
+            {0}/package-fixture-audit.json
+            {0}/installer-fixture-output.txt
+            {0}/installer-fixture-output.status
+            {0}/installer-fixture-log-cursor.json
+            {0}/installer-fixture-log-cursor.status
+            {0}/installer-fixture-log-capture.json
+            {0}/installer-fixture-log-capture.status
+            {0}/installer-fixture-log-selected.txt
+            {0}/installer-fixture-observation.json
+            {0}/MobileReleaseKit-InstallerFixture-original.pkg
+            {0}/package-fixture-prepare.json
+            {0}/package-fixture-tar.status
+            {0}/package-fixture-xar.status
+            {0}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg
+            {0}/scripts-result.json
+            {0}/package-audit.json
+            {0}/installation-observation.json
+            {0}/installer-output.txt
+            {0}/installer-output.status
+            {0}/installer-log-cursor.json
+            {0}/installer-log-cursor.status
+            {0}/installer-log-capture.json
+            {0}/installer-log-capture.status
+            {0}/installer-log-selected.txt
+            {0}/MobileReleaseKit-original.pkg
+            {0}/package-prepare.json
+            {0}/package-tar.status
+            {0}/package-xar.status
+            {0}/package-final/MobileReleaseKit.pkg
+            {0}/packaging-selection.json
+            {0}/producer-root/Install.pkg
+            {0}/producer-root/producer.json
+            {0}/producer-root/producer.sig
+            {0}/distribution/MobileReleaseKit.dmg
+            {0}/distribution/MobileReleaseKit-Observation.dmg
+            {0}/package-request-id.txt
+            {0}/android-helper-package-install.json
+            {0}/android-helper-notarize-payload.json
+            {0}/android-helper-finalize-package.json
+            {0}/package-finalization.status
+            {0}/image-finalization.status
+            {0}/image-finalization.stdout
+            {0}/image-finalization.stderr
+            {0}/android-helper-finalize-image.json
+            {0}/android-helper-final-image-resolve-notarytool.stdout
+            {0}/android-helper-final-image-resolve-notarytool.stderr
+            {0}/android-helper-final-image-resolve-notarytool.status
+            {0}/android-helper-final-image-resolve-stapler.stdout
+            {0}/android-helper-final-image-resolve-stapler.stderr
+            {0}/android-helper-final-image-resolve-stapler.status
+            {0}/android-helper-final-image-signature-before.stdout
+            {0}/android-helper-final-image-signature-before.stderr
+            {0}/android-helper-final-image-signature-before.status
+            {0}/android-helper-final-image-submit.stdout
+            {0}/android-helper-final-image-submit.stderr
+            {0}/android-helper-final-image-submit.status
+            {0}/android-helper-final-image-log.stdout
+            {0}/android-helper-final-image-log.stderr
+            {0}/android-helper-final-image-log.status
+            {0}/android-helper-final-image-staple.stdout
+            {0}/android-helper-final-image-staple.stderr
+            {0}/android-helper-final-image-staple.status
+            {0}/android-helper-final-image-validate.stdout
+            {0}/android-helper-final-image-validate.stderr
+            {0}/android-helper-final-image-validate.status
+            {0}/android-helper-final-image-signature-after.stdout
+            {0}/android-helper-final-image-signature-after.stderr
+            {0}/android-helper-final-image-signature-after.status
+            {0}/android-helper-final-image-verify.stdout
+            {0}/android-helper-final-image-verify.stderr
+            {0}/android-helper-final-image-verify.status
+            {0}/android-helper-final-image-attach.stdout
+            {0}/android-helper-final-image-attach.stderr
+            {0}/android-helper-final-image-attach.status
+            {0}/android-helper-final-image-detach.stdout
+            {0}/android-helper-final-image-detach.stderr
+            {0}/android-helper-final-image-detach.status
+            {0}/package-install.stdout
+            {0}/package-install.stderr
+            {0}/package-install.status
+            {0}/android-helper-producer-build.stdout
+            {0}/android-helper-producer-build.stderr
+            {0}/android-helper-producer-build.status
+            {0}/android-helper-producer-emitter.stdout
+            {0}/android-helper-producer-emitter.stderr
+            {0}/android-helper-producer-emitter.status
+            {0}/android-helper-distribution-create.stdout
+            {0}/android-helper-distribution-create.stderr
+            {0}/android-helper-distribution-create.status
+            {0}/android-helper-distribution-sign.stdout
+            {0}/android-helper-distribution-sign.stderr
+            {0}/android-helper-distribution-sign.status
+            {0}/android-helper-distribution-verify-signature.stdout
+            {0}/android-helper-distribution-verify-signature.stderr
+            {0}/android-helper-distribution-verify-signature.status
+            {0}/android-helper-distribution-verify-image.stdout
+            {0}/android-helper-distribution-verify-image.stderr
+            {0}/android-helper-distribution-verify-image.status
+            {0}/android-helper-observation-create.stdout
+            {0}/android-helper-observation-create.stderr
+            {0}/android-helper-observation-create.status
+            {0}/android-helper-observation-sign.stdout
+            {0}/android-helper-observation-sign.stderr
+            {0}/android-helper-observation-sign.status
+            {0}/android-helper-observation-verify-signature.stdout
+            {0}/android-helper-observation-verify-signature.stderr
+            {0}/android-helper-observation-verify-signature.status
+            {0}/android-helper-observation-verify-image.stdout
+            {0}/android-helper-observation-verify-image.stderr
+            {0}/android-helper-observation-verify-image.status
+            {0}/android-helper-distribution-attach.stdout
+            {0}/android-helper-distribution-attach.stderr
+            {0}/android-helper-distribution-attach.status
+            {0}/android-helper-installer-log-cursor.stdout
+            {0}/android-helper-installer-log-cursor.stderr
+            {0}/android-helper-installer-log-cursor.status
+            {0}/android-helper-installer.stdout
+            {0}/android-helper-installer.stderr
+            {0}/android-helper-installer.status
+            {0}/android-helper-installer-log-capture.stdout
+            {0}/android-helper-installer-log-capture.stderr
+            {0}/android-helper-installer-log-capture.status
+            {0}/android-helper-distribution-detach.stdout
+            {0}/android-helper-distribution-detach.stderr
+            {0}/android-helper-distribution-detach.status', steps.work.outputs.root) }}
           if-no-files-found: error
           retention-days: 14
           compression-level: 0

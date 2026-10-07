@@ -103,27 +103,15 @@ class MemoryBook:
         return self.close_known
 
 
-def memory_os(book, *, alias=None):
-    state = SimpleNamespace(link=alias, writes=[], bundle_uid=0)
-
-    def named(name, *, dir_fd, follow_symlinks):
-        assert follow_symlinks is False and dir_fd == book.directory(PROBE.APPLICATIONS)["fd"]
-        symbolic = name == "Xcode.app" and state.link is not None
-        mode = (stat.S_IFLNK | 0o777) if symbolic else (stat.S_IFDIR | 0o755)
-        return SimpleNamespace(st_dev=1, st_ino=900, st_mode=mode, st_uid=state.bundle_uid,
-                               st_gid=0, st_nlink=1, st_size=len(state.link) if symbolic else 0,
-                               st_mtime_ns=8, st_ctime_ns=8)
-
-    def readlink(name, *, dir_fd):
-        assert name == "Xcode.app" and dir_fd == book.directory(PROBE.APPLICATIONS)["fd"]
-        return state.link
+def memory_os(book):
+    state = SimpleNamespace(writes=[])
 
     def write(fd, body):
         assert fd in (1, 2) and type(body) is bytes
         state.writes.append(body)
         return len(body)
 
-    return SimpleNamespace(path=os.path, stat=named, readlink=readlink, write=write), state
+    return SimpleNamespace(path=os.path, write=write), state
 
 
 class IntelOSProviderData(unittest.TestCase):
@@ -169,45 +157,62 @@ class IntelOSProviderData(unittest.TestCase):
                 with self.subTest(code=code, prefix=out[:35], error=err[:35]):
                     with self.assertRaises((RuntimeError, UnicodeDecodeError)):
                         PROBE.observation(path, code, out, err)
-        selected = b"/Applications/Xcode_26.6.app/" + PROBE.TOOL_SUFFIX.encode() + b"\n"
-        self.assertEqual(PROBE.selected_tool_path(selected), Path(selected.decode().rstrip("\n")))
-        self.assertEqual(PROBE.alias_bundle("Xcode_26.6.app"), Path("/Applications/Xcode_26.6.app"))
-        self.assertEqual(PROBE.alias_bundle("/Applications/Xcode_26.6.app"), Path("/Applications/Xcode_26.6.app"))
-        for value in (selected[:-1], selected + b"\n", selected.replace(b"26.6", b"26.6_beta"),
-                      selected.replace(b"XcodeDefault", b"untrusted"), b"/usr/bin/dyld_info\n",
-                      b"/Library/Developer/CommandLineTools/usr/bin/dyld_info\n",
-                      selected.replace(b"/Applications/", b"/tmp/"), selected.replace(b"/Contents/", b"/../Contents/")):
-            with self.assertRaises(RuntimeError):
+        selected = b"/Library/Developer/CommandLineTools/usr/bin/dyld_info\n"
+        self.assertEqual(PROBE.selected_tool_path(selected), PROBE.SELECTED_TOOL)
+        self.assertEqual(PROBE.DEVELOPER_DIR, Path("/Library/Developer/CommandLineTools"))
+        old_suffix = "Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dyld_info"
+        invalid = (selected[:-1], selected + b"\n", selected.replace(b"CommandLineTools", b"CommandLineTools-beta"),
+                   selected.replace(b"/usr/", b"/../usr/"), selected.replace(b"/Library/", b"/tmp/"),
+                   selected.replace(b"/bin/", b"//bin/"), b"/usr/bin/dyld_info\n", b"dyld_info\n", b"x" * 513)
+        invalid += tuple((name + "/" + old_suffix + "\n").encode() for name in
+                         ("/Applications/Xcode.app", "/Applications/Xcode_26.6.app", "/Applications/Xcode_26.6_beta.app",
+                          "/tmp/Xcode_26.6.app", "../Xcode_26.6.app", "Xcode.app", "Xcode_26.6.app/.."))
+        for value in invalid:
+            with self.subTest(selected=value), self.assertRaises(RuntimeError):
                 PROBE.selected_tool_path(value)
-        for value in ("../Xcode_26.6.app", "/tmp/Xcode_26.6.app", "Xcode.app", "Xcode_26.6.app/..", "Xcode_26.6_beta.app"):
-            with self.assertRaises(RuntimeError):
-                PROBE.alias_bundle(value)
 
     def test_four_originals_selected_tool_post_and_finality_share_one_endpoint(self):
-        selected = Path("/Applications/Xcode_26.6.app") / PROBE.TOOL_SUFFIX
+        selected = PROBE.SELECTED_TOOL
         book = MemoryBook()
-        fake_os, state = memory_os(book, alias="/Applications/Xcode_26.6.app")
-        with mock.patch.object(PROBE, "os", fake_os):
-            tool = PROBE.selected_tool(book, Path("/Applications/Xcode.app") / PROBE.TOOL_SUFFIX)
-            self.assertEqual(tool["path"], selected)
+        tool = PROBE.selected_tool(book, selected)
+        self.assertEqual(tool["path"], selected)
+        self.assertIsNone(tool["alias"])
+        PROBE.tool_post(book, tool)
+        evidence = PROBE.tool_evidence(tool)
+        self.assertEqual(evidence["originalIdentity"], tool["entry"]["identity"])
+        self.assertEqual(evidence["selectedPath"], str(selected))
+        self.assertIsNone(evidence["oneHopAlias"])
+        self.assertTrue(all(row["directoryIdentity"][3] == 0 for row in evidence["ancestors"]))
+        tool["alias"] = {"name": "not-an-admissible-alias"}
+        with self.assertRaisesRegex(RuntimeError, "selected-tool-admission"):
             PROBE.tool_post(book, tool)
-            evidence = PROBE.tool_evidence(tool)
-            self.assertEqual(evidence["originalIdentity"], tool["entry"]["identity"])
-            self.assertEqual(evidence["oneHopAlias"]["parent"], "/Applications")
-            self.assertTrue(all(row["directoryIdentity"][3] == 0 for row in evidence["ancestors"]))
-            state.link = "/Applications/Xcode_26.7.app"
-            with self.assertRaisesRegex(RuntimeError, "selected-alias-changed"):
-                PROBE.tool_post(book, tool)
+        tool["alias"] = None
+        book.files[selected] = b"changed original tool"
+        with self.assertRaisesRegex(RuntimeError, "system-tool-post"):
+            PROBE.tool_post(book, tool)
+        self.assertTrue(book.finish())
+        for path in PROBE.DIRECTORY_PATHS:
+            for mode in ("wrong-owner", "group-write", "other-write", "not-directory"):
+                with self.subTest(ancestor=path, mode=mode):
+                    book = MemoryBook()
+                    ancestor = book.directory(path)
+                    facts = list(ancestor["identity"])
+                    if mode == "wrong-owner":
+                        facts[3] = 501
+                    elif mode == "not-directory":
+                        facts[2] = stat.S_IFLNK | 0o755
+                    else:
+                        facts[2] |= 0o020 if mode == "group-write" else 0o002
+                    ancestor["identity"] = tuple(facts)
+                    with self.assertRaisesRegex(RuntimeError, "system-tool-root-ancestor"):
+                        PROBE.system_tool(book, selected)
+                    self.assertTrue(book.finish())
         book = MemoryBook()
-        fake_os, state = memory_os(book)
-        state.bundle_uid = 501
-        with mock.patch.object(PROBE, "os", fake_os), self.assertRaisesRegex(RuntimeError, "selected-bundle-original"):
+        alias_error = OSError(PROBE.errno.ELOOP, "inert no-follow rejection")
+        with mock.patch.object(book, "file", side_effect=alias_error), self.assertRaises(OSError) as refusal:
             PROBE.selected_tool(book, selected)
-        book = MemoryBook()
-        applications = book.directory(PROBE.APPLICATIONS)
-        applications["identity"] = (*applications["identity"][:3], 501, 0)
-        with self.assertRaisesRegex(RuntimeError, "system-tool-root-ancestor"):
-            PROBE.system_tool(book, selected)
+        self.assertIs(refusal.exception, alias_error)
+        self.assertTrue(book.finish())
 
         # The real admission failure is never converted into tool authority by
         # a later metadata sample, including a safe-looking after-refusal mode.
@@ -217,6 +222,47 @@ class IntelOSProviderData(unittest.TestCase):
         fixture = SimpleNamespace(context_timeout=context_timeout, completed=completed, canonical=canonical,
                                   Refused=DirectoryRefused)
         deadline = 120_000_000_000
+        # An absent, linked or unsafe developer directory cannot trigger even
+        # the resolver, and never authorizes an installation or a fallback.
+        for rejected in (Path("/Library"), PROBE.DEVELOPER_DIR):
+            for mode in ("absent", "alias", "wrong-owner", "group-write", "other-write", "not-directory"):
+                with self.subTest(developer=rejected, mode=mode):
+                    book, calls, tools, dispatched = MemoryBook(), [], {}, []
+                    original_directory = book.directory
+                    progress = {"stage": "host-admission", "role": None, "sourceSlot": None}
+                    clock = SimpleNamespace(CLOCK_MONOTONIC=1, clock_gettime_ns=lambda which: 1)
+
+                    def refused_developer(path):
+                        path = Path(path)
+                        if path == rejected and mode in ("absent", "alias"):
+                            raise OSError(PROBE.errno.ENOENT if mode == "absent" else PROBE.errno.ELOOP, "inert CLT refusal")
+                        entry = original_directory(path)
+                        if path == rejected:
+                            facts = list(entry["identity"])
+                            if mode == "wrong-owner":
+                                facts[3] = 501
+                            elif mode == "not-directory":
+                                facts[2] = stat.S_IFREG | 0o755
+                            else:
+                                facts[2] |= 0o020 if mode == "group-write" else 0o002
+                            entry["identity"] = tuple(facts)
+                        return entry
+
+                    def forbidden_dispatch(argv, **kwargs):
+                        dispatched.append(argv)
+                        self.fail("resolver dispatched after rejected fixed CLT root")
+
+                    with mock.patch.object(book, "directory", side_effect=refused_developer), \
+                            mock.patch.object(PROBE, "time", clock):
+                        with self.assertRaises((OSError, RuntimeError)):
+                            PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=forbidden_dispatch), deadline,
+                                                    Path("/private/test"), calls, tools, progress)
+                    self.assertEqual(dispatched, [])
+                    self.assertEqual(calls, [])
+                    self.assertEqual(set(tools), {"xcrun"})
+                    self.assertEqual(progress["stage"], "resolver-admission")
+                    self.assertTrue(book.finish())
+
         for mode in ("group-write", "wrong-owner", "safe-after", "changed-named", "changed-fd",
                      "missing-parent", "closed", "expired", "observation-error", "no-new-entry", "foreign-path"):
             with self.subTest(directory_refusal=mode):
@@ -229,13 +275,13 @@ class IntelOSProviderData(unittest.TestCase):
                 original_directory = book.directory
 
                 def rejected_directory(path):
-                    if Path(path) != PROBE.APPLICATIONS:
+                    if Path(path) != PROBE.SELECTED_TOOL.parent:
                         return original_directory(path)
                     if mode == "no-new-entry":
                         raise primary
-                    parent = original_directory(PROBE.APPLICATIONS.parent)
+                    parent = original_directory(PROBE.SELECTED_TOOL.parent.parent)
                     state.parent = parent
-                    state.entry = {"fd": 900, "path": PROBE.APPLICATIONS, "kind": "directory",
+                    state.entry = {"fd": 900, "path": PROBE.SELECTED_TOOL.parent, "kind": "directory",
                                    "identity": None, "closed": False}
                     book.entries.append(state.entry)
                     permissions = 0o755 if mode in ("wrong-owner", "safe-after") else 0o775
@@ -243,7 +289,7 @@ class IntelOSProviderData(unittest.TestCase):
                                                  st_uid=502 if mode == "wrong-owner" else 0, st_gid=0,
                                                  st_nlink=2, st_size=64, st_mtime_ns=8, st_ctime_ns=8)
                     if mode == "missing-parent":
-                        del book.directories[PROBE.APPLICATIONS.parent]
+                        del book.directories[PROBE.SELECTED_TOOL.parent.parent]
                     elif mode == "closed":
                         state.entry.update(fd=None, closed=True)
                     elif mode == "expired":
@@ -263,7 +309,7 @@ class IntelOSProviderData(unittest.TestCase):
 
                 def named_directory(name, *, dir_fd, follow_symlinks):
                     self.assertEqual((name, dir_fd, follow_symlinks),
-                                     ("Applications", state.parent["fd"], False))
+                                     ("bin", state.parent["fd"], False))
                     state.samples.append("named")
                     return (SimpleNamespace(**dict(vars(state.info), st_ino=901))
                             if mode == "changed-named" else state.info)
@@ -290,7 +336,7 @@ class IntelOSProviderData(unittest.TestCase):
                 self.assertEqual((progress["stage"], progress["role"]), ("selected-tool-admission", PROBE.ROLES[0]))
                 data = progress["directoryAfterRefusal"]
                 if mode in ("group-write", "wrong-owner", "safe-after"):
-                    self.assertEqual(data, {"when": "after-refusal", "ancestorSlot": "applications", "sameOriginal": True,
+                    self.assertEqual(data, {"when": "after-refusal", "ancestorSlot": "bin", "sameOriginal": True,
                                            "permissionBits": stat.S_IMODE(state.info.st_mode), "isDirectory": True,
                                            "ownerIsRoot": mode != "wrong-owner", "ownerIsCurrent": False,
                                            "groupWritable": mode == "group-write", "otherWritable": False})
@@ -307,9 +353,7 @@ class IntelOSProviderData(unittest.TestCase):
 
         # Only the fixed ancestor slots are observable; no rejected path is
         # serialized or reopened, and the original dictionary stays unbound.
-        suffix = PROBE.TOOL_SUFFIX.split("/")[:-1]
-        directory_paths = [PROBE.APPLICATIONS] + [Path("/Applications/Xcode_26.6.app").joinpath(*suffix[:n])
-                                                  for n in range(len(suffix) + 1)]
+        directory_paths = PROBE.DIRECTORY_PATHS
         self.assertEqual(len(directory_paths), len(PROBE.DIRECTORY_SLOTS))
         for slot, path in zip(PROBE.DIRECTORY_SLOTS, directory_paths):
             book = MemoryBook()
@@ -356,7 +400,15 @@ class IntelOSProviderData(unittest.TestCase):
             self.assertTrue(book.finish())
 
         fixture = SimpleNamespace(context_timeout=context_timeout, completed=completed, canonical=canonical)
-        for mode in ("observed", "missing-first", "unparsed-first", "resolver-foreign", "wrong-original", "unknown", "late"):
+        class OutcomeUnknown(RuntimeError):
+            dispatched, contained, cleanup_complete = True, True, False
+
+        class Interrupted(RuntimeError):
+            dispatched, contained, cleanup_complete = True, True, True
+
+        for mode in ("observed", "missing-first", "unparsed-first", "resolver-foreign", "resolver-xcode",
+                     "resolver-nonzero", "resolver-stderr", "wrong-original", "unknown", "outcome-unknown", "interrupted",
+                     "tool-changed", "ancestor-changed", "late"):
             with self.subTest(mode=mode):
                 book, calls, tools, dispatched = MemoryBook(), [], {}, []
                 progress = {"stage": "host-admission", "role": None, "sourceSlot": None}
@@ -371,16 +423,33 @@ class IntelOSProviderData(unittest.TestCase):
                     self.assertIs(kwargs["capture"], True)
                     self.assertIs(kwargs["text"], False)
                     self.assertEqual(kwargs["cwd"], Path("/private/test"))
-                    self.assertEqual(set(kwargs["environ"]), {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ"})
+                    self.assertEqual(set(kwargs["environ"]), {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ", "DEVELOPER_DIR"})
+                    self.assertEqual(kwargs["environ"]["DEVELOPER_DIR"], "/Library/Developer/CommandLineTools")
+                    self.assertIn(PROBE.DEVELOPER_DIR, book.directories)
                     self.assertLessEqual(kwargs["timeout"], 30)
                     self.assertGreaterEqual(kwargs["timeout"], 1)
                     self.assertTrue(book.events and tools)
                     clock.now += 3_000_000_000
                     if len(dispatched) == 1:
-                        output = (str(selected) + "\n").encode() if mode != "resolver-foreign" else b"/tmp/dyld_info\n"
-                        return subprocess.CompletedProcess(argv, 0, output, b"")
+                        output = (str(selected) + "\n").encode()
+                        if mode == "resolver-foreign":
+                            output = b"/tmp/dyld_info\n"
+                        elif mode == "resolver-xcode":
+                            output = b"/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dyld_info\n"
+                        return subprocess.CompletedProcess(argv, 1 if mode == "resolver-nonzero" else 0, output,
+                                                           b"inert resolver stderr" if mode == "resolver-stderr" else b"")
                     if mode == "unknown":
                         raise RuntimeError("inert original outcome unknown")
+                    if mode == "outcome-unknown":
+                        raise OutcomeUnknown("inert unknown original lifetime")
+                    if mode == "interrupted":
+                        raise Interrupted("inert original cancellation")
+                    if mode == "tool-changed":
+                        book.files[selected] = b"changed tool original during query"
+                    if mode == "ancestor-changed":
+                        entry = book.directories[PROBE.DEVELOPER_DIR]
+                        facts = list(entry["identity"]); facts[2] |= 0o020
+                        entry["identity"] = tuple(facts)
                     path = argv[-1]
                     output, error, code = image_text(path), b"", 0
                     if len(dispatched) == 2:
@@ -392,22 +461,30 @@ class IntelOSProviderData(unittest.TestCase):
                             clock.now = deadline
                     return subprocess.CompletedProcess(["wrong"] if mode == "wrong-original" else argv, code, output, error)
 
+                owner = SimpleNamespace(run_owned=run, ProcessOutcomeUnknown=OutcomeUnknown, ProcessInterrupted=Interrupted)
                 with mock.patch.object(PROBE, "os", fake_os), mock.patch.object(PROBE, "time", clock):
-                    if mode in ("resolver-foreign", "wrong-original", "unknown", "late"):
+                    if mode not in ("observed", "missing-first", "unparsed-first"):
                         with self.assertRaises(RuntimeError):
-                            PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=run), deadline,
+                            PROBE.observe_providers(fixture, book, owner, deadline,
                                                     Path("/private/test"), calls, tools, progress)
-                        self.assertEqual(len(dispatched), 1 if mode == "resolver-foreign" else 2)
-                        self.assertEqual(progress["stage"], {"resolver-foreign": "selected-tool-path",
+                        self.assertEqual(len(dispatched), 1 if mode.startswith("resolver-") else 2)
+                        self.assertEqual(progress["stage"], {"resolver-foreign": "selected-tool-path", "resolver-xcode": "selected-tool-path",
+                                                           "resolver-nonzero": "resolver-return", "resolver-stderr": "resolver-return",
                                                            "wrong-original": "call-return", "unknown": "call",
-                                                           "late": "call-post"}[mode])
+                                                           "outcome-unknown": "call", "interrupted": "call",
+                                                           "tool-changed": "call-post", "ancestor-changed": "call-post", "late": "call-post"}[mode])
                         self.assertEqual(progress["role"], PROBE.ROLES[len(dispatched) - 1])
-                        if mode in ("wrong-original", "unknown"):
+                        if mode in ("wrong-original", "unknown", "outcome-unknown", "interrupted"):
                             self.assertIs(calls[-1]["originalReturned"], False)
-                        if mode == "late":
+                        if mode in ("tool-changed", "ancestor-changed", "late"):
                             self.assertIs(calls[-1]["originalReturned"], True)
+                        if mode in ("outcome-unknown", "interrupted"):
+                            self.assertEqual(calls[-1]["errorType"], "ProcessOutcomeUnknown" if mode == "outcome-unknown" else "ProcessInterrupted")
+                            self.assertIs(calls[-1]["dispatched"], True)
+                            self.assertIs(calls[-1]["contained"], True)
+                            self.assertIs(calls[-1]["cleanupComplete"], mode == "interrupted")
                     else:
-                        observations = PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=run), deadline,
+                        observations = PROBE.observe_providers(fixture, book, owner, deadline,
                                                                Path("/private/test"), calls, tools, progress)
                         self.assertEqual(len(dispatched), 4)
                         self.assertEqual(progress, {"stage": "observations-post", "role": None, "sourceSlot": None})
@@ -420,7 +497,7 @@ class IntelOSProviderData(unittest.TestCase):
                                                                    "unparsed-first": "unresolved"}[mode])
                         self.assertEqual([x["state"] for x in observations[1:]], ["observed", "observed"])
                         self.assertEqual(calls[0]["stdoutSha256"], hashlib.sha256((str(selected) + "\n").encode()).hexdigest())
-                        self.assertNotIn("DEVELOPER_DIR", dispatched[0][1]["environ"])
+                        self.assertEqual(dispatched[0][1]["environ"]["DEVELOPER_DIR"], str(PROBE.DEVELOPER_DIR))
 
         publication_root = Path("/private/test/report")
         identities = {p: (1, n, stat.S_IFDIR | 0o700, 501, 0)
@@ -544,7 +621,7 @@ class IntelOSProviderData(unittest.TestCase):
                 value = json.loads(stderr[-1])
                 self.assertEqual(value["sourceSlot"], source_slot if type(source_slot) is int
                                  and 0 <= source_slot < len(PROBE.SOURCE_PINS) + 2 else None)
-            directory = {"when": "after-refusal", "ancestorSlot": "default-toolchain", "sameOriginal": True,
+            directory = {"when": "after-refusal", "ancestorSlot": "command-line-tools", "sameOriginal": True,
                          "permissionBits": 0o7777, "isDirectory": True, "ownerIsRoot": False,
                          "ownerIsCurrent": False, "groupWritable": True, "otherWritable": True}
             for slot in PROBE.DIRECTORY_SLOTS:
@@ -621,8 +698,9 @@ class IntelOSProviderData(unittest.TestCase):
         self.assertNotIn("repr(error)", functions["emit_refusal"])
         self.assertIn("os.write(2, body)", functions["emit_refusal"])
         self.assertIn("len(body) <= DIAGNOSTIC_LIMIT", functions["emit_refusal"])
-        self.assertEqual(PROBE.DIRECTORY_SLOTS, ("applications", "bundle", "contents", "developer", "toolchains",
-                                               "default-toolchain", "usr", "bin"))
+        self.assertEqual(PROBE.DIRECTORY_SLOTS, ("library", "developer", "command-line-tools", "usr", "bin"))
+        self.assertEqual(PROBE.DIRECTORY_PATHS, (Path("/Library"), Path("/Library/Developer"), PROBE.DEVELOPER_DIR,
+                                               PROBE.DEVELOPER_DIR / "usr", PROBE.SELECTED_TOOL.parent))
         refusal = ast.parse(functions["directory_refusal_data"])
         calls = [node for node in ast.walk(refusal) if isinstance(node, ast.Call)]
         self.assertEqual(sum(isinstance(node.func, ast.Attribute) and node.func.attr == "fstat" for node in calls), 2)
@@ -652,8 +730,20 @@ class IntelOSProviderData(unittest.TestCase):
         self.assertIn('source_post_known is True and source_closed is True and bootstrap_closed is True', functions["publish_record"])
         self.assertIn('parent["identity"][3] == 0', functions["root_ancestors"])
         self.assertIn('output_limit=CAPTURE_LIMIT', functions["observe_providers"])
-        self.assertNotIn('DEVELOPER_DIR', functions["observe_providers"])
-        self.assertNotIn('TOOLCHAINS', functions["observe_providers"])
+        self.assertIn('"DEVELOPER_DIR": str(DEVELOPER_DIR)', functions["observe_providers"])
+        self.assertLess(functions["observe_providers"].index('developer = book.directory(DEVELOPER_DIR)'),
+                        functions["observe_providers"].index('result = command(ROLES[0]'))
+        self.assertIn('developer["identity"][3] == 0', functions["observe_providers"])
+        self.assertIn('not developer["identity"][2] & 0o022', functions["observe_providers"])
+        self.assertIn('root_ancestors(book, developer)', functions["observe_providers"])
+        self.assertIn('text[:-1] == str(SELECTED_TOOL)', functions["selected_tool_path"])
+        self.assertIn('system_tool(book, selected)', functions["selected_tool"])
+        self.assertIn('tool["alias"] is None', functions["tool_post"])
+        self.assertNotIn('alias_bundle', functions)
+        for forbidden in ('TOOLCHAINS', 'SDKROOT', 'os.environ', 'xcode-select', 'softwareupdate', 'chmod', 'copy', 'retry'):
+            self.assertNotIn(forbidden, functions["observe_providers"])
+        self.assertIn('uid=0, modes=(0o555, 0o755)', functions["system_tool"])
+        self.assertIn('not parent["identity"][2] & 0o022', functions["root_ancestors"])
         for key in ('vendorPayloadExecuted', 'requestedProviderDlopen', 'runtimeQualified', 'supplierAuthority', 'privateScratchRetired'):
             self.assertIn('"' + key + '": False', functions["main"])
         self.assertIn('"publicationProvisionalUntilOriginalCallerZero": True', functions["main"])

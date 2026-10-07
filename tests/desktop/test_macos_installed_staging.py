@@ -43,6 +43,43 @@ def workflow_step(workflow, name):
     return workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
 
 
+def workflow_evidence_paths(workflow):
+    """Project only the two fixed artifact lists as DATA, never evaluate expressions."""
+    installed = "Preserve bounded originals; upload success is never GUI/native acceptance"
+    aqua = "Preserve bounded original evidence; upload alone is not an Aqua pass"
+    names = [name for name in (installed, aqua) if "      - name: " + name + "\n" in workflow]
+    if len(names) != 1:
+        raise AssertionError("expected one fixed evidence step")
+    block = workflow_step(workflow, names[0])
+    if block.count("          path: |\n") != 1:
+        raise AssertionError("expected one literal artifact scalar")
+    lines = []
+    for line in block.split("          path: |\n", 1)[1].splitlines():
+        if not line.startswith("            "):
+            break
+        lines.append(line[12:])
+    scalar = "\n".join(lines) + "\n"
+    root = "${{ steps.work.outputs.root }}"
+    if names[0] == installed:
+        opening, closing = "${{ format('", "', steps.work.outputs.root) }}\n"
+        if not scalar.startswith(opening) or not scalar.endswith(closing) or len(scalar[4:-4]) > 21000:
+            raise AssertionError("expected the sole bounded fixed-root format")
+        template = scalar[len(opening):-len(closing)]
+        lines = template.split("\n")
+        if len(lines) != 287 or len(set(lines)) != 287 or any(not line.startswith("{0}/") for line in lines):
+            raise AssertionError("expected the 287 fixed format rows")
+        suffixes = [line[3:] for line in lines]
+    else:
+        if not lines or any(not line.startswith(root + "/") for line in lines):
+            raise AssertionError("expected literal Aqua evidence rows")
+        suffixes = [line[len(root):] for line in lines]
+    for suffix in suffixes:
+        if (not suffix.isascii() or any(not (character.isalnum() or character in "_./-") for character in suffix)
+                or any(part in ("", ".", "..") for part in suffix[1:].split("/"))):
+            raise AssertionError("expected literal artifact suffixes without globs or interpolation")
+    return "".join(root + suffix + "\n" for suffix in suffixes)
+
+
 def normal_app_steps(workflow):
     return tuple(workflow_step(workflow, name) for name in (
         "Build the ordinary selected-target desktop image and embedded frontend",
@@ -3865,7 +3902,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             positions = [final_run.index(value) for value in ('export -n ', final_call,
                 'finalization_status=$?', 'printf \'%s\\n\' "$finalization_status"', 'finalization_status_saved=$?',
                 'unset ' + ' '.join(final_secrets), 'if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi',
-                '[[ "$finalization_status_saved" == 0 ]] || exit 1')]
+                '[[ "$finalization_status_saved" == 0 ]] || exit "$finalization_status_saved"')]
             self.assertEqual(positions, sorted(positions))
             for secret in final_secrets:
                 self.assertEqual(finalized.count(secret + ": ${{ secrets." + secret + " }}"), 1)
@@ -3876,10 +3913,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotIn(forbidden, finalized)
             for artifact in ("/android-helper-finalize-package.json", "/package-finalization.status"):
                 self.assertEqual(workflow.count(artifact), 1 if artifact.endswith(".json") else 2)
-            export_name = ("Preserve bounded originals; upload success is never GUI/native acceptance"
-                           if filename == "desktop-macos-installed.yml" else
-                           "Preserve bounded original evidence; upload alone is not an Aqua pass")
-            exports = workflow_step(workflow, export_name).split("        path: |\n", 1)[1]
+            exports = workflow_evidence_paths(workflow)
+            if filename == "desktop-macos-installed.yml":
+                for old, bad in (("${{ format('{0}/source-binding.json", "${{ format('{1}/source-binding.json"),
+                                 ("', steps.work.outputs.root) }}", "', steps.work.outputs.root, github.workspace) }}"),
+                                 ("{0}/source-binding.json", "{0}/*"),
+                                 ("{0}/source-binding.json", "{0}/../source-binding.json")):
+                    self.assertEqual(workflow.count(old), 1)
+                    with self.assertRaises(AssertionError):
+                        workflow_evidence_paths(workflow.replace(old, bad, 1))
             self.assertIn("${{ steps.work.outputs.root }}/android-helper-finalize-package.json\n", exports)
             self.assertIn("${{ steps.work.outputs.root }}/package-finalization.status\n", exports)
             # Final P is an intentional public artifact; admit this one exact
@@ -4081,7 +4123,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertIn(key + '=\"$' + key + '\" \\\n            ' + call, run)
         positions = [run.index(value) for value in ('export -n ', call, 'image_status=$?',
             'printf \'%s\\n\' "$image_status"', 'image_status_saved=$?', 'unset ' + key,
-            'if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi', '[[ "$image_status_saved" == 0 ]] || exit 1')]
+            'if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi', '[[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"')]
         self.assertEqual(positions, sorted(positions))
         for forbidden in ("cargo", "sudo", "P12", "--sign", "--keychain-profile", "store-credentials", "force", "-kernel"):
             self.assertNotIn(forbidden, phase)
@@ -5086,6 +5128,7 @@ class MacInstalledData(unittest.TestCase):
             paths.append(aqua)  # A validates both; I does not pretend it includes A.
         for path in paths:
             workflow = path.read_text(encoding="utf-8")
+            exports = workflow_evidence_paths(workflow)
             installer_name = ("Application installation uses only standard privileged Installer; app and Python stay nonroot"
                               if path.name == "desktop-macos-aqua.yml"
                               else "Standard Installer only is privileged; never execute the app or Python as root")
@@ -5113,7 +5156,7 @@ class MacInstalledData(unittest.TestCase):
                 self.assertEqual(positions, sorted(positions))
                 for filename in (stem + "-output.status", stem + "-log-cursor.json", stem + "-log-cursor.status",
                                  stem + "-log-capture.json", stem + "-log-capture.status", stem + "-log-selected.txt"):
-                    self.assertIn('${{ steps.work.outputs.root }}/' + filename, workflow)
+                    self.assertIn('${{ steps.work.outputs.root }}/' + filename + '\n', exports)
                 self.assertIn('--installer-status "$MRK_MACOS_WORK/' + stem + '-output.status"', workflow)
                 self.assertNotIn("--installer-output", workflow)
                 self.assertNotIn("ulimit", block)
@@ -5130,7 +5173,7 @@ class MacInstalledData(unittest.TestCase):
             self.assertIn("timeout-minutes: 18", owned)
             for filename in ("package-install.status", "android-helper-package-install.json", "package-request-id.txt",
                              "producer-root/producer.json", "producer-root/producer.sig", "distribution/MobileReleaseKit.dmg"):
-                self.assertIn('${{ steps.work.outputs.root }}/' + filename, workflow)
+                self.assertIn('${{ steps.work.outputs.root }}/' + filename + '\n', exports)
         helper = (root.parent.parent / "desktop/tools/macos_android_helper_package.py").read_text()
         parsed = ast.parse(helper)
         operation = next(node for node in parsed.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
@@ -5157,11 +5200,32 @@ class MacInstalledData(unittest.TestCase):
             'timeout = package_timeout_data(self.package_clock(), self.package_endpoint, timeout)', 'result = self.call(')]
         self.assertEqual(positions, sorted(positions))
         self.assertLess(wrapper.index('result = self.call('), wrapper.rindex('self.package_clock()'))
+        call_node = next(node for node in operation.body if isinstance(node, ast.FunctionDef) and node.name == "call")
+        dispatch = next(node for node in call_node.body if isinstance(node, ast.Try))
+        self.assertEqual(len(dispatch.body), 3)
+        expected_entries = ast.parse('''if self.phase == "package-install":
+    if role == "distribution-attach":
+        self.mount_entered = True
+    elif role == "installer":
+        self.installer_entered = True
+if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
+    self.mount_entered = True
+''').body
+        self.assertEqual([ast.dump(node, include_attributes=False) for node in dispatch.body[:2]],
+                         [ast.dump(node, include_attributes=False) for node in expected_entries])
+        self.assertIsInstance(dispatch.body[2], ast.Assign)
+        self.assertIsInstance(dispatch.body[2].value, ast.Call)
+        self.assertEqual(ast.dump(dispatch.body[2].value.func, include_attributes=False),
+                         ast.dump(ast.parse("self.owner.run_owned", mode="eval").body, include_attributes=False))
+        self.assertEqual(original.count('result = self.owner.run_owned('), 1)
+        self.assertEqual(original.count('self.mount_entered = True'), 2)
+        self.assertEqual(original.count('self.installer_entered = True'), 1)
+        package_entry = ast.get_source_segment(helper, dispatch.body[0])
         for role, field in (("distribution-attach", "mount_entered"), ("installer", "installer_entered")):
             entered = 'self.' + field + ' = True'
             self.assertNotIn(entered, package)
-            self.assertEqual(original.count(entered), 1)
-            self.assertLess(original.index('role == "' + role + '"'), original.index(entered))
+            self.assertEqual(package_entry.count(entered), 1)
+            self.assertLess(package_entry.index('role == "' + role + '"'), package_entry.index(entered))
             self.assertLess(original.index(entered), original.index('result = self.owner.run_owned('))
         self.assertLess(original.index('self.publish("installer-output.txt"'), original.index('record["capturesSettled"] = True'))
         self.assertLess(original.index('record["capturesSettled"] = True'), original.index('need(result.returncode == 0 or diagnostic'))
@@ -6683,9 +6747,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
                          '--supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json"',
                          '--expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256"'):
             self.assertEqual(runtime.count(fragment), 1, fragment)
-        self.assertEqual(workflow.count("            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n"), 1)
+        exports = workflow_evidence_paths(workflow)
+        self.assertEqual(exports.count("${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n"), 1)
         for path in ("fresh-python-transport", "fresh-python-supplier", "fresh-python-receipt"):
-            self.assertNotIn("            ${{ steps.work.outputs.root }}/" + path + "/", workflow)
+            self.assertNotIn("${{ steps.work.outputs.root }}/" + path + "/", exports)
         selected_name = "Select the fixed configured signed runtime before any payload download"
         capsule_download_name = "Download only the configured signed Python capsule"
         capsule_project_name = "Project the configured capsule as DATA without executing it"
@@ -6743,7 +6808,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # The three added calls are DATA only. No suffix or artifact name can
         # authorize another body, and native signing remains a separate owner.
         for path in ("signed-python-transport", "signed-python-capsule"):
-            self.assertNotIn("            ${{ steps.work.outputs.root }}/" + path + "/", workflow)
+            self.assertNotIn("${{ steps.work.outputs.root }}/" + path + "/", exports)
         binding = TOOL.decode((Path(__file__).absolute().parents[2] / "desktop" / TOOL.SIGNED_RUNTIME_BINDING).read_bytes())
         self.assertEqual(set(binding), {"schemaVersion", "targets"})
         self.assertEqual(set(binding["targets"]), set(TOOL.MAC_TARGETS))
@@ -7108,8 +7173,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertEqual(workflow.count("sudo -- /usr/sbin/installer -pkg "), 1)
         for stem in ("installer-fixture",):
             self.assertIn('--installer-status "$MRK_MACOS_WORK/' + stem + '-output.status"', workflow)
+        exports = workflow_evidence_paths(workflow)
         for path in ("runtime-result.json", "input-result.json", "installer-fixture-observation.json", "installation-observation.json"):
-            self.assertIn("$" + "{{ steps.work.outputs.root }}/" + path, workflow)
+            self.assertIn("$" + "{{ steps.work.outputs.root }}/" + path + "\n", exports)
         guide = (root / "desktop/packaging/macos-installed.md").read_text(encoding="utf-8")
         self.assertIn("ordinary4 remains a separate later obligation", guide)
         self.assertIn("No normal P2/project-picker qualification bit is enabled", guide)

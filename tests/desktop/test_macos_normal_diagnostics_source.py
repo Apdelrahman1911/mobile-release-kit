@@ -692,6 +692,29 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          '"releaseReadinessEstablished": False', '"productReady": False'):
             self.assertIn(fragment, result_source, fragment)
         evidence = blocks['evidence']
+        # The single format has one literal template and one fixed work-root
+        # argument. Project these exact DATA rows; do not execute expressions.
+        self.assertEqual(evidence.count('          path: |\n'), 1)
+        self.assertEqual(evidence.count('          if-no-files-found: error\n'), 1)
+        scalar_lines = evidence.split('          path: |\n', 1)[1].split('          if-no-files-found:', 1)[0].splitlines()
+        self.assertTrue(all(line.startswith('            ') for line in scalar_lines))
+        scalar = '\n'.join(line[12:] for line in scalar_lines) + '\n'
+        opening, closing = "${{ format('", "', steps.work.outputs.root) }}\n"
+        self.assertTrue(scalar.startswith(opening))
+        self.assertTrue(scalar.endswith(closing))
+        self.assertEqual(len(scalar[4:-4]), 11686)
+        self.assertLess(len(scalar[4:-4]), 21000)
+        self.assertEqual(scalar.count('steps.work.outputs.root'), 1)
+        self.assertEqual(scalar.count('${{'), 1)
+        template = scalar[len(opening):-len(closing)]
+        rows = template.split('\n')
+        self.assertEqual((len(rows), len(set(rows))), (287, 287))
+        self.assertTrue(all(re.fullmatch(r'\{0\}/[A-Za-z0-9_./-]+', row) for row in rows))
+        suffixes = [row[3:] for row in rows]
+        self.assertTrue(all(part not in ('', '.', '..') for suffix in suffixes for part in suffix[1:].split('/')))
+        self.assertEqual(digest(('\n'.join(suffixes) + '\n').encode('ascii')),
+                         '91017a03fb36fa6424ee26ef76c11cd837bd73786004bf5e973d2b241a229b7a')
+        evidence = ''.join('${{ steps.work.outputs.root }}' + suffix + '\n' for suffix in suffixes)
         for leaf in EVIDENCE_LEAVES:
             self.assertEqual(evidence.count('${{ steps.work.outputs.root }}/normal-ui/' + leaf + '\n'), 1)
         for suffix in ('diagnostics-test.log', 'diagnostics-summary.raw.json', 'diagnostics-summary.stderr',
