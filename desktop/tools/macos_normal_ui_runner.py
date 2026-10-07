@@ -1449,7 +1449,7 @@ class EngineeringInputs:
         app = self.work / ENGINEERING_APP
         self.app_roster = self.scan(app, runtime=False)
         need(set(self.app_roster["files"]) == {"Contents/Info.plist", "Contents/MacOS/" + ENGINEERING_EXECUTABLE, "Contents/_CodeSignature/CodeResources"}
-             and set(self.app_roster["directories"]) == {"", "Contents", "Contents/MacOS", "Contents/_CodeSignature"}, "engineering-app-exact-roster")
+             and set(self.app_roster["directories"]) == {"", "Contents", "Contents/MacOS", "Contents/Resources", "Contents/_CodeSignature"}, "engineering-app-exact-roster")
         need(self.read(app / "Contents/Info.plist", 4096)[0] == self.plist_body, "engineering-app-plist-bytes")
         self.read(app / ("Contents/MacOS/" + ENGINEERING_EXECUTABLE), ENGINEERING_MAIN_BYTES, collect=False)
         self.read(app / "Contents/_CodeSignature/CodeResources", 1024 * 1024, collect=False)
@@ -1518,6 +1518,10 @@ def engineering_assemble(phase, inputs):
     app.mkdir(mode=0o700)
     (app / "Contents").mkdir(mode=0o700)
     (app / "Contents/MacOS").mkdir(mode=0o700)
+    # Tauri macOS resource_dir canonicalizes MacOS/../Resources during setup,
+    # before the main window exists. This fixed empty directory is not a second
+    # runtime: development inputs still come only from the admitted external tree.
+    (app / "Contents/Resources").mkdir(mode=0o700)
     exclusive_output(app / "Contents/Info.plist", inputs.plist_body, 4096)
     source_fd, _, _, source_identity, source_digest, _ = inputs.held[inputs.binary]
     output = app / ("Contents/MacOS/" + ENGINEERING_EXECUTABLE)
@@ -1552,7 +1556,7 @@ def engineering_assemble(phase, inputs):
     for name in ("Contents/Info.plist", "Contents/_CodeSignature/CodeResources"):
         os.chmod(app / name, 0o444, follow_symlinks=False)
     os.chmod(output, 0o555, follow_symlinks=False)
-    for name in ("Contents/MacOS", "Contents/_CodeSignature", "Contents", ""):
+    for name in ("Contents/MacOS", "Contents/Resources", "Contents/_CodeSignature", "Contents", ""):
         os.chmod(app / name, 0o555, follow_symlinks=False)
     inputs.admit_app()
 

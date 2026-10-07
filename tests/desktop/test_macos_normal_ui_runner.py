@@ -1995,7 +1995,8 @@ class NormalPhaseDataTests(unittest.TestCase):
         # assembly/input/receipt path. Small synthetic bytes only: no archive,
         # interpreter, signer, Xcode, or application is executed by this test.
         for fault in (None, "runtime-changed", "source-changed", "native-nonzero", "late-test",
-                      "input-close", "receipt-close", "summary-nonzero", "late-summary-close"):
+                      "input-close", "receipt-close", "summary-nonzero", "late-summary-close",
+                      "resources-missing", "resources-symlink", "resources-nonempty"):
             with self.subTest(engineering_original=fault), tempfile.TemporaryDirectory(prefix="mrk-engineering-main-data-") as temporary:
                 base = Path(temporary)
                 root, compiler, work = (base / name for name in ("source", "compiler", "work"))
@@ -2091,6 +2092,10 @@ class NormalPhaseDataTests(unittest.TestCase):
                     if argv[0] == "/usr/bin/codesign":
                         if "--sign" in argv:
                             app = work / "Mobile Release Kit.app"
+                            resources = app / "Contents/Resources"
+                            self.assertTrue(stat.S_ISDIR(resources.lstat().st_mode))
+                            self.assertEqual(stat.S_IMODE(resources.lstat().st_mode), 0o700)
+                            self.assertEqual(list(resources.iterdir()), [])
                             put(app / "Contents/_CodeSignature/CodeResources", b"synthetic signature envelope\n")
                             put(app / "Contents/MacOS/mobile-release-kit-desktop", binary + b"synthetic ad-hoc mutation\n", 0o700)
                         return subprocess.CompletedProcess(argv, 0, b"", b"")
@@ -2151,11 +2156,31 @@ class NormalPhaseDataTests(unittest.TestCase):
                         build_facts = json.loads((normal / "engineering-build.command-admission.json").read_bytes())
                         self.assertEqual(build_facts["compilerBinarySha256"], hashlib.sha256(binary).hexdigest())
                         self.assertTrue(build_facts["inputOriginalClosesCompleted"])
+                        resources = work / "Mobile Release Kit.app/Contents/Resources"
+                        self.assertTrue(stat.S_ISDIR(resources.lstat().st_mode))
+                        self.assertEqual(stat.S_IMODE(resources.lstat().st_mode), 0o555)
+                        self.assertEqual(list(resources.iterdir()), [])
+                        # Real strict path resolution matches Tauri's macOS
+                        # resource_dir requirement; no Tauri/native call is faked.
+                        self.assertEqual((work / "Mobile Release Kit.app/Contents/MacOS/../Resources").resolve(strict=True),
+                                         resources.resolve(strict=True))
+                        if fault in ("resources-missing", "resources-symlink"):
+                            resources.parent.chmod(0o700)
+                            resources.rmdir()
+                            if fault == "resources-symlink":
+                                resources.symlink_to(normal / "tmp", target_is_directory=True)
+                            resources.parent.chmod(0o555)
+                        elif fault == "resources-nonempty":
+                            resources.chmod(0o700)
+                            put(resources / "unexpected", b"not a runtime input\n", 0o444)
+                            resources.chmod(0o555)
                         current_mode[0] = "test"
                         tested_request = dict(request, phase="test", result=normal / "engineering-test.xcresult",
                             methods=(MODULE.ENGINEERING_METHOD,), allowance=60, timeout=180, phaseSeconds=345)
                         test_phase = MODULE.NormalPhase(SimpleNamespace(run_owned=owned_fake), {}, root, MODULE.PhaseClock(345, now=lambda: tick[0]))
-                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close", "receipt-close"):
+                        before_test_calls = len(owned)
+                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close", "receipt-close",
+                                     "resources-missing", "resources-symlink", "resources-nonempty"):
                             with self.assertRaises((MODULE.Refused, OSError)):
                                 MODULE.execute_engineering_phase(test_phase, tested_request, binding["sourceSha"], (1024**3,) * 2)
                         else:
@@ -2210,15 +2235,30 @@ class NormalPhaseDataTests(unittest.TestCase):
                             self.assertFalse(result.exists())
                         if fault in ("input-close", "receipt-close", "late-summary-close"):
                             self.assertEqual(len(close_failures), 1)
-                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close"):
+                        if fault in ("runtime-changed", "source-changed", "late-test", "input-close",
+                                     "resources-missing", "resources-symlink", "resources-nonempty"):
                             self.assertFalse((normal / "engineering-test.runner-admission.json").exists())
                         if fault == "native-nonzero":
                             self.assertFalse(any(argv[:4] == ["/usr/bin/xcrun", "xcresulttool", "get", "test-results"] for argv, _ in owned))
-                        products.admit.assert_called_once()
-                        self.assertEqual(products.check.call_count, 2 if fault != "late-test" else 1)
-                        products_type.return_value.__exit__.assert_called_once()
-                        self.assertEqual(sum(argv[1:2] == ["test-without-building"] for argv, _ in owned), 1)
+                        if fault in ("resources-missing", "resources-symlink", "resources-nonempty"):
+                            self.assertEqual(len(owned), before_test_calls)
+                            products_type.assert_not_called()
+                            products.admit.assert_not_called()
+                            products.check.assert_not_called()
+                            products_type.return_value.__exit__.assert_not_called()
+                            self.assertFalse(any(argv[1:2] == ["test-without-building"] for argv, _ in owned))
+                        else:
+                            products.admit.assert_called_once()
+                            self.assertEqual(products.check.call_count, 2 if fault != "late-test" else 1)
+                            products_type.return_value.__exit__.assert_called_once()
+                            self.assertEqual(sum(argv[1:2] == ["test-without-building"] for argv, _ in owned), 1)
                 finally:
+                    # Remove only this fixture's explicit symlink before the
+                    # existing readonly-tree cleanup; never follow it for chmod.
+                    resources_link = work / "Mobile Release Kit.app/Contents/Resources"
+                    if resources_link.is_symlink():
+                        resources_link.parent.chmod(0o700)
+                        resources_link.unlink()
                     # Only this test's known temporary tree, including deliberate
                     # readonly fixture inputs, is made removable for its owner.
                     for directory in [base, *(p for p in base.rglob("*") if p.is_dir())]:
