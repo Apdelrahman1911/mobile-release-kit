@@ -157,6 +157,33 @@ class IntelOSProviderData(unittest.TestCase):
                 with self.subTest(code=code, prefix=out[:35], error=err[:35]):
                     with self.assertRaises((RuntimeError, UnicodeDecodeError)):
                         PROBE.observation(path, code, out, err)
+        # Exact public Apple metadata from run37592121242/1, source4d0f566.
+        # Golden DATA replays do not claim dlopen, supplier authority or a passed native run.
+        captured = (
+            ('/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM', b'/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM [x86_64]:\n    -platform:\n        platform     minOS      sdk\n           macOS     26.6      26.6   \n    -uuid:\n        8E63DFCA-94E5-3274-A174-4AFAAA25B923\n    -linked_dylibs:\n        attributes     load path\n                       /System/Library/Frameworks/Foundation.framework/Versions/C/Foundation\n                       /usr/lib/libobjc.A.dylib\n                       /usr/lib/libSystem.B.dylib\n                       /System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation\n    -rpaths:\n', '7e39464fd3ac6c45d3230cef0b04a4e9278691b295437d8c2bb69f5173a99300', 'macOS', '8E63DFCA-94E5-3274-A174-4AFAAA25B923', 4),
+            ('/usr/lib/libgcc_s.1.dylib', b'/usr/lib/libgcc_s.1.dylib [x86_64]:\n    -platform:\n        platform     minOS      sdk\n zippered(macOS/Catalyst)     26.6      26.6   \n    -uuid:\n        D56A3632-DC79-3455-B0E2-9196AAF2A974\n    -linked_dylibs:\n        attributes     load path\n        re-export      /usr/lib/system/libcache.dylib\n        re-export      /usr/lib/system/libcommonCrypto.dylib\n        re-export      /usr/lib/system/libcompiler_rt.dylib\n        re-export      /usr/lib/system/libcopyfile.dylib\n        re-export      /usr/lib/system/libcorecrypto.dylib\n        re-export      /usr/lib/system/libdispatch.dylib\n        re-export      /usr/lib/system/libdyld.dylib\n        re-export      /usr/lib/system/libkeymgr.dylib\n        re-export      /usr/lib/system/libmacho.dylib\n        re-export      /usr/lib/system/libquarantine.dylib\n        re-export      /usr/lib/system/libremovefile.dylib\n        re-export      /usr/lib/system/libsystem_asl.dylib\n        re-export      /usr/lib/system/libsystem_blocks.dylib\n        re-export      /usr/lib/system/libsystem_c.dylib\n        re-export      /usr/lib/system/libsystem_collections.dylib\n        re-export      /usr/lib/system/libsystem_configuration.dylib\n        re-export      /usr/lib/system/libsystem_containermanager.dylib\n        re-export      /usr/lib/system/libsystem_coreservices.dylib\n        re-export      /usr/lib/system/libsystem_darwin.dylib\n        re-export      /usr/lib/system/libsystem_darwindirectory.dylib\n        re-export      /usr/lib/system/libsystem_dnssd.dylib\n        re-export      /usr/lib/system/libsystem_eligibility.dylib\n        re-export      /usr/lib/system/libsystem_featureflags.dylib\n        re-export      /usr/lib/system/libsystem_info.dylib\n        re-export      /usr/lib/system/libsystem_m.dylib\n        re-export      /usr/lib/system/libsystem_malloc.dylib\n        re-export      /usr/lib/system/libsystem_networkextension.dylib\n        re-export      /usr/lib/system/libsystem_notify.dylib\n        re-export      /usr/lib/system/libsystem_sandbox.dylib\n        re-export      /usr/lib/system/libsystem_sanitizers.dylib\n        re-export      /usr/lib/system/libsystem_secinit.dylib\n        re-export      /usr/lib/system/libsystem_kernel.dylib\n        re-export      /usr/lib/system/libsystem_platform.dylib\n        re-export      /usr/lib/system/libsystem_pthread.dylib\n        re-export      /usr/lib/system/libsystem_symptoms.dylib\n        re-export      /usr/lib/system/libsystem_trace.dylib\n        re-export      /usr/lib/system/libsystem_trial.dylib\n        re-export      /usr/lib/system/libunwind.dylib\n        re-export      /usr/lib/system/libxpc.dylib\n    -rpaths:\n', 'a2f174ae4525da440eb7bd2ba86d144ec4bf24e8bfa9281f4814727e6fc06ac4', 'zippered(macOS/Catalyst)', 'D56A3632-DC79-3455-B0E2-9196AAF2A974', 39),
+            ('/usr/lib/libncurses.5.4.dylib', b'/usr/lib/libncurses.5.4.dylib [x86_64]:\n    -platform:\n        platform     minOS      sdk\n zippered(macOS/Catalyst)     26.6      26.6   \n    -uuid:\n        C777C16F-8119-3E1C-B313-D75BF1047B94\n    -linked_dylibs:\n        attributes     load path\n                       /usr/lib/libSystem.B.dylib\n    -rpaths:\n', '6863147dd970c5b5ece3d2d62b6ce705b16e3d6db16134e53f77834665b085fc', 'zippered(macOS/Catalyst)', 'C777C16F-8119-3E1C-B313-D75BF1047B94', 1),
+        )
+        for path, body, digest, platform, uuid, loads in captured:
+            with self.subTest(captured=path):
+                self.assertEqual(hashlib.sha256(body).hexdigest(), digest)
+                image = PROBE.observation(path, 0, body, b"")["images"][0]
+                self.assertEqual(image["architecture"], "x86_64")
+                self.assertEqual(image["platform"], platform)
+                self.assertEqual((image["minimumOS"], image["sdk"]), ("26.6", "26.6"))
+                self.assertEqual(image["uuid"], uuid)
+                self.assertEqual(len(image["loads"]), loads)
+                self.assertEqual(image["rpaths"], [])
+                if platform != "macOS":
+                    for bad in (b"macCatalyst", b"iOS", b"zippered(Catalyst/macOS)",
+                                b"zippered(macOS/iOS)", b"zippered(macOS/Catalyst)extra"):
+                        with self.subTest(platform=bad), self.assertRaises(RuntimeError):
+                            PROBE.observation(path, 0, body.replace(platform.encode(), bad), b"")
+                    for bad in (body[:-1], body + body, body.replace(b"[x86_64]", b"[arm64]"),
+                                body.replace(b"     26.6", b"    26.6", 1),
+                                body.replace(b"26.6", b"26.x", 1)):
+                        with self.subTest(malformed=True), self.assertRaises(RuntimeError):
+                            PROBE.observation(path, 0, bad, b"")
         selected = b"/Library/Developer/CommandLineTools/usr/bin/dyld_info\n"
         self.assertEqual(PROBE.selected_tool_path(selected), PROBE.SELECTED_TOOL)
         self.assertEqual(PROBE.DEVELOPER_DIR, Path("/Library/Developer/CommandLineTools"))

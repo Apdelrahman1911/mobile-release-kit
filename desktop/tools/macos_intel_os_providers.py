@@ -281,11 +281,13 @@ def observation(path, returncode, stdout, stderr):
         need(index < len(lines), "image-platform-row")
         row = lines[index]
         fields = row.split()
-        need(len(fields) == 3 and fields[0] == "macOS"
+        # Apple Platform::canLoad explicitly accepts zippered dylibs for macOS.
+        # Retain that original platform identity instead of relabeling it macOS.
+        need(len(fields) == 3 and fields[0] in ("macOS", "zippered(macOS/Catalyst)")
              and all(re.fullmatch(r"[0-9]{1,5}(?:\.[0-9]{1,5}){0,2}", v) is not None for v in fields[1:]),
              "image-platform-value")
-        min_os, sdk = fields[1:]
-        need(row == f" {'macOS':>15}     {min_os:<7}   {sdk:<7}", "image-platform-spelling")
+        platform, min_os, sdk = fields
+        need(row == f" {platform:>15}     {min_os:<7}   {sdk:<7}", "image-platform-spelling")
         index += 1
         take("    -uuid:")
         uuid = None
@@ -308,7 +310,7 @@ def observation(path, returncode, stdout, stderr):
             need(len(rpaths) < 64, "image-rpath-count")
             rpaths.append(path_text(lines[index][8:]))
             index += 1
-        images.append({"architecture": arch, "platform": "macOS", "minimumOS": min_os,
+        images.append({"architecture": arch, "platform": platform, "minimumOS": min_os,
                        "sdk": sdk, "uuid": uuid, "loads": loads, "rpaths": rpaths})
     need(images and index == len(lines), "image-complete-output")
     return {"path": path, "state": "observed", "selectedIntelImageObserved": True,
