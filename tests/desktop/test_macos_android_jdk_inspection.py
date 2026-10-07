@@ -320,6 +320,55 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
         self.assertFalse(unknown.native)
         self.assertEqual(unknown.unknown[0]["format"], "foreign-native")
 
+        # Complete-mode foreign/unresolved prefixes are original bounded stream
+        # observations, not an ELF/PE loader or a new native-format permission.
+        samples = (
+            ("target.so", (b"\x7fELF" + bytes(range(256)) * 20), "ELF", None),
+            ("foreign.dll", (b"MZ" + bytes(range(256)) * 20), "PE", None),
+            ("future.class", b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 99, 1), None, "ambiguous-native"),
+            ("empty.class", b"", None, "class-name-format-disagreement"),
+            ("hidden.dylib", b"opaque native-looking name", None, "native-name-format-disagreement"),
+        )
+        for name, body, foreign_format, problem in samples:
+            arena = I.Arena(Original())
+            collector = I._Observer(C, arena, complete=True)
+            value = row(name, body)
+            collector.begin(value[:4] + (None,) + value[5:-1] + (None,))
+            try:
+                for offset in range(0, len(body), 7):
+                    collector.block(name, offset, body[offset:offset + 7])
+                collector.end(value)
+                facts = collector.foreign if foreign_format else collector.unknown
+                self.assertEqual(len(facts), 1)
+                observed = facts[0]
+                self.assertEqual((observed["name"], observed["bytes"], observed["mode"], observed["sha256"]),
+                                 (value[0], value[3], value[2], value[4]))
+                prefix = body[:4096]
+                self.assertEqual(observed["prefixBytes"], len(prefix))
+                self.assertEqual(observed["prefixSha256"], hashlib.sha256(prefix).hexdigest())
+                self.assertEqual(base64.b64decode(observed["prefixBase64"]), prefix)
+                if foreign_format:
+                    self.assertEqual(observed["format"], foreign_format)
+                    self.assertEqual(collector.unknown, [])
+                else:
+                    self.assertEqual(observed["reason"], problem)
+                    self.assertEqual(collector.foreign, [])
+                self.assertEqual(arena.held["payload"], 0)
+                self.assertGreater(arena.held["facts"], 4096)
+            finally:
+                collector.dispose_current()
+        # The128 cap counts all recognized native formats together, not128
+        # Mach-O plus another128 foreign objects. Exact128 remains observable.
+        foreign = [(f"f-{number:03}.so", b"\x7fELF" + b"x" * 160) for number in range(127)]
+        limit_body = zip_bytes(foreign + [("own.dylib", macho())])
+        limit = I._inspect_complete_non_jdk(Original(limit_body), C,
+            ("sdk-build-tools", len(limit_body), hashlib.sha256(limit_body).hexdigest()))
+        self.assertEqual((len(limit.document["nativeMembers"]), len(limit.document["foreignNativeMembers"])), (1, 127))
+        overflow = zip_bytes(foreign + [("own.dylib", macho()), ("last.dll", b"MZ" + b"x" * 160)])
+        with self.assertRaisesRegex(I.InspectionRefused, "native-member-count"):
+            I._inspect_complete_non_jdk(Original(overflow), C,
+                ("sdk-build-tools", len(overflow), hashlib.sha256(overflow).hexdigest()))
+
     def test_complete_jmod_and_zip_censuses_bind_whole_bytes_crc_and_counterparts(self):
         native = macho()
         java = b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 61, 1)
@@ -573,6 +622,113 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
         self.assertFalse(compact_receipt["supplierAuthority"])
         self.assertEqual(compact_receipt["peakReservations"]["rows"], compact_charge)
 
+        # A full311-small-JAR synthetic census exercises the real all-sibling
+        # algorithm. These bytes/names are NOT the vendor's311 observed tuples.
+        jars = []
+        for number in range(311):
+            children = [("p/C.class", java)]
+            if number == 0:
+                children.append(("native.dylib", macho()))
+            elif number == 1:
+                children.append(("nested.data", zip_bytes([("notice", b"complete nested data")])))
+            material = zip_bytes(children)
+            jars.append((f"gradle-8.14.5/lib/sibling-{number:03}.jar", material))
+        whole = zip_bytes(jars + [("gradle-8.14.5/NOTICE", b"not filtered")])
+        complete = I._inspect_complete_non_jdk(Original(whole), C,
+            ("gradle", len(whole), hashlib.sha256(whole).hexdigest()))
+        value = complete.document
+        outer_rows, outer_summary = baseline("gradle", whole)
+        self.assertEqual(value["rows"], outer_rows)
+        self.assertEqual(value["outer"], outer_summary)
+        self.assertTrue(value["completeOuterMemberHashes"])
+        self.assertTrue(value["completeInnerCoverage"])
+        self.assertEqual(value["uninspectedInnerArchives"], [])
+        self.assertEqual(value["uninspectedInnerArchiveCount"], 0)
+        self.assertEqual(value["innerInspectionScope"], "all-complete-outer-zip-or-jmod")
+        self.assertEqual([(v["name"], v["bytes"], v["sha256"]) for v in value["innerArchives"]],
+                         [(name, len(body), hashlib.sha256(body).hexdigest()) for name, body in jars])
+        self.assertEqual(len(value["innerArchives"]), 311)
+        self.assertIsNone(value["innerArchives"][0]["negativeEvidence"])
+        self.assertIsNone(value["innerArchives"][1]["negativeEvidence"])
+        self.assertEqual(len(value["innerArchives"][1]["nestedArchives"]), 1)
+        for inner in value["innerArchives"][2:]:
+            negative = inner["negativeEvidence"]
+            self.assertEqual((negative["centralMembers"], negative["inspectedMembers"], negative["files"]), (1, 1, 1))
+            self.assertEqual(negative["enumerationSha256"], inner["enumerationSha256"])
+            self.assertEqual((negative["nativeMembers"], negative["nestedArchives"]), ([], []))
+            self.assertFalse(negative["nativeExecution"])
+            self.assertFalse(negative["supplierAuthority"])
+        # Complete JMOD retains its actual four-byte view offset and every
+        # directory row; a directory does not fabricate a file-format count.
+        jmod_zip = zip_bytes([("legal/", b""), ("legal/notice", b"x")])
+        jmod_body = b"JM\x01\x00" + jmod_zip
+        raw = zip_bytes([("module.jmod", jmod_body)])
+        checked_jmod = I._inspect_complete_non_jdk(Original(raw), C,
+            ("gradle", len(raw), hashlib.sha256(raw).hexdigest())).document["innerArchives"][0]
+        self.assertEqual((checked_jmod["format"], checked_jmod["zipViewOffset"], checked_jmod["bytes"]),
+                         ("jmod", 4, len(jmod_body)))
+        self.assertEqual(checked_jmod["sha256"], hashlib.sha256(jmod_body).hexdigest())
+        self.assertEqual((checked_jmod["centralMembers"], checked_jmod["files"], checked_jmod["directoryMembers"]),
+                         (2, 1, 1))
+        self.assertEqual(sum(checked_jmod["formatCounts"].values()), 1)
+        self.assertEqual(checked_jmod["negativeEvidence"]["expandedInspectedBytes"], 1)
+        # The inverse rejects omissions/duplicates even after actual full rows
+        # have been obtained; it is not a selected-count assertion alone.
+        for changed in (value["innerArchives"][:-1], value["innerArchives"] + value["innerArchives"][:1]):
+            observer = I._Observer(C, I.Arena(Original()), complete=True, top_level=True)
+            observer.archives = changed
+            with self.assertRaisesRegex(I.InspectionRefused, "complete-outer-inner-inverse"):
+                I._complete_outer_inverse(outer_rows, observer, observer.arena)
+            self.assertTrue(observer.arena.failed)
+        for component, prefix, count in (("sdk-platform", "android-35/", 10),
+                                         ("sdk-build-tools", "android-15/", 5)):
+            children = [(prefix + f"small-{index}.jar", zip_bytes([("p/C.class", java)])) for index in range(count)]
+            raw = zip_bytes(children)
+            sdk = I._inspect_complete_non_jdk(Original(raw), C,
+                (component, len(raw), hashlib.sha256(raw).hexdigest())).document
+            self.assertEqual(len(sdk["innerArchives"]), count)
+            self.assertTrue(all(child["negativeEvidence"] is not None for child in sdk["innerArchives"]))
+            self.assertFalse(sdk["nativeClosure"])
+            self.assertFalse(sdk["supplierAuthority"])
+        # A suffix/native/foreign/nested/unsupported observation can NEVER be
+        # replaced by the empty negative expected for a fixed SDK resource.
+        for name, payload in (("p/native.dylib", macho()), ("p/target.so", b"\x7fELF" + b"x" * 80),
+                              ("p/foreign.dll", b"MZ" + b"x" * 80),
+                              ("p/nested", zip_bytes([("notice", b"x")])),
+                              ("p/ambiguous.class", b"\xca\xfe\xba\xbe" + struct.pack(">HHH", 0, 99, 1)),
+                              ("p/fake.dylib", b"ordinary bytes"), ("p/empty.class", b""),
+                              ("p/program", b"#!/bin/sh\nexit 0\n")):
+            child = zip_bytes([(name, payload)])
+            raw = zip_bytes([("android-35/android.jar", child)])
+            sdk = I._inspect_complete_non_jdk(Original(raw), C,
+                ("sdk-platform", len(raw), hashlib.sha256(raw).hexdigest())).document
+            self.assertIsNone(sdk["innerArchives"][0]["negativeEvidence"], name)
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            info = zipfile.ZipInfo("opaque-mode"); info.create_system = 3
+            info.external_attr = 0o100755 << 16
+            archive.writestr(info, b"opaque executable bytes")
+        raw = zip_bytes([("android-15/lib/d8.jar", output.getvalue())])
+        sdk = I._inspect_complete_non_jdk(Original(raw), C,
+            ("sdk-build-tools", len(raw), hashlib.sha256(raw).hexdigest())).document
+        self.assertIsNone(sdk["innerArchives"][0]["negativeEvidence"])
+        self.assertEqual(sdk["innerArchives"][0]["unknownMembers"][0]["reason"], "executable-opaque")
+        for name, payload in (("wrong.jar", b"not an archive"), ("wrong.jmod", zip_bytes([("x", b"x")])),
+                              ("empty.jar", zip_bytes([])),  # Existing parser requires a nonempty central census.
+                              ("garbage.jar", b"PK\x03\x04not a complete ZIP")):
+            raw = zip_bytes([(name, payload)])
+            with self.assertRaises((I.InspectionRefused, C.Refused)):
+                I._inspect_complete_non_jdk(Original(raw), C,
+                    ("gradle", len(raw), hashlib.sha256(raw).hexdigest()))
+        # The completed collector still rejects an inner CRC error. The outer
+        # hash is intentionally recomputed over the malformed synthetic input.
+        broken = bytearray(zip_bytes([("value", b"known bytes")]))
+        broken[30 + len("value")] ^= 1
+        raw = zip_bytes([("actual.jar", bytes(broken))])
+        with self.assertRaises(C.Refused):
+            I._inspect_complete_non_jdk(Original(raw), C,
+                ("gradle", len(raw), hashlib.sha256(raw).hexdigest()))
+
     def test_nested_and_simultaneous_workspace_limits_fail_without_resetting_the_original(self):
         leaf = zip_bytes([("value", b"complete")])
         one = zip_bytes([("one.jar", leaf)])
@@ -629,6 +785,60 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
         self.assertEqual(over.held["rows"], 0)
         with self.assertRaisesRegex(I.InspectionRefused, "already-failed"):
             over.check()
+
+        # Four top-level siblings each retain their own existing nested3/depth2
+        # constraint, but all actual reads/expansion remain one cumulative Arena.
+        child = zip_bytes([("value", b"1234")])
+        parent = zip_bytes([("nested", child)])
+        body = zip_bytes([(f"sibling-{index}.jar", parent) for index in range(4)])
+        pin = C.Pin("gradle", len(body), hashlib.sha256(body).hexdigest())
+        original = Original(body)
+        arena = I.Arena(original)
+        observer = I._Observer(C, arena, complete=True, top_level=True)
+        summary = C.compile_archive(original, pin, observer=observer, workspace=arena).consume_rows(lambda _: None)
+        I._complete_census(observer, summary)
+        self.assertEqual(len(observer.archives), 4)
+        self.assertTrue(all(len(archive["nestedArchives"]) == 1 for archive in observer.archives))
+        expected_reads = summary["issuedReadBytes"] + sum(
+            item["issuedReadBytes"] + item["nestedArchives"][0]["issuedReadBytes"] for item in observer.archives)
+        self.assertEqual(arena.reads, expected_reads)
+        expected_expansion = sum(item["expandedInspectedBytes"] + item["nestedArchives"][0]["expandedInspectedBytes"]
+                                 for item in observer.archives)
+        self.assertEqual(arena.expanded, expected_expansion)
+        self.assertEqual((arena.held["payload"], arena.held["rows"]), (0, 0))
+        for counter, used, bound in (("read", expected_reads, I.READ_LIMIT),
+                                      ("expanded", expected_expansion, I.EXPANDED_LIMIT)):
+            original = Original(body); limited = I.Arena(original)
+            if counter == "read":
+                limited.charge_read(bound - used + 1)
+            else:
+                limited.charge_expanded(bound - used + 1)
+            collector = I._Observer(C, limited, complete=True, top_level=True)
+            try:
+                with self.assertRaisesRegex(I.InspectionRefused, "aggregate-(issued-read|inner-expansion)"):
+                    C.compile_archive(original, pin, observer=collector, workspace=limited)
+            finally:
+                collector.dispose_current()
+            self.assertTrue(limited.failed)
+            self.assertEqual((limited.held["payload"], limited.held["rows"]), (0, 0))
+            with self.assertRaisesRegex(I.InspectionRefused, "already-failed"):
+                limited.check()
+        for options in ({"top_level": True}, {"complete": 1}, {"complete": True, "expected": {}},
+                        {"complete": True, "outer_selection": ()},
+                        {"complete": True, "top_level": True, "depth": 1},
+                        {"complete": True, "top_level": True, "nested_count": [0]}):
+            with self.assertRaisesRegex(I.InspectionRefused, "complete-observer-context"):
+                I._Observer(C, I.Arena(Original()), **options)
+        fourth_nested = zip_bytes([(f"nested-{number}", child) for number in range(4)])
+        raw = zip_bytes([("parent.jar", fourth_nested)])
+        with self.assertRaisesRegex(I.InspectionRefused, "nested-archive-count-or-depth"):
+            I._inspect_complete_non_jdk(Original(raw), C,
+                ("gradle", len(raw), hashlib.sha256(raw).hexdigest()))
+        oversized = I.Inspection(I.Arena(Original()), {"data": "x" * (I.OUTPUT_LIMIT + 1)})
+        with self.assertRaisesRegex(I.InspectionRefused, "inspection-output-bound"):
+            oversized.publish(lambda _: self.fail("oversized output must not escape"))
+        self.assertTrue(oversized.arena.failed)
+        self.assertFalse(oversized.published)
 
     def test_fixed_nomination_and_final_publication_never_recover_an_original_failure(self):
         parser_bytes = (_TOOLS / "macos_android_supplier_correspondence.py").read_bytes()
@@ -762,3 +972,50 @@ class IntelJdkInspectionDataTests(unittest.TestCase):
             original.changed = original.expired = False
             with self.assertRaisesRegex(I.InspectionRefused, "already-failed"):
                 report.publish(lambda _: self.fail("failed non-JDK output cannot become success"))
+
+        self.assertEqual(I.COMPLETE_NON_JDK_ARCHIVES, (
+            ("gradle", 138068841, "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854"),
+            ("sdk-platform", 64273788, "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0"),
+            ("sdk-build-tools", 76857898, "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48"),
+        ))
+        untouched = Original(b"invalid selection must never touch this original")
+        for component in (None, True, 1, [], {}, b"gradle", "jdk", "aapt2", "bundletool", "Gradle", "gradle/", StringSubclass("gradle")):
+            with self.assertRaisesRegex(I.InspectionRefused, "complete-non-jdk-component"):
+                I.inspect_complete_non_jdk(untouched, component, C)
+        self.assertEqual((untouched.reads, untouched.checks, untouched.bindings), ([], 0, 0))
+        for component in ("gradle", "sdk-platform", "sdk-build-tools"):
+            with self.assertRaises(C.Refused):
+                I.inspect_complete_non_jdk(Original(b"not the fixed public body"), component, C)
+        body = zip_bytes([("android-35/android.jar", zip_bytes([("notice", b"complete")]))])
+        spec = ("sdk-platform", len(body), hashlib.sha256(body).hexdigest())
+        passed = I._inspect_complete_non_jdk(Original(body), C, spec)
+        output = []; receipt = passed.publish(output.append)
+        self.assertEqual(len(output), 1)
+        observed = json.loads(output[0])
+        self.assertEqual(observed["kind"], "mrk-intel-complete-non-jdk-observation-data-v1")
+        self.assertTrue(observed["completeInnerCoverage"])
+        self.assertTrue(observed["innerArchives"][0]["negativeEvidence"]["completeMemberHashes"])
+        self.assertEqual(receipt["sha256"], hashlib.sha256(output[0]).hexdigest())
+        self.assertEqual(receipt["bytes"], len(output[0]))
+        self.assertFalse(observed["nativeExecuted"])
+        self.assertFalse(observed["nativeClosure"])
+        self.assertFalse(observed["supplierAuthority"])
+        with self.assertRaisesRegex(I.InspectionRefused, "publication-finality"):
+            passed.publish(lambda _: self.fail("no second successful publication"))
+        for failure in ("sink", "binding", "endpoint"):
+            original = Original(body)
+            report = I._inspect_complete_non_jdk(original, C, spec)
+            def refuse(_):
+                if failure == "sink":
+                    raise ValueError("complete-original-sink-failure")
+                if failure == "binding":
+                    original.changed = True
+                else:
+                    original.expired = True
+            with self.assertRaises((C.Refused, ValueError)):
+                report.publish(refuse)
+            self.assertTrue(report.arena.failed)
+            self.assertFalse(report.published)
+            original.changed = original.expired = False
+            with self.assertRaisesRegex(I.InspectionRefused, "already-failed"):
+                report.publish(lambda _: self.fail("failed complete DATA is not a receipt"))

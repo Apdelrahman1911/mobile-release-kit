@@ -111,6 +111,7 @@ struct Original {
 struct Creation { parent: usize, name: String, effect: Effect, identity: Option<Identity>, allocated: Option<u64> }
 struct Writing { file: usize, chain: Vec<usize>, ordinal: usize }
 struct Prepared {
+    profile: crate::android_build_protocol::Profile,
     hello: Hello, selected: MacToolchainSelection, inventory: Inventory, provider: Provider,
     raw: [Vec<u8>; 3], totals: ContentTotals,
 }
@@ -126,6 +127,12 @@ fn unhex<const N: usize>(value: &str) -> Option<[u8; N]> {
 }
 impl Prepared {
     fn from_metadata(metadata: Metadata, account: u32, cap:usize) -> Result<Self> {
+        let profile = crate::android_build_protocol::Profile::current().ok_or(Problem::SupplierUnavailable)?;
+        Self::from_metadata_for(profile, metadata, account, cap)
+    }
+    fn from_metadata_for(profile: crate::android_build_protocol::Profile,
+        metadata: Metadata, account: u32, cap:usize) -> Result<Self> {
+        crate::android_native_macos_profile::authority(profile).ok_or(Problem::SupplierUnavailable)?;
         let (hello, raw) = metadata.into_complete().map_err(|_| Problem::Inventory)?;
         let selected = MacToolchainSelection { instance: hex(&hello.instance), owner_uid: account,
             // Parser comparison DATA only; never a user catalog selection.
@@ -136,17 +143,17 @@ impl Prepared {
             .into_iter().try_fold(0usize,|sum,value|sum.checked_add(value.capacity())).ok_or(Problem::Bounds)?;
         let remaining=cap.checked_sub(Publisher::fixed_owned_bytes().ok_or(Problem::Bounds)?)
             .and_then(|n|n.checked_sub(raw_bytes)).and_then(|n|n.checked_sub(selected_bytes)).ok_or(Problem::Bounds)?;
-        let inventory=policy::parse_manifest_bounded(&raw[0],&selected,remaining).ok_or(Problem::Inventory)?;
+        let inventory=policy::parse_manifest_bounded_for(profile,&raw[0],&selected,remaining).ok_or(Problem::Inventory)?;
         let remaining=remaining.checked_sub(inventory.dynamic_bytes().ok_or(Problem::Bounds)?).ok_or(Problem::Bounds)?;
-        let record=Registration::parse_bounded(&raw[1],account,&selected.instance,remaining).ok_or(Problem::Binding)?;
-        if !record.matches(&selected){return Err(Problem::Binding);}
+        let record=Registration::parse_bounded_for(profile,&raw[1],account,&selected.instance,remaining).ok_or(Problem::Binding)?;
+        if !record.matches_for(profile,&selected){return Err(Problem::Binding);}
         drop(record); // no simultaneous discarded record String graph in Provider parsing
-        let provider=Provider::parse_bounded(&raw[2],&selected,remaining).ok_or(Problem::Inventory)?;
+        let provider=Provider::parse_bounded_for(profile,&raw[2],&selected,remaining).ok_or(Problem::Inventory)?;
         // A signed peer, version string or caller's claimed supplier SHA is not
         // complete archive→installed-byte provenance. The shipping catalogue
         // remains deliberately unavailable until genuine Mac supplier evidence
         // is independently reviewed and pinned; no Linux/source-path fallback.
-        crate::android_supplier_macos::admit(&inventory, &hello.supplier_record).map_err(|_| Problem::SupplierUnavailable)?;
+        crate::android_supplier_macos::admit_for(profile, &inventory, &hello.supplier_record).map_err(|_| Problem::SupplierUnavailable)?;
         let payload_bytes = inventory.data.files.iter().try_fold(0_u64, |sum, file| sum.checked_add(file.size)).ok_or(Problem::Bounds)?;
         let totals = ContentTotals { files: inventory.data.files.len().try_into().map_err(|_| Problem::Bounds)?,
             directories: inventory.directories.len().try_into().map_err(|_| Problem::Bounds)?,
@@ -154,7 +161,7 @@ impl Prepared {
             payload_bytes, metadata_bytes: raw.iter().map(|value| value.len() as u64).sum() };
         if totals.content_bytes().is_none_or(|bytes| bytes > transfer::MAX_BYTES)
             || totals.entries().is_none_or(|count| count as usize > transfer::MAX_FILES) { return Err(Problem::Bounds); }
-        Ok(Self { hello, selected, inventory, provider, raw, totals })
+        Ok(Self { profile, hello, selected, inventory, provider, raw, totals })
     }
     fn paths(&self)->impl Iterator<Item=&str>{
         self.inventory.directories.iter().map(String::as_str)
@@ -184,6 +191,7 @@ impl Prepared {
 }
 impl EffectCensus{
     fn for_prepared(prepared:&Prepared,account:u32,cap:usize)->Option<Self>{
+        if !policy::native_catalog_supports(prepared.profile) || !prepared.inventory.matches_profile(prepared.profile) {return None;}
         // Exactly the source traversal's original multiplicities; do not reserve
         // ORIGINAL_LIMIT worst-case descriptors or assume all names are255B.
         let account_digits=account.to_string().len();
@@ -860,7 +868,12 @@ impl Publisher {
         }
         self.check_original(index, true, false)?; Ok(raw)
     }
-    fn native_file(&mut self, index: usize, spec: &FileSpec, prefix: &[u8], inventory: &Inventory) -> Result<()> {
+    fn native_file(&mut self, profile: crate::android_build_protocol::Profile,
+        index: usize, spec: &FileSpec, prefix: &[u8], inventory: &Inventory) -> Result<()> {
+        let authority=crate::android_native_macos_profile::authority(profile).ok_or(Problem::SupplierUnavailable)?;
+        if crate::android_build_protocol::Profile::current()!=Some(profile) || !inventory.matches_profile(profile) {
+            return Err(self.fail(Problem::Inventory));
+        }
         if policy::android_target_elf(spec,prefix).map_err(|_|Problem::Inventory)?
             || policy::gradle_foreign_launcher(spec).map_err(|_|Problem::Inventory)?{return Ok(());}
         if spec.path == inventory.data.roles.gradle {
@@ -874,16 +887,19 @@ impl Publisher {
         let recognizable = [[0xcf,0xfa,0xed,0xfe], [0xfe,0xed,0xfa,0xcf], [0xca,0xfe,0xba,0xbe], [0xca,0xfe,0xba,0xbf]]
             .iter().any(|magic| prefix.starts_with(magic));
         if !mandatory && !recognizable { return Ok(()); }
-        let architecture=if sdk.is_some_and(|kind|kind.legacy()){policy::MachArchitecture::X86_64}else{policy::MachArchitecture::Arm64};
+        let architecture=if sdk.is_some_and(|kind|kind.legacy()){policy::MachArchitecture::X86_64}else{authority.architecture()};
         let slice=policy::native_slice(prefix,spec.size,architecture).ok_or(Problem::Inventory)?;
         let header = self.region(index, slice.offset, 32)?;
         let bytes = u32::from_le_bytes(header[20..24].try_into().map_err(|_| Problem::Inventory)?) as usize;
         let body = self.region(index, slice.offset, bytes.checked_add(32).ok_or(Problem::Bounds)?)?;
         let commands=policy::native_commands(&body,slice,architecture).ok_or(Problem::Inventory)?;
-        if !policy::local_loads(&spec.path, &commands, inventory) { return Err(self.fail(Problem::Inventory)); }
+        if !policy::local_loads_for(profile, &spec.path, &commands, inventory) { return Err(self.fail(Problem::Inventory)); }
         Ok(())
     }
     fn os_provider(&mut self, prepared: &Prepared) -> Result<()> {
+        let authority=crate::android_native_macos_profile::authority(prepared.profile).ok_or(Problem::SupplierUnavailable)?;
+        if crate::android_build_protocol::Profile::current()!=Some(prepared.profile) {return Err(self.fail(Problem::Inventory));}
+        let architecture=authority.architecture();
         for spec in &prepared.provider.files {
             let mut chain=Vec::new();chain.try_reserve_exact(17).map_err(|_|Problem::Bounds)?;
             if chain.capacity()!=17{return Err(self.fail(Problem::Bounds));}
@@ -912,11 +928,11 @@ impl Publisher {
             let (hash, prefix) = self.read(index, spec.size, 256)?;
             if hash != spec.sha256 { return Err(self.fail(Problem::Inventory)); }
             if spec.mode & 0o111 != 0 {
-                let slice = policy::arm64_slice(&prefix, spec.size).ok_or(Problem::Inventory)?;
+                let slice = policy::native_slice(&prefix, spec.size, architecture).ok_or(Problem::Inventory)?;
                 let header = self.region(index, slice.offset, 32)?;
                 let size = u32::from_le_bytes(header[20..24].try_into().map_err(|_| Problem::Inventory)?) as usize;
                 let raw = self.region(index, slice.offset, size.checked_add(32).ok_or(Problem::Bounds)?)?;
-                let commands = policy::macho_commands(&raw, slice).ok_or(Problem::Inventory)?;
+                let commands = policy::native_commands(&raw, slice, architecture).ok_or(Problem::Inventory)?;
                 if !commands.loads.iter().all(|path| policy::system_load(path))
                     || !commands.rpaths.iter().all(|path| policy::OS_ROOTS.contains(&path.as_str()) || policy::system_load(path)) {
                     return Err(self.fail(Problem::Inventory));
@@ -1008,7 +1024,7 @@ impl Publisher {
                 if let Some(spec) = spec {
                     let (hash, prefix) = self.read(index, spec.size, 256)?;
                     if hash != spec.sha256 { return Err(self.fail(Problem::Inventory)); }
-                    self.native_file(index, spec, &prefix, &prepared.inventory)?;
+                    self.native_file(prepared.profile, index, spec, &prefix, &prepared.inventory)?;
                 }
             }
             self.check_original(index, true, false)?;
@@ -1314,10 +1330,64 @@ mod allocation_data_tests{
         let totals=ContentTotals{files:inventory.data.files.len() as u32,directories:inventory.directories.len() as u32,
             aliases:inventory.data.aliases.len() as u32,payload_bytes:inventory.data.files.iter().map(|f|f.size).sum(),
             metadata_bytes:raw.iter().map(|v|v.len() as u64).sum()};
-        Prepared{hello,selected,inventory,provider,raw,totals}
+        Prepared{profile:crate::android_build_protocol::Profile::MacArm64,hello,selected,inventory,provider,raw,totals}
     }
     #[test]
     fn effect_high_water_counts_original_multiplicity_and_refuses_before_effects(){
+        use crate::android_build_protocol::Profile;
+        let metadata = |input: &Prepared| {
+            let mut value = Metadata::new(input.hello).unwrap();
+            for (field, raw) in input.raw.iter().enumerate() {
+                for (chunk, bytes) in raw.chunks(1024).enumerate() {
+                    value.push(MetadataChunk { field: field as u8, offset: (chunk * 1024) as u32, bytes }).unwrap();
+                }
+            }
+            assert!(value.complete()); value
+        };
+        let input=prepared();
+        // These synthetic originals pass the real selected metadata parsers but
+        // never acquire production supplier membership or permission to publish.
+        assert!(matches!(Prepared::from_metadata_for(Profile::MacArm64, metadata(&input), 501, ORIGINAL_CONTROL_BYTES),
+            Err(Problem::SupplierUnavailable)));
+        for profile in [Profile::MacX64, Profile::LinuxX64] {
+            assert!(matches!(Prepared::from_metadata_for(profile, metadata(&input), 501, ORIGINAL_CONTROL_BYTES),
+                Err(Problem::SupplierUnavailable)));
+        }
+        for field in 0..3 {
+            let mut bad=prepared();
+            let mut values:[serde_json::Value;3]=std::array::from_fn(|index|
+                serde_json::from_slice(&bad.raw[index]).unwrap());
+            values[field]["profile"]=serde_json::json!("not-the-selected-profile");
+            bad.raw[2]=serde_json::to_vec(&values[2]).unwrap();
+            bad.selected.os_provider_sha256=hex(&Sha256::digest(&bad.raw[2]));
+            values[0]["osProviderSha256"]=serde_json::json!(bad.selected.os_provider_sha256);
+            bad.raw[0]=serde_json::to_vec(&values[0]).unwrap();
+            bad.selected.inventory_sha256=hex(&Sha256::digest(&bad.raw[0]));
+            values[1]["inventorySha256"]=serde_json::json!(bad.selected.inventory_sha256);
+            values[1]["osProviderSha256"]=serde_json::json!(bad.selected.os_provider_sha256);
+            bad.raw[1]=serde_json::to_vec(&values[1]).unwrap();
+            bad.selected.record_sha256=hex(&Sha256::digest(&bad.raw[1]));
+            for index in 0..3 {
+                bad.hello.lengths[index]=bad.raw[index].len() as u32;
+                bad.hello.hashes[index]=Sha256::digest(&bad.raw[index]).into();
+            }
+            // Earlier sites are genuinely valid: neither a stale outer digest
+            // nor an earlier parser may mask the selected document's refusal.
+            if field>0 {
+                assert!(policy::parse_manifest_bounded_for(Profile::MacArm64,
+                    &bad.raw[0],&bad.selected,ORIGINAL_CONTROL_BYTES).is_some());
+            }
+            if field==2 {
+                assert!(Registration::parse_bounded_for(Profile::MacArm64,&bad.raw[1],501,
+                    &bad.selected.instance,ORIGINAL_CONTROL_BYTES).unwrap()
+                    .matches_for(Profile::MacArm64,&bad.selected));
+            }
+            let expected=if field==1 {Problem::Binding} else {Problem::Inventory};
+            assert!(matches!(Prepared::from_metadata_for(Profile::MacArm64, metadata(&bad), 501, ORIGINAL_CONTROL_BYTES),
+                Err(problem) if problem==expected));
+        }
+        let mut wrong=prepared();wrong.profile=Profile::MacX64;
+        assert!(EffectCensus::for_prepared(&wrong,501,ORIGINAL_CONTROL_BYTES).is_none());
         let input=prepared();let census=EffectCensus::for_prepared(&input,501,ORIGINAL_CONTROL_BYTES).unwrap();
         let directories=input.inventory.directories.len();let files=input.inventory.data.files.len();let aliases=input.inventory.data.aliases.len();
         let depths=|path:&str|path.split('/').filter(|v|!v.is_empty()).count();

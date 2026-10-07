@@ -90,6 +90,79 @@ pub(crate) const GRADLE_BAT: ForeignLauncherPin = ForeignLauncherPin {
     path: "gradle/bin/gradle.bat", member: "gradle-8.14.5/bin/gradle.bat", bytes: 3018,
     sha256: "d20e9ded0291e1ed6552d1df30022d2e5952ad493f9d3380f6a32b97f0cc80c7", original_mode: 0o755,
 };
+/// Native authority is a separate closed selection from the comparison tables.
+/// Only a complete compiled supplier/role graph may construct this value. Intel
+/// snapshots remain ObservationOnly and cannot supply an authority by matching.
+pub(crate) struct NativeAuthority {
+    profile: Profile,
+    toolchain: &'static str,
+    architecture: MachArchitecture,
+    archive: (u64, &'static str),
+    release: (u64, &'static str),
+    jvm_cfg: (u64, &'static str),
+    native: &'static [JdkNativePin],
+    archives: &'static [JdkJvmArchivePin],
+    template: &'static MachPin,
+    template_member: &'static str,
+    template_bytes: u64,
+    template_sha256: &'static str,
+}
+static ARM_AUTHORITY: NativeAuthority = NativeAuthority {
+    profile: Profile::MacArm64,
+    toolchain: crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE,
+    architecture: MachArchitecture::Arm64,
+    archive: (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256),
+    release: (1638, "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b"),
+    jvm_cfg: (29, "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"),
+    native: JDK_NATIVE, archives: JDK_JVM_ARCHIVES, template: &JPACKAGE_TEMPLATE,
+    template_member: "classes/jdk/jpackage/internal/resources/jpackageapplauncher",
+    template_bytes: 185600,
+    template_sha256: "73403782287c715055d9f58cca4571add26f01817d710186bf6e52fa5ac1b442",
+};
+pub(crate) const AUTHORITY_STORAGE_BYTES: usize = std::mem::size_of::<NativeAuthority>();
+pub(crate) fn authority(profile: Profile) -> Option<&'static NativeAuthority> {
+    match profile {
+        Profile::MacArm64 => Some(&ARM_AUTHORITY),
+        Profile::MacX64 | Profile::LinuxX64 => None,
+    }
+}
+impl NativeAuthority {
+    pub(crate) fn profile(&self) -> Profile { self.profile }
+    pub(crate) fn toolchain(&self) -> &'static str { self.toolchain }
+    pub(crate) fn architecture(&self) -> MachArchitecture { self.architecture }
+    pub(crate) fn archive(&self) -> (u64, &'static str) { self.archive }
+    pub(crate) fn release(&self) -> (u64, &'static str) { self.release }
+    pub(crate) fn jvm_cfg(&self) -> (u64, &'static str) { self.jvm_cfg }
+    pub(crate) fn natives(&self) -> &'static [JdkNativePin] { self.native }
+    pub(crate) fn archives(&self) -> &'static [JdkJvmArchivePin] { self.archives }
+    pub(crate) fn jdk_native(&self, relative: &str) -> Option<&'static JdkNativePin> {
+        self.native.iter().find(|pin| pin.relative == relative)
+    }
+    pub(crate) fn jdk_jvm_archive(&self, path: &str) -> Option<&'static JdkJvmArchivePin> {
+        let relative = jdk_relative(path)?;
+        self.archives.iter().find(|pin| pin.relative == relative)
+    }
+    pub(crate) fn jvm_header(&self, member: &JdkJvmMemberPin) -> Option<&'static MachPin> {
+        match member.counterpart {
+            Some(relative) => self.jdk_native(relative).map(|pin| &pin.header),
+            None => (member.member == self.template_member && member.bytes == self.template_bytes
+                && member.sha256 == self.template_sha256)
+                .then_some(self.template),
+        }
+    }
+    pub(crate) fn matches(&self, pin: &MachPin, commands: &MachCommands) -> bool {
+        pin.matches_architecture(commands, self.architecture)
+    }
+    pub(crate) fn snapshot(&self, pin: &MachPin, prefix: &[u8], commands: &MachCommands) -> bool {
+        prefix.len() == pin.prefix_bytes && policy::digest_matches(prefix, pin.prefix_sha256)
+            && self.matches(pin, commands)
+    }
+    pub(crate) fn record_authority(&self) -> impl Serialize + '_ {
+        // Same ARM v3 tuple and bytes: no wrapper, target field, or new tag.
+        (self.archive.0, self.archive.1, GRADLE_ARCHIVE_SHA256,
+            self.native, self.archives, self.template, SDK_TARGET_ELFS, GRADLE_BAT)
+    }
+}
 pub(crate) static JDK_NATIVE: &[JdkNativePin] = &[
     JdkNativePin { relative: "Contents/Home/bin/jar", bytes: 70448, sha256: "c55e508c52019bb483ee2e737b751ed44d5e9e86abe660c713404db43c58803d",
         original_mode: 0o755, phase: JdkPhase::Bootstrap, header: MachPin { prefix_bytes: 4096, prefix_sha256: "a69e71ca440e5664e069f67df8d05af5ecb41e7b25c94f085199651c94f26c0f", commands_sha256: "ef2ba338a4d0915c69b2fb01ca0ccf3b47effe8d13bbc544a4fcde3570c064a6", file_type: 2,
@@ -635,36 +708,38 @@ fn selected_file<'a>(inventory: &'a Inventory, relative: &str) -> Option<&'a Fil
     let bundle = inventory.data.roles.java_home()?.strip_suffix("Contents/Home")?;
     inventory.file_under(bundle, relative)
 }
-fn jdk_release(inventory: &Inventory) -> bool {
-    inventory.data.versions.jdk_vendor == "temurin" && inventory.data.versions.jdk_version == "17.0.20.1"
+fn jdk_release(authority: &NativeAuthority, inventory: &Inventory) -> bool {
+    inventory.matches_profile(authority.profile()) && inventory.data.versions.jdk_vendor == "temurin" && inventory.data.versions.jdk_version == "17.0.20.1"
         && selected_file(inventory, "Contents/Home/release").is_some_and(|file|
-            file.size == 1638 && file.sha256 == "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b"
+            (file.size, file.sha256.as_str()) == authority.release()
                 && file.mode == 0o444)
         // Exact 29-byte "-server KNOWN\n-client IGNORE\n" original config.
         // This is not inferred from a caller phase or a Java-looking filename.
         && selected_file(inventory, "Contents/Home/lib/jvm.cfg").is_some_and(|file|
-            file.size == 29 && file.sha256 == "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"
+            (file.size, file.sha256.as_str()) == authority.jvm_cfg()
                 && file.mode == 0o444)
 }
-pub(crate) fn jdk_post_jli_provider<'a>(
-    path: &str, commands: &MachCommands, inventory: &'a Inventory,
+pub(crate) fn jdk_post_jli_provider_for<'a>(
+    profile: Profile, path: &str, commands: &MachCommands, inventory: &'a Inventory,
 ) -> Result<Option<&'a str>, ()> {
+    let authority = authority(profile).ok_or(())?;
+    if !inventory.matches_profile(profile) { return Err(()); }
     let Some(relative) = jdk_relative(path) else { return Ok(None); };
     // Synthetic/other source-reviewed tuples get ordinary closure only. They
     // acquire no post-JLI exception, even if a caller supplies matching paths.
     if inventory.data.versions.jdk_vendor != "temurin"
         || inventory.data.versions.jdk_version != "17.0.20.1" { return Ok(None); }
-    if !jdk_release(inventory) { return Err(()); }
-    let pin = jdk_native(relative).ok_or(())?;
+    if !jdk_release(authority, inventory) { return Err(()); }
+    let pin = authority.jdk_native(relative).ok_or(())?;
     let actual = selected_file(inventory, relative).ok_or(())?;
     if actual.path != path || !pin.matches(path, actual.size, &actual.sha256, actual.mode)
-        || !pin.header.matches(commands) { return Err(()); }
+        || !authority.matches(&pin.header, commands) { return Err(()); }
     // Whole finite original identity closure: a changed/missing JLI, launcher,
     // VM or other installed native can never establish this sealed phase.
-    if !JDK_NATIVE.iter().all(|pin| selected_file(inventory, pin.relative).is_some_and(|file|
+    if !authority.natives().iter().all(|pin| selected_file(inventory, pin.relative).is_some_and(|file|
         pin.matches(&file.path, file.size, &file.sha256, file.mode))) { return Err(()); }
-    let jli = jdk_native("Contents/Home/lib/libjli.dylib").ok_or(())?;
-    let provider = jdk_native("Contents/Home/lib/server/libjvm.dylib").ok_or(())?;
+    let jli = authority.jdk_native("Contents/Home/lib/libjli.dylib").ok_or(())?;
+    let provider = authority.jdk_native("Contents/Home/lib/server/libjvm.dylib").ok_or(())?;
     if jli.phase != JdkPhase::Bootstrap || provider.phase != JdkPhase::ExplicitJvmProvider
         || jli.header.install_name != Some("@rpath/libjli.dylib")
         || provider.header.install_name != Some("@rpath/libjvm.dylib")
@@ -679,6 +754,14 @@ pub(crate) fn jdk_post_jli_provider<'a>(
     if !commands.loads.iter().any(|load| load == "@rpath/libjvm.dylib") { return Err(()); }
     Ok(Some(&selected_file(inventory, provider.relative).ok_or(())?.path))
 }
+// Legacy ARM DATA helpers are not production target defaults.
+#[cfg(test)]
+pub(crate) fn jdk_post_jli_provider<'a>(
+    path: &str, commands: &MachCommands, inventory: &'a Inventory,
+) -> Result<Option<&'a str>, ()> {
+    jdk_post_jli_provider_for(Profile::MacArm64, path, commands, inventory)
+}
+#[cfg(test)]
 pub(crate) fn record_authority() -> impl Serialize {
     (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256, GRADLE_ARCHIVE_SHA256,
         JDK_NATIVE, JDK_JVM_ARCHIVES, JPACKAGE_TEMPLATE, SDK_TARGET_ELFS, GRADLE_BAT)
@@ -939,6 +1022,17 @@ mod tests {
 
     #[test]
     fn paired_jdk_comparison_profiles_bind_cpu_and_original_bytes() {
+        let selected = authority(Profile::MacArm64).unwrap();
+        assert_eq!(selected.profile(), Profile::MacArm64);
+        assert_eq!(selected.toolchain(), crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE);
+        assert_eq!(selected.architecture(), MachArchitecture::Arm64);
+        assert_eq!(selected.archive(), (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256));
+        assert_eq!(selected.release(), (1638, "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b"));
+        assert_eq!(selected.jvm_cfg(), (29, "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"));
+        assert!(std::ptr::eq(selected.natives(), JDK_NATIVE));
+        assert!(std::ptr::eq(selected.archives(), JDK_JVM_ARCHIVES));
+        assert_eq!(AUTHORITY_STORAGE_BYTES, std::mem::size_of::<NativeAuthority>());
+        assert!(authority(Profile::MacX64).is_none() && authority(Profile::LinuxX64).is_none());
         let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
         let intel = jdk_comparison_profile(Profile::MacX64).unwrap();
         assert!(jdk_comparison_profile(Profile::LinuxX64).is_none());

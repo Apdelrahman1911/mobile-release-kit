@@ -1469,9 +1469,11 @@ impl SavedCommandOwner {
         // Pure immutable catalogue work before this owner has a Document,
         // Registry or control book. Status/reconcile queries only use get().
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
-        if domain == SavedCommandDomain::AndroidBuild
-            && android_wire::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports) {
-            crate::android_supplier_macos::prepare_compiled_catalogue();
+        if domain == SavedCommandDomain::AndroidBuild {
+            if let Some(profile) = android_wire::Profile::current()
+                .filter(|profile| crate::android_toolchain_macos_policy::native_catalog_supports(*profile)) {
+                crate::android_supplier_macos::prepare_compiled_catalogue_for(profile);
+            }
         }
         let android_original_owner = domain == SavedCommandDomain::AndroidBuild && runtime.claim_original_android_owner();
         let (changes, _) = watch::channel(0);

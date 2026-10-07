@@ -50,6 +50,15 @@ NON_JDK_ARCHIVES = (
 )
 
 
+# Separate complete DATA route. The legacy selected-three route above is not
+# silently upgraded and the caller cannot choose arbitrary pins or selections.
+COMPLETE_NON_JDK_ARCHIVES = (
+    ("gradle", 138068841, "6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854"),
+    ("sdk-platform", 64273788, "0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0"),
+    ("sdk-build-tools", 76857898, "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48"),
+)
+
+
 class InspectionRefused(ValueError):
     pass
 
@@ -305,8 +314,59 @@ class _View:
         self._body = None
 
 
+def _complete_problem(name, mode, kind):
+    # These are conservative unresolved DATA labels, never native admission.
+    if kind in ("unsupported-native", "ambiguous-native", "unsupported-jmod"):
+        return kind
+    if ((name.endswith((".jar", ".zip")) and kind != "zip")
+            or (name.endswith(".jmod") and kind != "jmod")):
+        return "archive-name-format-disagreement"
+    if name.endswith(".class") and kind != "java-class-header":
+        return "class-name-format-disagreement"
+    if name.endswith((".dylib", ".jnilib", ".so", ".dll", ".exe")) and kind not in ("macho", "foreign-native"):
+        return "native-name-format-disagreement"
+    if kind == "opaque" and mode & 0o111:
+        return "executable-opaque"
+    return None
+
+
+def _complete_prefix(row, kind, window, arena):
+    size = min(row[3], 4096)
+    arena.require((window is None and size == 0)
+                  or (window is not None and window.size == size and window.used == size),
+                  "complete-prefix-incomplete")
+    arena.reserve("other", 2 * size)
+    try:
+        encoded = 4 * ((size + 2) // 3)
+        arena.facts(4096 + 8 * len(row[0]) + 4 * encoded)
+        prefix = b"" if window is None else bytes(window.data)
+        return {"name": row[0], "bytes": row[3], "mode": row[2], "sha256": row[4],
+                "format": kind, "prefixBytes": size,
+                "prefixSha256": hashlib.sha256(prefix).hexdigest(),
+                "prefixBase64": base64.b64encode(prefix).decode("ascii")}
+    finally:
+        arena.release("other", 2 * size)
+
+
+def _complete_census(observer, summary):
+    need(observer.complete and observer.current is None and not observer.uninspected
+         and summary["aliases"] == 0 and 0 <= summary["files"] <= summary["members"]
+         and sum(observer.formats.values()) == summary["files"]
+         and len(observer.native) == observer.formats["macho"]
+         and len(observer.foreign) == observer.formats["foreign-native"]
+         and len(observer.native) + len(observer.foreign) <= 128
+         and len(observer.archives) == observer.formats["zip"] + observer.formats["jmod"],
+         "complete-observer-census")
+
+
 class _Observer:
-    def __init__(self, parser, arena, *, expected=None, depth=0, nested_count=None, outer_selection=None):
+    def __init__(self, parser, arena, *, expected=None, depth=0, nested_count=None, outer_selection=None,
+                 complete=False, top_level=False):
+        need(type(complete) is bool and type(top_level) is bool
+             and (not complete or expected is None and outer_selection is None)
+             and (not top_level or complete and depth == 0 and nested_count is None),
+             "complete-observer-context")
+        self.complete, self.top_level = complete, top_level
         self.parser, self.arena, self.expected = parser, arena, expected
         self.depth = depth
         self.nested_count = [0] if nested_count is None else nested_count
@@ -324,6 +384,7 @@ class _Observer:
             need(len(self.outer_selection) == len(outer_selection), "outer-selection-duplicate")
         self.current = None
         self.native = []
+        self.foreign = [] if complete else None
         self.unknown = []
         self.archives = []
         self.formats = {name: 0 for name in sorted(FORMAT_NAMES)}
@@ -337,7 +398,7 @@ class _Observer:
             self.arena.require(row[0] not in self.selected_seen
                                and row[3] == self.outer_selection[row[0]][0], "selected-outer-member-size")
         self.current = {"row": row, "offset": 0, "kind": None, "buffer": None,
-                        "native": None, "prefix": b"", "probe": bytearray(),
+                        "native": None, "prefix": b"", "probe": bytearray(), "prefix_window": None,
                         "whole_hash": None, "view_hash": None, "buffered": 0}
 
     def block(self, name, offset, data):
@@ -363,8 +424,11 @@ class _Observer:
                 state["buffer"] = bytearray(state["row"][3])
                 state["whole_hash"] = hashlib.sha256()
                 state["view_hash"] = hashlib.sha256() if kind == "jmod" else state["whole_hash"]
-            elif kind in ("unsupported-native", "ambiguous-native", "foreign-native", "unsupported-jmod"):
+            elif not self.complete and kind in ("unsupported-native", "ambiguous-native", "foreign-native", "unsupported-jmod"):
                 state["prefix"] = probe
+            if self.complete and (kind == "foreign-native"
+                                  or _complete_problem(state["row"][0], state["row"][2], kind) is not None):
+                state["prefix_window"] = _Window(0, min(4096, state["row"][3]), self.arena)
             self._feed(state, 0, probe)
             self._feed(state, offset + taken, data[taken:])
             state["probe"] = None
@@ -377,6 +441,8 @@ class _Observer:
             return
         if state["native"] is not None:
             state["native"].feed(offset, data)
+        if state["prefix_window"] is not None:
+            state["prefix_window"].feed(offset, data)
         if state["buffer"] is not None:
             self.arena.require(offset == state["buffered"]
                                and offset + len(data) <= len(state["buffer"]), "inner-collector-order")
@@ -397,25 +463,29 @@ class _Observer:
         if self.expected is not None:
             self.arena.require(tuple(row) == self.expected[row[0]], "outer-member-correspondence")
         kind = state["kind"] or "opaque"
+        if self.top_level and row[0].endswith((".jar", ".jmod")):
+            self.arena.require(kind == ("jmod" if row[0].endswith(".jmod") else "zip"),
+                               "complete-outer-archive-format")
         selected = self.outer_selection is not None and row[0] in self.outer_selection
         if selected:
             self.arena.require(kind == "zip" and (row[3], row[4]) == self.outer_selection[row[0]],
                                "selected-outer-member-pin")
         self.formats[kind] += 1
         if state["native"] is not None:
-            need(len(self.native) < 128, "native-member-count")
+            need(len(self.native) + (len(self.foreign) if self.complete else 0) < 128, "native-member-count")
             self.native.append(state["native"].finish(row))
         elif state["buffer"] is not None:
             self.arena.require(state["buffered"] == row[3]
                                and state["whole_hash"].hexdigest() == row[4], "inner-whole-member-sha")
-            outer = self.expected is not None or self.outer_selection is not None
+            outer = self.expected is not None or self.outer_selection is not None or self.top_level
             if not outer:
                 self.nested_count[0] += 1
                 need(self.depth < 2 and self.nested_count[0] <= 3, "nested-archive-count-or-depth")
             self.archives.append(inspect_inner(self.parser, self.arena, state["buffer"], row,
                                               zip_sha256=state["view_hash"].hexdigest(),
                                               depth=self.depth if outer else self.depth + 1,
-                                              nested_count=None if outer else self.nested_count))
+                                              nested_count=None if outer else self.nested_count,
+                                              complete=self.complete))
         elif self.outer_selection is not None and kind in ("zip", "jmod"):
             self.arena.facts(4096 + 8 * len(row[0]))
             self.uninspected.append({"name": row[0], "bytes": row[3], "mode": row[2], "sha256": row[4],
@@ -424,6 +494,18 @@ class _Observer:
             self.arena.facts(4096 + 8 * len(row[0]) + 8 * len(state["prefix"]))
             self.unknown.append({"name": row[0], "bytes": row[3], "mode": row[2], "sha256": row[4],
                                   "format": kind, "prefixBase64": base64.b64encode(state["prefix"]).decode("ascii")})
+        if self.complete:
+            if kind == "foreign-native":
+                need(len(self.native) + len(self.foreign) < 128, "native-member-count")
+                prefix = state["prefix_window"]
+                self.arena.require(prefix is not None, "foreign-prefix-required")
+                observed_format = "ELF" if prefix.data[:4] == b"\x7fELF" else "PE"
+                self.foreign.append(_complete_prefix(row, observed_format, prefix, self.arena))
+            problem = _complete_problem(row[0], row[2], kind)
+            if problem is not None:
+                fact = _complete_prefix(row, kind, state["prefix_window"], self.arena)
+                fact["reason"] = problem
+                self.unknown.append(fact)
         if selected:
             self.selected_seen.add(row[0])
         self.dispose_current()
@@ -433,13 +515,15 @@ class _Observer:
         if state is not None:
             if state["native"] is not None:
                 state["native"].dispose()
+            if state["prefix_window"] is not None:
+                state["prefix_window"].dispose()
             if state["buffer"] is not None:
                 size = len(state["buffer"])
                 state["buffer"] = None
                 self.arena.release("payload", size)
 
 
-def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count=None):
+def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count=None, complete=False):
     """Inspect a completed collector, with independent authentication of its copy.
 
     zip_sha256 is captured from the same ordered stream as the complete buffer;
@@ -453,7 +537,7 @@ def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count
     jmod = body[:4] == b"JM\x01\x00"
     arena.require(jmod or body[:4] in (b"PK\x03\x04", b"PK\x05\x06"), "inner-format")
     view = _View(body, 4 if jmod else 0, arena)
-    observer = _Observer(parser, arena, depth=depth, nested_count=nested_count)
+    observer = _Observer(parser, arena, depth=depth, nested_count=nested_count, complete=complete)
     enumeration = hashlib.sha256()
     try:
         pin = parser.OpaqueZipPin(view._length, zip_sha256)
@@ -467,7 +551,7 @@ def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count
         summary = report.consume_rows(consume)
         need(observer.current is None and summary["aliases"] == 0, "inner-observer-finality")
         arena.facts(8192 + 8 * len(row[0]))
-        return {"name": row[0], "bytes": row[3], "sha256": row[4], "mode": row[2],
+        result = {"name": row[0], "bytes": row[3], "sha256": row[4], "mode": row[2],
                 "format": "jmod" if jmod else "zip", "zipViewOffset": 4 if jmod else 0,
                 "centralMembers": summary["members"],
                 "inspectedMembers": summary["members"], "files": summary["files"],
@@ -479,6 +563,23 @@ def inspect_inner(parser, arena, body, row, *, zip_sha256, depth=0, nested_count
                 "innerBookReservationBytes": summary["rosterReservationBytes"],
                 "issuedReadBytes": summary["issuedReadBytes"],
                 "nativeExecuted": False, "supplierAuthority": False}
+        if complete:
+            _complete_census(observer, summary)
+            arena.facts(4096)
+            result["directoryMembers"] = summary["members"] - summary["files"]
+            result["foreignNativeMembers"] = sorted(observer.foreign, key=lambda item: item["name"])
+            result["negativeEvidence"] = None
+            if (not observer.native and not observer.foreign and not observer.unknown and not observer.archives
+                    and all(count == 0 for kind, count in observer.formats.items()
+                            if kind not in ("java-class-header", "opaque"))):
+                result["negativeEvidence"] = {
+                    "kind": "complete-recognized-format-negative",
+                    "centralMembers": summary["members"], "inspectedMembers": summary["members"],
+                    "files": summary["files"], "completeMemberHashes": True,
+                    "expandedInspectedBytes": summary["expandedBytes"],
+                    "enumerationSha256": enumeration.hexdigest(), "nativeMembers": [], "nestedArchives": [],
+                    "nativeExecution": False, "supplierAuthority": False}
+        return result
     except BaseException:
         arena.failed = True
         raise
@@ -705,3 +806,91 @@ def inspect_non_jdk(original, component, parser):
          "non-jdk-component")  # Before touching the supplied original.
     specification = next(row for row in NON_JDK_ARCHIVES if row[0] == component)
     return _inspect_non_jdk(original, parser, specification)
+
+
+def _complete_outer_inverse(rows, observer, arena):
+    # Reserve both temporary maps/tuples before construction. All source rows
+    # remain retained; no filtered list replaces the original outer inventory.
+    charge = 8192 + sum(4096 + 16 * len(row[0]) for row in rows
+                        if row[1] == "file" and row[-1] in ("zip", "jmod"))
+    arena.reserve("other", charge)
+    try:
+        expected = {row[0]: (row[3], row[2], row[4], row[-1]) for row in rows
+                    if row[1] == "file" and row[-1] in ("zip", "jmod")}
+        actual = {item["name"]: (item["bytes"], item["mode"], item["sha256"], item["format"])
+                  for item in observer.archives}
+        arena.require(len(actual) == len(observer.archives) and actual == expected,
+                      "complete-outer-inner-inverse")
+    finally:
+        arena.release("other", charge)
+
+
+def _inspect_complete_non_jdk(original, parser, specification):
+    # Private real-byte fixture seam, never a caller-controlled production pin.
+    need(type(specification) is tuple and len(specification) == 3, "complete-non-jdk-specification")
+    component, size, digest = specification
+    need(type(component) is str and component in ("gradle", "sdk-platform", "sdk-build-tools")
+         and uint(size) and 0 < size <= 256 * MIB and sha(digest), "complete-non-jdk-specification")
+    arena = Arena(original)
+    observer = None
+    rows, retained_rows = [], 0
+    try:
+        arena.check()
+        observer = _Observer(parser, arena, complete=True, top_level=True)
+        report = parser.compile_archive(original, parser.Pin(component, size, digest),
+                                        observer=observer, workspace=arena)
+        def retain(row):
+            nonlocal retained_rows
+            arena.check()
+            charge = 1536 + 8 * len(row[0]) + 8 * len(row[5] or "")
+            arena.reserve_rows(charge)
+            retained_rows += charge
+            rows.append(row)
+        summary = report.consume_rows(retain)
+        arena.require(summary["members"] == len(rows), "complete-outer-row-count")
+        _complete_census(observer, summary)
+        _complete_outer_inverse(rows, observer, arena)
+        original.verify_binding()
+        arena.check()
+        arena.facts(8192)
+        document = {"schemaVersion": 1, "kind": "mrk-intel-complete-non-jdk-observation-data-v1",
+                    "target": "x86_64-apple-darwin", "component": component,
+                    "archiveBytes": size, "archiveSha256": digest,
+                    "columns": list(parser.COLUMNS), "outer": summary, "rows": rows,
+                    "completeOuterMemberHashes": True, "completeInnerCoverage": True,
+                    "directoryMembers": summary["members"] - summary["files"],
+                    "formatCounts": observer.formats,
+                    "nativeMembers": sorted(observer.native, key=lambda item: item["name"]),
+                    "foreignNativeMembers": sorted(observer.foreign, key=lambda item: item["name"]),
+                    "unknownMembers": sorted(observer.unknown, key=lambda item: item["name"]),
+                    "innerArchives": sorted(observer.archives, key=lambda item: item["name"]),
+                    "uninspectedInnerArchives": sorted(observer.uninspected, key=lambda item: item["name"]),
+                    "uninspectedInnerArchiveCount": len(observer.uninspected),
+                    "innerInspectionScope": "all-complete-outer-zip-or-jmod",
+                    "issuedReadBytes": arena.reads, "innerExpandedBytes": arena.expanded,
+                    "prepublicationPeakReservedBytes": arena.peak,
+                    "prepublicationPeakReservations": dict(arena.peaks),
+                    "reservationMeaning": "explicit-owned-allocation-budget-not-total-interpreter-memory",
+                    "remainingObligations": ["fresh-complete-target-reference", "target-native-role-review",
+                                             "installed-loader-provider-custody", "native-Mac-qualification"],
+                    "nativeExecuted": False, "nativeClosure": False, "supplierAuthority": False}
+        return Inspection(arena, document)
+    except BaseException:
+        arena.failed = True
+        rows.clear()
+        try:
+            arena.release_rows(retained_rows)
+        except BaseException:
+            pass
+        raise
+    finally:
+        if observer is not None:
+            observer.dispose_current()
+
+
+def inspect_complete_non_jdk(original, component, parser):
+    """Fully observe one fixed public Gradle/SDK archive; never native permission."""
+    need(type(component) is str and component in ("gradle", "sdk-platform", "sdk-build-tools"),
+         "complete-non-jdk-component")
+    specification = next(row for row in COMPLETE_NON_JDK_ARCHIVES if row[0] == component)
+    return _inspect_complete_non_jdk(original, parser, specification)

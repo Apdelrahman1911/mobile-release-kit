@@ -131,3 +131,72 @@ originals (including JNA JavaVM/libgcc and native-platform ncurses), native load
 behavior, installed Inspect/Review/Register/readback and build/signing roles
 require their own genuine macOS26 x86_64 qualification. No new workflow is
 nominated by this comparison change; Linux DATA tests cannot discharge it.
+
+## Target-selected native authority (source plumbing, not Intel activation)
+
+The native authority selector is separate from the paired comparison facades.
+Only the complete ARM authority is currently selected. Intel and Linux return
+unavailable **before** consulting, initializing or waiting on the ARM supplier
+cache. Production bootstrap, source reservation, recipe and supplier admission,
+all three proposal documents, Publisher metadata/matching, installed readback,
+payload roles and sealed OS-provider CPU inspection select the same compiled
+profile. Inventory/record hashes cannot choose another target. ARM's canonical
+supplier v3 tuple/digest and existing role/loader rules remain unchanged.
+
+The existing whole-owner ARM budget DATA factories remain explicitly ARM even
+when compiled on another host; they are not evidence of that host's supplier
+authority. Added retained profile fields and the fixed authority layout remain
+charged by actual type sizes in the same allocation budgets. Generic FAT parsing,
+the i386 JNA refusal, OS file/root lists and all unknown/finality rules are unchanged.
+
+Intel activation still requires a complete **fresh public** target reference, not
+reuse of a historical local payload: the fixed x64 Temurin17.0.20.1+1 archive
+(180578248 bytes, `c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a`),
+the full549-entry JDK outer roster and every nested/counterpart disposition, all
+311 Gradle inner archives (308 beyond the three comparison subsets), complete
+SDK35 host/script/Android-target roles and the pinned AAPT2/bundletool resources.
+The existing bounded correspondence/inspection/projector must account for each
+original and uninspected entry; seven snapshots are not a complete catalogue.
+
+Separate target role review is required for JLI/VM/post-JLI, both distinct libjli
+originals, plain and shaded Jansi, native-platform and Bundletool JNA. An eventual
+JNA exception must bind its exact containing archive/member and **all** FAT sibling
+extents while selecting only x86_64; there is no generic i386 acceptance here.
+Actual sealed Intel OS-provider originals, including any required JavaVM/libgcc/
+ncurses linkage, must be proved rather than inferred from path prefixes, LC_ID
+labels or ARM providers. Shared-cache-only storage is a concrete unresolved input,
+not permission to invent a file. Only then can a complete separately reviewed
+Intel reference and genuine installed Inspect/Review/Register/readback qualify
+the existing Android path. This source change grants no native execution,
+registration, service approval, license consent or signing qualification.
+
+## Complete Gradle/SDK observation route (SOURCE, not observed qualification)
+
+`inspect_complete_non_jdk` is a separate closed DATA entry for the fixed public
+Gradle8.14.5, SDK platform35r02 and macOS build-tools35 originals. It does not
+upgrade the old selected-three route or reuse a historical payload. The complete
+entry authenticates its whole supplied original first, then inspects **every**
+recognized outer ZIP/JMOD and all permitted nested descendants, retaining exact
+outer tuples and an inverse whole-member/inner-census join. The311/10/5 counts are
+current SOURCE expectations until a genuine fresh pass supplies their actual
+members, hashes, modes and dispositions; source support alone is not that pass.
+
+Top-level sibling JARs are distinct from the unchanged nested3/depth2 bound. Every
+view still shares one original endpoint,768MiB issued-read allowance,1GiB inner
+expansion,64MiB live payload,48MiB rows,128MiB explicit workspace and8MiB terminal
+output. The outer parser's separate1GiB expansion bound remains distinct. Hitting
+any bound refuses; neither partial output nor a reset counter supplies completeness.
+
+Complete reports preserve x64 Mach-O snapshots, bounded original4096-byte ELF/PE
+prefixes, every unsupported/ambiguous or name/format-disagreeing row and all nested
+censuses. A recognized-format negative exists only after complete member hashing
+with no native/foreign/unresolved/nested observation; it is not bytecode safety or
+universal format detection. Unknown is never an invented empty resource set.
+Legacy JDK/selected-three semantics and the ARM catalogue generator remain unchanged.
+
+The new report is not the current generator's accepted input format and cannot
+activate an Intel supplier. It still needs genuine fresh full Gradle/SDK evidence,
+a reviewed complete target reference, exact host/script/Android-target roles,
+JNA/FAT and OS-provider resolution, then actual installed native qualification.
+No archive/vendor/native command, license acceptance or supplier authority is
+provided by this SOURCE route or its synthetic byte-only tests.

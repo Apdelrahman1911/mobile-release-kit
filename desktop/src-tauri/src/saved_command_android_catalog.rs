@@ -618,7 +618,7 @@ impl SavedCommandOwner {
         #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         {
             let recovery=if let Some(input)=recover{
-                if !crate::android_supplier_macos::available(){return Err(wire::unavailable());}
+                if !crate::android_build_protocol::Profile::current().is_some_and(crate::android_supplier_macos::available_for){return Err(wire::unavailable());}
                 let produced=r.android_catalog.published.as_ref().ok_or_else(wire::invalid)?;
                 if !produced.original.accepted_final.load(Ordering::SeqCst)||!produced.original.original_matches(&self.inner)
                     ||!produced.original.known_originals()||produced.original.failure().is_some()

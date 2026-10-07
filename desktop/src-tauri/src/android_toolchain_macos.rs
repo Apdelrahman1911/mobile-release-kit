@@ -241,6 +241,9 @@ impl AndroidToolchainSlots {
         self.check(index,end,Some(stop))?;Ok(out)
     }
     fn native_file(&mut self,index:usize,spec:&FileSpec,prefix:&[u8],inventory:Option<&Inventory>,end:Instant,stop:&watch::Receiver<bool>) -> Result<()> {
+        let profile=current_native_profile()?;
+        let authority=crate::android_native_macos_profile::authority(profile).ok_or(Failure::Inventory)?;
+        if inventory.is_some_and(|inventory|!inventory.matches_profile(profile)){return Err(Failure::Inventory);}
         if inventory.is_some() {
             if policy::android_target_elf(spec,prefix).map_err(|_|Failure::Inventory)?
                 || policy::gradle_foreign_launcher(spec).map_err(|_|Failure::Inventory)? {return Ok(());}
@@ -256,7 +259,7 @@ impl AndroidToolchainSlots {
             return Ok(());
         }
         let architecture=if sdk.is_some_and(|kind|kind.legacy()) {policy::MachArchitecture::X86_64}
-            else {policy::MachArchitecture::Arm64};
+            else {authority.architecture()};
         let mandatory=spec.mode&0o111!=0 || spec.path.ends_with(".dylib") || spec.path.ends_with(".jnilib");
         let recognizable=prefix.starts_with(&[0xcf,0xfa,0xed,0xfe]) || prefix.starts_with(&[0xfe,0xed,0xfa,0xcf])
             || prefix.starts_with(&[0xca,0xfe,0xba,0xbe]) || prefix.starts_with(&[0xca,0xfe,0xba,0xbf]);
@@ -267,7 +270,7 @@ impl AndroidToolchainSlots {
         let body=self.region(index,slice.offset,bytes.checked_add(32).ok_or(Failure::Bounds)?,end,stop)?;
         let commands=policy::native_commands(&body,slice,architecture).ok_or(Failure::Inventory)?;
         let accepted=match inventory {
-            Some(inventory)=>policy::local_loads(&spec.path,&commands,inventory),
+            Some(inventory)=>policy::local_loads_for(profile,&spec.path,&commands,inventory),
             None=>commands.loads.iter().all(|load|policy::system_load(load))
                 && commands.rpaths.iter().all(|path|policy::OS_ROOTS.contains(&path.as_str()) || policy::system_load(path)),
         };
@@ -372,7 +375,7 @@ impl AndroidToolchainSlots {
         let (inventory,provider)=self.read_bound_content(root,&selected,&record,intent,end,stop)?;
         // Full recovery/Start requires genuine supplier correspondence as well
         // as the existing complete file, launcher, load and OS-provider checks.
-        crate::android_supplier_macos::admit(&inventory,&intent.content_data().supplier_record)
+        crate::android_supplier_macos::admit_for(current_native_profile()?,&inventory,&intent.content_data().supplier_record)
             .map_err(|_|Failure::Inventory)?;
         let membership=Membership::new(&inventory);
         let mut seen=BTreeSet::new();
@@ -640,6 +643,9 @@ mod inert_arm_tests {
     }
     pub(super) fn android_catalog_constructor_is_inert_and_lost_frame_return_is_not_finality_data() {
         // Control DATA only: no SnapshotBook constructor/native API is called.
+        assert_eq!(current_native_profile().ok(), crate::android_build_protocol::Profile::current()
+            .filter(|profile|policy::native_catalog_supports(*profile)));
+        assert!(crate::android_native_macos_profile::authority(crate::android_build_protocol::Profile::MacX64).is_none());
         let end=Instant::now()+Duration::from_secs(30);
         let (_send,read)=watch::channel(end);
         let mut catalog=AndroidCatalogSlots::new(read);

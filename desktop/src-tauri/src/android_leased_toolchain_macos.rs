@@ -112,7 +112,7 @@ impl LeasedAndroidToolchainSlots{
         let result=self.tools.inspect_leased_once(&intent,w,stop).map_err(tool_issue);
         self.in_call=false;
         if let Err(issue)=result{
-            let issue=if issue==Issue::Refused && !crate::android_supplier_macos::available(){Issue::Unavailable}else{issue};
+            let issue=if issue==Issue::Refused && !crate::android_build_protocol::Profile::current().is_some_and(crate::android_supplier_macos::available_for){Issue::Unavailable}else{issue};
             return Err(self.note(issue));
         }
         self.lease[0].check_held(false).map_err(|issue|self.note(issue))?;

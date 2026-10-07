@@ -53,7 +53,7 @@ jobs:
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       # Final signed M comes only from the fixed configured SOURCE nomination.
-      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: f15bd0246673d0aeffea4d4643146c1d6a3359ef3c7896c0280a3b700cf9f787
       # Independently accepted paired supplier six pins; each signing capsule requires a new final M.
       MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
       MRK_MACOS_PYTHON_SUPPLIER_SHA256: ${{ matrix.supplier_receipt }}
@@ -111,7 +111,7 @@ jobs:
           [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
           if [[ "$MRK_MACOS_AQUA_SCOPE" != xcode-installed-classification && "$MRK_MACOS_AQUA_SCOPE" != wrapping-keychain-private && "$MRK_MACOS_AQUA_SCOPE" != android-registration-lifecycle ]]; then
             # Supplier/CLT admission belongs only to the unchanged build routes.
-            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f867a9d4a39201d2dabfa60660a5b6ec3f49c3e20f24a40548af86e65fe9f108 ]] || exit 1
+            [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == f15bd0246673d0aeffea4d4643146c1d6a3359ef3c7896c0280a3b700cf9f787 ]] || exit 1
             [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
             [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
             [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1

@@ -1567,8 +1567,8 @@ mod catalogue_budget_tests {
         let catalog_bytes=catalog.registration_retained_bytes().unwrap();
         let sources_bytes=sources.retained_data_bytes().unwrap();
 
-        let inspection=AndroidRegistrationSourceSlots::reservation(SourcePhase::Inspection).unwrap();
-        let reproof=AndroidRegistrationSourceSlots::reservation(SourcePhase::Reproof).unwrap();
+        let inspection=AndroidRegistrationSourceSlots::catalogue_reservation_data(SourcePhase::Inspection).unwrap();
+        let reproof=AndroidRegistrationSourceSlots::catalogue_reservation_data(SourcePhase::Reproof).unwrap();
         let source=crate::android_supplier_macos::with_compiled_catalogue_data(|recipe,observed,provider,payload|
             AndroidRegistrationSourceSlots::catalogue_allocation_data(recipe,&roots,observed,provider,payload,
                 old_instance.clone(),old_control.audit.subscribe(),inspection));

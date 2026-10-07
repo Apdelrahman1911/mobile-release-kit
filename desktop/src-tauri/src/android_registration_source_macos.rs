@@ -150,6 +150,7 @@ fn source_review_allocation_bytes(closure:&Closure,support:usize,proposal:&Propo
 /// native original, consent, read result or finality can be supplied here.
 #[derive(Clone, Copy)]
 pub(crate) struct SourceReservation {
+    profile: crate::android_build_protocol::Profile,
     phase: SourcePhase,
     storage: SourceStorage,
     // This is a full-catalogue validity upper bound, not a second allocation.
@@ -164,7 +165,7 @@ impl SourceReservation {
         (self.bytes.checked_sub(self.supplier_work).unwrap(),self.supplier_work)
     }
     fn covers(&self, recipe: &Recipe, phase: SourcePhase) -> bool {
-        self.phase == phase && self.supplier_work > 0
+        self.profile == recipe.profile() && self.phase == phase && self.supplier_work > 0
             && recipe.working_reservation_bytes().ok().is_some_and(|bytes| bytes <= self.proposal_validity)
             && recipe.source_storage().ok().is_some_and(|shape| self.storage.covers(shape))
     }
@@ -203,13 +204,22 @@ impl SourceSlots {
     /// One real source phase, not a new pool. The caller adds previous Review,
     /// client/control/task/status/request storage under its same64MiB cap.
     pub(crate) fn reservation(phase: SourcePhase) -> Option<SourceReservation> {
-        let catalogue = supplier::source_catalogue_budget().ok()?;
+        Self::reservation_for(crate::android_build_protocol::Profile::current()?, phase)
+    }
+    // Synthetic whole-owner ARM budgets remain explicit DATA, even on Intel or
+    // Linux test hosts. This factory never changes production current selection.
+    #[cfg(test)]
+    pub(crate) fn catalogue_reservation_data(phase: SourcePhase) -> Option<SourceReservation> {
+        Self::reservation_for(crate::android_build_protocol::Profile::MacArm64, phase)
+    }
+    fn reservation_for(profile: crate::android_build_protocol::Profile, phase: SourcePhase) -> Option<SourceReservation> {
+        let catalogue = supplier::source_catalogue_budget_for(profile).ok()?;
         let supplier_work = match phase {
             SourcePhase::Inspection => catalogue.proposal_work,
             SourcePhase::Reproof => catalogue.reproof_work,
         };
         let bytes = Self::source_working_bytes(catalogue.storage)?.checked_add(supplier_work)?;
-        Some(SourceReservation { phase, storage: catalogue.storage, proposal_validity: catalogue.proposal_work,
+        Some(SourceReservation { profile, phase, storage: catalogue.storage, proposal_validity: catalogue.proposal_work,
             supplier_work, bytes })
     }
     /// Concrete source maximum including both planned descriptor passes and
@@ -450,8 +460,15 @@ impl SourceSlots {
         self.begun = true;
         Ok(())
     }
+    fn selected_profile(&self) -> Result<crate::android_build_protocol::Profile> {
+        let profile = crate::android_build_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?;
+        if !self.reservation.is_some_and(|reservation| reservation.profile == profile)
+            || !policy::native_catalog_supports(profile) { return Err(AdmissionFailure::Inventory); }
+        Ok(profile)
+    }
     fn begin(&mut self, roots: &[RegisteredRoot; 3], phase: SourcePhase, end: Instant, stop: &watch::Receiver<bool>)
         -> Result<([Vec<Identity>; 3], JdkLayout, String, String)> {
+        self.selected_profile()?;
         self.allocate_records(phase)?;
         self.point(end, stop)?; self.account = Some(native::real_user().map_err(native_error)?); self.point(end, stop)?;
         if matches!(self.account, None | Some(0) | Some(u32::MAX)) { return Err(AdmissionFailure::Ownership); }
@@ -495,7 +512,7 @@ impl SourceSlots {
         end: Instant, stop: &watch::Receiver<bool>, publish: &mut Publish<'_>) -> Result<()> {
         let result = (|| {
             let (root_data, layout, vendor, version) = self.begin(roots, SourcePhase::Inspection, end, stop)?;
-            let profile = crate::android_build_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?;
+            let profile = self.selected_profile()?;
             let recipe = supplier::recipe_for(profile, &SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
                 .map_err(|_| AdmissionFailure::Inventory)?;
             if !self.reservation.is_some_and(|reserved| reserved.covers(&recipe, SourcePhase::Inspection)) {
@@ -531,7 +548,7 @@ impl SourceSlots {
             }
             // Only prove the small layout against the SAME reviewed reference.
             // Never regenerate instance, proposal, consent or reviewed documents.
-            let profile = crate::android_build_protocol::Profile::current().ok_or(AdmissionFailure::Inventory)?;
+            let profile = self.selected_profile()?;
             let observed_recipe = supplier::recipe_for(profile, &SourceLayouts { jdk: layout, jdk_vendor: &vendor, jdk_version: &version })
                 .map_err(|_| AdmissionFailure::Inventory)?;
             let old = reviewed.recipe.source_roster(); let new = observed_recipe.source_roster();
@@ -785,17 +802,20 @@ impl SourceSlots {
         Ok(bytes)
     }
     fn provider_native(&mut self, index: usize, file: &FileSpec, prefix: &[u8], end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        let authority = crate::android_native_macos_profile::authority(self.selected_profile()?)
+            .ok_or(AdmissionFailure::Inventory)?;
+        let architecture = authority.architecture();
         let mandatory = file.mode & 0o111 != 0 || file.path.ends_with(".dylib") || file.path.ends_with(".jnilib");
         let recognized = prefix.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) || prefix.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
             || prefix.starts_with(&[0xca, 0xfe, 0xba, 0xbe]) || prefix.starts_with(&[0xca, 0xfe, 0xba, 0xbf]);
         if !mandatory && !recognized { return Ok(()); }
-        let slice = policy::arm64_slice(prefix, file.size).ok_or(AdmissionFailure::Inventory)?;
+        let slice = policy::native_slice(prefix, file.size, architecture).ok_or(AdmissionFailure::Inventory)?;
         let header = self.region(index, slice.offset, 32, end, stop)?;
         let count = u32::from_le_bytes(header[20..24].try_into().map_err(native_error)?) as usize;
         let body = self.region(index, slice.offset, count.checked_add(32).ok_or(AdmissionFailure::Bounds)?, end, stop)?;
         // SAME shared Mach-O/system-load semantics as the installed tool reader,
         // not a second inventory or native policy registry.
-        let commands = policy::macho_commands(&body, slice).ok_or(AdmissionFailure::Inventory)?;
+        let commands = policy::native_commands(&body, slice, architecture).ok_or(AdmissionFailure::Inventory)?;
         if !commands.loads.iter().all(|load| policy::system_load(load))
             || !commands.rpaths.iter().all(|path| policy::OS_ROOTS.contains(&path.as_str()) || policy::system_load(path)) {
             return Err(AdmissionFailure::Inventory);
@@ -1380,12 +1400,23 @@ mod storage_capacity_tests {
     }
     fn reservation(phase: SourcePhase) -> SourceReservation {
         let storage = shape();
-        SourceReservation { phase, storage, proposal_validity: 2, supplier_work: 1,
+        SourceReservation { profile: crate::android_build_protocol::Profile::MacArm64, phase, storage, proposal_validity: 2, supplier_work: 1,
             bytes: SourceSlots::source_working_bytes(storage).unwrap() + 1 }
     }
     #[test]
     fn phase_checked_allocation_uses_exact_admitted_records_without_native_entry() {
         for phase in [SourcePhase::Inspection, SourcePhase::Reproof] {
+            use crate::android_build_protocol::Profile;
+            for profile in [Profile::MacX64, Profile::LinuxX64] {
+                assert!(SourceSlots::reservation_for(profile, phase).is_none());
+            }
+            assert_eq!(SourceSlots::reservation(phase).is_some(), Profile::current() == Some(Profile::MacArm64));
+            let selected = SourceSlots::catalogue_reservation_data(phase).unwrap();
+            assert_eq!(selected.profile, Profile::MacArm64);
+            let recipe = supplier::recipe_for(Profile::MacArm64, &SourceLayouts { jdk: JdkLayout::Bundle,
+                jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap();
+            assert!(selected.covers(&recipe, phase));
+            assert!(!(SourceReservation { profile: Profile::MacX64, ..selected }).covers(&recipe, phase));
             let (_send, audit) = watch::channel(Instant::now());
             let mut source = SourceSlots::new_original(audit, None, Some(reservation(phase)));
             let before = source.retained_bytes().unwrap();

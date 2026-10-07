@@ -47,7 +47,7 @@ fn mac_fields(profile: Profile) -> Option<MacFields> {
 /// The finite production JDK/loader catalogue is still ARM-only. Paired
 /// document parsing is not an Intel supplier, lease or native-execution grant.
 pub(crate) fn native_catalog_supports(profile: Profile) -> bool {
-    matches!(profile, Profile::MacArm64)
+    crate::android_native_macos_profile::authority(profile).is_some()
 }
 const BUNDLETOOL_SHA: &str = "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29";
 const BUNDLETOOL_BYTES: u64 = 32_520_401;
@@ -776,15 +776,20 @@ fn resolve(base: &str, tail: &str) -> Option<String> {
 /// Every declared loader search root must itself be protected. A missing member
 /// under an admitted immutable root is harmless; a writable/unknown search root
 /// cannot be ignored merely because another candidate happens to exist.
+#[cfg(test)]
 pub(crate) fn local_loads(path: &str, commands: &MachCommands, inventory: &Inventory) -> bool {
-    // The actual supplier/JDK/post-JLI and legacy role authority is ARM-profile only.
-    // Paired Intel document DATA must never borrow it as native qualification.
-    if !inventory.matches_profile(Profile::MacArm64) { return false; }
+    local_loads_for(Profile::MacArm64, path, commands, inventory)
+}
+pub(crate) fn local_loads_for(profile: Profile, path: &str, commands: &MachCommands, inventory: &Inventory) -> bool {
+    // Authority and documents must select the same target before any role edge.
+    // CPU equality alone never joins the host and the fixed SDK legacy graph.
+    let Some(authority) = crate::android_native_macos_profile::authority(profile) else { return false; };
+    if !inventory.matches_profile(profile) { return false; }
     if commands.loads.len().checked_add(commands.rpaths.len()).is_none_or(|n| n > 1024)
         || commands.loads.iter().chain(&commands.rpaths).any(|s| s.len() > 512) { return false; }
     let legacy = sdk35_reserved(path).is_some_and(|kind| kind.legacy() && !kind.script());
-    if commands.architecture != (if legacy { MachArchitecture::X86_64 } else { MachArchitecture::Arm64 }) { return false; }
-    let loaded_jvm = match crate::android_native_macos_profile::jdk_post_jli_provider(path, commands, inventory) {
+    if commands.architecture != (if legacy { MachArchitecture::X86_64 } else { authority.architecture() }) { return false; }
+    let loaded_jvm = match crate::android_native_macos_profile::jdk_post_jli_provider_for(profile, path, commands, inventory) {
         Ok(value) => value, Err(()) => return false,
     };
     let parent = path.rsplit_once('/').map_or("", |(p,_)| p);
@@ -1577,10 +1582,19 @@ mod tests {
         let mut commands = MachCommands { architecture: MachArchitecture::Arm64, file_type: 2,
             header_sha256: "e".repeat(64), install_name: None, loads: vec![], rpaths: vec![] };
         assert!(local_loads(AAPT2, &commands, &arm_inventory));
+        assert!(local_loads_for(Profile::MacArm64, AAPT2, &commands, &arm_inventory));
+        for profile in [Profile::MacX64, Profile::LinuxX64] {
+            assert!(!local_loads_for(profile, AAPT2, &commands, &arm_inventory));
+            assert!(!local_loads_for(profile, AAPT2, &commands, &intel_inventory));
+            assert!(crate::android_native_macos_profile::jdk_post_jli_provider_for(profile,
+                "jdk/Test.jdk/Contents/Home/bin/java", &commands, &arm_inventory).is_err());
+        }
         for architecture in [MachArchitecture::Arm64, MachArchitecture::X86_64] {
             commands.architecture = architecture;
             for path in [AAPT2, "jdk/Test.jdk/Contents/Home/bin/java", Sdk35File::LldIntel.pin().path] {
                 assert!(!local_loads(path, &commands, &intel_inventory));
+                assert!(!local_loads_for(Profile::MacArm64, path, &commands, &intel_inventory));
+                assert!(!local_loads_for(Profile::MacX64, path, &commands, &intel_inventory));
             }
         }
         // Even exact existing ARM JDK DATA cannot be relabeled as Intel authority.
