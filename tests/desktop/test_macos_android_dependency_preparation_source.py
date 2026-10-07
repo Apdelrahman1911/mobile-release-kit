@@ -52,6 +52,27 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         for path, pin in constants['RESOURCES'].items():
             raw = (ROOT / path).read_bytes()
             self.assertEqual([len(raw), hashlib.sha256(raw).hexdigest()], pin)
+        project = json.loads((ROOT / 'desktop/tools/android_dependency_preparation_data/project-v1.json').read_bytes())
+        bodies = {name: base64.b64decode(raw, validate=True) for name, raw in project['files'].items()}
+        self.assertEqual(len(bodies), 9)
+        build = bodies['project/build.gradle'].decode()
+        self.assertIn('resolutionStrategy.activateDependencyLocking()', build)
+        self.assertIn('lockAllConfigurations()', build)
+        self.assertIn('lockMode = LockMode.STRICT', build)
+        self.assertIn("classpath 'com.android.tools.build:gradle:8.9.2'", build)
+        for incompatible in ('failOnDynamicVersions', 'failOnChangingVersions', 'failOnNonReproducibleResolution'):
+            self.assertNotIn(incompatible, build)
+        self.assertIn('dependencyVerificationMode = DependencyVerificationMode.STRICT', bodies['project/settings.gradle'].decode())
+        self.assertIn('<verify-metadata>true</verify-metadata>',
+                      (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_text())
+        total = sum(map(len, bodies.values()))
+        self.assertEqual(total, 3989)
+        materializer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'materialize')
+        bound = next(n for n in ast.walk(materializer) if isinstance(n, ast.Call) and len(n.args) == 2
+                     and isinstance(n.args[1], ast.Constant) and n.args[1].value == 'fixture-decoded-bound')
+        self.assertEqual(ast.literal_eval(bound.args[0].comparators[0]), total)
+        self.assertIn("'pythonExecutable': python_executable", source)
+        self.assertIn("value['pythonExecutable'] == observed_python_executable()", source)
         for text in ('N.NormalPhase(', 'N.load_normal_owner(SOURCE)', 'C.compile_archive(',
                      'capture.consume_rows(self.terminal_row)', 'self.verify_binding()',
                      "'unsupported-vendor-alias'", 'os.O_NOFOLLOW', 'os.O_EXCL',
@@ -684,6 +705,21 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         helper.os = types.SimpleNamespace(**dict(vars(os), environ={'GITHUB_SHA': sha}))
         class Clock:
             def check(self): return 1
+        # Real tiny project materialization catches stale decoded-total guards;
+        # only path syntax is adapted, and no Gradle/vendor code executes.
+        helper.P = types.SimpleNamespace(relative=lambda name: self.assertTrue(
+            name and not name.startswith('/') and all(p not in ('', '.', '..') for p in name.split('/'))))
+        project_raw = (ROOT / 'desktop/tools/android_dependency_preparation_data/project-v1.json').read_bytes()
+        verification = (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_bytes()
+        with tempfile.TemporaryDirectory(prefix='a-fixture-', dir=scratch) as temporary:
+            work = Path(temporary)
+            originals = helper.materialize(work, project_raw, verification, Clock())
+            decoded = {name.removeprefix('project/'): base64.b64decode(raw, validate=True)
+                       for name, raw in json.loads(project_raw)['files'].items()}
+            self.assertEqual(sum(map(len, decoded.values())), 3989)
+            decoded['gradle/verification-metadata.xml'] = verification
+            self.assertEqual(originals, {name: helper.digest(raw) for name, raw in decoded.items()})
+            self.assertEqual({name: (work / 'run/project' / name).read_bytes() for name in decoded}, decoded)
         with tempfile.TemporaryDirectory(prefix='a-receipt-', dir=scratch) as temporary:
             work = Path(temporary)
             # Explicit inert validator DATA, never a native-observation receipt.
@@ -700,6 +736,44 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             def record_clock(seconds):
                 return {'startNs': '0', 'deadlineNs': str(seconds * 1000000000), 'beforePublicationNs': '1',
                         'postCloseDeadlineRequired': True}
+            # These are explicitly inert reader DATA, not claimed native facts.
+            # Exercise the real acquisition reader before later cleanup adapters.
+            write_report(report)
+            for name, raw in (('tool-roster.json', b'[]'), ('directory-roster.json', b'{}')):
+                (work / name).write_bytes(raw); (work / name).chmod(0o600)
+            acquisition = {'status': 'closed', 'source': sha, 'workflow': helper.WORKFLOW, 'ref': helper.REF,
+                'phase': 'acquisition', 'archives': helper.ARCHIVES, 'archiveBytes': 469391018,
+                'toolBytes': 1, 'readBytes': 1, 'files': 1, 'entries': 1, 'stockCaSha256': '0' * 64,
+                'nativeExecuted': False, 'protectedRegistration': False,
+                'sdkObservationSha256': helper.digest(path.read_bytes()), 'sdkMetadata': helper.SDK_METADATA,
+                'toolRosterSha256': helper.digest(b'[]{}'), 'pythonExecutable': sys.executable,
+                'phaseClock': record_clock(810)}
+            receipt_path = work / 'acquisition.json'
+            def write_acquisition(value):
+                receipt_path.write_bytes(helper.encoded(value)); receipt_path.chmod(0o600)
+            write_acquisition(acquisition)
+            self.assertEqual(helper.observed_python_executable(), sys.executable)
+            admitted, receipt_sha = helper.acquisition_receipt(work, Clock())
+            self.assertEqual(admitted, acquisition)
+            self.assertEqual(receipt_sha, helper.digest(receipt_path.read_bytes()))
+            malformed_paths = [None, 1, '', 'relative/python', '/tmp//python', '/tmp/./python',
+                '/tmp/../python', '/tmp/python\n', '/tmp/python\x00', '/tmp/python\x7f', '/tmp/pýthon', '/' + 'p' * 1024]
+            for invalid in malformed_paths + ['/different/actual/python']:
+                write_acquisition(dict(acquisition, pythonExecutable=invalid))
+                with self.subTest(python=repr(invalid)), self.assertRaisesRegex(helper.Refused, '^acquisition-python-binding$'):
+                    helper.acquisition_receipt(work, Clock())
+            for invalid in (dict(acquisition, extra=True), {k: v for k, v in acquisition.items() if k != 'pythonExecutable'}):
+                write_acquisition(invalid)
+                with self.assertRaisesRegex(helper.Refused, '^acquisition-fields$'):
+                    helper.acquisition_receipt(work, Clock())
+            saved_sys = helper.sys
+            try:
+                for invalid in malformed_paths:
+                    helper.sys = types.SimpleNamespace(executable=invalid)
+                    with self.assertRaisesRegex(helper.Refused, '^python-executable-path$'):
+                        helper.observed_python_executable()
+            finally: helper.sys = saved_sys
+            write_acquisition(acquisition)
             _, task, jdk = helper.arguments(work)
             head = ['/usr/bin/git', '-C', str(helper.SOURCE), 'rev-parse', 'HEAD']
             clean = ['/usr/bin/git', '-C', str(helper.SOURCE), 'status', '--porcelain=v1', '--untracked-files=all']
@@ -798,7 +872,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         verification = (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_bytes()
         work = Path('/case/PRIVATE-WORK-SENTINEL')
         stderr = ("FAILURE: Build failed with an exception.\n* Where:\n"
-            "Build file '" + str(work / 'run/project/build.gradle') + "' line: 27\n"
+            "Build file '" + str(work / 'run/project/build.gradle') + "' line: 21\n"
             "* What went wrong:\nA problem occurred evaluating root project 'PRIVATE-NAME-SENTINEL'.\n"
             "> Could not find method dependencyLocking() for arguments [PRIVATE-ARG-SENTINEL].\n"
             "> Could not resolve com.android.tools.build:gradle:8.9.2.\n"
@@ -823,9 +897,9 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertIn('dependencyLocking', value['symbols'])
         self.assertIn('org.gradle.api.artifacts.dsl.LockMode', value['symbols'])
         self.assertEqual(value['repositories'], ['google-maven'])
-        self.assertEqual([(r['file'], r['line']) for r in value['locations']], [('project/build.gradle', 27)])
+        self.assertEqual([(r['file'], r['line']) for r in value['locations']], [('project/build.gradle', 21)])
         source = base64.b64decode(json.loads(project_raw)['files']['project/build.gradle']).decode().splitlines()
-        self.assertEqual(value['locations'][0]['sourceLine'], source[26])
+        self.assertEqual(value['locations'][0]['sourceLine'], source[20])
         public = helper.encoded(value).decode()
         self.assertLessEqual(len(public.encode()), 12 << 10)
         for private in ('PRIVATE-', str(work), 'com.private', 'INTERNAL-MODULE', 'https://', 'token='):

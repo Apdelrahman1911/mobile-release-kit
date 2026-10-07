@@ -40,7 +40,7 @@ ACQUISITION_SECONDS = 900
 # Filled below from immutable current SOURCE, not an historical body store.
 PINS = {'desktop/tools/macos_android_supplier_preparation.py': [64306, '1d16d1e6af1d6d7795f36bef1bef89efbc7f05f80ac5e869216ad5225e536808'], 'desktop/tools/macos_android_supplier_correspondence.py': [53703, 'f0234fa1f56f9e5ba81a5619b6a8ae4605eefbd13e5157dd991657f7703faf29'], 'desktop/tools/macos_normal_ui_runner.py': [108597, '20b96a54f6b44e8098be9dd16baef9dcd33563858ff98dae069521dd697cd9b2']}
 ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
-RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [6125, 'cbcc8c69f468ae157611614f8dc30f5037f8ef39f1c095d0d7aba31c24f58c37'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
+RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [5797, '61e18ba78c0044e8383905df6678b9b9d4334d2b893fd83cb61c9286e91ba7a4'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
 SDK_METADATA = [{'bytes': 17832, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/platform-35-package.xml', 'sha256': '385364dad6ba50838ec90abc8e4593976e0e0c54c87cf703857ba0a1aad63fe2', 'target': 'sdk/platforms/android-35/package.xml'}, {'bytes': 17719, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/build-tools-35-package.xml', 'sha256': '6f7a9969f1bb25e39ae22fa5690b878e6806217453acf3b534712fb3a76ad1d4', 'target': 'sdk/build-tools/35.0.0/package.xml'}]
 N = P = C = None
 
@@ -258,17 +258,27 @@ def current_observation(work, clock):
     return digest(raw)
 
 
+def observed_python_executable():
+    # Public API metadata from the admitted hosted Python, never a path selector.
+    value = sys.executable
+    need(type(value) is str and 1 < len(value) <= 1024 and value.startswith('/')
+         and all('!' <= c <= '~' for c in value)
+         and all(part not in ('', '.', '..') for part in value.split('/')[1:]), 'python-executable-path')
+    return value
+
+
 def acquisition_receipt(work, clock):
     raw, _ = read(work / 'acquisition.json', 16384, clock=clock); value = N.document(raw)
     need(set(value) == {'status', 'source', 'workflow', 'ref', 'phase', 'archives', 'archiveBytes',
          'toolBytes', 'readBytes', 'files', 'entries', 'stockCaSha256', 'nativeExecuted',
-         'protectedRegistration', 'sdkObservationSha256', 'sdkMetadata', 'toolRosterSha256', 'phaseClock'}, 'acquisition-fields')
+         'protectedRegistration', 'sdkObservationSha256', 'sdkMetadata', 'toolRosterSha256', 'pythonExecutable', 'phaseClock'}, 'acquisition-fields')
     need(value['status'] == 'closed' and value['source'] == os.environ['GITHUB_SHA']
          and value['workflow'] == WORKFLOW and value['ref'] == REF and value['phase'] == 'acquisition'
          and value['archives'] == ARCHIVES and value['archiveBytes'] == 469391018
          and value['nativeExecuted'] is False and value['protectedRegistration'] is False
          and value['sdkMetadata'] == SDK_METADATA
          and value['sdkObservationSha256'] == current_observation(work, clock), 'acquisition-bindings')
+    need(value['pythonExecutable'] == observed_python_executable(), 'acquisition-python-binding')
     for key, maximum in (('toolBytes', TOOL_BYTES), ('readBytes', READ_BYTES), ('files', FILES), ('entries', ENTRIES)):
         need(type(value[key]) is int and 0 < value[key] <= maximum, 'acquisition-resource')
     need(type(value['stockCaSha256']) is str and re.fullmatch('[0-9a-f]{64}', value['stockCaSha256']), 'acquisition-ca-digest')
@@ -768,6 +778,7 @@ class Acquisition:
 def acquire(work, *, private=None):
     # This flag selects the internal role; it is NOT parent authentication.
     need(os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1' and private is not None, 'acquisition-original-required')
+    python_executable = observed_python_executable()
     a = Acquisition(work)
     recheck_chain(private['fds'], private['originals'])
     a.charge_read(16384); a.charge_read(1)
@@ -790,7 +801,7 @@ def acquire(work, *, private=None):
         'archiveBytes': 469391018, 'toolBytes': a.writes, 'readBytes': a.reads,
         'files': a.files, 'entries': a.entries, 'stockCaSha256': digest(ca),
         'sdkObservationSha256': sdk_sha, 'sdkMetadata': SDK_METADATA, 'toolRosterSha256': roster_sha,
-        'nativeExecuted': False, 'protectedRegistration': False,
+        'nativeExecuted': False, 'protectedRegistration': False, 'pythonExecutable': python_executable,
         'phaseClock': a.clock.before_publication()}), clock=a.clock)
     recheck_chain(private['fds'], private['originals'])
     # main consumes its retained work descriptors before the final successful endpoint.
@@ -859,7 +870,7 @@ def materialize(work, project_raw, verification, clock):
         body = base64.b64decode(content, validate=True)
         path = work / 'run/project' / name; path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         publish_preparation(work, 'run/project/' + name, body, clock=clock); originals[name] = digest(body)
-    need(sum(len(base64.b64decode(r)) for r in value['files'].values()) == 4236, 'fixture-decoded-bound')
+    need(sum(len(base64.b64decode(r)) for r in value['files'].values()) == 3989, 'fixture-decoded-bound')
     publish_preparation(work, 'run/project/gradle/verification-metadata.xml', verification, clock=clock)
     originals['gradle/verification-metadata.xml'] = digest(verification)
     return originals
