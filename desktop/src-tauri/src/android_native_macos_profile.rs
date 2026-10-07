@@ -119,11 +119,114 @@ static ARM_AUTHORITY: NativeAuthority = NativeAuthority {
     template_bytes: 185600,
     template_sha256: "73403782287c715055d9f58cca4571add26f01817d710186bf6e52fa5ac1b442",
 };
-pub(crate) const AUTHORITY_STORAGE_BYTES: usize = std::mem::size_of::<NativeAuthority>();
+// Separate selected roles for the complete fresh Intel reference. The retained
+// Intel comparison pins remain ObservationOnly; no match promotes that phase.
+pub(crate) static INTEL_JDK_PHASES: [(&str, JdkPhase); 71] = [
+    ("Contents/Home/bin/jar", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jarsigner", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/java", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/javac", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/javadoc", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/javap", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jcmd", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jconsole", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jdb", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jdeprscan", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jdeps", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jfr", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jhsdb", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jimage", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jinfo", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jlink", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jmap", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jmod", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jpackage", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jps", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jrunscript", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jshell", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jstack", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jstat", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/jstatd", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/keytool", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/rmiregistry", JdkPhase::Bootstrap),
+    ("Contents/Home/bin/serialver", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/jspawnhelper", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libattach.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libawt.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libawt_lwawt.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libdt_socket.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libextnet.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libfontmanager.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libfreetype.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libinstrument.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libj2gss.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libj2pcsc.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libj2pkcs11.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libjaas.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libjava.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libjavajpeg.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libjawt.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libjdwp.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libjimage.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libjli.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libjsig.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libjsound.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/liblcms.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libmanagement.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libmanagement_agent.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libmanagement_ext.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libmlib_image.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libnet.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libnio.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libosx.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libosxapp.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libosxkrb5.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libosxsecurity.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libosxui.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libprefs.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/librmi.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libsaproc.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libsplashscreen.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libsyslookup.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/libverify.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/libzip.dylib", JdkPhase::PostJli),
+    ("Contents/Home/lib/server/libjsig.dylib", JdkPhase::Bootstrap),
+    ("Contents/Home/lib/server/libjvm.dylib", JdkPhase::ExplicitJvmProvider),
+    ("Contents/MacOS/libjli.dylib", JdkPhase::Bootstrap),
+];
+static INTEL_AUTHORITY: NativeAuthority = NativeAuthority {
+    profile: Profile::MacX64,
+    toolchain: crate::android_build_protocol::MAC_X64_TOOLCHAIN_PROFILE,
+    architecture: MachArchitecture::X86_64,
+    archive: (intel_jdk::ARCHIVE_BYTES, intel_jdk::ARCHIVE_SHA256),
+    release: intel_jdk::RELEASE, jvm_cfg: intel_jdk::JVM_CFG,
+    native: intel_jdk::NATIVE, archives: intel_jdk::JVM_ARCHIVES,
+    template: &intel_jdk::TEMPLATE_HEADER,
+    template_member: "classes/jdk/jpackage/internal/resources/jpackageapplauncher",
+    template_bytes: intel_jdk::TEMPLATE_BYTES,
+    template_sha256: intel_jdk::TEMPLATE_SHA256,
+};
+fn intel_phases_complete(phases: &[(&str, JdkPhase)]) -> bool {
+    phases.len() == intel_jdk::NATIVE.len()
+        && phases.iter().zip(intel_jdk::NATIVE).all(|((relative, phase), pin)|
+            *relative == pin.relative && match phase {
+                JdkPhase::Bootstrap => *relative != "Contents/Home/lib/server/libjvm.dylib"
+                    && !pin.header.loads.contains(&"@rpath/libjvm.dylib"),
+                JdkPhase::PostJli => pin.header.loads.contains(&"@rpath/libjvm.dylib"),
+                JdkPhase::ExplicitJvmProvider => *relative == "Contents/Home/lib/server/libjvm.dylib",
+                JdkPhase::ObservationOnly => false,
+            })
+        && phases.iter().filter(|(_, phase)| *phase == JdkPhase::Bootstrap).count() == 45
+        && phases.iter().filter(|(_, phase)| *phase == JdkPhase::PostJli).count() == 25
+        && phases.iter().filter(|(_, phase)| *phase == JdkPhase::ExplicitJvmProvider).count() == 1
+}
+pub(crate) const AUTHORITY_STORAGE_BYTES: usize = 2 * std::mem::size_of::<NativeAuthority>()
+    + std::mem::size_of::<[(&str, JdkPhase); 71]>();
 pub(crate) fn authority(profile: Profile) -> Option<&'static NativeAuthority> {
     match profile {
         Profile::MacArm64 => Some(&ARM_AUTHORITY),
-        Profile::MacX64 | Profile::LinuxX64 => None,
+        Profile::MacX64 => intel_phases_complete(&INTEL_JDK_PHASES).then_some(&INTEL_AUTHORITY),
+        Profile::LinuxX64 => None,
     }
 }
 impl NativeAuthority {
@@ -137,6 +240,14 @@ impl NativeAuthority {
     pub(crate) fn archives(&self) -> &'static [JdkJvmArchivePin] { self.archives }
     pub(crate) fn jdk_native(&self, relative: &str) -> Option<&'static JdkNativePin> {
         self.native.iter().find(|pin| pin.relative == relative)
+    }
+    pub(crate) fn jdk_phase(&self, relative: &str) -> Option<JdkPhase> {
+        let pin = self.jdk_native(relative)?;
+        match self.profile {
+            Profile::MacArm64 => Some(pin.phase),
+            Profile::MacX64 => INTEL_JDK_PHASES.iter().find(|(name, _)| *name == relative).map(|(_, phase)| *phase),
+            Profile::LinuxX64 => None,
+        }
     }
     pub(crate) fn jdk_jvm_archive(&self, path: &str) -> Option<&'static JdkJvmArchivePin> {
         let relative = jdk_relative(path)?;
@@ -740,7 +851,8 @@ pub(crate) fn jdk_post_jli_provider_for<'a>(
         pin.matches(&file.path, file.size, &file.sha256, file.mode))) { return Err(()); }
     let jli = authority.jdk_native("Contents/Home/lib/libjli.dylib").ok_or(())?;
     let provider = authority.jdk_native("Contents/Home/lib/server/libjvm.dylib").ok_or(())?;
-    if jli.phase != JdkPhase::Bootstrap || provider.phase != JdkPhase::ExplicitJvmProvider
+    if authority.jdk_phase(jli.relative) != Some(JdkPhase::Bootstrap)
+        || authority.jdk_phase(provider.relative) != Some(JdkPhase::ExplicitJvmProvider)
         || jli.header.install_name != Some("@rpath/libjli.dylib")
         || provider.header.install_name != Some("@rpath/libjvm.dylib")
         || !jli.header.loads.iter().chain(provider.header.loads).all(|load| policy::system_load(load))
@@ -750,7 +862,7 @@ pub(crate) fn jdk_post_jli_provider_for<'a>(
         || provider.header.rpaths != ["@loader_path/.", "@loader_path/.."] {
         return Err(());
     }
-    if pin.phase != JdkPhase::PostJli { return Ok(None); }
+    if authority.jdk_phase(pin.relative).ok_or(())? != JdkPhase::PostJli { return Ok(None); }
     if !commands.loads.iter().any(|load| load == "@rpath/libjvm.dylib") { return Err(()); }
     Ok(Some(&selected_file(inventory, provider.relative).ok_or(())?.path))
 }
@@ -1029,10 +1141,45 @@ mod tests {
         assert_eq!(selected.archive(), (JDK_ARCHIVE_BYTES, JDK_ARCHIVE_SHA256));
         assert_eq!(selected.release(), (1638, "cb6064fe4d7b87d9fbb8b8c7702047044d1bbeac38e0c5217f595579b6cc764b"));
         assert_eq!(selected.jvm_cfg(), (29, "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"));
-        assert!(std::ptr::eq(selected.natives(), JDK_NATIVE));
-        assert!(std::ptr::eq(selected.archives(), JDK_JVM_ARCHIVES));
-        assert_eq!(AUTHORITY_STORAGE_BYTES, std::mem::size_of::<NativeAuthority>());
-        assert!(authority(Profile::MacX64).is_none() && authority(Profile::LinuxX64).is_none());
+        // Check the named owner and its repeated borrowed views separately
+        // from full pin DATA: promoted table storage is not a unique address
+        // across static initializers and multiple codegen units.
+        let repeated_arm = authority(Profile::MacArm64).unwrap();
+        assert!(std::ptr::eq(selected, &ARM_AUTHORITY));
+        assert!(std::ptr::eq(selected, repeated_arm));
+        assert!(std::ptr::eq(selected.natives(), repeated_arm.natives()));
+        assert!(std::ptr::eq(selected.archives(), repeated_arm.archives()));
+        assert_eq!(serde_json::to_vec(selected.natives()).unwrap(),
+            serde_json::to_vec(JDK_NATIVE).unwrap());
+        assert_eq!(serde_json::to_vec(selected.archives()).unwrap(),
+            serde_json::to_vec(JDK_JVM_ARCHIVES).unwrap());
+        assert_eq!(AUTHORITY_STORAGE_BYTES, 2 * std::mem::size_of::<NativeAuthority>()
+            + std::mem::size_of::<[(&str, JdkPhase); 71]>());
+        assert!(authority(Profile::LinuxX64).is_none());
+        let selected_intel = authority(Profile::MacX64).unwrap();
+        assert_eq!(selected_intel.profile(), Profile::MacX64);
+        assert_eq!(selected_intel.toolchain(), crate::android_build_protocol::MAC_X64_TOOLCHAIN_PROFILE);
+        assert_eq!(selected_intel.architecture(), MachArchitecture::X86_64);
+        assert_eq!(selected_intel.archive(), (180578248,
+            "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a"));
+        assert_eq!(selected_intel.release(), (1637,
+            "edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b"));
+        assert_eq!(selected_intel.jvm_cfg(), selected.jvm_cfg());
+        // Named authority ownership is stable. The slice referents behind
+        // another static can be duplicated across codegen units; compare all
+        // pinned DATA separately instead of assigning those referents identity.
+        let repeated_intel = authority(Profile::MacX64).unwrap();
+        assert!(std::ptr::eq(selected_intel, &INTEL_AUTHORITY));
+        assert!(std::ptr::eq(selected_intel, repeated_intel));
+        assert!(std::ptr::eq(selected_intel.natives(), repeated_intel.natives()));
+        assert!(std::ptr::eq(selected_intel.archives(), repeated_intel.archives()));
+        assert_eq!(serde_json::to_vec(selected_intel.natives()).unwrap(),
+            serde_json::to_vec(intel_jdk::NATIVE).unwrap());
+        assert_eq!(serde_json::to_vec(selected_intel.archives()).unwrap(),
+            serde_json::to_vec(intel_jdk::JVM_ARCHIVES).unwrap());
+        assert!(!std::ptr::eq(selected_intel, selected));
+        assert_eq!(serde_json::to_vec(&selected.record_authority()).unwrap(),
+            serde_json::to_vec(&record_authority()).unwrap());
         let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
         let intel = jdk_comparison_profile(Profile::MacX64).unwrap();
         assert!(jdk_comparison_profile(Profile::LinuxX64).is_none());
@@ -1050,7 +1197,7 @@ mod tests {
         assert_eq!(intel.native_members().iter().filter(|pin| pin.header.file_type == 6).count(), 42);
         assert!(intel.native_members().iter().all(|pin| pin.phase == JdkPhase::ObservationOnly));
         assert!(arm.native_members().iter().all(|pin| pin.phase != JdkPhase::ObservationOnly));
-        assert!(!policy::native_catalog_supports(Profile::MacX64));
+        assert!(policy::native_catalog_supports(Profile::MacX64));
 
         let file = native_file(&intel, "Contents/Home/bin/java");
         let prefix = intel_jdk::JAVA_PREFIX;
@@ -1100,6 +1247,41 @@ mod tests {
         let cfg = "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0";
         assert!(arm.metadata_original_matches("Contents/Home/lib/jvm.cfg", 29, cfg, 0o100644));
         assert!(intel.metadata_original_matches("Contents/Home/lib/jvm.cfg", 29, cfg, 0o100644));
+
+        // The role map is a separate complete literal, not mutated comparison
+        // phases or a runtime lookup of ARM pins. Invalid map shapes refuse.
+        assert!(intel_phases_complete(&INTEL_JDK_PHASES));
+        assert_eq!(INTEL_JDK_PHASES.len(), 71);
+        assert_eq!(INTEL_JDK_PHASES.iter().filter(|(_, p)| *p == JdkPhase::Bootstrap).count(), 45);
+        assert_eq!(INTEL_JDK_PHASES.iter().filter(|(_, p)| *p == JdkPhase::PostJli).count(), 25);
+        assert_eq!(INTEL_JDK_PHASES.iter().filter(|(_, p)| *p == JdkPhase::ExplicitJvmProvider).count(), 1);
+        for (index, (name, phase)) in INTEL_JDK_PHASES.iter().enumerate() {
+            assert!(!INTEL_JDK_PHASES[..index].iter().any(|(prior, _)| prior == name));
+            assert_eq!(selected_intel.jdk_phase(name), Some(*phase));
+            assert_eq!(selected_intel.jdk_native(name).unwrap().phase, JdkPhase::ObservationOnly);
+        }
+        assert_eq!(selected_intel.jdk_phase("Contents/Home/lib/libjli.dylib"), Some(JdkPhase::Bootstrap));
+        assert_eq!(selected_intel.jdk_phase("Contents/Home/lib/server/libjvm.dylib"), Some(JdkPhase::ExplicitJvmProvider));
+        assert_eq!(selected_intel.jdk_phase("Contents/Home/lib/libjava.dylib"), Some(JdkPhase::PostJli));
+        for missing in ["libjava.dylib", "Contents/Home/lib/../lib/libjava.dylib", "Contents/Home/lib/unknown.dylib"] {
+            assert!(selected_intel.jdk_phase(missing).is_none());
+        }
+        assert!(!intel_phases_complete(&INTEL_JDK_PHASES[1..]));
+        for mutation in 0..5 {
+            let mut changed = INTEL_JDK_PHASES;
+            match mutation {
+                0 => changed[0].0 = changed[1].0,
+                1 => changed[0].0 = "Contents/Home/bin/unlisted",
+                2 => changed[0].1 = JdkPhase::ObservationOnly,
+                3 => changed.swap(0, 1),
+                _ => {
+                    let post = changed.iter().position(|(_, phase)| *phase == JdkPhase::PostJli).unwrap();
+                    changed[0].1 = JdkPhase::PostJli;
+                    changed[post].1 = JdkPhase::Bootstrap;
+                }
+            }
+            assert!(!intel_phases_complete(&changed));
+        }
     }
 
     #[test]
@@ -1287,14 +1469,18 @@ mod tests {
     #[test]
     fn intel_non_jdk_opaque_siblings_and_loader_labels_never_grant_native_authority() {
         use crate::android_supplier_macos_source::{JdkLayout, SourceLayouts};
-        assert!(!policy::native_catalog_supports(Profile::MacX64));
+        assert!(policy::native_catalog_supports(Profile::MacX64));
         assert!(policy::native_catalog_supports(Profile::MacArm64));
-        assert!(!crate::android_supplier_macos::available_for(Profile::MacX64));
+        assert!(!policy::native_catalog_supports(Profile::LinuxX64));
         let layout = SourceLayouts { jdk: JdkLayout::Bundle,
             jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" };
-        assert!(matches!(crate::android_supplier_macos::recipe_for(Profile::MacX64, &layout),
+        let selected = crate::android_supplier_macos::recipe_for(Profile::MacX64, &layout).unwrap();
+        assert_eq!(selected.profile(), Profile::MacX64);
+        assert!(crate::android_supplier_macos::available_for(Profile::MacX64));
+        assert!(matches!(crate::android_supplier_macos::recipe_for(Profile::LinuxX64, &layout),
             Err(crate::android_supplier_macos::Failure::Unavailable)));
-        // No ARM supplier-cache initialization or replacement fixture reference.
+        // Only the complete compiled Intel reference supplies that recipe; all
+        // borrowed non-JDK comparison phases below stay ObservationOnly.
         let arm = jdk_comparison_profile(Profile::MacArm64).unwrap();
         let intel_jdk = jdk_comparison_profile(Profile::MacX64).unwrap();
         assert!(std::ptr::eq(arm.native_members(), JDK_NATIVE));

@@ -1407,10 +1407,24 @@ mod storage_capacity_tests {
     fn phase_checked_allocation_uses_exact_admitted_records_without_native_entry() {
         for phase in [SourcePhase::Inspection, SourcePhase::Reproof] {
             use crate::android_build_protocol::Profile;
-            for profile in [Profile::MacX64, Profile::LinuxX64] {
-                assert!(SourceSlots::reservation_for(profile, phase).is_none());
+            assert!(SourceSlots::reservation_for(Profile::LinuxX64, phase).is_none());
+            assert_eq!(SourceSlots::reservation(phase).is_some(),
+                matches!(Profile::current(), Some(Profile::MacArm64 | Profile::MacX64)));
+            for profile in [Profile::MacArm64, Profile::MacX64] {
+                let selected = SourceSlots::reservation_for(profile, phase).unwrap();
+                let budget = supplier::source_catalogue_budget_for(profile).unwrap();
+                let recipe = supplier::recipe_for(profile, &SourceLayouts { jdk: JdkLayout::Bundle,
+                    jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap();
+                assert_eq!(selected.profile, profile);
+                assert_eq!(selected.storage, budget.storage);
+                assert_eq!(selected.proposal_validity, budget.proposal_work);
+                assert_eq!(selected.supplier_work, match phase {
+                    SourcePhase::Inspection => budget.proposal_work, SourcePhase::Reproof => budget.reproof_work });
+                assert_eq!(selected.bytes, SourceSlots::source_working_bytes(budget.storage).unwrap() + selected.supplier_work);
+                assert!(selected.covers(&recipe, phase));
+                let other = if profile == Profile::MacArm64 { Profile::MacX64 } else { Profile::MacArm64 };
+                assert!(!(SourceReservation { profile: other, ..selected }).covers(&recipe, phase));
             }
-            assert_eq!(SourceSlots::reservation(phase).is_some(), Profile::current() == Some(Profile::MacArm64));
             let selected = SourceSlots::catalogue_reservation_data(phase).unwrap();
             assert_eq!(selected.profile, Profile::MacArm64);
             let recipe = supplier::recipe_for(Profile::MacArm64, &SourceLayouts { jdk: JdkLayout::Bundle,

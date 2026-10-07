@@ -122,6 +122,77 @@ def memory_paths(events):
     return MemoryPath, Stream
 
 
+# Independent fixed-selector DATA, never a caller-provided test filter.
+SOURCE_SLOTS_CASE = "installed_runtime::android_registration_source::storage_capacity_tests::phase_checked_allocation_uses_exact_admitted_records_without_native_entry"
+
+
+def source_slots_environment():
+    value = mac_environment("x86_64-apple-darwin")
+    value.pop("MRK_COMPILE_SELECTION")
+    value.pop("MRK_MACOS_COMPILE_MODE")
+    value.update(GITHUB_REF="refs/heads/verify/desktop-macos-intel-source-slots",
+                 GITHUB_WORKFLOW_REF="fictional/project/.github/workflows/desktop-macos-intel-source-slots.yml@refs/heads/verify/desktop-macos-intel-source-slots",
+                 MRK_DESKTOP_HOSTED_CHECKS="macos-intel-source-slots-v1")
+    return value
+
+
+def source_slots_context():
+    return {**helper.compile_workflow_binding(source_slots_environment(), helper.SOURCE_SLOTS_SCOPE),
+            "root": "/inert/tmp/mrk-desktop-foundation-original", "source": "/inert/source", "git": "/usr/bin/git",
+            "platform": "macos", "sourceTree": "3" * 40, "workflowSha256": "2" * 64,
+            "executionScope": "macos-intel-source-slots-v1", "rustup": None,
+            "sourceSlots": {"target": "x86_64-apple-darwin", "features": ["development-runtime"],
+                            "testTarget": "lib", "test": SOURCE_SLOTS_CASE}}
+
+
+def source_slots_result():
+    return {"test": SOURCE_SLOTS_CASE, "running": 1, "passed": 1, "failed": 0,
+            "ignored": 0, "measured": 0, "filtered": 7}
+
+
+def source_slots_stdout():
+    return ("\nrunning 1 test\ntest " + SOURCE_SLOTS_CASE + " ... ok\n\n"
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s\n\n").encode()
+
+
+def source_slots_receipt(phase):
+    bound = source_slots_context()
+    checks = ["rust-version-target", "mac-cargo-version"] + (
+        ["mac-source-slots-locked-metadata"] if phase == "acquire" else ["headless-test-compile-only", "mac-source-slots-data-test"])
+    value = {"schemaVersion": 1, "scope": "desktop-macos-intel-source-slots-data-v1", "phase": phase, "status": "passed",
+             **{key: bound[key] for key in ("sourceSha", "sourceTree", "platform", "workflowPath", "workflowSha",
+                                           "workflowRef", "workflowSha256", "runId", "attempt", "sourceSlots")},
+             "rust": deepcopy(MAC_RUST_EXPECTED["x86_64-apple-darwin"]), "node": None,
+             "checks": [{"check": check, "exitCode": 0} for check in checks]}
+    if phase == "compile":
+        value["testResult"] = source_slots_result()
+    return value
+
+
+def source_slots_paths(events, captures):
+    MemoryPath, _ = memory_paths(events)
+    class Capture(io.StringIO):
+        def __init__(self, path):
+            super().__init__()
+            self.path = str(path)
+        def __exit__(self, *args):
+            captures[self.path] = self.getvalue().encode()
+            events.append(("closed", self.path))
+            return super().__exit__(*args)
+    class SlotsPath(MemoryPath):
+        def open(self, *args, **kwargs):
+            events.append(("open", str(self), args))
+            return Capture(self)
+    def writer(path, stream):
+        assert str(path) == stream.path
+        return (1, 3, 0o100600, 501, 20, 1, len(stream.getvalue().encode()), 1, 1)
+    def read(path, expected):
+        body = captures[str(path)]
+        assert len(body) == expected[6]
+        return body if path.name == "source-slots-test.stdout" else b""
+    return SlotsPath, writer, read
+
+
 class ShellCompileContractTests(unittest.TestCase):
     def test_compile_scope_refuses_every_native_phase_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("context must not be opened")), \
@@ -173,6 +244,31 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(helper.compiler_binding(engineering_context()), MAC_RUST_EXPECTED["aarch64-apple-darwin"])
         with self.assertRaises(helper.CheckFailure):
             helper.compiler_binding({**engineering_context(), "platform": "linux"})
+
+        # This distinct native DATA profile still cannot dispatch a native
+        # product/fixture phase or borrow another host's feature graph.
+        with patch.object(helper, "load_context", side_effect=AssertionError("no context IO")), \
+                patch.object(helper, "tools", side_effect=AssertionError("no tool selection")):
+            for phase in ("native", "workflow-owner", "config-core", "windows-snapshot", "engineering-main-test", "unexpected"):
+                with self.subTest(source_slots_phase=phase), self.assertRaises(helper.CheckFailure):
+                    helper.phase(phase, "macos", helper.SOURCE_SLOTS_SCOPE)
+            for platform in ("linux", "windows", "unknown"):
+                for phase in helper.COMPILE_PHASES:
+                    with self.subTest(source_slots_platform=platform, phase=phase), self.assertRaises(helper.CheckFailure):
+                        helper.phase(phase, platform, helper.SOURCE_SLOTS_SCOPE)
+        for phase in ("prepare", "acquire", "compile", "clean"):
+            helper.admit_phase(helper.SOURCE_SLOTS_SCOPE, phase)
+        self.assertEqual(helper.SOURCE_SLOTS_TEST, SOURCE_SLOTS_CASE)
+        self.assertEqual(helper.source_slots_selection(), source_slots_context()["sourceSlots"])
+        self.assertEqual(helper.compiler_binding(source_slots_context()), MAC_RUST_EXPECTED["x86_64-apple-darwin"])
+        for bad in ({**source_slots_context(), "platform": "linux"},
+                    {**source_slots_context(), "executionScope": helper.MAC_COMPILE_SCOPE}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.phase_source_slots("compile", bad)
+        changed = source_slots_context()
+        changed["sourceSlots"]["features"] = ["registration-helper"]
+        with self.assertRaises(helper.CheckFailure):
+            helper.phase_source_slots("compile", changed)
 
     def test_compile_binding_requires_actual_fixed_workflow_ref_source_and_attempt(self):
         original = environment()
@@ -376,6 +472,83 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn("--engineering-main-summary", engineering_workflow)
         self.assertIn("engineering-summary.status", engineering_workflow)
         self.assertLess(engineering_workflow.index("--engineering-main-summary"), engineering_workflow.index("ci_foundation.py clean'"))
+
+        fixed = source_slots_environment()
+        binding = helper.compile_workflow_binding(fixed, helper.SOURCE_SLOTS_SCOPE)
+        self.assertEqual(binding["workflowPath"], ".github/workflows/desktop-macos-intel-source-slots.yml")
+        for key, bad in (("GITHUB_SHA", "0" * 40), ("GITHUB_WORKFLOW_SHA", "a" * 40),
+                         ("GITHUB_REF", helper.MAC_COMPILE_REF), ("GITHUB_WORKFLOW_REF", "foreign/workflow"),
+                         ("GITHUB_RUN_ID", "0"), ("GITHUB_RUN_ATTEMPT", "0"), ("GITHUB_EVENT_NAME", "pull_request")):
+            with self.subTest(source_slots_field=key), self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**fixed, key: bad}, helper.SOURCE_SLOTS_SCOPE)
+        with self.assertRaises(helper.CheckFailure):
+            helper.compile_workflow_binding({**fixed, "GITHUB_EVENT_NAME": "workflow_dispatch"}, helper.SOURCE_SLOTS_SCOPE)
+        self.assertEqual(helper.compile_workflow_binding({**fixed, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                         "MRK_EXPECTED_SHA": "1" * 40}, helper.SOURCE_SLOTS_SCOPE), binding)
+        workflow = (HELPER.parents[2] / helper.SOURCE_SLOTS_WORKFLOW).read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("runs-on: macos-26-intel"), 1)
+        self.assertIn("branches: [verify/desktop-macos-intel-source-slots]", workflow)
+        self.assertEqual(workflow.count("type: string"), 1)
+        self.assertIn('[[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]', workflow)
+        self.assertIn('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]', workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertIn("timeout-minutes: 40", workflow)
+        self.assertEqual(workflow.count("timeout-minutes: 16"), 2)
+        for phase in ("prepare", "acquire", "compile", "clean"):
+            self.assertEqual(workflow.count('desktop/tools/ci_foundation.py ' + phase + "'"), 1)
+        self.assertIn("if: success() && steps.allocation.outcome == 'success'", workflow)
+        upload = workflow.split("          path: |\n", 1)[1].split("          if-no-files-found:", 1)[0]
+        self.assertEqual([line.strip() for line in upload.splitlines()],
+                         ["${{ steps.prepare.outputs.root }}/" + name for name in
+                          ("public-bindings.json", "acquire-checks.json", "compile-checks.json", "source-slots-failure.json")])
+        for forbidden in ("actions/setup-node", "npm ", "--ignored", "--selector", "matrix:", ".stdout", ".stderr", "secrets."):
+            self.assertNotIn(forbidden, workflow)
+
+        # Actual direct-tools admission checks each original selected field,
+        # including contradictory/space-mangled duplicates, before Cargo runs.
+        original = "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+        probes = (original, original + "\nrelease: 1.98.1", original + "\n release : 1.98.0",
+                  original + "\ncommit-hash: " + "a" * 40, original + "\nhost: aarch64-apple-darwin",
+                  original.replace("release: 1.98.0", "release: 1.98.1"),
+                  original.replace("commit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea", ""))
+        for probe in probes:
+            calls = []
+            def invoke(argv, **kw):
+                calls.append((list(argv), kw))
+                return probe if kw["check"] == "rust-version-target" else "cargo 1.98.1 (abcdef123 2026-09-01)"
+            env = {"PATH": "/selected/bin"}
+            with self.subTest(source_slots_probe=probe), patch.object(helper, "ordinary"), \
+                    patch.object(helper, "run", side_effect=invoke):
+                if probe == original:
+                    cargo, rustc = helper.tools(source_slots_context(), env)
+                    prefix = "/Users/runner/.rustup/toolchains/stable-x86_64-apple-darwin/bin/"
+                    self.assertEqual((cargo, rustc), (prefix + "cargo", prefix + "rustc"))
+                    self.assertEqual([kw["check"] for _, kw in calls], ["rust-version-target", "mac-cargo-version"])
+                    self.assertEqual(env["RUSTUP_AUTO_INSTALL"], "0")
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.tools(source_slots_context(), env)
+                    self.assertEqual([kw["check"] for _, kw in calls], ["rust-version-target"])
+
+        events = []
+        MemoryPath, _ = memory_paths(events)
+        bound = source_slots_context()
+        loaded = deepcopy(bound)
+        with patch.dict(helper.os.environ, {**fixed, "MRK_DESKTOP_CI_ROOT": bound["root"]}, clear=True), \
+                patch.object(helper, "Path", MemoryPath), patch.object(helper, "ordinary"), \
+                patch.object(helper, "hash_file", return_value=bound["workflowSha256"]), \
+                patch.object(helper, "read_bounded_json", side_effect=lambda *args: deepcopy(loaded)), \
+                patch.object(helper, "source_slots_source_guard"):
+            self.assertEqual(helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE), bound)
+            for key, bad in (("target", "aarch64-apple-darwin"), ("features", ["desktop-shell"]),
+                             ("testTarget", "bin"), ("test", "other::test")):
+                loaded = deepcopy(bound); loaded["sourceSlots"][key] = bad
+                with self.subTest(selection=key), self.assertRaises(helper.CheckFailure):
+                    helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            for key, bad in (("sourceSlots", None), ("sourceTree", "0" * 40), ("source", "/foreign/source")):
+                loaded = {**deepcopy(bound), key: bad}
+                with self.assertRaises(helper.CheckFailure):
+                    helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -730,6 +903,70 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.clean_compile(bound)
             terminal.assert_called_once_with(bound)
 
+        # A compile0 is not the DATA test: both original checks, exact selector,
+        # one nonignored result and the same source/tree/run are mandatory.
+        bound = source_slots_context()
+        for phase in ("acquire", "compile"):
+            positive = source_slots_receipt(phase)
+            self.assertEqual(helper.validate_compile_receipt(positive, bound, phase), positive)
+            published = []
+            with patch.object(helper, "write_json", side_effect=lambda path, value: published.append((str(path), deepcopy(value)))):
+                helper.phase_receipt(bound, phase, [row["check"] for row in positive["checks"]], node=None,
+                                     source_slots_result=source_slots_result() if phase == "compile" else None)
+            self.assertEqual(published, [(bound["root"] + "/" + phase + "-checks.json", positive)])
+            for key, bad in (("scope", "desktop-macos-normal-compile-only-v1"), ("sourceTree", "4" * 40),
+                             ("sourceSha", "4" * 40), ("workflowSha256", "4" * 64), ("attempt", "3"),
+                             ("node", helper.NODE), ("rust", MAC_RUST_EXPECTED["aarch64-apple-darwin"]),
+                             ("checks", positive["checks"][:-1]), ("checks", list(reversed(positive["checks"]))),
+                             ("extra", None), ("sourceSlots", {**positive["sourceSlots"], "features": []})):
+                with self.subTest(source_slots_phase=phase, field=key), self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt({**deepcopy(positive), key: bad}, bound, phase)
+            for check_index in range(len(positive["checks"])):
+                for exit_code in (False, 1, None):
+                    bad = deepcopy(positive); bad["checks"][check_index]["exitCode"] = exit_code
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.validate_compile_receipt(bad, bound, phase)
+            changed = deepcopy(bound); changed["sourceSlots"]["target"] = "aarch64-apple-darwin"
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_compile_receipt(positive, changed, phase)
+        for bad in (None, {}, {**source_slots_result(), "passed": 0}, {**source_slots_result(), "running": 2},
+                    {**source_slots_result(), "passed": True}, {**source_slots_result(), "ignored": 1},
+                    {**source_slots_result(), "failed": 1}, {**source_slots_result(), "measured": 1},
+                    {**source_slots_result(), "test": "other::test"}, {**source_slots_result(), "filtered": -1},
+                    {**source_slots_result(), "filtered": 65536}, {**source_slots_result(), "filtered": False},
+                    {**source_slots_result(), "extra": 0}):
+            with self.subTest(result=bad), self.assertRaises(helper.CheckFailure):
+                helper.validate_compile_receipt({**source_slots_receipt("compile"), "testResult": bad}, bound, "compile")
+        missing = source_slots_receipt("compile"); del missing["testResult"]
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_compile_receipt(missing, bound, "compile")
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_compile_receipt({**source_slots_receipt("acquire"), "testResult": source_slots_result()}, bound, "acquire")
+        published = []
+        with patch.object(helper, "write_json", side_effect=lambda *args: published.append(args)):
+            for wrong_node, wrong_result in ((helper.NODE, source_slots_result()), (None, None)):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.phase_receipt(bound, "compile", [row["check"] for row in source_slots_receipt("compile")["checks"]],
+                                         node=wrong_node, source_slots_result=wrong_result)
+            with self.assertRaises(helper.CheckFailure):
+                helper.phase_receipt(bound, "acquire", [row["check"] for row in source_slots_receipt("acquire")["checks"]],
+                                     source_slots_result=source_slots_result())
+        self.assertFalse(published)
+        positive_stdout = source_slots_stdout()
+        self.assertEqual(helper.source_slots_test_result(positive_stdout), source_slots_result())
+        for broken in (b"", b"\xff", positive_stdout.decode(), b" " * (1024 * 1024 + 1),
+                       positive_stdout.replace(b"running 1 test", b"running 0 tests"),
+                       positive_stdout.replace(b"running 1 test", b"running 2 tests"),
+                       positive_stdout.replace(b"1 passed", b"0 passed"),
+                       positive_stdout.replace(b"0 failed", b"1 failed"),
+                       positive_stdout.replace(b"0 ignored", b"1 ignored"),
+                       positive_stdout.replace(b"... ok", b"... ignored"),
+                       positive_stdout.replace(SOURCE_SLOTS_CASE.encode(), b"other::test"),
+                       positive_stdout.replace(b"7 filtered", b"65536 filtered"),
+                       b"compiler diagnostic\n" + positive_stdout, positive_stdout + positive_stdout):
+            with self.subTest(stdout=broken[:80]), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_test_result(broken)
+
 
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):
         names = set(helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES + helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES)
@@ -958,6 +1195,131 @@ class ShellCompileContractTests(unittest.TestCase):
                     helper.clean_compile(bound)
                 no_deletion()
 
+        # Actual prepare + acquisition, with only original IO/commands replaced
+        # by finite in-memory doubles. No Node/rustup or extra graph enters.
+        bound = source_slots_context()
+        events, captures, written, calls, guards = [], {}, [], [], []
+        SlotsPath, writer, read = source_slots_paths(events, captures)
+        _, ZipStream = memory_paths(events)
+        def invoke_slots(argv, **kw):
+            calls.append((list(map(str, argv)), {**kw, "env": dict(kw["env"])}))
+            if kw["check"] == "source-head":
+                return bound["sourceSha"]
+            if kw["check"] == "source-tree":
+                return bound["sourceTree"]
+            if kw["check"] == "rust-version-target":
+                return "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+            if kw["check"] == "mac-cargo-version":
+                return "cargo 1.98.0 (abcdef123 2026-09-01)"
+            if kw["check"] == "mac-source-slots-locked-metadata":
+                kw["output"].write('{"packages":[]}\n')
+                self.assertIsNotNone(kw["diagnostics"])
+            return ""
+        def only_git(name):
+            self.assertEqual(name, "git")
+            return "/usr/bin/git"
+        with patch.dict(helper.os.environ, source_slots_environment(), clear=True), \
+                patch.object(helper, "Path", SlotsPath), patch.object(helper, "run", side_effect=invoke_slots), \
+                patch.object(helper, "ordinary"), patch.object(helper, "hash_file", return_value="2" * 64), \
+                patch.object(helper, "no_cargo_configuration", side_effect=lambda paths: guards.append(tuple(map(str, paths)))), \
+                patch.object(helper, "write_json", side_effect=lambda path, value: written.append((str(path), deepcopy(value)))), \
+                patch.object(helper.shutil, "which", side_effect=only_git), \
+                patch.object(helper.tempfile, "mkdtemp", return_value=bound["root"]), \
+                patch.object(helper.zipfile, "ZipFile", ZipStream), patch.object(helper.time, "monotonic", return_value=100.0), \
+                patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read):
+            with io.StringIO() as prepared_stdout, contextlib.redirect_stdout(prepared_stdout):
+                helper.prepare("macos", helper.SOURCE_SLOTS_SCOPE)
+                self.assertEqual(prepared_stdout.getvalue(), "Prepared bounded source ZIP and source-bound synthetic check inputs.\n")
+            prepared = next(value for path, value in written if path.endswith("/context.json"))
+            public = next(value for path, value in written if path.endswith("/public-bindings.json"))
+            self.assertIsNone(prepared["rustup"])
+            self.assertEqual(prepared["sourceSlots"], bound["sourceSlots"])
+            self.assertEqual(public["sourceSlots"], bound["sourceSlots"])
+            self.assertEqual(public["sourceTree"], bound["sourceTree"])
+            self.assertEqual(public["compiler"], MAC_RUST_EXPECTED["x86_64-apple-darwin"])
+            self.assertIsNone(public["node"])
+            self.assertNotIn("test-execution", public["notQualified"])
+            self.assertTrue({"other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration",
+                             "signing", "installed-runtime"}.issubset(public["notQualified"]))
+            helper.phase_source_slots("acquire", prepared)
+        metadata = [(argv, kw) for argv, kw in calls if kw["check"] == "mac-source-slots-locked-metadata"]
+        self.assertEqual(len(metadata), 1)
+        argv, kw = metadata[0]
+        self.assertEqual(argv, ["/Users/runner/.rustup/toolchains/stable-x86_64-apple-darwin/bin/cargo", "metadata",
+                               "--locked", "--format-version", "1", "--no-default-features", "--features", "development-runtime",
+                               "--filter-platform", "x86_64-apple-darwin", "--manifest-path", bound["source"] + "/desktop/src-tauri/Cargo.toml"])
+        self.assertEqual(kw["timeout"], 600)
+        self.assertEqual(next(value for path, value in written if path.endswith("/acquire-checks.json")), source_slots_receipt("acquire"))
+        self.assertEqual([kw["check"] for _, kw in calls if kw["check"] not in ("source-head", "source-tree", "source-clean")],
+                         ["rust-version-target", "mac-cargo-version", "mac-source-slots-locked-metadata"])
+        self.assertTrue(any(bound["root"] + "/home" in row and bound["root"] + "/cargo" in row for row in guards))
+        self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
+
+        # Actual ambient/config/adjacent-output refusal, without touching disk.
+        paths = set()
+        class GuardPath(PurePosixPath):
+            def exists(self):
+                return str(self) in paths
+            def is_symlink(self):
+                return str(self) in paths
+        with patch.dict(helper.os.environ, {}, clear=True):
+            helper.source_slots_source_guard(GuardPath(bound["source"]), GuardPath(bound["root"]))
+            for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", "desktop/src-tauri/target",
+                             "desktop/helpers/macos-vault-helper/target", "desktop/src-tauri/.cargo/config.toml"):
+                paths.add(bound["source"] + "/" + relative)
+                with self.subTest(adjacent=relative), self.assertRaises(helper.CheckFailure):
+                    helper.source_slots_source_guard(GuardPath(bound["source"]), GuardPath(bound["root"]))
+                paths.clear()
+            for relative in ("home/.cargo/config", "cargo/.cargo/config.toml"):
+                paths.add(bound["root"] + "/" + relative)
+                with self.assertRaises(helper.CheckFailure):
+                    helper.source_slots_source_guard(GuardPath(bound["source"]), GuardPath(bound["root"]))
+                paths.clear()
+            for flag in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                         "CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER"):
+                with patch.dict(helper.os.environ, {flag: ""}), self.assertRaises(helper.CheckFailure):
+                    helper.source_slots_source_guard(GuardPath(bound["source"]), GuardPath(bound["root"]))
+
+        # Reuse the finite cleanup tree defined above, but replace its synthetic
+        # normal receipts with this profile's exact acquisition+DATA originals.
+        # The existing classes close reads and record every inert deletion.
+        def reset_slots_tree():
+            files.clear(); directories.clear(); symbolic.clear(); cleanup_events.clear()
+            directories.update(bound["root"] + "/" + name for name in helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES)
+            files.update({bound["root"] + "/" + name: b"inert data" for name in helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES})
+            for phase_name in ("acquire", "compile"):
+                files[bound["root"] + "/" + phase_name + "-checks.json"] = json.dumps(source_slots_receipt(phase_name)).encode()
+        source_order = []
+        with patch.object(helper, "Path", CleanPath), patch.object(helper, "ordinary", side_effect=original_file), \
+                patch.object(helper.shutil, "rmtree", side_effect=remove_tree), \
+                patch.object(helper, "source_unchanged", side_effect=lambda *args, **kw: source_order.append("source")), \
+                patch.object(helper, "source_slots_source_guard", side_effect=lambda *args: source_order.append("guard")):
+            reset_slots_tree()
+            with io.StringIO() as cleanup_stdout, contextlib.redirect_stdout(cleanup_stdout):
+                helper.phase_source_slots("clean", bound)
+                self.assertEqual(cleanup_stdout.getvalue(), "Removed settled compiler-only outputs; preserved exactly three public receipts. No native qualification.\n")
+            self.assertEqual(source_order, ["source", "guard"])
+            self.assertEqual(set(files), {bound["root"] + "/" + name for name in helper.COMPILE_PUBLIC_FILES})
+            self.assertFalse(directories)
+            for fault in ("failure-summary", "foreign-output", "missing-receipt", "ignored", "native-output", "frontend", "symlink"):
+                reset_slots_tree()
+                if fault in ("failure-summary", "foreign-output"):
+                    files[bound["root"] + ("/source-slots-failure.json" if fault == "failure-summary" else "/foreign")] = b"{}"
+                elif fault == "missing-receipt":
+                    del files[bound["root"] + "/compile-checks.json"]
+                elif fault == "ignored":
+                    value = source_slots_receipt("compile"); value["testResult"]["ignored"] = 1
+                    files[bound["root"] + "/compile-checks.json"] = json.dumps(value).encode()
+                elif fault == "native-output":
+                    files[bound["root"] + "/native/foreign"] = b"original"
+                elif fault == "frontend":
+                    directories.add(bound["source"] + "/desktop/dist")
+                else:
+                    symbolic.add(bound["root"] + "/target")
+                with self.subTest(cleanup_fault=fault), self.assertRaises(helper.CheckFailure):
+                    helper.phase_source_slots("clean", bound)
+                no_deletion()
+
 
     def test_compile_receipt_bytes_reject_duplicate_nonfinite_extra_or_oversized_frames(self):
         value = receipt("compile")
@@ -1150,6 +1512,217 @@ class ShellCompileContractTests(unittest.TestCase):
                     helper.phase_mac_compile("compile", {**vault, "macCompile": bad})
                 self.assertFalse(calls)
                 self.assertFalse(receipts)
+
+        # Original success is insufficient without the exact one-test stdout,
+        # source POST and the unchanged aggregate endpoint. Both raw streams
+        # remain private, exclusive and consuming-closed even on failure.
+        bound = source_slots_context()
+        expected_order = ["rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"]
+        for fault in (None, "compile-nonzero", "test-nonzero", "zero-tests", "ignored", "readback", "source-post",
+                      "late-test", "reversed-test", "late-receipt", "publication-failure", "expired-before-tools"):
+            events, captures, calls, publications, clock = [], {}, [], [], [100.0]
+            SlotsPath, writer, read = source_slots_paths(events, captures)
+            source_calls = []
+            def source_original(*args, **kw):
+                source_calls.append("source")
+                if fault == "source-post" and len(source_calls) == 2:
+                    raise helper.CheckFailure("source original changed")
+            def original(argv, **kw):
+                calls.append((list(map(str, argv)), {**kw, "env": dict(kw["env"])}))
+                if kw["check"] == "rust-version-target":
+                    return "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+                if kw["check"] == "mac-cargo-version":
+                    return "cargo 1.98.0 (abcdef123 2026-09-01)"
+                if kw["check"] == "headless-test-compile-only":
+                    if fault in ("compile-nonzero", "publication-failure"):
+                        raise helper.CheckFailure("original compile nonzero")
+                elif kw["check"] == "mac-source-slots-data-test":
+                    body = source_slots_stdout()
+                    if fault == "zero-tests":
+                        body = body.replace(b"running 1 test", b"running 0 tests").replace(b"1 passed", b"0 passed")
+                    if fault == "ignored":
+                        body = body.replace(b"0 ignored", b"1 ignored")
+                    kw["output"].write(body.decode())
+                    if fault == "test-nonzero":
+                        raise helper.CheckFailure("original test nonzero")
+                    if fault == "late-test":
+                        clock[0] = 970.0
+                    if fault == "reversed-test":
+                        clock[0] = 99.0
+                return ""
+            def read_original(path, expected):
+                if fault == "readback":
+                    raise helper.CheckFailure("output original changed")
+                return read(path, expected)
+            def publication(path, value):
+                if fault == "publication-failure":
+                    raise OSError("inert publication failure")
+                publications.append((str(path), deepcopy(value)))
+                if fault == "late-receipt" and path.name == "compile-checks.json":
+                    clock[0] = 970.0
+            observed_clock = []
+            def clock_original():
+                observed_clock.append(clock[0])
+                return 970.0 if fault == "expired-before-tools" and len(observed_clock) > 1 else clock[0]
+            with self.subTest(original_fault=fault), patch.object(helper, "Path", SlotsPath), \
+                    patch.object(helper, "ordinary"), patch.object(helper, "source_unchanged", side_effect=source_original), \
+                    patch.object(helper, "source_slots_source_guard"), patch.object(helper, "run", side_effect=original), \
+                    patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read_original), \
+                    patch.object(helper, "write_json", side_effect=publication), patch.object(helper.time, "monotonic", side_effect=clock_original), \
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-not-forwarded"}, clear=True):
+                if fault is None:
+                    helper.phase_source_slots("compile", bound)
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.phase_source_slots("compile", bound)
+            checks = [kw["check"] for _, kw in calls]
+            if fault == "expired-before-tools":
+                self.assertFalse(checks)
+            elif fault in ("compile-nonzero", "publication-failure", "readback"):
+                self.assertEqual(checks, expected_order[:-1])
+            else:
+                self.assertEqual(checks, expected_order)
+            commands = [(argv, kw) for argv, kw in calls if "output" in kw]
+            for argv, kw in commands:
+                self.assertIn("--locked", argv); self.assertIn("--offline", argv)
+                self.assertEqual(argv[argv.index("--jobs") + 1], "1")
+                self.assertIn("--no-default-features", argv)
+                self.assertEqual(argv[argv.index("--features") + 1], "development-runtime")
+                self.assertEqual(argv[argv.index("--target") + 1], "x86_64-apple-darwin")
+                self.assertEqual(argv[argv.index("--manifest-path") + 1], bound["source"] + "/desktop/src-tauri/Cargo.toml")
+                self.assertEqual(argv[argv.index("--target-dir") + 1], bound["root"] + "/target")
+                self.assertIn("--lib", argv)
+                self.assertFalse(any(value in argv for value in ("--ignored", "--release", "registration-helper", "desktop-shell")))
+                self.assertEqual(kw["env"]["RUSTUP_AUTO_INSTALL"], "0")
+                self.assertEqual(kw["env"]["GITHUB_SHA"], bound["sourceSha"])
+                self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", kw["env"])
+                self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
+                self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
+                if kw["check"] == "headless-test-compile-only":
+                    self.assertEqual(argv[-1], "--no-run")
+                else:
+                    self.assertNotIn("--no-run", argv)
+                    self.assertEqual(argv[-4:], [SOURCE_SLOTS_CASE, "--", "--exact", "--test-threads=1"])
+            passed = [value for path, value in publications if path.endswith("/compile-checks.json")]
+            failures = [value for path, value in publications if path.endswith("/source-slots-failure.json")]
+            self.assertEqual(passed, [source_slots_receipt("compile")] if fault in (None, "late-receipt") else [])
+            self.assertEqual(len(failures), 0 if fault in (None, "publication-failure") else 1)
+            for failure in failures:
+                self.assertEqual(set(failure), {"schemaVersion", "scope", "phase", "status", "lastFixedStage",
+                    "sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt"})
+                self.assertEqual(failure["status"], "failed-or-unknown")
+                self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
+                self.assertNotIn("synthetic-not-forwarded", json.dumps(failure))
+            if fault is None:
+                self.assertEqual(len(source_calls), 2)
+                self.assertTrue(all(event[2] == ("x",) for event in events if event[0] == "open"))
+                self.assertEqual(len([event for event in events if event[0] == "closed"]), 4)
+                # Successful commands may legitimately leave both raw streams
+                # empty except for the mandatory actual libtest stdout.
+                self.assertEqual(captures[bound["root"] + "/target/source-slots-compile.stdout"], b"")
+                self.assertEqual(captures[bound["root"] + "/target/source-slots-test.stderr"], b"")
+
+        # The unchanged run owner keeps its private-output contract and actual
+        # original exit/timeout handling; subprocess.run is never entered here.
+        with io.StringIO() as output, io.StringIO() as diagnostics, io.StringIO() as notices, \
+                contextlib.redirect_stdout(notices), patch.object(helper.subprocess, "run") as original_run:
+            helper.run(["/fixed/cargo"], check="mac-source-slots-data-test", cwd=PurePosixPath("/inert"), env={},
+                       timeout=150, output=output, diagnostics=diagnostics)
+            self.assertEqual(original_run.call_args.kwargs["stdout"], output)
+            self.assertEqual(original_run.call_args.kwargs["stderr"], diagnostics)
+            self.assertTrue(original_run.call_args.kwargs["check"])
+            self.assertEqual(original_run.call_count, 1)
+            for fields in ({"capture": True, "output": output, "diagnostics": diagnostics}, {"diagnostics": diagnostics}):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.run(["/fixed/cargo"], check="mac-source-slots-data-test", cwd=PurePosixPath("/inert"), env={}, timeout=150, **fields)
+            self.assertEqual(original_run.call_count, 1)
+            for error in (helper.subprocess.CalledProcessError(101, ["/fixed/cargo"]),
+                          helper.subprocess.TimeoutExpired(["/fixed/cargo"], 150), OSError("inert")):
+                original_run.side_effect = error
+                with self.assertRaises(helper.CheckFailure):
+                    helper.run(["/fixed/cargo"], check="mac-source-slots-data-test", cwd=PurePosixPath("/inert"), env={},
+                               timeout=150, output=output, diagnostics=diagnostics)
+
+        # Exercise the actual no-follow bounded original reader with inert FD
+        # bindings, not a mock return from the parser. No host open/read/close.
+        actual_os = helper.os
+        class Info:
+            st_dev, st_ino, st_mode, st_uid, st_gid, st_nlink = 1, 2, 0o100600, 501, 20, 1
+            st_mtime_ns, st_ctime_ns = 3, 4
+            def __init__(self, size):
+                self.st_size = size
+        class OriginalOS:
+            O_RDONLY, O_NOFOLLOW = actual_os.O_RDONLY, actual_os.O_NOFOLLOW
+            O_CLOEXEC, O_NONBLOCK = actual_os.O_CLOEXEC, actual_os.O_NONBLOCK
+            def __init__(self, body, fault):
+                self.body, self.fault, self.position, self.closes, self.fstats, self.opened = body, fault, 0, [], 0, []
+                self.info = Info(len(body))
+                if fault == "oversize": self.info.st_size = 1024 * 1024 + 1
+                if fault == "mode": self.info.st_mode = 0o100644
+                if fault == "link": self.info.st_nlink = 2
+                if fault == "uid": self.info.st_uid = 502
+            def geteuid(self): return 501
+            def open(self, path, flags):
+                self.opened.append((str(path), flags))
+                return 77
+            def fstat(self, fd):
+                self_outer.assertEqual(fd, 77)
+                self.fstats += 1
+                if self.fault == "post" and self.fstats == 2:
+                    self.info.st_mtime_ns += 1
+                return self.info
+            def read(self, fd, size):
+                self_outer.assertEqual(fd, 77)
+                self_outer.assertLessEqual(size, 65536)
+                if self.fault == "early": return b""
+                if self.fault == "tail" and self.position == len(self.body): return b"x"
+                result = self.body[self.position:self.position + size]; self.position += len(result)
+                return result
+            def close(self, fd):
+                self_outer.assertEqual(fd, 77); self.closes.append(fd)
+        class ReadPath(PurePosixPath):
+            def lstat(self):
+                if original.fault == "named":
+                    altered = Info(original.info.st_size); altered.st_ino = 8
+                    return altered
+                return original.info
+        self_outer = self
+        for name, body in (("source-slots-test.stdout", source_slots_stdout()), ("source-slots-test.stderr", b""),
+                           ("metadata.json", b'{"packages":[]}')):
+            faults = (None, "named", "mode", "link", "uid", "post", "tail") + (("early",) if body else ())
+            if name != "metadata.json": faults += ("oversize",)
+            for fault in faults:
+                original = OriginalOS(body, fault)
+                expected = helper.source_slots_identity(original.info)
+                path = ReadPath("/inert/target") / name
+                with self.subTest(read_name=name, fault=fault), patch.object(helper, "os", original):
+                    if fault is None:
+                        self.assertEqual(helper.source_slots_read(path, expected), body if name == "source-slots-test.stdout" else b"")
+                    else:
+                        with self.assertRaises(helper.CheckFailure):
+                            helper.source_slots_read(path, expected)
+                self.assertEqual(original.closes, [77])
+                self.assertEqual(original.opened, [(str(path), actual_os.O_RDONLY | actual_os.O_NOFOLLOW | actual_os.O_CLOEXEC | actual_os.O_NONBLOCK)])
+        original = OriginalOS(b"", None)
+        with patch.object(helper, "os", original):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_read(ReadPath("/inert/metadata.json"), helper.source_slots_identity(original.info))
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_read(ReadPath("/inert/unselected"), helper.source_slots_identity(original.info))
+        self.assertEqual(original.closes, [77])
+        self.assertEqual(len(original.opened), 1)
+        class Writer:
+            def fileno(self): return 77
+        for fault in (None, "named", "mode", "link", "uid"):
+            original = OriginalOS(b"inert", fault)
+            with self.subTest(writer_fault=fault), patch.object(helper, "os", original):
+                if fault is None:
+                    self.assertEqual(helper.source_slots_writer(ReadPath("/inert/source-slots-test.stdout"), Writer()),
+                                     helper.source_slots_identity(original.info))
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.source_slots_writer(ReadPath("/inert/source-slots-test.stdout"), Writer())
+            self.assertFalse(original.closes)  # The surrounding original stream owns close, not this check.
 
 
 if __name__ == "__main__":

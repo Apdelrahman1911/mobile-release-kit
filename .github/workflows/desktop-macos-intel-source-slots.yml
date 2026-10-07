@@ -1,0 +1,116 @@
+name: Mac Intel SourceSlots allocation DATA
+
+on:
+  push:
+    branches: [verify/desktop-macos-intel-source-slots]
+    paths:
+      - desktop/**
+      - src/mobile_release/**
+      - tests/desktop/**
+      - .github/workflows/desktop-macos-intel-source-slots.yml
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed source for the single inert Mac allocation test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-intel-source-slots-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source-slots:
+    name: One Intel SourceSlots allocation test (not supplier qualification)
+    runs-on: macos-26-intel
+    timeout-minutes: 40
+    env:
+      MRK_DESKTOP_PLATFORM: macos
+      MRK_MACOS_TARGET: x86_64-apple-darwin
+      MRK_DESKTOP_HOSTED_CHECKS: macos-intel-source-slots-v1
+      MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+    steps:
+      - name: Require exact disposable verification source
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == X64 ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-intel-source-slots.yml@$GITHUB_REF" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+          else
+            [[ "$GITHUB_EVENT_NAME" == push ]]
+          fi
+      - name: Check out exact source without persisted credentials
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select fixed helper Python
+        timeout-minutes: 2
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Prepare fixed SourceSlots source bindings
+        id: prepare
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py prepare'
+      - name: Acquire only locked Intel headless dependencies
+        timeout-minutes: 16
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
+      - name: Compile once and run the one exact inert allocation test
+        id: allocation
+        timeout-minutes: 16
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py compile'
+      - name: Preserve only bounded public source and DATA receipts
+        if: always() && steps.prepare.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: desktop-macos-intel-source-slots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/public-bindings.json
+            ${{ steps.prepare.outputs.root }}/acquire-checks.json
+            ${{ steps.prepare.outputs.root }}/compile-checks.json
+            ${{ steps.prepare.outputs.root }}/source-slots-failure.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 1
+      - name: Remove only positively settled same-owner outputs
+        if: success() && steps.allocation.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py clean'

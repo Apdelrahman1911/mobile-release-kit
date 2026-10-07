@@ -758,7 +758,21 @@ ENGINEERING_COMPILE_CHECKS = {
     "compile": ("rust-version-target", "mac-cargo-version", "node-version",
                 "typescript-no-emit", "vite-assets", "tauri-debug-compile-only"),
 }
+# One fixed Mac-only inert DATA test, not another native execution owner.
+SOURCE_SLOTS_SCOPE = "macos-intel-source-slots-v1"
+SOURCE_SLOTS_WORKFLOW = ".github/workflows/desktop-macos-intel-source-slots.yml"
+SOURCE_SLOTS_REF = "refs/heads/verify/desktop-macos-intel-source-slots"
+SOURCE_SLOTS_EVIDENCE = "desktop-macos-intel-source-slots-data-v1"
+SOURCE_SLOTS_TARGET = "x86_64-apple-darwin"
+SOURCE_SLOTS_FEATURES = "development-runtime"
+SOURCE_SLOTS_TEST = "installed_runtime::android_registration_source::storage_capacity_tests::phase_checked_allocation_uses_exact_admitted_records_without_native_entry"
+SOURCE_SLOTS_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-source-slots-locked-metadata"),
+    "compile": ("rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"),
+}
 COMPILE_PROFILES = {
+    SOURCE_SLOTS_SCOPE: {"workflow": SOURCE_SLOTS_WORKFLOW, "ref": SOURCE_SLOTS_REF,
+                         "evidence": SOURCE_SLOTS_EVIDENCE, "checks": SOURCE_SLOTS_CHECKS},
     ENGINEERING_COMPILE_SCOPE: {"workflow": ENGINEERING_COMPILE_WORKFLOW, "ref": ENGINEERING_COMPILE_REF,
                                 "evidence": ENGINEERING_COMPILE_EVIDENCE, "checks": ENGINEERING_COMPILE_CHECKS},
     MAC_COMPILE_SCOPE: {"workflow": MAC_COMPILE_WORKFLOW, "ref": MAC_COMPILE_REF,
@@ -2682,6 +2696,7 @@ TOOL_CHECKS = frozenset({
     "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
+    "mac-source-slots-locked-metadata", "mac-source-slots-data-test",
     "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
     "typescript-no-emit", "vite-assets", "tauri-debug-compile-only", "passive-native-contract",
     "config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close",
@@ -2754,7 +2769,7 @@ def admit_phase(scope: str, phase: str) -> None:
 
 def admit_platform(scope: str, platform: str) -> None:
     require(platform in TARGETS, "Unknown desktop verification platform")
-    require(scope not in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} or platform == "macos", "Normal Mac compilation requires macOS")
+    require(scope not in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} or platform == "macos", "Normal Mac compilation requires macOS")
     require(scope != GTK_COMPILE_SCOPE or platform == "linux", "SG1 compilation requires Linux")
     require(scope != WORKFLOW_NATIVE_SCOPE or platform == "linux", "Workflow native verification requires Linux")
     require(scope != METADATA_NATIVE_SCOPE or platform == "linux", "Metadata native verification requires Linux")
@@ -2812,6 +2827,10 @@ def mac_compile_checks(target: str, mode: str) -> dict:
 
 
 def compiler_binding(context: dict) -> dict:
+    if context.get("executionScope") == SOURCE_SLOTS_SCOPE:
+        require(context.get("platform") == "macos", "SourceSlots compiler requires macOS")
+        release, commit = MAC_COMPILE_RUST[SOURCE_SLOTS_TARGET]
+        return {"release": release, "commitHash": commit, "target": SOURCE_SLOTS_TARGET}
     if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE:
         require(context.get("platform") == "macos", "Engineering main compiler requires macOS")
         release, commit = MAC_COMPILE_RUST[ENGINEERING_COMPILE_TARGET]
@@ -2901,6 +2920,8 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
             and environment.get("GITHUB_WORKFLOW_REF") == f"{repository}/{profile['workflow']}@{profile['ref']}",
             "Compiler workflow/ref binding differs")
     event = environment.get("GITHUB_EVENT_NAME")
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(sha != "0" * 40, "SourceSlots event source is not a commit")
     if scope == ENGINEERING_COMPILE_SCOPE:
         require(event == "push", "Engineering main compilation requires its fixed push ref")
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
@@ -3022,6 +3043,11 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         expected.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if phase == "compile":
             expected["compiledMain"] = validate_engineering_main(value.get("compiledMain"))
+    if context["executionScope"] == SOURCE_SLOTS_SCOPE:
+        require(same_compile_json(context.get("sourceSlots"), source_slots_selection()), "SourceSlots receipt selection differs")
+        expected.update(sourceTree=context["sourceTree"], sourceSlots=source_slots_selection(), node=None)
+        if phase == "compile":
+            expected["testResult"] = validate_source_slots_result(value.get("testResult"))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -3114,6 +3140,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
+        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test",
         "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
@@ -3159,10 +3186,12 @@ def admitted_host(*, retention_only: bool = False) -> str:
         "linux": "linux", "darwin": "macos", "win32": "windows",
     }.get(sys.platform), "Unexpected host platform")
     admit_platform(os.environ["MRK_DESKTOP_HOSTED_CHECKS"], platform)
-    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE}:
+    if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
         target = mac_compile_target(os.environ)
         require(os.environ["MRK_DESKTOP_HOSTED_CHECKS"] != ENGINEERING_COMPILE_SCOPE
                 or target == ENGINEERING_COMPILE_TARGET, "Engineering main smoke is ARM only")
+        require(os.environ["MRK_DESKTOP_HOSTED_CHECKS"] != SOURCE_SLOTS_SCOPE
+                or target == SOURCE_SLOTS_TARGET, "SourceSlots DATA is Intel only")
         require(os.uname().sysname == "Darwin" and os.uname().machine == MAC_COMPILE_HOSTS[target][1]
                 and os.geteuid() != 0, "Normal Mac compiler requires its actual non-root native host")
     if os.environ["MRK_DESKTOP_HOSTED_CHECKS"] == WINDOWS_SNAPSHOT_SCOPE:
@@ -3233,7 +3262,7 @@ def source_unchanged(context: dict, *, timeout_for=None) -> None:
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15 if timeout_for is None else timeout_for(15), capture=True)
             == context["sourceSha"], "Checkout commit changed")
-    if context.get("executionScope") == ENGINEERING_COMPILE_SCOPE:
+    if context.get("executionScope") in {ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
         require(run([git, "rev-parse", "HEAD^{tree}"], check="source-tree", cwd=source, env=environment,
                     timeout=15 if timeout_for is None else timeout_for(15), capture=True) == context["sourceTree"],
                 "Engineering original source tree changed")
@@ -7102,7 +7131,7 @@ def clean_github_tls(context: dict) -> None:
 
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
                   scope: str = "passive-development-foundation-only", compiled: dict | None = None,
-                  main_compiled: dict | None = None) -> None:
+                  main_compiled: dict | None = None, source_slots_result: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
@@ -7111,6 +7140,10 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         "rust": compiler_binding(context), "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
+    if source_slots_result is not None:
+        require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
+                and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
+        value["testResult"] = validate_source_slots_result(source_slots_result)
     if main_compiled is not None:
         require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
                 and compiled is None, "Unexpected engineering main artifact")
@@ -7132,6 +7165,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
             value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
         if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
+        if context["executionScope"] == SOURCE_SLOTS_SCOPE:
+            value.update(sourceTree=context["sourceTree"], sourceSlots=context["sourceSlots"])
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7501,6 +7536,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     mac_mode = mac_compile_mode(os.environ, mac_target) if mac_target is not None else None
     if scope == ENGINEERING_COMPILE_SCOPE:
         require(mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET, "Engineering main target differs")
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(mac_compile_target(os.environ) == SOURCE_SLOTS_TARGET, "SourceSlots target differs")
+        source_slots_source_guard(source, temp)
     if mac_target is not None or scope == ENGINEERING_COMPILE_SCOPE:
         mac_compile_source_guard(source, temp)
     for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/target", "desktop/src-tauri/gen"):
@@ -7529,8 +7567,8 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     for name in empty_files:
         (root / name).touch(mode=0o600, exist_ok=False)
     git = shutil.which("git")
-    rustup = None if scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} else shutil.which("rustup")
-    require(git is not None and (scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE} or rustup is not None), "Hosted compiler tools unavailable")
+    rustup = None if scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} else shutil.which("rustup")
+    require(git is not None and (scope in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE} or rustup is not None), "Hosted compiler tools unavailable")
     environment = clean_environment(root)
     require(run([git, "rev-parse", "HEAD"], check="source-head", cwd=source, env=environment, timeout=15, capture=True) == sha,
             "Event and checkout source differ")
@@ -7564,6 +7602,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
                "runId": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
                "git": git, "rustup": rustup, "python": str(Path(sys.executable).resolve(strict=True))}
     context.update(binding)
+    if scope == SOURCE_SLOTS_SCOPE:
+        require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "SourceSlots source tree differs")
+        context["sourceSlots"] = source_slots_selection()
     if engineering_work is not None:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "Engineering source tree differs")
         context["engineeringWork"] = str(engineering_work)
@@ -7625,7 +7666,12 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         }
     if profile:
         public.update(binding)
-        public["notQualified"].append("test-execution")
+        if scope != SOURCE_SLOTS_SCOPE:
+            public["notQualified"].append("test-execution")
+    if scope == SOURCE_SLOTS_SCOPE:
+        compiler = compiler_binding(context)
+        public.update(expectedRust=compiler["release"], compiler=compiler, sourceSlots=context["sourceSlots"], node=None)
+        public["notQualified"].extend(("other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration", "signing", "installed-runtime"))
     if scope == MAC_COMPILE_SCOPE:
         compiler = compiler_binding(context)
         public.update(expectedRust=compiler["release"], compiler=compiler, macCompile=context["macCompile"])
@@ -7680,7 +7726,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             and root.parent == (Path(os.environ["RUNNER_TEMP"]) if retention_only else Path(os.environ["RUNNER_TEMP"]).resolve(strict=True))
             and not root.is_symlink(), "Unrecognized task root")
     ordinary(root / "context.json")
-    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, ENGINEERING_COMPILE_SCOPE}
+    context = (read_bounded_json(root / "context.json", 256 * 1024) if scope in {GITHUB_READONLY_SCOPE, GITHUB_TLS_SCOPE, METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}
                else workflow_json(root / "context.json") if scope == WORKFLOW_NATIVE_SCOPE
                else json.loads((root / "context.json").read_text(encoding="utf-8")))
     require(context["root"] == str(root) and context["platform"] == platform and context.get("executionScope") == scope
@@ -7711,6 +7757,15 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
                     and mac_compile_target(os.environ) == ENGINEERING_COMPILE_TARGET,
                     "Engineering main original source/work/target binding changed")
             mac_compile_source_guard(Path(context["source"]), root)
+        if scope == SOURCE_SLOTS_SCOPE:
+            require(same_compile_json(context.get("sourceSlots"), source_slots_selection())
+                    and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
+                    and type(context.get("sourceTree")) is str
+                    and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
+                    and context["sourceTree"] != "0" * 40
+                    and mac_compile_target(os.environ) == SOURCE_SLOTS_TARGET,
+                    "SourceSlots context source/target/selector differs")
+            source_slots_source_guard(Path(context["source"]), root)
         if scope == GTK_COMPILE_SCOPE:
             require(type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -7797,7 +7852,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
 
 def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tuple[str, str]:
     root = Path(context["root"])
-    if context.get("executionScope") in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE}:
+    if context.get("executionScope") in {MAC_COMPILE_SCOPE, ENGINEERING_COMPILE_SCOPE, SOURCE_SLOTS_SCOPE}:
         selected = compiler_binding(context)
         binary = Path("/Users/runner/.rustup/toolchains") / ("stable-" + selected["target"]) / "bin"
         cargo, rustc = str(binary / "cargo"), str(binary / "rustc")
@@ -7808,6 +7863,11 @@ def tools(context: dict, environment: dict[str, str], *, timeout_for=None) -> tu
         require(len(version.encode()) <= 4096 and "release: " + selected["release"] in version.splitlines()
                 and "commit-hash: " + selected["commitHash"] in version.splitlines()
                 and "host: " + selected["target"] in version.splitlines(), "Direct Mac compiler version/commit/host differs")
+        if context.get("executionScope") == SOURCE_SLOTS_SCOPE:
+            lines = version.splitlines()
+            for field, expected in (("release", selected["release"]), ("commit-hash", selected["commitHash"]), ("host", selected["target"])):
+                require([line for line in lines if line.partition(":")[0].strip() == field] == [field + ": " + expected],
+                        "SourceSlots original compiler tuple is missing, malformed or repeated")
         cargo_version = run([cargo, "--version"], check="mac-cargo-version", cwd=root, env=environment,
                             timeout=15 if timeout_for is None else timeout_for(15), capture=True)
         require(len(cargo_version.encode()) <= 4096 and re.fullmatch(r"cargo [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3} \([0-9a-f]+ [0-9]{4}-[0-9]{2}-[0-9]{2}\)", cargo_version) is not None,
@@ -8326,7 +8386,8 @@ def clean_compile(context: dict) -> None:
     # Validate the complete deletion roster before removing any of it. All were
     # created by prepare/acquire/compile in this fresh hosted job, never user data.
     directories = [source / relative for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen")]
-    if context.get("executionScope") == MAC_COMPILE_SCOPE and context["macCompile"]["mode"] == "vault-only":
+    if (context.get("executionScope") == SOURCE_SLOTS_SCOPE
+            or context.get("executionScope") == MAC_COMPILE_SCOPE and context["macCompile"]["mode"] == "vault-only"):
         # No frontend original ran in this fixed mode. Never invent or adopt
         # generated directories just to satisfy the full4 deletion roster.
         for directory in directories:
@@ -8421,6 +8482,185 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
          ",".join(GTK_COMPILE_FEATURES)], check="gtk-integration-compile-only", cwd=root,
         env=environment, timeout=1500)
     return observed_node
+
+
+def source_slots_selection() -> dict:
+    return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+            "testTarget": "lib", "test": SOURCE_SLOTS_TEST}
+
+
+def validate_source_slots_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"test", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "SourceSlots DATA result fields differ")
+    require(value["test"] == SOURCE_SLOTS_TEST and type(value["test"]) is str
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 1), ("passed", 1), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "SourceSlots DATA did not pass exactly its one selected test")
+    return value
+
+
+def source_slots_test_result(raw: bytes) -> dict:
+    """Original libtest stdout only, never Cargo stderr or a zero-test exit."""
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "SourceSlots DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("SourceSlots DATA stdout is not the fixed libtest result") from None
+    match = re.fullmatch(r"\n?running 1 test\ntest " + re.escape(SOURCE_SLOTS_TEST)
+                         + r" \.\.\. ok\n\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "SourceSlots DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_result({"test": SOURCE_SLOTS_TEST, "running": 1, "passed": 1,
+                                         "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def source_slots_identity(observed) -> tuple:
+    return (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_uid, observed.st_gid,
+            observed.st_nlink, observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns)
+
+
+def source_slots_writer(path: Path, stream: TextIO) -> tuple:
+    observed = os.fstat(stream.fileno())
+    require(stat.S_ISREG(observed.st_mode) and observed.st_uid == os.geteuid()
+            and observed.st_nlink == 1 and stat.S_IMODE(observed.st_mode) == 0o600
+            and source_slots_identity(path.lstat()) == source_slots_identity(observed),
+            "SourceSlots private output original changed")
+    return source_slots_identity(observed)
+
+
+def source_slots_read(path: Path, expected: tuple) -> bytes:
+    # Only the fixed stdout/stderr originals just returned by run() are read.
+    # This is bounded post-original admission, not a new streaming IO owner.
+    limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
+              "source-slots-compile.stdout": 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+              "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
+    require(path.name in limits and type(expected) is tuple and len(expected) == 9,
+            "Unexpected SourceSlots private output")
+    original = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        observed = os.fstat(original)
+        require(source_slots_identity(observed) == expected == source_slots_identity(path.lstat())
+                and stat.S_ISREG(observed.st_mode) and observed.st_uid == os.geteuid()
+                and observed.st_nlink == 1 and stat.S_IMODE(observed.st_mode) == 0o600
+                and 0 <= observed.st_size <= limits[path.name]
+                and (path.name != "metadata.json" or observed.st_size > 0),
+                "SourceSlots private output is changed or oversized")
+        remaining = observed.st_size
+        chunks = []
+        while remaining:
+            block = os.read(original, min(65536, remaining))
+            require(bool(block), "SourceSlots private output ended early")
+            remaining -= len(block)
+            if path.name == "source-slots-test.stdout":
+                chunks.append(block)
+        require(os.read(original, 1) == b"" and source_slots_identity(os.fstat(original)) == expected
+                and source_slots_identity(path.lstat()) == expected, "SourceSlots private output POST changed")
+        return b"".join(chunks)
+    finally:
+        os.close(original)
+
+
+def source_slots_source_guard(source: Path, root: Path) -> None:
+    mac_compile_source_guard(source, root)
+    no_cargo_configuration((root / "home", root / "cargo"))
+    require(not any(name in os.environ for name in (
+        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS", "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER")),
+        "SourceSlots ambient compiler flags or wrappers are not admitted")
+    for relative in ("desktop/node_modules", "desktop/dist", "desktop/src-tauri/gen", "desktop/src-tauri/target"):
+        generated = source / relative
+        require(not generated.exists() and not generated.is_symlink(), "SourceSlots has unexpected frontend or adjacent target output")
+
+
+def phase_source_slots(name: str, context: dict) -> None:
+    """One fixed Intel DATA test through the existing original run/cleanup owner."""
+    require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and context.get("platform") == "macos"
+            and same_compile_json(context.get("sourceSlots"), source_slots_selection()), "Wrong SourceSlots context")
+    require(name in ("acquire", "compile", "clean"), "Wrong SourceSlots phase")
+    root, source = Path(context["root"]), Path(context["source"])
+    if name == "clean":
+        source_unchanged(context)
+        source_slots_source_guard(source, root)
+        clean_compile(context)
+        return
+    started = time.monotonic()
+    deadline, previous = started + 900, started
+    last_check = "source-pre"
+    def remaining(cap: int) -> int:
+        nonlocal previous
+        now = time.monotonic()
+        require(previous <= now < deadline - 30, "SourceSlots endpoint expired or clock reversed")
+        previous = now
+        value = min(cap, int(deadline - now - 30))
+        require(value > 0, "SourceSlots has no remaining original time")
+        return value
+    try:
+        remaining(30)
+        source_unchanged(context, timeout_for=remaining)
+        source_slots_source_guard(source, root)
+        environment = clean_environment(root)
+        environment["GITHUB_SHA"] = context["sourceSha"]
+        last_check = "tools"
+        cargo, _ = tools(context, environment, timeout_for=remaining)
+        remaining(30)
+        manifest = source / "desktop/src-tauri/Cargo.toml"
+        common = ["--locked", "--offline", "--jobs", "1", "--no-default-features",
+                  "--features", SOURCE_SLOTS_FEATURES, "--target", SOURCE_SLOTS_TARGET,
+                  "--manifest-path", str(manifest), "--target-dir", str(root / "target"), "--lib"]
+        if name == "acquire":
+            commands = (("mac-source-slots-locked-metadata",
+                         [cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
+                          "--features", SOURCE_SLOTS_FEATURES, "--filter-platform", SOURCE_SLOTS_TARGET,
+                          "--manifest-path", str(manifest)], root / "metadata.json",
+                         root / "target/source-slots-metadata.stderr", 600),)
+        else:
+            # Reuse one Cargo-fingerprinted compile; only the literal exact case
+            # follows it. No ignored filter, arbitrary selector or other graph.
+            commands = (("headless-test-compile-only", [cargo, "test", *common, "--no-run"],
+                         root / "target/source-slots-compile.stdout", root / "target/source-slots-compile.stderr", 600),
+                        ("mac-source-slots-data-test", [cargo, "test", *common, SOURCE_SLOTS_TEST,
+                                                       "--", "--exact", "--test-threads=1"],
+                         root / "target/source-slots-test.stdout", root / "target/source-slots-test.stderr", 150))
+        result = None
+        for check, argv, output_path, stderr_path, cap in commands:
+            last_check = check
+            remaining(30)
+            with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+                before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(row[6] == 0 for row in before), "SourceSlots private output was not fresh")
+                run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                output.flush()
+                diagnostics.flush()
+                originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "SourceSlots output identity changed")
+            remaining(30)
+            raw = source_slots_read(output_path, originals[0])
+            source_slots_read(stderr_path, originals[1])
+            remaining(30)
+            if check == "mac-source-slots-data-test":
+                result = source_slots_test_result(raw)
+        last_check = "source-post"
+        source_slots_source_guard(source, root)
+        source_unchanged(context, timeout_for=remaining)
+        remaining(30)
+        last_check = "receipt"
+        phase_receipt(context, name, list(SOURCE_SLOTS_CHECKS[name]), node=None, source_slots_result=result)
+        # A retained receipt cannot rescue an original late/failed phase. The
+        # closed failure row also makes the exact successful cleanup roster fail.
+        remaining(30)
+    except Exception:
+        failure = {"schemaVersion": 1, "scope": SOURCE_SLOTS_EVIDENCE, "phase": name,
+                   "status": "failed-or-unknown", "lastFixedStage": last_check,
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                   "workflowRef", "workflowSha256", "runId", "attempt")}}
+        try:
+            require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                    "SourceSlots failure summary exceeds its bound")
+            write_json(root / "source-slots-failure.json", failure)
+        except Exception:
+            pass  # Never replace/mask the primary failure or retry publication.
+        raise
 
 
 def phase_mac_compile(name: str, context: dict) -> None:
@@ -8557,6 +8797,9 @@ def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         return
     if scope == GITHUB_TLS_SCOPE:
         phase_github_tls(name, context)
+        return
+    if scope == SOURCE_SLOTS_SCOPE:
+        phase_source_slots(name, context)
         return
     if scope == MAC_COMPILE_SCOPE:
         phase_mac_compile(name, context)

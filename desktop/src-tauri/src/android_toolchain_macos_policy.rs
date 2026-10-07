@@ -1676,7 +1676,7 @@ mod tests {
     }
     pub(super) fn intel_document_data_never_borrows_arm_native_role_authority_data() {
         assert!(native_catalog_supports(Profile::MacArm64));
-        assert!(!native_catalog_supports(Profile::MacX64));
+        assert!(native_catalog_supports(Profile::MacX64));
         assert!(!native_catalog_supports(Profile::LinuxX64));
         let (arm, arm_docs) = paired_documents(Profile::MacArm64);
         let arm_inventory = parse_manifest(&arm_docs[0].bytes, &arm).unwrap();
@@ -1697,7 +1697,10 @@ mod tests {
             for path in [AAPT2, "jdk/Test.jdk/Contents/Home/bin/java", Sdk35File::LldIntel.pin().path] {
                 assert!(!local_loads(path, &commands, &intel_inventory));
                 assert!(!local_loads_for(Profile::MacArm64, path, &commands, &intel_inventory));
-                assert!(!local_loads_for(Profile::MacX64, path, &commands, &intel_inventory));
+                // CPU/path selected load-DATA now has an Intel catalogue.
+                // Empty synthetic loads are not a supplier or original receipt.
+                assert_eq!(local_loads_for(Profile::MacX64, path, &commands, &intel_inventory),
+                    architecture == MachArchitecture::X86_64);
             }
         }
         // Even exact existing ARM JDK DATA cannot be relabeled as Intel authority.
@@ -1709,6 +1712,25 @@ mod tests {
         let data = parse_manifest_for(Profile::MacX64, &raw, &selected).unwrap();
         let pin = crate::android_native_macos_profile::jdk_native("Contents/Home/lib/libjava.dylib").unwrap();
         assert!(!local_loads("jdk/Test.jdk/Contents/Home/lib/libjava.dylib", &expected_jdk_commands(pin), &data));
+
+        let mut relabeled = expected_jdk_commands(pin);
+        relabeled.architecture = MachArchitecture::X86_64;
+        assert!(!local_loads_for(Profile::MacX64,
+            "jdk/Test.jdk/Contents/Home/lib/libjava.dylib", &relabeled, &data));
+        // Same CPU never erases the separate legacy-SDK/native-current roles.
+        // Both exact endpoints are present: these refusals are not missing-file
+        // shortcuts. This copied inventory remains inert load-comparison DATA.
+        let mut role_inventory = parse_manifest_for(Profile::MacX64, &intel_docs[0].bytes, &intel).unwrap();
+        let legacy = Sdk35File::LldIntel.pin();
+        role_inventory.data.files.push(FileSpec { path: legacy.path.into(), size: legacy.bytes,
+            sha256: legacy.sha256.into(), mode: legacy.original_mode & !0o222 });
+        role_inventory.data.files.sort_by(|a, b| a.path.cmp(&b.path));
+        assert!(role_inventory.exact_file(AAPT2).is_some() && role_inventory.exact_file(legacy.path).is_some());
+        commands.architecture = MachArchitecture::X86_64;
+        commands.loads = vec![format!("@loader_path/../../../{}", legacy.path)];
+        assert!(!local_loads_for(Profile::MacX64, AAPT2, &commands, &role_inventory));
+        commands.loads = vec![format!("@loader_path/../../../../{}", AAPT2)];
+        assert!(!local_loads_for(Profile::MacX64, legacy.path, &commands, &role_inventory));
     }
     #[test]
     fn paired_policy_roundtrips_preserve_arm_defaults_and_bounds() {

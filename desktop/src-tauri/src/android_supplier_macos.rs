@@ -107,6 +107,9 @@ enum NativeResourceKind {
     GradlePlainJansiIntel,
     // Genuine bundletool ARM64 bypasses its Intel/Rosetta-only JNA route.
     BundletoolDarwinI386X64,
+    CurrentX64,
+    OtherPlatformArm64,
+    OtherPlatformI386,
 }
 #[derive(Clone, Copy, Serialize)]
 struct NestedNative {
@@ -356,6 +359,90 @@ const BUNDLETOOL_MANIFEST_NATIVE: native_profile::MachPin = native_profile::Mach
     file_type: 2, install_name: None, loads: &["/usr/lib/libSystem.B.dylib"],
     rpaths: &["@loader_path/../lib64", "@loader_path/lib64"],
 };
+// Complete selected x64 roles from the same two fresh hash-bound inspections.
+// Tuple selection below follows the existing full archive/member identity join;
+// these labels never become filesystem provider roots or executable paths.
+const INTEL_CURRENT_NATIVE: &[(&str, &str, native_profile::MachPin)] = &[
+    ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/x86_64-macos/libgradle-fileevents.dylib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "b23bc10e1ecb787ec08785f7808fa846ebe1d5c2fb87e068961fee7f3c690bb9",
+        commands_sha256: "ec9c0749c8d0cbb613edf11823437f50995bf01d870117c8eb2f0c84a6b669a6", file_type: 6,
+        install_name: Some("@rpath/libgradle-fileevents.dylib"),
+        loads: &["/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation", "/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices", "/usr/lib/libSystem.B.dylib", "/usr/lib/libobjc.A.dylib"],
+        rpaths: &[],
+    }),
+    ("gradle/lib/jansi-1.18.jar", "META-INF/native/osx/libjansi.jnilib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "59304b588c332d6cf314a7508b7b779847af4356a550622dda6199b3b0b5dc8d",
+        commands_sha256: "dfc37deef8df976028e14a9b128d2015ee8ca96d536365456aaa11b9d56b26ef", file_type: 6,
+        install_name: Some("/Users/gnodet/work/git/jansi-native/target/native-build/target/lib/libjansi-1.8.jnilib"),
+        loads: &["/usr/lib/libSystem.B.dylib"],
+        rpaths: &[],
+    }),
+    ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar", "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86_64/libjansi.jnilib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "43543aae647a399d2ab3698a87780736df221dddddaf3b2f3980bce3e6af82c1",
+        commands_sha256: "0a17447709b2ccbf93be7b0ca2c8313091d15f75bafd90f87f5c9a0a1f02a517", file_type: 6,
+        install_name: Some("target/native-Mac-x86_64/libjansi.jnilib"),
+        loads: &["/usr/lib/libSystem.B.dylib"],
+        rpaths: &[],
+    }),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform-curses.dylib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "66c4ef9b6f87cbc04f737d736eb5f6cad4e23e9d56e2a23443d5658c86a91ff2",
+        commands_sha256: "bb9c009f99b07212108296d2df4654a44e35f517a15b5a944915e88b7d4083b1", file_type: 6,
+        install_name: Some("libnative-platform-curses.dylib"),
+        loads: &["/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices", "/usr/lib/libncurses.5.4.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
+        rpaths: &[],
+    }),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform.dylib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "db88f1d8266717f2773f007393d220f0a7f81b8329a1e5c889465b9ffbb9dfa7",
+        commands_sha256: "3e3433923025805ba1590e8b5920e8b81136f07c10422f86de469d97fa21d483", file_type: 6,
+        install_name: Some("libnative-platform.dylib"),
+        loads: &["/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib"],
+        rpaths: &[],
+    }),
+    ("bundletool/bundletool.jar", "com/sun/jna/darwin/libjnidispatch.jnilib", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "6c8e81470d05a2abc4766e917906bff125f614b30d5e0038c19e64d50c70dac3",
+        commands_sha256: "3c691aa432620683a580fae8cec05e65c862be2d4b30cfc60dede01a9aa94dd4", file_type: 6,
+        install_name: Some("libjnidispatch.jnilib"),
+        loads: &["/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM", "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation", "/usr/lib/libSystem.B.dylib", "/usr/lib/libgcc_s.1.dylib"],
+        rpaths: &[],
+    }),
+    ("bundletool/bundletool.jar", "macos/aapt2", native_profile::MachPin {
+        prefix_bytes: 4096, prefix_sha256: "1fbb58d83791e214ca2c009c1056593357b02d4eacb570f955b214382a254716",
+        commands_sha256: "7ba9e2c6f30ccd6391e553157beae15cc6abe91527515ff1d39a2956cc7cad12", file_type: 2,
+        install_name: None,
+        loads: &["/usr/lib/libSystem.B.dylib"],
+        rpaths: &["@loader_path/../lib64", "@loader_path/lib64"],
+    }),
+];
+fn intel_native_pin(path: &str, member: &str) -> Option<&'static native_profile::MachPin> {
+    INTEL_CURRENT_NATIVE.iter().find(|(archive, name, _)| *archive == path && *name == member).map(|(_, _, pin)| pin)
+}
+fn native_kind_for(profile: Profile, path: &str, pin: &NativeResourcePin) -> Option<NativeResourceKind> {
+    match profile {
+        Profile::MacArm64 => Some(pin.kind),
+        Profile::MacX64 => {
+            if intel_native_pin(path, pin.member).is_some() { return Some(NativeResourceKind::CurrentX64); }
+            match (path, pin.member) {
+                ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/aarch64-macos/libgradle-fileevents.dylib")
+                | ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar", "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/arm64/libjansi.jnilib")
+                | ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform-curses.dylib")
+                | ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform.dylib") => Some(NativeResourceKind::OtherPlatformArm64),
+                ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar", "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86/libjansi.jnilib") => Some(NativeResourceKind::OtherPlatformI386),
+                _ if matches!(pin.kind, NativeResourceKind::OtherPlatformElf | NativeResourceKind::OtherPlatformPe) => Some(pin.kind),
+                _ => None,
+            }
+        }
+        Profile::LinuxX64 => None,
+    }
+}
+fn intel_member_pin(file: &CanonicalFile, member: &NestedNative) -> Option<&'static native_profile::MachPin> {
+    let archive = native_archive(file.path)?;
+    if (file.size, file.sha256, file.mode) != (archive.bytes, archive.sha256, 0o444)
+        || member.kind != NativeResourceKind::CurrentX64 { return None; }
+    let expected = archive.members.iter().find(|pin| pin.member == member.member)?;
+    if (member.bytes, member.sha256, member.mode) != (expected.bytes, expected.sha256, expected.mode)
+        || native_kind_for(Profile::MacX64, file.path, expected) != Some(NativeResourceKind::CurrentX64) { return None; }
+    intel_native_pin(file.path, member.member)
+}
 fn native_archive(path: &str) -> Option<&'static NativeArchivePin> {
     NATIVE_ARCHIVES.iter().find(|archive| archive.path == path)
 }
@@ -380,14 +467,24 @@ fn native_members_match_for(authority: &native_profile::NativeAuthority,
     let Some(archive) = native_archive(file.path) else {
         // Unlisted foreign resources have no exception. Existing ARM64-only
         // unlisted archives still require their native header/system-load proof.
-        return members.iter().all(|m| m.kind == NativeResourceKind::Arm64 && m.header.is_some());
+        return match authority.profile() {
+            Profile::MacArm64 => members.iter().all(|m| m.kind == NativeResourceKind::Arm64 && m.header.is_some()),
+            Profile::MacX64 => members.is_empty(),
+            Profile::LinuxX64 => false,
+        };
     };
     file.size == archive.bytes && file.sha256 == archive.sha256 && file.mode == 0o444
         && members.len() == archive.members.len()
-        && members.iter().zip(archive.members).all(|(actual, expected)|
-            (actual.member, actual.bytes, actual.sha256, actual.mode, actual.kind)
-                == (expected.member, expected.bytes, expected.sha256, expected.mode, expected.kind)
-                && actual.header.is_some() == (expected.kind == NativeResourceKind::Arm64))
+        && members.iter().zip(archive.members).all(|(actual, expected)| {
+            if (actual.member, actual.bytes, actual.sha256, actual.mode)
+                != (expected.member, expected.bytes, expected.sha256, expected.mode) { return false; }
+            let Some(kind) = native_kind_for(authority.profile(), file.path, expected) else { return false; };
+            if actual.kind != kind { return false; }
+            if kind == NativeResourceKind::CurrentX64 {
+                actual.header.as_ref().zip(intel_member_pin(file, actual))
+                    .is_some_and(|(header, pin)| native_snapshot_matches(header, pin))
+            } else { actual.header.is_some() == (kind == NativeResourceKind::Arm64) }
+        })
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -428,6 +525,8 @@ struct Reference {
 // Comparison DATA, never runtime registration or native qualification.
 // Structural, inventory, native, support and whole-owner gates still apply.
 include!("android_supplier_macos_catalogue.rs");
+#[path = "android_supplier_macos_intel_catalogue.rs"]
+mod intel_catalogue;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -504,7 +603,8 @@ fn archive_order(component: Component, left: &str, right: &str) -> Ordering {
     if component == Component::Bundletool { left.cmp(right) } else { folded(left, right) }
 }
 fn archive_mode(component: Component, sha256: &str, mode: u32, kind: u32) -> bool {
-    let observed_jdk_directory = component == Component::Jdk && sha256 == JDK17_ARCHIVE_SHA
+    let observed_jdk_directory = component == Component::Jdk
+        && (sha256 == JDK17_ARCHIVE_SHA || sha256 == "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a")
         && mode == 0o042755 && kind == 0o040000;
     (mode & !0o170777 == 0 || observed_jdk_directory)
         && (mode & 0o170000 == 0 || mode & 0o170000 == kind)
@@ -637,6 +737,29 @@ fn native_header_for(value: &NativeHeader, bytes: u64, architecture: policy::Mac
     if slice.offset == 0 && value.prefix.get(..32) != value.commands.get(..32) { return None; }
     let result = policy::native_commands(value.commands, slice, architecture)?;
     if result.rpaths.len() > NATIVE_RPATHS { return None; }
+    Some(result)
+}
+// The sole i386-sibling exception is a fixed Bundletool/JNA role, after the
+// complete containing original and member join. Generic native_header_for and
+// native_slice retain their strict architecture admission for every other use.
+fn embedded_native_header(authority: &native_profile::NativeAuthority,
+    file: &CanonicalFile, member: &NestedNative) -> Option<policy::MachCommands> {
+    let header = member.header.as_ref()?;
+    if (file.path, member.member) != ("bundletool/bundletool.jar", "com/sun/jna/darwin/libjnidispatch.jnilib") {
+        return native_header_for(header, member.bytes, authority.architecture());
+    }
+    if authority.profile() != Profile::MacX64 { return None; }
+    let pin = intel_member_pin(file, member)?;
+    if !native_snapshot_matches(header, pin) { return None; }
+    let commands = u32::from_le_bytes(header.commands.get(16..20)?.try_into().ok()?);
+    if commands > NATIVE_COMMANDS { return None; }
+    let archive = native_profile::ToolArchiveComparison { component: "bundletool",
+        bytes: file.size, sha256: file.sha256, containing_jar: None };
+    let original = native_profile::ToolMemberComparison { name: member.member,
+        bytes: member.bytes, sha256: member.sha256, mode: member.mode };
+    let slice = policy::bundletool_jna_slice(authority.profile(), &archive, &original, header.prefix)?;
+    let result = policy::native_commands(header.commands, slice, authority.architecture())?;
+    if result.rpaths.len() > NATIVE_RPATHS || !authority.matches(pin, &result) { return None; }
     Some(result)
 }
 /// Small structural/digest/layout headroom is retained in BOTH phases. Reproof
@@ -1189,17 +1312,27 @@ impl Reference {
             // Exact failure cannot fall through to generic system-only acceptance.
             let Some(archive) = native_archive(file.path) else { return false; };
             let Some(pin) = archive.members.iter().find(|pin| pin.member == member.member) else { return false; };
+            let selected_pin = match authority.profile() {
+                Profile::MacArm64 => &BUNDLETOOL_MANIFEST_NATIVE,
+                Profile::MacX64 => { let Some(pin) = intel_member_pin(file, member) else { return false; }; pin },
+                Profile::LinuxX64 => return false,
+            };
             return self.profile == authority.toolchain()
                 && self.roles.bundletool == file.path && inventory.data.roles.bundletool == file.path
                 && file.size == archive.bytes && file.sha256 == archive.sha256 && file.mode == 0o444
                 && inventory.exact_file(file.path).is_some_and(|selected|
                     selected.size == file.size && selected.sha256 == file.sha256 && selected.mode == file.mode)
-                && (member.member, member.bytes, member.sha256, member.mode, member.kind)
-                    == (pin.member, pin.bytes, pin.sha256, pin.mode, pin.kind)
-                && member.kind == NativeResourceKind::Arm64
+                && (member.member, member.bytes, member.sha256, member.mode)
+                    == (pin.member, pin.bytes, pin.sha256, pin.mode)
+                && native_kind_for(authority.profile(), file.path, pin) == Some(member.kind)
                 && member.header.as_ref().is_some_and(|header|
-                    BUNDLETOOL_MANIFEST_NATIVE.snapshot_bytes(header.prefix, header.commands))
-                && authority.matches(&BUNDLETOOL_MANIFEST_NATIVE, commands);
+                    selected_pin.snapshot_bytes(header.prefix, header.commands))
+                && authority.matches(selected_pin, commands);
+        }
+        if authority.profile() == Profile::MacX64 {
+            let Some(pin) = intel_member_pin(file, member) else { return false; };
+            if !member.header.as_ref().is_some_and(|header|
+                pin.snapshot_bytes(header.prefix, header.commands)) || !authority.matches(pin, commands) { return false; }
         }
         // Other current-platform resources keep the original system-only rule.
         commands.loads.iter().all(|p| policy::system_load(p))
@@ -1248,8 +1381,8 @@ impl Reference {
                         }
                         // A no-header resource has already matched the complete
                         // finite foreign tuple, not a path or caller flag.
-                        let Some(header) = &member.header else { continue; };
-                        let Some(commands) = native_header_for(header, member.bytes, authority.architecture()) else { return false; };
+                        if member.header.is_none() { continue; }
+                        let Some(commands) = embedded_native_header(authority, &file.installed, member) else { return false; };
                         if !self.embedded_native_closure(&file.installed, member, &commands, inventory) { return false; }
                     }
                 }
@@ -1268,8 +1401,29 @@ impl std::io::Write for ReferenceDigest {
     }
     fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
+const INTEL_FRESH_INPUTS: [(&str, u64, &str); 9] = [
+    ("jdk-correspondence.json", 100949, "fd4287337be6dc07ebb3576e1790a2c708487899637ed945d60d5197e8d30e46"),
+    ("jdk-inspection.json", 1290358, "2c47970095d5ef969fc51bf688fcf2aac30899c68bd1c82d14a621e95debb246"),
+    ("gradle-inspection.json", 1272954, "918398b9ad0e63b1c8fc109a79aeac34c7aca77886de71ddea6296d6952f7c08"),
+    ("sdk-platform-inspection.json", 2231680, "49197e87a4accfa69b28ef4e898b2fcaad61bf576dae182839b8e9fa6701c315"),
+    ("sdk-build-tools-inspection.json", 322435, "0de11cf169df014f73fdde1b78065ae56aefb4cea56e3f2d3aea62eca16d1013"),
+    ("aapt2-inspection.json", 11261, "0b3cba2d81005bbc08fc50eb596aec51027e20b6e1a3ae689be7cecd72881aa8"),
+    ("bundletool-inspection.json", 2958475, "14398d557aef3777fd3f7049e54b8a4542dac1990b8edf3cbae5a14bda670797"),
+    ("jdk-release.bytes", 1637, "edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b"),
+    ("jdk-jvm-cfg.bytes", 29, "aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0"),
+];
 fn emit_reference<W: std::io::Write>(reference: &Reference, writer: &mut W) -> Option<()> {
     let authority = reference.authority()?;
+    if authority.profile() == Profile::MacX64 {
+        std::io::Write::write_all(writer, b"mrk-macos-android-canonical-supplier-reference-intel-v1\0").ok()?;
+        serde_json::to_writer(writer, &(reference, &sdk_metadata::OPTIONAL,
+            [sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::Platform35Revision2),
+             sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::BuildTools35)],
+            authority.record_authority(), authority.release(), authority.jvm_cfg(),
+            &native_profile::INTEL_JDK_PHASES[..], &INTEL_FRESH_INPUTS, INTEL_CURRENT_NATIVE)).ok()?;
+        return Some(());
+    }
+    // ARM's complete v3 stream is deliberately byte-for-byte unchanged.
     std::io::Write::write_all(writer, b"mrk-macos-android-canonical-supplier-reference-v3\0").ok()?;
     // Bind full compiled provenance and the fixed optional observation contract,
     // not only enum identities. Generated XML bytes have exact document pins.
@@ -1308,10 +1462,13 @@ impl CheckedReference {
 }
 type CheckedCatalogue = [Option<CheckedReference>; REFERENCES.len()];
 static COMPILED_CATALOGUE: OnceLock<CheckedCatalogue> = OnceLock::new();
+static INTEL_COMPILED_CATALOGUE: OnceLock<CheckedCatalogue> = OnceLock::new();
+const _: () = assert!(REFERENCES.len() == 1 && intel_catalogue::REFERENCES.len() == REFERENCES.len());
 // The complete static state, two fixed construction-array layouts, candidate
 // and transient Recipe are additive to the existing supplier work allowance.
 // The retained Recipe is also charged by its original SourceSlots/Review owner.
-pub(crate) const CACHE_STORAGE_BYTES: usize = size_of::<OnceLock<CheckedCatalogue>>() + native_profile::AUTHORITY_STORAGE_BYTES;
+pub(crate) const CACHE_STORAGE_BYTES: usize = 2 * size_of::<OnceLock<CheckedCatalogue>>()
+    + native_profile::AUTHORITY_STORAGE_BYTES + size_of::<[(&str, u64, &str); 9]>();
 pub(crate) const CACHE_WORK_BYTES: usize = CACHE_STORAGE_BYTES + 2 * size_of::<CheckedCatalogue>()
     + size_of::<CheckedReference>() + size_of::<Recipe>();
 const _: () = assert!(CACHE_WORK_BYTES <= 4096, "compiled supplier cache must remain fixed and small");
@@ -1327,7 +1484,9 @@ fn compiled_catalogue_for(profile: Profile) -> Option<&'static CheckedCatalogue>
     match profile {
         Profile::MacArm64 => Some(COMPILED_CATALOGUE.get_or_init(|| std::array::from_fn(|index|
             CheckedReference::new_for(profile, &REFERENCES[index])))),
-        Profile::MacX64 | Profile::LinuxX64 => None,
+        Profile::MacX64 => Some(INTEL_COMPILED_CATALOGUE.get_or_init(|| std::array::from_fn(|index|
+            CheckedReference::new_for(profile, &intel_catalogue::REFERENCES[index])))),
+        Profile::LinuxX64 => None,
     }
 }
 /// Pure synchronous bootstrap before the ordinary Android owner's short books
@@ -1347,7 +1506,8 @@ pub(crate) fn available_for(profile: Profile) -> bool {
     // Called under Registry/control books: never initialize or wait here.
     native_profile::authority(profile).is_some() && match profile {
         Profile::MacArm64 => catalogue_available(&COMPILED_CATALOGUE),
-        Profile::MacX64 | Profile::LinuxX64 => false,
+        Profile::MacX64 => catalogue_available(&INTEL_COMPILED_CATALOGUE),
+        Profile::LinuxX64 => false,
     }
 }
 /// Pure compiled DATA, not a grant or a second64MiB pool. The app source book
@@ -1459,7 +1619,9 @@ pub(crate) fn recipe_for(profile: Profile, layout: &SourceLayouts<'_>) -> Result
     match profile {
         Profile::MacArm64 => choose_checked_for(profile, REFERENCES, layout, |index, _|
             compiled_catalogue_for(profile).and_then(|catalogue| catalogue[index])),
-        Profile::MacX64 | Profile::LinuxX64 => Err(Failure::Unavailable),
+        Profile::MacX64 => choose_checked_for(profile, intel_catalogue::REFERENCES, layout, |index, _|
+            compiled_catalogue_for(profile).and_then(|catalogue| catalogue[index])),
+        Profile::LinuxX64 => Err(Failure::Unavailable),
     }
 }
 impl Recipe {
@@ -2090,6 +2252,26 @@ mod tests {
         interrupted.get_or_init(|| [CheckedReference::new(original)]);
         assert!(catalogue_available(&interrupted));
         assert!(CACHE_STORAGE_BYTES > 0 && CACHE_STORAGE_BYTES <= CACHE_WORK_BYTES && CACHE_WORK_BYTES <= 4096);
+
+        // Separate local cells use the same nonblocking query, including while
+        // Intel is being initialized; no process-global reset or mock lock.
+        let arm_only: OnceLock<CheckedCatalogue> = OnceLock::new();
+        let intel_only: OnceLock<CheckedCatalogue> = OnceLock::new();
+        let initializations = std::cell::Cell::new(0);
+        assert!(!catalogue_available(&arm_only) && !catalogue_available(&intel_only));
+        intel_only.get_or_init(|| {
+            initializations.set(initializations.get() + 1);
+            assert!(!catalogue_available(&intel_only) && arm_only.get().is_none());
+            [CheckedReference::new_for(Profile::MacX64, &intel_catalogue::REFERENCES[0])]
+        });
+        assert!(catalogue_available(&intel_only) && arm_only.get().is_none());
+        intel_only.get_or_init(|| panic!("selected immutable Intel result must not initialize twice"));
+        assert_eq!(initializations.get(), 1);
+        assert_eq!(intel_only.get().unwrap()[0].unwrap().profile, Profile::MacX64);
+        assert_eq!(CACHE_STORAGE_BYTES, 2 * size_of::<OnceLock<CheckedCatalogue>>()
+            + native_profile::AUTHORITY_STORAGE_BYTES + size_of::<[(&str, u64, &str); 9]>());
+        assert_eq!(CACHE_WORK_BYTES, CACHE_STORAGE_BYTES + 2 * size_of::<CheckedCatalogue>()
+            + size_of::<CheckedReference>() + size_of::<Recipe>());
     }
     #[test]
     fn immutable_cache_lookup_never_initializes_or_waits() {
@@ -2099,10 +2281,10 @@ mod tests {
     pub(super) fn checked_ordinals_preserve_selection_failure_and_duplicate_semantics_data() {
         let real_layout = SourceLayouts { jdk: JdkLayout::Bundle,
             jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" };
-        // Same vendor/version does not borrow an ARM reference, including while
-        // its original cache is cold. No fixture reference or cache reset here.
+        // Unsupported Linux never consults either target cache. Intel selects
+        // its own complete reference, not the ARM array or matching labels.
         let before = COMPILED_CATALOGUE.get().map(|entries| entries as *const CheckedCatalogue);
-        for profile in [Profile::MacX64, Profile::LinuxX64] {
+        for profile in [Profile::LinuxX64] {
             assert!(!available_for(profile));
             prepare_compiled_catalogue_for(profile);
             assert!(compiled_catalogue_for(profile).is_none());
@@ -2110,6 +2292,18 @@ mod tests {
             assert!(matches!(recipe_for(profile, &real_layout), Err(Failure::Unavailable)));
         }
         assert_eq!(COMPILED_CATALOGUE.get().map(|entries| entries as *const CheckedCatalogue), before);
+        prepare_compiled_catalogue_for(Profile::MacX64);
+        let real_intel = recipe_for(Profile::MacX64, &real_layout).unwrap();
+        assert_eq!(real_intel.profile(), Profile::MacX64);
+        assert!(available_for(Profile::MacX64));
+        assert_eq!(COMPILED_CATALOGUE.get().map(|entries| entries as *const CheckedCatalogue), before);
+        assert_eq!(real_intel.selected.digest, reference_digest(&intel_catalogue::REFERENCES[0]).unwrap());
+        let duplicates = static_slice(vec![intel_catalogue::REFERENCES[0], intel_catalogue::REFERENCES[0]]);
+        assert!(matches!(choose_checked_for(Profile::MacX64, duplicates, &real_layout,
+            |_, _| Some(real_intel.selected)), Err(Failure::Reference)));
+        let invalid_intel = static_slice(vec![Reference { profile: "wrong-profile", ..intel_catalogue::REFERENCES[0] }]);
+        assert!(matches!(choose_checked_for(Profile::MacX64, invalid_intel, &real_layout,
+            |_, reference| CheckedReference::new_for(Profile::MacX64, reference)), Err(Failure::Reference)));
         let base = fixture();
         let layout = SourceLayouts { jdk: JdkLayout::Bundle, jdk_vendor: base.observed_jdk_vendor,
             jdk_version: base.observed_jdk_version };
@@ -2118,11 +2312,12 @@ mod tests {
         let catalogue = static_slice(vec![base, unrelated]);
         let entries = [CheckedReference::new(&catalogue[0]), CheckedReference::new(&catalogue[1])];
         assert!(entries[0].is_some() && entries[1].is_none());
-        for profile in [Profile::MacX64, Profile::LinuxX64] {
-            assert!(CheckedReference::new_for(profile, &catalogue[0]).is_none());
-            assert!(matches!(choose_checked_for(profile, catalogue, &layout, |_, _|
-                panic!("unsupported profile must not consult a checked ordinal")), Err(Failure::Unavailable)));
-        }
+        assert!(CheckedReference::new_for(Profile::MacX64, &catalogue[0]).is_none());
+        assert!(matches!(choose_checked_for(Profile::MacX64, catalogue, &layout,
+            |index, _| entries[index]), Err(Failure::Reference)));
+        assert!(CheckedReference::new_for(Profile::LinuxX64, &catalogue[0]).is_none());
+        assert!(matches!(choose_checked_for(Profile::LinuxX64, catalogue, &layout, |_, _|
+            panic!("unsupported profile must not consult a checked ordinal")), Err(Failure::Unavailable)));
         let wrong = CheckedReference { profile: Profile::MacX64, ..entries[0].unwrap() };
         assert!(matches!(choose_checked_for(Profile::MacArm64, catalogue, &layout, |_, _| Some(wrong)), Err(Failure::Reference)));
         let selected = choose_checked(catalogue, &layout, |index, _| entries[index]).unwrap();
@@ -2508,6 +2703,87 @@ mod tests {
         assert!(matches!(catalogue_budget(&[]), Err(Failure::Unavailable)));
         let recipe = Recipe { selected: CheckedReference::new(retained(r)).unwrap(), layout: JdkLayout::Bundle };
         assert_eq!(recipe.source_versions(), ["17.0.1", "35.0.0", "8.14.5"]);
+
+        let intel = native_profile::authority(Profile::MacX64).unwrap();
+        let reference = &intel_catalogue::REFERENCES[0];
+        let mut current = 0; let mut arm = 0; let mut i386 = 0; let mut foreign = 0;
+        for archive in NATIVE_ARCHIVES {
+            let (file, class) = reference.payload.iter().zip(reference.classes)
+                .find(|(file, _)| file.installed.path == archive.path).unwrap();
+            let FileClass::JvmArchive { native_members } = class else { panic!("complete Intel JVM roster"); };
+            assert!(native_members_match_for(intel, &file.installed, native_members));
+            assert_eq!(native_members.len(), archive.members.len());
+            assert!(!native_members_match_for(intel, &file.installed, &native_members[1..]));
+            let mut duplicate = native_members.to_vec(); duplicate.push(native_members[0]);
+            assert!(!native_members_match_for(intel, &file.installed, &duplicate));
+            for changed_file in [CanonicalFile { size: file.installed.size + 1, ..file.installed },
+                CanonicalFile { sha256: HASH, ..file.installed }, CanonicalFile { mode: 0o555, ..file.installed }] {
+                assert!(!native_members_match_for(intel, &changed_file, native_members));
+            }
+            for (member, original) in native_members.iter().zip(archive.members) {
+                assert_eq!((member.member, member.bytes, member.sha256, member.mode),
+                    (original.member, original.bytes, original.sha256, original.mode));
+                match member.kind {
+                    NativeResourceKind::CurrentX64 => {
+                        current += 1;
+                        let header = member.header.unwrap();
+                        let pin = intel_member_pin(&file.installed, member).unwrap();
+                        assert!(native_snapshot_matches(&header, pin));
+                        let parsed = embedded_native_header(intel, &file.installed, member).unwrap();
+                        assert!(intel.matches(pin, &parsed));
+                        for mutation in 0..2 {
+                            let mut changed = native_members.to_vec();
+                            let at = changed.iter().position(|row| row.member == member.member).unwrap();
+                            if mutation == 0 { changed[at].header = None; }
+                            else {
+                                let mut prefix = header.prefix.to_vec(); prefix[4095] ^= 1;
+                                changed[at].header = Some(NativeHeader { prefix: static_slice(prefix), ..header });
+                            }
+                            assert!(!native_members_match_for(intel, &file.installed, &changed));
+                        }
+                    }
+                    NativeResourceKind::OtherPlatformArm64 => { arm += 1; assert!(member.header.is_none()); }
+                    NativeResourceKind::OtherPlatformI386 => {
+                        i386 += 1; assert!(member.header.is_none());
+                        assert_eq!((file.installed.path, member.member, member.bytes, member.sha256, member.mode),
+                            ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar",
+                             "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86/libjansi.jnilib",
+                             14748, "ea7ceaf2b63f95ac34822fed2f4cdfd436599c682e04383fac3736dd4c4a41a6", 0));
+                    }
+                    NativeResourceKind::OtherPlatformElf | NativeResourceKind::OtherPlatformPe => {
+                        foreign += 1; assert!(member.header.is_none());
+                    }
+                    _ => panic!("old ARM/observation disposition is not an Intel role"),
+                }
+            }
+            for mutation in 0..6 {
+                let mut changed = native_members.to_vec();
+                match mutation {
+                    0 => changed[0].member = "unlisted/native.dylib",
+                    1 => changed[0].bytes += 1,
+                    2 => changed[0].sha256 = HASH,
+                    3 => changed[0].mode ^= 1,
+                    4 => changed[0].kind = NativeResourceKind::Arm64,
+                    _ => changed[0].header = if changed[0].header.is_some() { None }
+                        else { Some(NativeHeader { prefix: THIN, commands: THIN }) },
+                }
+                assert!(!native_members_match_for(intel, &file.installed, &changed));
+            }
+            if native_members.iter().any(|member| matches!(member.kind,
+                NativeResourceKind::CurrentX64 | NativeResourceKind::OtherPlatformArm64 | NativeResourceKind::OtherPlatformI386)) {
+                assert!(!native_members_match(&file.installed, native_members));
+            }
+        }
+        assert_eq!((current, arm, i386, foreign), (7, 4, 1, 62));
+        assert_eq!(INTEL_CURRENT_NATIVE.len(), current);
+        let unknown = CanonicalFile { path: "gradle/lib/unlisted.jar", size: 1, sha256: HASH, mode: 0o444 };
+        assert!(native_members_match_for(intel, &unknown, &[]));
+        for kind in [NativeResourceKind::CurrentX64, NativeResourceKind::OtherPlatformArm64,
+            NativeResourceKind::OtherPlatformI386, NativeResourceKind::Arm64] {
+            let member = NestedNative { member: "native.dylib", bytes: 32, sha256: HASH, mode: 0,
+                kind, header: Some(NativeHeader { prefix: THIN, commands: THIN }) };
+            assert!(!native_members_match_for(intel, &unknown, &[member]));
+        }
     }
 
 // Genuine captured header SOURCE only; not an original read or native-run receipt.
@@ -2692,6 +2968,26 @@ mod tests {
     ];
 
 
+    // Complete generated tuple DATA, not held originals/provider custody. This
+    // reuses the selected policy constructor for focused native mutation cases.
+    fn compiled_inventory_data_for(profile: Profile, r: &Reference) -> Inventory {
+        assert_eq!(r.authority().unwrap().profile(), profile);
+        let v = &r.versions;
+        policy::proposal_inventory_for(profile, policy::ProposalManifestData {
+            versions: Versions { jdk_vendor: v.jdk_vendor.into(), jdk_version: v.jdk_version.into(),
+                gradle_version: v.gradle_version.into(), agp_version: v.agp_version.into(),
+                sdk_platform: v.sdk_platform.into(), sdk_platform_revision: v.sdk_platform_revision.into(),
+                sdk_build_tools_version: v.sdk_build_tools_version.into() },
+            gradle_distribution: Distribution { url: r.gradle_distribution_url.into(),
+                sha256: r.gradle_distribution_sha256.into() },
+            roles: Roles { java: r.roles.java.into(), javac: r.roles.javac.into(), gradle: r.roles.gradle.into(),
+                bundletool: r.roles.bundletool.into(), sdk: r.roles.sdk.into() },
+            files: r.payload.iter().map(|p| FileSpec { path: p.installed.path.into(), size: p.installed.size,
+                sha256: p.installed.sha256.into(), mode: p.installed.mode }).collect(),
+            aliases: r.aliases.iter().map(|a| Alias { path: a.path.into(), target: a.target.into(),
+                canonical: a.canonical.into() }).collect(),
+        }, &"a".repeat(32), HASH).unwrap()
+    }
     fn finite_jdk_inventory() -> Inventory {
         // Expected DATA only: these identities do not attest to installed files.
         let base = fixture();
@@ -2823,6 +3119,70 @@ mod tests {
             }
         }
         assert_eq!(other_natives, 4);
+
+        let intel_reference = &intel_catalogue::REFERENCES[0];
+        let intel = native_profile::authority(Profile::MacX64).unwrap();
+        let arm = native_profile::authority(Profile::MacArm64).unwrap();
+        let intel_inventory = compiled_inventory_data_for(Profile::MacX64, intel_reference);
+        let mut selected_count = 0;
+        for (payload, class) in intel_reference.payload.iter().zip(intel_reference.classes) {
+            let FileClass::JvmArchive { native_members } = class else { continue; };
+            if intel.jdk_jvm_archive(payload.installed.path).is_some() { continue; }
+            for member in native_members.iter().filter(|member| member.header.is_some()) {
+                selected_count += 1;
+                let header = member.header.unwrap();
+                let commands = embedded_native_header(intel, &payload.installed, member).unwrap();
+                assert_eq!(commands.architecture, policy::MachArchitecture::X86_64);
+                assert!(intel_reference.embedded_native_closure(&payload.installed, member, &commands, &intel_inventory));
+                assert!(!reference.embedded_native_closure(&payload.installed, member, &commands, &intel_inventory));
+                assert!(embedded_native_header(arm, &payload.installed, member).is_none());
+                if member.member == "com/sun/jna/darwin/libjnidispatch.jnilib" {
+                    assert_eq!(payload.installed.path, "bundletool/bundletool.jar");
+                    assert!(native_header_for(&header, member.bytes, policy::MachArchitecture::X86_64).is_none());
+                    assert_eq!(&header.prefix[..12], &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2, 0, 0, 0, 7]);
+                    assert_eq!(commands.loads, [
+                        "/System/Library/Frameworks/JavaVM.framework/Versions/A/JavaVM",
+                        "/System/Library/Frameworks/Foundation.framework/Versions/C/Foundation",
+                        "/usr/lib/libSystem.B.dylib", "/usr/lib/libgcc_s.1.dylib"]);
+                    let mut sibling = header.prefix.to_vec(); sibling[11] = 12;
+                    let altered = NestedNative { header: Some(NativeHeader { prefix: static_slice(sibling), ..header }), ..*member };
+                    assert!(embedded_native_header(intel, &payload.installed, &altered).is_none());
+                } else {
+                    assert!(native_header_for(&header, member.bytes, policy::MachArchitecture::X86_64).is_some());
+                }
+                if member.member == "macos/aapt2" {
+                    assert_eq!(commands.rpaths, ["@loader_path/../lib64", "@loader_path/lib64"]);
+                    assert!(!commands.rpaths.iter().all(|p| policy::OS_ROOTS.contains(&p.as_str()) || policy::system_load(p)));
+                } else {
+                    assert!(commands.loads.iter().all(|p| policy::system_load(p)));
+                    assert!(commands.rpaths.is_empty());
+                }
+                for changed_file in [CanonicalFile { path: "other/bundletool.jar", ..payload.installed },
+                    CanonicalFile { size: payload.installed.size + 1, ..payload.installed },
+                    CanonicalFile { sha256: HASH, ..payload.installed },
+                    CanonicalFile { mode: 0o555, ..payload.installed }] {
+                    assert!(!intel_reference.embedded_native_closure(&changed_file, member, &commands, &intel_inventory));
+                }
+                for changed in [NestedNative { bytes: member.bytes + 1, ..*member },
+                    NestedNative { sha256: HASH, ..*member }, NestedNative { mode: member.mode ^ 1, ..*member },
+                    NestedNative { kind: NativeResourceKind::Arm64, ..*member },
+                    NestedNative { header: None, ..*member }] {
+                    assert!(!intel_reference.embedded_native_closure(&payload.installed, &changed, &commands, &intel_inventory));
+                }
+                for mutation in 0..5 {
+                    let mut changed = commands.clone();
+                    match mutation {
+                        0 => changed.architecture = policy::MachArchitecture::Arm64,
+                        1 => changed.header_sha256 = HASH.into(),
+                        2 => changed.install_name = Some("/usr/lib/forged.dylib".into()),
+                        3 => changed.loads.push("@rpath/unreviewed.dylib".into()),
+                        _ => changed.rpaths.push("/tmp/unprotected".into()),
+                    }
+                    assert!(!intel_reference.embedded_native_closure(&payload.installed, member, &changed, &intel_inventory));
+                }
+            }
+        }
+        assert_eq!(selected_count, 7);
     }
 
     pub(super) fn genuine_jmod_header_and_installed_counterpart_context_are_joined_data() {
@@ -2892,6 +3252,70 @@ mod tests {
         assert_eq!(native_profile::JDK_JVM_ARCHIVES.iter().map(|a| a.members.len()).sum::<usize>(), 71);
         assert_eq!(native_profile::JDK_JVM_ARCHIVES.iter().flat_map(|a| a.members).filter(|m| m.counterpart.is_some()).count(), 70);
         assert_fixture_is_not_compiled(&subject); // A header/data predicate is never supplier activation.
+
+        let intel_reference = &intel_catalogue::REFERENCES[0];
+        let intel = native_profile::authority(Profile::MacX64).unwrap();
+        let mut intel_inventory = compiled_inventory_data_for(Profile::MacX64, intel_reference);
+        assert_eq!(intel.archives().len(), 74); // The three non-JVM ZIPs retain complete DATA, not JVM roles.
+        assert_eq!(intel.archives().iter().map(|archive| archive.members.len()).sum::<usize>(), 71);
+        assert!(intel_reference.native_closure(&intel_inventory));
+        let mut archives = 0; let mut linked = 0; let mut templates = 0;
+        for (payload, class) in intel_reference.payload.iter().zip(intel_reference.classes) {
+            let FileClass::JvmArchive { native_members } = class else { continue; };
+            let Some(archive) = intel.jdk_jvm_archive(payload.installed.path) else { continue; };
+            archives += 1;
+            assert!(native_members_match_for(intel, &payload.installed, native_members));
+            for (member, expected) in native_members.iter().zip(archive.members) {
+                let header = member.header.unwrap();
+                let commands = native_header_for(&header, member.bytes, policy::MachArchitecture::X86_64).unwrap();
+                assert!(intel.snapshot(intel.jvm_header(expected).unwrap(), header.prefix, &commands));
+                assert!(native_header_for(&header, member.bytes, policy::MachArchitecture::Arm64).is_none());
+                let mut changed = native_members.to_vec();
+                let at = changed.iter().position(|row| row.member == member.member).unwrap();
+                changed[at].kind = NativeResourceKind::CurrentX64;
+                assert!(!native_members_match_for(intel, &payload.installed, &changed));
+                if let Some(relative) = expected.counterpart {
+                    linked += 1;
+                    let bundle = payload.installed.path.strip_suffix(archive.relative).unwrap();
+                    let installed = intel_inventory.file_under(bundle, relative).unwrap();
+                    assert_eq!((installed.size, installed.sha256.as_str()), (member.bytes, member.sha256));
+                    assert!(policy::local_loads_for(Profile::MacX64, &installed.path, &commands, &intel_inventory));
+                } else {
+                    templates += 1;
+                    assert_eq!((member.member, member.bytes, member.sha256),
+                        ("classes/jdk/jpackage/internal/resources/jpackageapplauncher", 188160,
+                         "2fc0206e6e6fb80c90d2b1893d2e145e1b9a6162fa1ce5b0349307566b75d7fd"));
+                    assert!(commands.loads.iter().all(|path| policy::system_load(path)) && commands.rpaths.is_empty());
+                }
+            }
+        }
+        assert_eq!((archives, linked, templates), (71, 70, 1));
+        let provider_path = "jdk/temurin-17.jdk/Contents/Home/lib/server/libjvm.dylib";
+        let mut direct = 0;
+        for (payload, class) in intel_reference.payload.iter().zip(intel_reference.classes) {
+            let FileClass::MachO(header) = class else { continue; };
+            let Some(relative) = native_profile::jdk_relative(payload.installed.path) else { continue; };
+            direct += 1;
+            let commands = native_header_for(header, payload.installed.size, policy::MachArchitecture::X86_64).unwrap();
+            let actual = native_profile::jdk_post_jli_provider_for(Profile::MacX64,
+                payload.installed.path, &commands, &intel_inventory).unwrap();
+            assert_eq!(actual, if intel.jdk_phase(relative) == Some(native_profile::JdkPhase::PostJli) {
+                Some(provider_path) } else { None });
+            assert!(native_profile::jdk_post_jli_provider_for(Profile::MacArm64,
+                payload.installed.path, &commands, &intel_inventory).is_err());
+        }
+        assert_eq!(direct, 71);
+        for suffix in ["Contents/Home/lib/libjli.dylib", "Contents/Home/lib/server/libjvm.dylib",
+            "Contents/Home/bin/java", "Contents/Home/release", "Contents/Home/lib/jvm.cfg"] {
+            let at = intel_inventory.data.files.iter().position(|file| file.path.ends_with(suffix)).unwrap();
+            let old = std::mem::replace(&mut intel_inventory.data.files[at].sha256, HASH.into());
+            assert!(!intel_reference.native_closure(&intel_inventory));
+            intel_inventory.data.files[at].sha256 = old;
+        }
+        assert!(intel_reference.native_closure(&intel_inventory));
+        let at = intel_inventory.data.files.iter().position(|file| file.path == provider_path).unwrap();
+        intel_inventory.data.files.remove(at);
+        assert!(!intel_reference.native_closure(&intel_inventory));
     }
     fn direct_tuple_reference(base: Reference, file: CanonicalFile, group: SourceGroup, component: Component,
         archive: ArchivePin<'static>, member: &'static str, original_mode: u32) -> Reference {
@@ -3051,7 +3475,8 @@ mod tests {
              sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::BuildTools35)],
              native_profile::record_authority())).unwrap();
         assert_eq!(digest, <[u8;32]>::from(legacy.hash.finalize()));
-        assert_eq!(CACHE_STORAGE_BYTES, size_of::<OnceLock<CheckedCatalogue>>() + native_profile::AUTHORITY_STORAGE_BYTES);
+        assert_eq!(CACHE_STORAGE_BYTES, 2 * size_of::<OnceLock<CheckedCatalogue>>()
+            + native_profile::AUTHORITY_STORAGE_BYTES + size_of::<[(&str, u64, &str); 9]>());
 
         // Supplier-side storage/phase accounting only. Fresh Inspect, retained-
         // Review Inspect and Register still require their real combined caller
@@ -3071,7 +3496,6 @@ mod tests {
             jdk, jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap());
         for (selected, layout) in recipes.iter().zip(layouts) {
             assert_eq!(selected.jdk_layout(), layout);
-            assert_eq!(reference_digest(selected.selected.reference), Some(digest));
             assert_eq!(selected.selected.digest, digest);
             assert_eq!(selected.source_versions(), ["17.0.20.1", "35.0.0", "8.14.5"]);
             assert_eq!(selected.source_storage().unwrap(), budget.storage);
@@ -3083,6 +3507,9 @@ mod tests {
             assert!(std::ptr::eq(roster.archive_members, selected.selected.reference.support_members));
             assert!(std::ptr::eq(roster.optional_sdk_metadata, &sdk_metadata::OPTIONAL));
         }
+        // Both layouts reuse this same checked immutable reference. Rehash it
+        // once, not once per layout, in addition to the independent stream above.
+        assert_eq!(reference_digest(recipes[0].selected.reference), Some(digest));
         assert!(matches!(recipe(&SourceLayouts { jdk: JdkLayout::Bundle,
             jdk_vendor: "temurin", jdk_version: "17.0.20.1" }), Err(Failure::Unavailable)));
 
@@ -3137,7 +3564,7 @@ mod tests {
             let mut parsed = policy::parse_manifest(bytes[0], &selection).unwrap();
             assert!(policy::Provider::parse(bytes[2], &selection).is_some());
             assert!(policy::Registration::parse(bytes[1], 501, &instance).unwrap().matches(&selection));
-            assert!(r.matches_inventory(&parsed) && r.native_closure(&parsed));
+            assert!(selected.selected.matches_inventory(&parsed) && r.native_closure(&parsed));
             assert_eq!(result.supplier_record(), &digest);
             assert_eq!(admit(&parsed, &digest), Ok(()));
             assert_eq!(result.payload_map(), r.payload);
@@ -3151,19 +3578,115 @@ mod tests {
             let mut wrong_digest = digest; wrong_digest[0] ^= 1;
             assert_eq!(admit(&parsed, &wrong_digest), Err(SupplierFailure::Unavailable));
             parsed.data.versions.gradle_version.push('x');
-            assert!(!r.matches_inventory(&parsed));
+            assert!(!selected.selected.matches_inventory(&parsed));
             assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
             parsed.data.versions.gradle_version.pop();
             let at = parsed.data.files.iter().position(|file|
                 file.path == "jdk/temurin-17.jdk/Contents/Home/lib/server/libjvm.dylib").unwrap();
             let saved = std::mem::replace(&mut parsed.data.files[at].sha256, HASH.into());
-            assert!(!r.native_closure(&parsed) && !r.matches_inventory(&parsed));
+            assert!(!r.native_closure(&parsed) && !selected.selected.matches_inventory(&parsed));
             assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
             parsed.data.files[at].sha256 = saved;
-            assert!(r.matches_inventory(&parsed) && r.native_closure(&parsed));
+            assert!(selected.selected.matches_inventory(&parsed) && r.native_closure(&parsed));
             parsed.data.files.remove(at);
-            assert!(!r.native_closure(&parsed) && !r.matches_inventory(&parsed));
+            assert!(!r.native_closure(&parsed) && !selected.selected.matches_inventory(&parsed));
             assert_eq!(admit(&parsed, &digest), Err(SupplierFailure::Unavailable));
+        });
+
+        let intel = &intel_catalogue::REFERENCES[0];
+        assert_eq!(intel_catalogue::REFERENCES.len(), 1);
+        assert_eq!(intel.profile, crate::android_build_protocol::MAC_X64_TOOLCHAIN_PROFILE);
+        assert!(intel.archives.iter().map(|archive| archive.component).eq(COMPONENTS));
+        assert_eq!((intel.archives[0].archive.bytes, intel.archives[0].archive.sha256,
+            intel.archives[0].official_source, intel.archives[0].member_count),
+            (180578248, "c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a",
+             "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz", 549));
+        for (actual, arm) in intel.archives[1..].iter().zip(&r.archives[1..]) {
+            assert_eq!((actual.archive.bytes, actual.archive.sha256, actual.official_source),
+                (arm.archive.bytes, arm.archive.sha256, arm.official_source));
+        }
+        assert!(intel.structural() && intel.source_directory_closure() && intel.compiled_metadata_pair());
+        assert!(support_manifest_matches(intel));
+        let intel_digest = reference_digest(intel).unwrap();
+        assert_ne!(intel_digest, digest);
+        assert_eq!(INTEL_FRESH_INPUTS.len(), 9);
+        assert_eq!(INTEL_FRESH_INPUTS.iter().map(|(_, size, _)| size).sum::<u64>(), 8_189_778);
+        assert_eq!(INTEL_FRESH_INPUTS[2], ("gradle-inspection.json", 1272954,
+            "918398b9ad0e63b1c8fc109a79aeac34c7aca77886de71ddea6296d6952f7c08"));
+        assert_eq!(INTEL_FRESH_INPUTS[7], ("jdk-release.bytes", 1637,
+            "edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b"));
+        let authority = native_profile::authority(Profile::MacX64).unwrap();
+        let mut expected = ReferenceDigest { count: 0, hash: Sha256::new() };
+        std::io::Write::write_all(&mut expected, b"mrk-macos-android-canonical-supplier-reference-intel-v1\0").unwrap();
+        serde_json::to_writer(&mut expected, &(intel, &sdk_metadata::OPTIONAL,
+            [sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::Platform35Revision2),
+             sdk_metadata::compiled_sdk_metadata(SdkMetadataKind::BuildTools35)],
+            authority.record_authority(), authority.release(), authority.jvm_cfg(),
+            &native_profile::INTEL_JDK_PHASES[..], &INTEL_FRESH_INPUTS, INTEL_CURRENT_NATIVE)).unwrap();
+        assert_eq!(intel_digest, <[u8; 32]>::from(expected.hash.finalize()));
+        assert!(expected.count < REFERENCE_STREAM_BYTES);
+        assert!(CheckedReference::new_for(Profile::MacArm64, intel).is_none());
+        assert!(CheckedReference::new_for(Profile::MacX64, r).is_none());
+        assert!(CheckedReference::new_for(Profile::LinuxX64, intel).is_none());
+        let relabeled = retained(Reference { profile: crate::android_build_protocol::MAC_X64_TOOLCHAIN_PROFILE, ..*r });
+        assert!(CheckedReference::new_for(Profile::MacX64, relabeled).is_none());
+        let changed = Reference { source_members: &intel.source_members[1..], ..*intel };
+        assert!(!changed.structural());
+        assert_ne!(reference_digest(&changed).unwrap(), intel_digest);
+        let budget = source_catalogue_budget_for(Profile::MacX64).unwrap();
+        assert_eq!(budget.storage, intel.source_storage().unwrap());
+        assert_eq!(budget.proposal_work, intel.working_bytes().unwrap());
+        assert_eq!(budget.reproof_work, fixed_working_bytes().unwrap());
+        assert!(budget.proposal_work <= APP_BYTES && budget.reproof_work < budget.proposal_work);
+        assert!(available_for(Profile::MacX64) && !available_for(Profile::LinuxX64));
+        let intel_layouts = [JdkLayout::Bundle, JdkLayout::HomeInSameBundle];
+        let intel_recipes = intel_layouts.map(|jdk| recipe_for(Profile::MacX64, &SourceLayouts {
+            jdk, jdk_vendor: "Eclipse Adoptium", jdk_version: "17.0.20.1" }).unwrap());
+        for (recipe, layout) in intel_recipes.iter().zip(intel_layouts) {
+            assert_eq!(recipe.profile(), Profile::MacX64);
+            assert_eq!(recipe.jdk_layout(), layout);
+            assert_eq!(recipe.selected.digest, intel_digest);
+            assert_eq!(recipe.source_storage().unwrap(), budget.storage);
+            assert_eq!(recipe.working_reservation_bytes().unwrap(), budget.proposal_work);
+            assert!(std::ptr::eq(recipe.source_roster().members, recipe.selected.reference.source_members));
+        }
+        // Layout selection was checked above. The full pure proposal and each
+        // inventory fault use one genuine checked Recipe, as in the ARM case.
+        let recipe = &intel_recipes[0];
+        complete_compiled_observations(intel, |complete, provider| {
+            assert!(recipe.observations_match(&complete));
+            let missing = SourceObservations { members: &complete.members[1..], ..complete };
+            assert!(matches!(recipe.finalize_proposal(&instance, 501, &missing, provider), Err(Failure::SourceMismatch)));
+            let result = recipe.finalize_proposal(&instance, 501, &complete, provider).unwrap();
+            let documents = result.documents();
+            let selection = crate::android_build_protocol::MacToolchainSelection {
+                instance: instance.clone(), owner_uid: 501, catalog_generation: 1,
+                inventory_sha256: policy::digest(documents[0]), record_sha256: policy::digest(documents[1]),
+                os_provider_sha256: policy::digest(documents[2]),
+            };
+            let mut inventory = policy::parse_manifest_for(Profile::MacX64, documents[0], &selection).unwrap();
+            assert!(policy::Provider::parse_for(Profile::MacX64, documents[2], &selection).is_some());
+            assert!(policy::Registration::parse_for(Profile::MacX64, documents[1], 501, &instance).unwrap()
+                .matches_for(Profile::MacX64, &selection));
+            assert!(policy::parse_manifest_for(Profile::MacArm64, documents[0], &selection).is_none());
+            assert!(policy::Provider::parse_for(Profile::MacArm64, documents[2], &selection).is_none());
+            assert!(policy::Registration::parse_for(Profile::MacArm64, documents[1], 501, &instance).is_none());
+            assert!(recipe.selected.matches_inventory(&inventory) && intel.native_closure(&inventory));
+            assert_eq!(result.supplier_record(), &intel_digest);
+            assert_eq!(admit_for(Profile::MacX64, &inventory, &intel_digest), Ok(()));
+            assert_eq!(admit_for(Profile::MacArm64, &inventory, &intel_digest), Err(SupplierFailure::Unavailable));
+            assert_eq!(admit_for(Profile::LinuxX64, &inventory, &intel_digest), Err(SupplierFailure::Unavailable));
+            assert_eq!(admit_for(Profile::MacX64, &inventory, &digest), Err(SupplierFailure::Unavailable));
+            assert_eq!(admit_checked(&[Some(recipe.selected), Some(recipe.selected)], &inventory, &intel_digest),
+                Err(SupplierFailure::Unavailable));
+            assert_eq!(result.payload_map(), intel.payload);
+            assert!(result.retained_bytes().unwrap() <= budget.proposal_work);
+            let at = inventory.data.files.iter().position(|file| file.path.ends_with("/lib/server/libjvm.dylib")).unwrap();
+            let old = std::mem::replace(&mut inventory.data.files[at].sha256, HASH.into());
+            assert!(!recipe.selected.matches_inventory(&inventory));
+            assert_eq!(admit_for(Profile::MacX64, &inventory, &intel_digest), Err(SupplierFailure::Unavailable));
+            inventory.data.files[at].sha256 = old;
+            assert!(recipe.selected.matches_inventory(&inventory));
         });
     }
     #[test]
@@ -3281,6 +3804,28 @@ mod tests {
         assert_eq!(archive_order(Component::Gradle, "r8/A.class", "r8/a.class"), Ordering::Equal);
         assert_eq!(archive_order(Component::SdkBuildTools, "r8/A.class", "r8/a.class"), Ordering::Equal);
         assert_eq!(archive_order(Component::Aapt2, "r8/A.class", "r8/a.class"), Ordering::Equal);
+
+        let intel = native_profile::authority(Profile::MacX64).unwrap();
+        let intel_hash = intel.archive().1;
+        assert!(archive_mode(Component::Jdk, intel_hash, 0o042755, 0o040000));
+        for (component, hash, mode, kind) in [
+            (Component::Gradle, intel_hash, 0o042755, 0o040000),
+            (Component::Jdk, HASH, 0o042755, 0o040000),
+            (Component::Jdk, intel_hash, 0o102755, 0o100000),
+            (Component::Jdk, intel_hash, 0o044755, 0o040000),
+            (Component::Jdk, intel_hash, 0o041755, 0o040000),
+            (Component::Jdk, intel_hash, 0o042700, 0o040000),
+        ] {
+            assert!(!archive_mode(component, hash, mode, kind));
+        }
+        assert_eq!(intel_catalogue::REFERENCES[0].archives[0].members.iter().filter(|row|
+            matches!(row.kind, ArchiveKind::Directory { mode: 0o042755 })).count(), 92);
+        assert!(!modes(&[0o2755]) && !modes(&[0o42755]));
+        assert!(intel_catalogue::REFERENCES[0].source_members.iter().all(|row| match row.kind {
+            SourceKindSpec::Directory { modes: allowed } | SourceKindSpec::File { modes: allowed, .. } =>
+                allowed.iter().all(|mode| mode & !0o777 == 0),
+            SourceKindSpec::Alias { .. } => true,
+        }));
     }
 
     #[test]

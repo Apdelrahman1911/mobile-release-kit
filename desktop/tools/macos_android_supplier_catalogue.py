@@ -1337,7 +1337,10 @@ def collect_sources(outers):
     return ordered
 
 
-def classify(member, label, path, proofs):
+def classify(member, label, path, proofs, *, profile="arm64"):
+    _projection_profile(profile)
+    if profile == "x86_64":
+        return _classify_intel(member, label, path, proofs)
     key = (label, member.name)
     if member.name.endswith((".jar", ".jmod")):
         if label in SDK_NEGATIVE:
@@ -1396,7 +1399,9 @@ def classify(member, label, path, proofs):
 
 
 class Projection:
-    def __init__(self, outers, proofs):
+    def __init__(self, outers, proofs, *, profile="arm64"):
+        archives = _projection_profile(profile)
+        self.profile = profile
         self.outers, self.proofs = outers, proofs
         for label, name, size, digest in SDK_PROPERTIES:
             row = outers[label].by_name.get(name)
@@ -1415,7 +1420,7 @@ class Projection:
             if source.kind == "file":
                 member = outers[LABELS[source.archive]].members[source.member]
                 path = canonical_source(source.group, source.relative)
-                mode, classification = classify(member, LABELS[source.archive], path, proofs)
+                mode, classification = classify(member, LABELS[source.archive], path, proofs, profile=profile)
                 self.payload.append(Payload(path, member.size, member.sha256, mode,
                                            ("Picked", source.group, source.relative), classification))
             elif source.kind == "alias":
@@ -1424,14 +1429,16 @@ class Projection:
         # Compiled SDK XML is not a fabricated selected package.xml header.
         for path, size, digest, kind in XML_FILES:
             self.payload.append(Payload(path, size, digest, 0o444, ("CompiledSdkMetadata", kind), ("Data",)))
-        bundle = finite_native("bundletool/bundletool.jar", ARCHIVES["bundletool"][:2], proofs.bundle["nativeMembers"])
+        bundle = (finite_native("bundletool/bundletool.jar", archives["bundletool"][:2], proofs.bundle["nativeMembers"])
+                  if profile == "arm64" else _intel_finite_native("bundletool/bundletool.jar",
+                      archives["bundletool"][:2], _intel_native_rows(proofs.bundle)))
         self.payload.append(Payload("bundletool/bundletool.jar", *ARCHIVES["bundletool"][:2], 0o444,
                                    ("Support", "BundletoolJar"), ("JvmArchive", bundle)))
         aapt = outers["aapt2"].by_name.get("aapt2")
         need(aapt is not None and (aapt.size, aapt.sha256, aapt.mode) == (11143368,
              "213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e", 0o100755), "aapt2-member-pin")
         snapshot = proofs.direct[("aapt2", "aapt2")]
-        need(snapshot[2] == ARM64, "aapt2-arm64-snapshot")
+        need(snapshot[2] == (ARM64 if profile == "arm64" else 0x01000007), "aapt2-selected-snapshot")
         self.payload.append(Payload(AAPT2_PATH, aapt.size, aapt.sha256, 0o555,
                                    ("MemberOfSameOriginalArchive",), ("MachO", snapshot)))
         self.aapt = aapt
@@ -1483,8 +1490,8 @@ def rust_string(value):
     return json.dumps(value, ensure_ascii=True)
 
 
-def archive_literal(label):
-    size, digest = ARCHIVES[label][:2]
+def archive_literal(label, *, profile="arm64"):
+    size, digest = _projection_profile(profile)[label][:2]
     return "ArchivePin { bytes: " + str(size) + ", sha256: " + rust_string(digest) + " }"
 
 
@@ -1527,7 +1534,9 @@ class Emitter:
         return {"bytes": self.total, "sha256": self.digest.hexdigest()}
 
 
-def render(projection, sink):
+def render(projection, sink, *, profile="arm64"):
+    archives = _projection_profile(profile)
+    need(projection.profile == profile, "projection-render-profile")
     output = Emitter(sink)
     put = output.put
     headers, header_ids = [], {}
@@ -1544,6 +1553,8 @@ def render(projection, sink):
         return "NativeHeader { prefix: CAT_H" + str(ordinal) + "_PREFIX, commands: CAT_H" + str(ordinal) + "_COMMANDS }"
     put("// Generated proposed SOURCE from complete admitted official observation DATA.\n")
     put("// No IO, mutable runtime registration, reference digest or native qualification.\n")
+    if profile == "x86_64":
+        put("use super::*;\n")
     for ordinal, (prefix, commands, _) in enumerate(headers):
         for suffix, raw in (("PREFIX", prefix), ("COMMANDS", commands)):
             put("const CAT_H" + str(ordinal) + "_" + suffix + ": &[u8] = &[\n")
@@ -1556,7 +1567,9 @@ def render(projection, sink):
         put("const CAT_N" + str(ordinal) + ": &[NestedNative] = &[\n")
         for row, kind, snapshot in payload.classification[1]:
             need(kind in ("Arm64", "JdkInstalledCounterpart", "JdkJpackageTemplate", "OtherPlatformElf", "OtherPlatformPe",
-                          "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64"), "native-literal-kind")
+                          "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64")
+                 or profile == "x86_64" and kind in ("CurrentX64", "OtherPlatformArm64", "OtherPlatformI386"),
+                 "native-literal-kind")
             put("    NestedNative { member: " + rust_string(row["name"]) + ", bytes: " + str(row["bytes"])
                 + ", sha256: " + rust_string(row["sha256"]) + ", mode: " + oct(row["mode"])
                 + ", kind: NativeResourceKind::" + kind + ", header: " + ("Some(" + native(snapshot) + ")" if snapshot is not None else "None") + " },\n")
@@ -1581,9 +1594,9 @@ def render(projection, sink):
         put("];\n")
     put("const CAT_ARCHIVES: &[OfficialArchive] = &[\n")
     for archive, label in enumerate(LABELS):
-        published = "Sha1(" + rust_string(SDK_SHA1[label]) + ")" if label in SDK_SHA1 else "Sha256(" + rust_string(ARCHIVES[label][1]) + ")"
-        put("    OfficialArchive { component: Component::" + COMPONENTS[archive] + ", official_source: " + rust_string(ARCHIVES[label][2])
-            + ", vendor_release: " + rust_string(ARCHIVES[label][3]) + ", archive: " + archive_literal(label)
+        published = "Sha1(" + rust_string(SDK_SHA1[label]) + ")" if label in SDK_SHA1 else "Sha256(" + rust_string(archives[label][1]) + ")"
+        put("    OfficialArchive { component: Component::" + COMPONENTS[archive] + ", official_source: " + rust_string(archives[label][2])
+            + ", vendor_release: " + rust_string(archives[label][3]) + ", archive: " + archive_literal(label, profile=profile)
             + ", published: PublishedChecksum::" + published + ", member_count: " + str(len(projection.outers[label].members))
             + ", expanded_bytes: " + str(sum(m.size for m in projection.outers[label].members)) + ", members: CAT_A" + str(archive) + " },\n")
     put("];\nconst CAT_TREES: &[SourceTree] = &[\n")
@@ -1612,7 +1625,7 @@ def render(projection, sink):
         put("    SourceBinding { provenance: SourceProvenance::" + provenance + ", disposition: SourceDisposition::" + disposition + " },\n")
     put("];\nconst CAT_SUPPORT: &[SupportOriginalSpec] = &[\n")
     for label, asset in (("bundletool", "BundletoolJar"), ("aapt2", "Aapt2OsxJar")):
-        put("    SupportOriginalSpec { asset: SupportAsset::" + asset + ", archive: " + archive_literal(label) + ", modes: &[0o444] },\n")
+        put("    SupportOriginalSpec { asset: SupportAsset::" + asset + ", archive: " + archive_literal(label, profile=profile) + ", modes: &[0o444] },\n")
     put("];\nconst CAT_PROJECTED: ZipMemberSpec<'static> = " + zip_literal(projection.aapt) + ";\n")
     put("const CAT_SUPPORT_MEMBERS: &[SupportMemberSpec] = &[SupportMemberSpec { asset: SupportAsset::Aapt2OsxJar, member: CAT_PROJECTED }];\n")
     put("const CAT_PAYLOAD: &[PayloadSource] = &[\n")
@@ -1627,7 +1640,7 @@ def render(projection, sink):
             value = "CompiledSdkMetadata(SdkMetadataKind::" + origin[1] + ")"
         else:
             need(origin == ("MemberOfSameOriginalArchive",), "payload-origin-kind")
-            value = "MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: " + archive_literal("aapt2") + ", member: CAT_PROJECTED }"
+            value = "MemberOfSameOriginalArchive { asset: SupportAsset::Aapt2OsxJar, archive: " + archive_literal("aapt2", profile=profile) + ", member: CAT_PROJECTED }"
         put("    PayloadSource { installed: CanonicalFile { path: " + rust_string(payload.path) + ", size: " + str(payload.size)
             + ", sha256: " + rust_string(payload.sha256) + ", mode: " + oct(payload.mode) + " }, origin: PayloadOrigin::" + value + " },\n")
     put("];\nconst CAT_CLASSES: &[FileClass] = &[\n")
@@ -1654,14 +1667,15 @@ def render(projection, sink):
     put("];\nconst CAT_DIRECTORIES: &[&str] = &[\n")
     for path in projection.directories:
         put("    " + rust_string(path) + ",\n")
-    put("];\nconst REFERENCES: &[Reference] = &[Reference {\n")
-    put("    profile: crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE,\n")
+    put("];\n" + ("pub(super) " if profile == "x86_64" else "") + "const REFERENCES: &[Reference] = &[Reference {\n")
+    put("    profile: crate::android_build_protocol::" + ("MAC_TOOLCHAIN_PROFILE" if profile == "arm64"
+        else "MAC_X64_TOOLCHAIN_PROFILE") + ",\n")
     put("    observed_jdk_vendor: " + rust_string(projection.vendor) + ", observed_jdk_version: " + rust_string(projection.version) + ",\n")
     put('    versions: VersionSpec { jdk_vendor: "temurin", jdk_version: "17.0.20.1", gradle_version: "8.14.5", agp_version: "8.9.2",\n')
     put('        sdk_platform: "android-35", sdk_platform_revision: "2", sdk_build_tools_version: "35.0.0" },\n')
     put("    roles: RoleSpec { java: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/java") + ", javac: " + rust_string(INSTALLED_JDK + "Contents/Home/bin/javac")
         + ', gradle: "gradle/bin/gradle", bundletool: "bundletool/bundletool.jar", sdk: "sdk" },\n')
-    put("    gradle_distribution_url: " + rust_string(GRADLE_WRAPPER_URL) + ", gradle_distribution_sha256: " + rust_string(ARCHIVES["gradle"][1]) + ",\n")
+    put("    gradle_distribution_url: " + rust_string(GRADLE_WRAPPER_URL) + ", gradle_distribution_sha256: " + rust_string(archives["gradle"][1]) + ",\n")
     put("    archives: CAT_ARCHIVES, trees: CAT_TREES, source_members: CAT_SOURCES, source_bindings: CAT_BINDINGS,\n")
     put("    support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,\n")
     put("    aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,\n}];\n")
@@ -1694,8 +1708,8 @@ def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
 
 
 # Fresh Intel observations are a different DATA protocol, not replacements for
-# Inputs' historical ARM documents. Nothing below calls Projection/render or
-# creates a native role, Reference, Rust digest, cache entry or supplier grant.
+# Inputs' historical ARM documents. Private admission below is DATA only; the
+# separate generate_intel entry can propose SOURCE, never a runtime grant.
 _FRESH_INTEL_ROLES = (
     "jdk-correspondence.json", "jdk-inspection.json", "gradle-inspection.json",
     "sdk-platform-inspection.json", "sdk-build-tools-inspection.json",
@@ -1949,7 +1963,12 @@ def _fresh_specials(value, counts, *, complete, outer=None, counterpart=False, c
     names = set()
     if complete:
         if unknown:
-            names.add(_fresh_sdk_manifest(value, counts, container, containing))
+            if outer is not None and outer.label == "gradle":
+                names.add(_fresh_gradle_launcher(value, outer))
+            elif _fresh_gradle_context(container, containing) is not None:
+                names.update(_fresh_gradle_specials(value, counts, container, containing))
+            else:
+                names.add(_fresh_sdk_manifest(value, counts, container, containing))
         foreign = value["foreignNativeMembers"]
     else:
         # Only the old producer's explicitly recognized ELF/PE rows can move
@@ -1999,7 +2018,7 @@ def _fresh_inner(value, member=None, *, complete, counterpart=False, depth=0, ne
     reads = integer(value["issuedReadBytes"], value["bytes"] - value["zipViewOffset"], 768 * 1024 * 1024)
     integer(value["innerBookReservationBytes"], 1, 48 * 1024 * 1024)
     sha(value["enumerationSha256"])
-    counts = _fresh_counts(value["formatCounts"], files)  # Files, NOT centralMembers.
+    counts = _fresh_inner_counts(value, files, container, member)  # Files, NOT centralMembers.
     need(container is None or depth == 0, "fresh-inert-origin-depth")
     names = _fresh_specials(value, counts, complete=complete, counterpart=counterpart,
                            container=container, containing=member)
@@ -2092,7 +2111,9 @@ def _fresh_outer_observation(value, outer, archives, *, complete, jdk=False):
                  "fresh-outer-class-suffix")
             need(not name.endswith((".dylib", ".jnilib", ".so", ".dll", ".exe")) or name in names,
                  "fresh-outer-native-suffix")
-            need(member.hint is not None or not member.mode & 0o111, "fresh-outer-executable-opaque")
+            need(member.hint is not None or not member.mode & 0o111
+                 or outer.label == "gradle" and name == _INTEL_GRADLE_LAUNCHER[0] and name in names,
+                 "fresh-outer-executable-opaque")
     # Exact inverse for the independently supplied OUTER rows. The ambiguous
     # FAT/class hint is divided by the actual native list, not guessed as x64.
     hints = {hint: sum(m.kind == "file" and m.hint == hint for m in outer.members)
@@ -2222,7 +2243,11 @@ class _FreshIntelData:
 
 
 def _fresh_intel_data(documents):
-    inputs = _FreshIntelInputs(documents)
+    return _fresh_intel_read(_FreshIntelInputs(documents))
+
+
+def _fresh_intel_read(inputs):
+    need(type(inputs) is _FreshIntelInputs, "fresh-input-book")
     outer_raw = inputs.raw("jdk-correspondence.json")
     jdk = inputs.document("jdk-inspection.json")
     outers, observations = [_fresh_jdk(outer_raw, jdk)], [jdk]
@@ -2231,7 +2256,350 @@ def _fresh_intel_data(documents):
         outers.append(_fresh_non_jdk(label, value)); observations.append(value)
     selected = _fresh_selected_bytes(inputs, outers[0])
     commitments = inputs.finish()
-    # No SOURCE sink exists on this route. Even complete private DATA must not
-    # bypass the still-unimplemented Intel role/projection/authority gates.
+    # No SOURCE sink exists on this route. A caller still needs the separately
+    # pinned complete projection, and real runtime custody/role admission.
     return _FreshIntelData(tuple((name, inputs.documents[name]) for name in _FRESH_INTEL_ROLES),
                            commitments, tuple(outers), tuple(observations), selected)
+
+
+_INTEL_INPUT_COMMITMENTS = (('jdk-correspondence.json', 100949, 'fd4287337be6dc07ebb3576e1790a2c708487899637ed945d60d5197e8d30e46'),
+ ('jdk-inspection.json', 1290358, '2c47970095d5ef969fc51bf688fcf2aac30899c68bd1c82d14a621e95debb246'),
+ ('gradle-inspection.json', 1272954, '918398b9ad0e63b1c8fc109a79aeac34c7aca77886de71ddea6296d6952f7c08'),
+ ('sdk-platform-inspection.json', 2231680, '49197e87a4accfa69b28ef4e898b2fcaad61bf576dae182839b8e9fa6701c315'),
+ ('sdk-build-tools-inspection.json', 322435, '0de11cf169df014f73fdde1b78065ae56aefb4cea56e3f2d3aea62eca16d1013'),
+ ('aapt2-inspection.json', 11261, '0b3cba2d81005bbc08fc50eb596aec51027e20b6e1a3ae689be7cecd72881aa8'),
+ ('bundletool-inspection.json', 2958475, '14398d557aef3777fd3f7049e54b8a4542dac1990b8edf3cbae5a14bda670797'),
+ ('jdk-release.bytes', 1637, 'edbe3a2e6b6a3186010a3b75257685d943a8baa013a92174c9a48b8c1a73886b'),
+ ('jdk-jvm-cfg.bytes', 29, 'aa9efb969444c1484e29adecab55a122458090616e766b2f1230ef05bc3867e0'))
+
+
+# Fixed fresh-observation SOURCE proposal only. These commitments do not grant
+# runtime custody or a native phase; the separately reviewed Rust reference does.
+_INTEL_ARCHIVES = {**ARCHIVES, "jdk": (*_FRESH_INTEL_JDK,
+    "https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz",
+    "jdk-17.0.20.1+1")}
+_INTEL_GRADLE_LAUNCHER = ("gradle-8.14.5/bin/gradle.bat", 3018,
+    "d20e9ded0291e1ed6552d1df30022d2e5952ad493f9d3380f6a32b97f0cc80c7", 0o100755)
+_INTEL_KOTLIN_I386 = ("org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86/libjansi.jnilib",
+    14748, "ea7ceaf2b63f95ac34822fed2f4cdfd436599c682e04383fac3736dd4c4a41a6", 0,
+    "7cc4e324aee6f2555b8a2b9c4e3988b5638d14d60e8ccb3e75066479c5ec08ea")
+# Exact containing tuple, unresolved-row count, observed format, class version,
+# required versioned path (None for historical classes), and full canonical row
+# commitment. Original unknown/count/negative fields are NEVER rewritten.
+_INTEL_GRADLE_RESOURCES = {
+    "gradle-8.14.5/lib/jackson-core-2.18.6.jar": (589904,
+        "e7e1bfa50f0a79db37e6aa37db111cf03aebf4a484b359d21127ab43ab2398c6", 2,
+        "ambiguous-native", (65, 0), "META-INF/versions/21/",
+        "1272a46b0599dd250638ee512b011d1dfe8bbfd54dcf4db8385e57af217921a2"),
+    "gradle-8.14.5/lib/plugins/bcprov-jdk18on-1.84.jar": (8919063,
+        "64d6c5a6121fcd927152dd182cbed39afe0fda641a970d9bcc0c9cb1858b2731", 24,
+        "ambiguous-native", (69, 0), "META-INF/versions/25/",
+        "07eae1913819bb60ffc0e17d7c642bd7881e945b6f76c3cb4b519dd7744f33b3"),
+    "gradle-8.14.5/lib/xml-apis-1.4.01.jar": (220536,
+        "a840968176645684bb01aed376e067ab39614885f9eee44abe35a5f20ebe7fad", 346,
+        "ambiguous-native", (45, 3), None,
+        "7287ab3a8414dc3609d88acb090654103001cb5a2f43572e4fe6f361b952dac4"),
+    "gradle-8.14.5/lib/kotlin-compiler-embeddable-2.0.21.jar": (58272093,
+        "9fa8cdd1de0dccffe154c997d423ec6b5f53cd6d9177e3a77a9b0de03fb1bc81", 1,
+        "unsupported-native", None, None,
+        "6db635559b82d6a2630ce9da705852f80bb632b7482ccacd1211aaacf0888497"),
+}
+_INTEL_CURRENT_NATIVE = (
+    ("bundletool/bundletool.jar", "com/sun/jna/darwin/libjnidispatch.jnilib"),
+    ("bundletool/bundletool.jar", "macos/aapt2"),
+    ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/x86_64-macos/libgradle-fileevents.dylib"),
+    ("gradle/lib/jansi-1.18.jar", "META-INF/native/osx/libjansi.jnilib"),
+    ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar",
+     "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/x86_64/libjansi.jnilib"),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform-curses.dylib"),
+    ("gradle/lib/native-platform-osx-amd64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-amd64/libnative-platform.dylib"),
+)
+_INTEL_NONHOST_ARM = (
+    ("gradle/lib/gradle-fileevents-0.2.7.jar", "net/rubygrapefruit/platform/aarch64-macos/libgradle-fileevents.dylib"),
+    ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar",
+     "org/jetbrains/kotlin/org/fusesource/jansi/internal/native/Mac/arm64/libjansi.jnilib"),
+    ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform-curses.dylib"),
+    ("gradle/lib/native-platform-osx-aarch64-0.22-milestone-28.jar", "net/rubygrapefruit/platform/osx-aarch64/libnative-platform.dylib"),
+)
+
+
+def _projection_profile(profile):
+    need(type(profile) is str and profile in ("arm64", "x86_64"), "closed-projection-profile")
+    return ARCHIVES if profile == "arm64" else _INTEL_ARCHIVES
+
+
+def _fresh_gradle_context(container, containing):
+    if type(container) is not _FreshOuter or container.label != "gradle" or type(containing) is not Member:
+        return None
+    pin = _INTEL_GRADLE_RESOURCES.get(containing.name)
+    if pin is None:
+        return None
+    need(container.by_name.get(containing.name) is containing
+         and (containing.kind, containing.hint, containing.mode, containing.size, containing.sha256)
+         == ("file", "zip", 0o100644, pin[0], pin[1]), "fresh-gradle-containing-original")
+    return pin
+
+
+def _fresh_inner_counts(value, files, container, containing):
+    pin = _fresh_gradle_context(container, containing)
+    if pin is None:
+        return _fresh_counts(value["formatCounts"], files)
+    counts = keys(value["formatCounts"], _FRESH_FORMATS, "fresh-format-counts")
+    need(sum(integer(n, 0, files) for n in counts.values()) == files, "fresh-file-format-census")
+    need(all(counts[k] == (pin[2] if k == pin[3] else 0)
+             for k in ("unsupported-native", "ambiguous-native", "unsupported-jmod")),
+         "fresh-gradle-fixed-unresolved-census")
+    return counts
+
+
+def _fresh_unknown_prefix(item):
+    keys(item, ("name", "bytes", "mode", "sha256", "format", "prefixBytes", "prefixSha256",
+                "prefixBase64", "reason"), "fresh-fixed-unknown-shape")
+    _fresh_file(item)
+    prefix = base64_bytes(item["prefixBase64"], item["prefixBytes"], item["prefixSha256"], 4096)
+    need(len(prefix) == min(item["bytes"], 4096), "fresh-fixed-unknown-prefix-extent")
+    if len(prefix) == item["bytes"]:
+        need(item["prefixSha256"] == item["sha256"], "fresh-fixed-unknown-whole-prefix")
+    return prefix
+
+
+def _fresh_class_header(prefix, size, version):
+    """Finite header DATA, not class verification/loading or an MR manifest.
+
+    JVMS25 4.1 admits these versions. Independently rule OUT FAT32 using
+    necessary original-size constraints, never the project's slice-count cap.
+    """
+    need(type(prefix) is bytes and type(size) is int and 11 <= len(prefix) <= min(size, 4096)
+         and type(version) is tuple and all(type(value) is int for value in version)
+         and version in ((45, 3), (65, 0), (69, 0)), "fresh-fixed-class-input")
+    need(prefix[:4] == b"\xca\xfe\xba\xbe"
+         and (int.from_bytes(prefix[6:8], "big"), int.from_bytes(prefix[4:6], "big")) == version,
+         "fresh-fixed-class-version")
+    tags = (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) if version[0] == 45 else (
+        1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 20)
+    need(int.from_bytes(prefix[8:10], "big") > 1 and prefix[10] in tags,
+         "fresh-fixed-class-initial-pool-header")
+    table_end = 8 + 20 * int.from_bytes(prefix[4:8], "big")
+    impossible = table_end > size
+    if not impossible:
+        need(len(prefix) >= 28, "fresh-fixed-class-fat-evidence-missing")
+        offset = int.from_bytes(prefix[16:20], "big")
+        extent = int.from_bytes(prefix[20:24], "big")
+        impossible = offset < table_end or offset + extent > size
+    need(impossible, "fresh-fixed-class-fat-not-excluded")
+
+
+def _fresh_kotlin_i386(item, prefix):
+    name, size, digest, mode, prefix_digest = _INTEL_KOTLIN_I386
+    need((item["name"], item["bytes"], item["sha256"], item["mode"], item["prefixSha256"])
+         == (name, size, digest, mode, prefix_digest)
+         and item["format"] == item["reason"] == "unsupported-native"
+         and len(prefix) == 4096 and prefix[:4] == b"\xce\xfa\xed\xfe"
+         and tuple(int.from_bytes(prefix[n:n + 4], "little") for n in (4, 8, 12)) == (7, 3, 6),
+         "fresh-fixed-kotlin-i386-original")
+
+
+def _fresh_gradle_specials(value, counts, container, containing):
+    pin = _fresh_gradle_context(container, containing)
+    need(pin is not None and (value["name"], value["bytes"], value["sha256"], value["mode"])
+         == (containing.name, pin[0], pin[1], 0o100644)
+         and value["format"] == "zip" and value["zipViewOffset"] == 0,
+         "fresh-fixed-gradle-resource-parent")
+    rows = value["unknownMembers"]
+    need(type(rows) is list and len(rows) == counts[pin[3]] == pin[2]
+         and hashlib.sha256(canonical(rows)).hexdigest() == pin[6], "fresh-fixed-gradle-resource-roster")
+    names, previous = set(), None
+    for item in rows:
+        prefix = _fresh_unknown_prefix(item)
+        name = item["name"]
+        need(name not in names and (previous is None or previous < name)
+             and item["format"] == item["reason"] == pin[3], "fresh-fixed-gradle-resource-order")
+        names.add(name); previous = name
+        if pin[4] is None:
+            _fresh_kotlin_i386(item, prefix)
+        else:
+            need(name.endswith(".class") and (pin[5] is None or name.startswith(pin[5])),
+                 "fresh-fixed-versioned-class-path")
+            _fresh_class_header(prefix, item["bytes"], pin[4])
+    return names
+
+
+def _fresh_gradle_launcher(value, outer):
+    need(type(outer) is _FreshOuter and outer.label == "gradle", "fresh-fixed-launcher-component")
+    unknown = value["unknownMembers"]
+    need(len(unknown) == 1, "fresh-fixed-launcher-roster")
+    item = unknown[0]
+    prefix = _fresh_unknown_prefix(item)
+    member = outer.by_name.get(_INTEL_GRADLE_LAUNCHER[0])
+    need(member is not None and member.kind == "file" and member.hint is None
+         and (member.name, member.size, member.sha256, member.mode) == _INTEL_GRADLE_LAUNCHER
+         and (item["name"], item["bytes"], item["sha256"], item["mode"]) == _INTEL_GRADLE_LAUNCHER
+         and item["format"] == "opaque" and item["reason"] == "executable-opaque"
+         and len(prefix) == member.size, "fresh-fixed-launcher-original")
+    return member.name
+
+
+def _intel_native_rows(value):
+    rows = list(value["nativeMembers"])
+    if "foreignNativeMembers" in value:
+        rows.extend(value["foreignNativeMembers"])
+        if value.get("name") == "gradle-8.14.5/lib/kotlin-compiler-embeddable-2.0.21.jar":
+            rows.extend(value["unknownMembers"])
+    else:
+        # In the legacy outer-only Bundletool schema these are explicit ELF/PE
+        # records, not complete-mode unknown class/native dispositions.
+        rows.extend(value["unknownMembers"])
+    return rows
+
+
+def _intel_native_kind(path, expected):
+    name, _, _, _, kind = expected
+    key = (path, name)
+    if key in _INTEL_CURRENT_NATIVE:
+        need(kind in ("Arm64", "GradleIntelPlatform", "GradlePlainJansiIntel", "BundletoolDarwinI386X64"),
+             "intel-current-native-source-kind")
+        return "CurrentX64"
+    if key in _INTEL_NONHOST_ARM:
+        need(kind == "Arm64", "intel-nonhost-arm-source-kind")
+        return "OtherPlatformArm64"
+    if key == ("gradle/lib/kotlin-compiler-embeddable-2.0.21.jar", _INTEL_KOTLIN_I386[0]):
+        need(kind == "GradleIntelPlatform", "intel-i386-source-kind")
+        return "OtherPlatformI386"
+    need(kind in ("OtherPlatformElf", "OtherPlatformPe"), "intel-native-unassigned-role")
+    return kind
+
+
+def _intel_finite_native(path, archive, rows):
+    pin = NATIVE_PINS.get(path)
+    ordered = sorted(rows, key=lambda row: row["name"].lower())
+    if pin is None:
+        need(not ordered, "unlisted-native-resource")
+        return ()
+    need(archive == pin[:2] and len(ordered) == len(pin[2]), "native-archive-pin")
+    result = []
+    for row, expected in zip(ordered, pin[2]):
+        need((row["name"], row["bytes"], row["sha256"], row["mode"]) == expected[:4], "native-resource-pin")
+        kind, snapshot = _intel_native_kind(path, expected), None
+        if kind in ("CurrentX64", "OtherPlatformArm64"):
+            prefix, commands = _fresh_native(row)
+            if kind == "CurrentX64":
+                need(commands is not None, "intel-current-native-snapshot")
+                snapshot = (prefix, commands, 0x01000007)
+            else:
+                need(commands is None and prefix[:4] == b"\xcf\xfa\xed\xfe"
+                     and int.from_bytes(prefix[4:8], "little") == ARM64, "intel-finite-nonhost-arm")
+        elif kind == "OtherPlatformI386":
+            _fresh_kotlin_i386(row, _fresh_unknown_prefix(row))
+        else:
+            actual = _fresh_foreign(row, None, complete=row["format"] in ("ELF", "PE"))
+            need(actual == ("ELF" if kind == "OtherPlatformElf" else "PE"), "intel-finite-foreign-format")
+        result.append((row, kind, snapshot))
+    return tuple(result)
+
+
+def _intel_jdk_members(value):
+    result = []
+    for row in sorted(value["nativeMembers"], key=lambda row: row["name"].lower()):
+        prefix, commands = _fresh_native(row, counterpart=value["format"] == "jmod")
+        need(commands is not None, "intel-jdk-selected-native")
+        counterpart = row.get("counterpart")
+        need(counterpart is not None, "intel-jdk-native-requires-counterpart-claim")
+        kind = "JdkInstalledCounterpart" if counterpart["matched"] else "JdkJpackageTemplate"
+        # _fresh_jdk_counterparts already joined all full originals, prefixes,
+        # commands and the one exact no-counterpart jpackage template.
+        result.append((row, kind, (prefix, commands, 0x01000007)))
+    return tuple(result)
+
+
+def _classify_intel(member, label, path, proofs):
+    key = (label, member.name)
+    if member.name.endswith((".jar", ".jmod")):
+        value = proofs.jvms.get(key)
+        need(value is not None, "jvm-complete-observation-missing")
+        native = (_intel_jdk_members(value) if label == "jdk" else
+                  _intel_finite_native(path, (member.size, member.sha256), _intel_native_rows(value)))
+        return 0o444, ("JvmArchive", native)
+    if label == "sdk-build-tools" and member.name in SDK_PINS:
+        kind, expected_path, size, digest, mode = SDK_PINS[member.name]
+        need((path, member.size, member.sha256, member.mode) == (expected_path, size, digest, 0o100000 | mode), "sdk-special-pin")
+        if kind in ("D8", "Apksigner", "LldShell"):
+            need(member.hint == "shell", "sdk-script-prefix")
+            return mode & ~0o222, ("SdkBash", kind)
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] == 0x01000007, "sdk-legacy-intel-snapshot")
+        return mode & ~0o222, ("SdkLegacyIntel", kind, snapshot)
+    if member.hint == "elf":
+        pin = ELF_PINS.get(member.name) if label == "sdk-build-tools" else None
+        need(pin is not None and (path, member.size, member.sha256, member.mode)
+             == (pin[0], pin[1], pin[2], 0o100000 | pin[3]), "unlisted-target-elf")
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] is None and snapshot[0].startswith(pin[4]), "target-elf-header-pin")
+        return 0o444, ("AndroidTargetElf",)
+    if member.hint in ("macho", "fat-macho-or-java-class"):
+        snapshot = proofs.direct.get(key)
+        need(snapshot is not None and snapshot[2] == 0x01000007 and label in ("jdk", "sdk-build-tools"),
+             "intel-direct-native-snapshot")
+        mode = (member.mode & 0o777) & ~0o222
+        need(mode in (0o444, 0o555), "direct-installed-mode")
+        return mode, ("MachO", snapshot)
+    # The remaining fixed script/foreign launcher/license/data rules are
+    # architecture-independent and unchanged. No JVM/native case falls here.
+    return classify(member, label, path, proofs)
+
+
+class _IntelProofs:
+    """Direct typed adapter over authentic fresh DATA, not a legacy report."""
+    def __init__(self, data):
+        need(type(data) is _FreshIntelData and data.commitments == _INTEL_INPUT_COMMITMENTS,
+             "intel-projection-fresh-originals")
+        self.direct, self.jvms, self.negatives = {}, {}, {}
+        self.selected = dict(data.selected_bytes)
+        self.bundle = data.observations[LABELS.index("bundletool")]
+        for label, value in zip(LABELS, data.observations):
+            for row in value["nativeMembers"]:
+                prefix, commands = _fresh_native(row)
+                need(commands is not None, "intel-direct-selected-snapshot")
+                self.direct[(label, row["name"])] = (prefix, commands, 0x01000007)
+            if label == "sdk-build-tools":
+                for row in value["foreignNativeMembers"]:
+                    kind = _fresh_foreign(row, None, complete=True)
+                    need(kind == "ELF", "intel-sdk-foreign-kind")
+                    self.direct[(label, row["name"])] = (
+                        base64_bytes(row["prefixBase64"], row["prefixBytes"], row["prefixSha256"], 4096), b"", None)
+            if label not in LABELS[:4]:
+                continue
+            for row in value["jvmMembers"] if label == "jdk" else value["innerArchives"]:
+                key = (label, row["name"])
+                need(key not in self.jvms and key not in self.negatives, "intel-duplicate-jvm-proof")
+                if row["name"].endswith((".jar", ".jmod")):
+                    self.jvms[key] = row
+                else:
+                    need(not row["nativeMembers"] and not row["unknownMembers"] and not row["nestedArchives"]
+                         and all(n == 0 for kind, n in row["formatCounts"].items()
+                                 if kind not in ("java-class-header", "opaque")), "intel-non-jvm-interior")
+                    # Retain the original, fully admitted record. No invented
+                    # negativeEvidence field or rewritten enum/counts.
+                    self.negatives[key] = row
+        for label, expected in SDK_NEGATIVE.items():
+            need({name for group, name in self.jvms.keys() | self.negatives.keys() if group == label}
+                 == expected, "intel-sdk-inner-inverse")
+
+    def release(self):
+        # Reuse the exact existing release grammar on the actual selected bytes.
+        # The path is the same; neither the old ARM size/hash nor a JSON wrapper
+        # substitutes for the independently admitted Intel release original.
+        return Proofs.release(self)
+
+
+def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
+    """Propose Intel SOURCE from the exact fresh nine; no runtime authority."""
+    inputs = _FreshIntelInputs(documents)
+    need(inputs.commitments == _INTEL_INPUT_COMMITMENTS, "intel-emission-input-commitments")
+    data = _fresh_intel_read(inputs)
+    proofs = _IntelProofs(data)
+    projection = Projection(dict(zip(LABELS, data.outers)), proofs, profile="x86_64")
+    summary = projection.summary()
+    summary["profile"] = "android-registered-macos-x86_64-v1"
+    summary["inputs"] = [{"path": name, "bytes": size, "sha256": digest} for name, size, digest in data.commitments]
+    summary["output"] = render(projection, sink, profile="x86_64")
+    return summary
