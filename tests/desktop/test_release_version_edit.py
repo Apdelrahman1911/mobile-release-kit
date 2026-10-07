@@ -401,6 +401,17 @@ class VersionOriginalCustodyTests(unittest.TestCase):
             self.assertEqual(targets.dependency_only_parents, {"release": owner.parents["release"]})
             self.assertEqual(revision.missing_version_directories, ("public",))
             self.assertEqual(targets.observation_paths, (*text.DEPENDENCY_PATHS, original.path))
+            context = targets.journal_context()
+            self.assertEqual(context, {"policy": "saved-text-recovery-v1",
+                "config": {"byteLength": len(dependencies[0].data), "sha256": hashlib.sha256(dependencies[0].data).hexdigest()},
+                "ignore": {"byteLength": len(dependencies[1].data), "sha256": hashlib.sha256(dependencies[1].data).hexdigest()},
+                "selection": {"source": "public/version.properties", "nameKey": "VERSION_NAME",
+                              "buildKey": "BUILD_NUMBER", "iosEnabled": True}})
+            context["selection"]["source"] = "elsewhere/version.properties"
+            context["ignore"]["byteLength"] = 0
+            self.assertEqual(targets.journal_context()["selection"]["source"], original.path)
+            self.assertEqual(targets.journal_context()["ignore"], {"byteLength": len(dependencies[1].data),
+                             "sha256": hashlib.sha256(dependencies[1].data).hexdigest()})
             for authority in (targets, revision):
                 with self.assertRaises(TypeError):
                     copy.copy(authority)

@@ -76,7 +76,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages }
 
 #[derive(Clone, Serialize)]
@@ -113,8 +113,8 @@ impl EditProjection {
         match self.domain {
             EditDomain::Configuration => self.checkout.as_ref().map(|c| c.revision.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.revision(),
-            EditDomain::MetadataText => self.metadata_text.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
-            EditDomain::ReleaseVersion => self.release_version.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
+            EditDomain::MetadataText => self.metadata_text.as_ref()?.revision(),
+            EditDomain::ReleaseVersion => self.release_version.as_ref()?.revision(),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.checkout.as_ref().map(|c| c.revision.as_str()),
         }
     }
@@ -122,8 +122,8 @@ impl EditProjection {
         match self.domain {
             EditDomain::Configuration => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.plan_token(),
-            EditDomain::MetadataText => self.metadata_text.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
-            EditDomain::ReleaseVersion => self.release_version.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
+            EditDomain::MetadataText => self.metadata_text.as_ref()?.plan_token(),
+            EditDomain::ReleaseVersion => self.release_version.as_ref()?.plan_token(),
             EditDomain::MetadataImages => self.metadata_images.as_ref()?.prepared.as_ref().map(|p| p.plan_token.as_str()),
         }
     }
@@ -143,10 +143,13 @@ impl EditProjection {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
+        if detail.recovery.is_some() && (detail.checkout.is_some() || detail.prepared.is_some() || detail.submission.is_some()) { return Err(BridgeError::protocol()); }
+        if detail.recovery.is_some() && (detail.platform.is_some() || detail.locale.is_some())
+            || detail.recovery.is_none() && !detail.normal_context().is_some_and(|context| context.valid()) { return Err(BridgeError::protocol()); }
         Ok(Projection { domain: DOMAIN, platform: detail.platform, locale: detail.locale.clone(),
             project_id: self.project_id.clone(), session_id: self.session_id.clone(), owner_generation: self.owner_generation.clone(),
             phase: self.phase, review_remaining_ms: self.review_remaining_ms, checkout: detail.checkout.clone(),
-            prepared: detail.prepared.clone(), apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(),
+            prepared: detail.prepared.clone(), recovery: detail.recovery.clone(), apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(),
             native_reason: self.native_reason, native_finality: self.native_finality, late_settled: self.late_settled })
     }
     pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
@@ -154,9 +157,10 @@ impl EditProjection {
         if self.domain != EditDomain::ReleaseVersion || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
+        if detail.recovery.is_some() && (detail.checkout.is_some() || detail.prepared.is_some() || detail.submission.is_some()) { return Err(BridgeError::protocol()); }
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
-            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), apply_submitted: self.apply_submitted,
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), recovery: detail.recovery.clone(), apply_submitted: self.apply_submitted,
             core_outcome: self.core_outcome.clone(), native_reason: self.native_reason, native_finality: self.native_finality,
             late_settled: self.late_settled })
     }
@@ -294,9 +298,13 @@ pub enum ChildFrame {
     WorkflowTerminal(u32, crate::github_workflow_edit_protocol::TerminalReply),
     WorkflowRecoveryOpened(crate::github_workflow_edit_protocol::RecoveryOpened),
     WorkflowRecoveryPrepared(crate::github_workflow_edit_protocol::RecoveryPreparedReply),
+    MetadataTextRecoveryOpened(crate::saved_text_recovery_protocol::Opened),
+    MetadataTextRecoveryPrepared(crate::saved_text_recovery_protocol::PreparedReply),
     MetadataTextOpened(crate::metadata_text_edit_protocol::Opened),
     MetadataTextPrepared(crate::metadata_text_edit_protocol::PreparedReply),
     MetadataTextTerminal(u32, crate::metadata_text_edit_protocol::TerminalReply),
+    ReleaseVersionRecoveryOpened(crate::saved_text_recovery_protocol::Opened),
+    ReleaseVersionRecoveryPrepared(crate::saved_text_recovery_protocol::PreparedReply),
     ReleaseVersionOpened(crate::release_version_edit_protocol::Opened),
     ReleaseVersionPrepared(crate::release_version_edit_protocol::PreparedReply),
     ReleaseVersionTerminal(u32, crate::release_version_edit_protocol::TerminalReply),
@@ -310,8 +318,8 @@ impl ChildFrame {
             Self::Opened(_) | Self::Prepared(_) | Self::Terminal(..) => EditDomain::Configuration,
             Self::WorkflowOpened(_) | Self::WorkflowPrepared(_) | Self::WorkflowTerminal(..)
                 | Self::WorkflowRecoveryOpened(_) | Self::WorkflowRecoveryPrepared(_) => EditDomain::GitHubWorkflows,
-            Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) => EditDomain::MetadataText,
-            Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) => EditDomain::ReleaseVersion,
+            Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) | Self::MetadataTextRecoveryOpened(_) | Self::MetadataTextRecoveryPrepared(_) => EditDomain::MetadataText,
+            Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) | Self::ReleaseVersionRecoveryOpened(_) | Self::ReleaseVersionRecoveryPrepared(_) => EditDomain::ReleaseVersion,
             Self::MetadataImagesOpened(_) | Self::MetadataImagesPrepared(_) | Self::MetadataImagesTerminal(..) => EditDomain::MetadataImages,
         }
     }

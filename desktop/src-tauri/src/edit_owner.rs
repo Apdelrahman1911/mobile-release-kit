@@ -3,7 +3,7 @@
 //! Installed Configuration, workflow, metadata and saved-version edits on Linux/macOS
 //! have separate fixed profiles inside this SAME original owner and custody/settlement route.
 //! General edit qualification stays closed; no Windows edit backend is admitted.
-use std::{collections::BTreeSet, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
+use std::{collections::{BTreeMap, BTreeSet}, future::{Future, pending}, path::PathBuf, pin::Pin, process::ExitStatus,
     sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use serde_json::{json, Value};
 use tokio::{io::{AsyncRead, AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStderr, ChildStdin, ChildStdout},
@@ -23,6 +23,7 @@ use crate::{edit_protocol::{self as wire, Capability, Checkout, ChildFrame, Conf
     metadata_text_edit_protocol::{self as metadata_wire, MetadataTextEditStatus, PrepareMetadataTextEdit},
     release_version_edit_protocol::{self as version_wire, ReleaseVersionEditStatus, PrepareReleaseVersionEdit},
     metadata_images_edit_protocol::{self as images_wire, MetadataImagesEditStatus, PrepareMetadataImagesEdit},
+    saved_text_recovery_protocol as saved_recovery,
     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}};
 
 const NATIVE_EDIT_QUALIFIED: bool = false;
@@ -421,6 +422,30 @@ fn image_recovery_complete(projection: &EditProjection) -> bool {
         && detail.prepared.as_ref().and_then(|prepared| images_wire::expected_success(&prepared.view))
             .is_some_and(|(effect, journal)| core.effect == effect && core.journal == journal)
 }
+fn saved_text_recovery(projection: &EditProjection) -> Option<&saved_recovery::Details> {
+    match projection.domain {
+        EditDomain::MetadataText => projection.metadata_text.as_ref()?.recovery.as_ref(),
+        EditDomain::ReleaseVersion => projection.release_version.as_ref()?.recovery.as_ref(),
+        _ => None,
+    }
+}
+fn saved_text_recovery_mut(projection: &mut EditProjection) -> Option<&mut saved_recovery::Details> {
+    match projection.domain {
+        EditDomain::MetadataText => projection.metadata_text.as_mut()?.recovery.as_mut(),
+        EditDomain::ReleaseVersion => projection.release_version.as_mut()?.recovery.as_mut(),
+        _ => None,
+    }
+}
+fn saved_text_recovery_complete(projection: &EditProjection) -> bool {
+    if !projection.apply_submitted || projection.phase != Phase::Final || projection.native_reason != Reason::None
+        || projection.native_finality != NativeFinality::Settled || projection.late_settled { return false; }
+    let Some(recovery) = saved_text_recovery(projection) else { return false; };
+    let Some(core) = &projection.core_outcome else { return false; };
+    core.reason == CoreReason::None && core.resources == ResourceState::Settled && core.journal == Journal::Clean
+        && recovery.terminal_admissible(true, core) && recovery.prepared.as_ref()
+            .filter(|prepared| prepared.view.valid(projection.domain))
+            .and_then(|prepared| prepared.view.expected_success()).is_some_and(|effect| effect == core.effect)
+}
 fn image_open_admission_error(recovery: bool, claimed: bool, error: BridgeError) -> BridgeError {
     if recovery && !claimed { crate::metadata_images_commands::recovery_not_admitted(error) } else { error }
 }
@@ -455,7 +480,7 @@ impl DomainStatus {
         match self { Self::MetadataImages(status) => Ok(status), _ => Err(BridgeError::protocol()) }
     }
 }
-enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission), WorkflowRecovery }
+enum SavedTextSubmission { MetadataText(metadata_wire::Submission), ReleaseVersion(version_wire::Submission), MetadataImages(images_wire::Submission), WorkflowRecovery, SavedTextRecovery }
 enum ImageOpen { Import(images_wire::ImportData), Recover }
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RegisteredEditRoot {
@@ -464,7 +489,7 @@ pub(crate) struct RegisteredEditRoot {
 // Keep existing workflow callers/fixtures bound to their original API. The
 // shared root proof is not a domain permit; admission and tickets remain tagged.
 pub(crate) type WorkflowRegistration = RegisteredEditRoot;
-pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool }
+pub(crate) struct RegisteredOpenTicket { owner: Arc<Inner>, domain: EditDomain, id: String, executor: tokio::runtime::Handle, workflow_recovery: bool, saved_text_recovery: bool }
 pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
 
 // Only the ignored headless workflow fixture can construct this private value,
@@ -728,15 +753,44 @@ mod saved_registration_stamp_tests {
     }
 }
 
+// The existing shared block remains the compatibility surface. Attribution is
+// bounded to its 64 projects and the same five domains; absence is NOT proof
+// that a shared/unexplained block belongs to the latest successful recovery.
+#[derive(Default)]
+struct BlockReasons { domains: BTreeSet<EditDomain>, eligible: BTreeSet<EditDomain>, unattributed: bool }
+#[derive(Default)]
+struct DomainBlocks(BTreeMap<String, BlockReasons>);
+impl DomainBlocks {
+    fn record(&mut self, project: &str, domain: EditDomain, shared_present: bool, settled: bool) -> bool {
+        if self.0.len() >= 64 && !self.0.contains_key(project) { return false; }
+        let reasons = self.0.entry(project.into()).or_insert_with(|| BlockReasons { unattributed: shared_present, ..BlockReasons::default() });
+        let first = reasons.domains.insert(domain);
+        if settled && (first || reasons.eligible.contains(&domain)) { reasons.eligible.insert(domain); }
+        else { reasons.eligible.remove(&domain); }
+        true
+    }
+    fn may_recover(&self, project: &str, domain: EditDomain) -> bool {
+        self.0.get(project).is_some_and(|reason| !reason.unattributed && reason.domains.len() == 1
+            && reason.domains.contains(&domain) && reason.eligible.contains(&domain))
+    }
+    fn clear_domain(&mut self, project: &str, domain: EditDomain) -> bool {
+        let Some(reason) = self.0.get_mut(project) else { return false; };
+        if !reason.domains.remove(&domain) { return false; }
+        reason.eligible.remove(&domain);
+        let clear = reason.domains.is_empty() && !reason.unattributed;
+        if clear { self.0.remove(project); }
+        clear
+    }
+}
 struct Registry {
     generation: String, loss_generation: String, window: Option<String>, document_bound: bool, document_lost: bool,
     revision: u32, exhausted: bool, stopping: bool, disabled: bool,
     active: Option<ActiveOwner>, last: Option<EditProjection>, blocked_projects: BTreeSet<String>, image_recovery_projects: BTreeSet<String>,
-    workflow_recovery_projects: BTreeSet<String>,
+    workflow_recovery_projects: BTreeSet<String>, domain_blocks: DomainBlocks,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     installed_final: Option<InstalledEditFinality>,
 }
 struct ActiveOwner {
@@ -754,7 +808,7 @@ impl<T> Default for Pipe<T> { fn default() -> Self { Self { io: None, close: Rec
 struct Startup { attempted: bool, returned: bool, failed: bool, child: Option<Child> }
 impl Default for Startup { fn default() -> Self { Self { attempted: false, returned: false, failed: false, child: None } } }
 struct Session {
-    domain: EditDomain, registration: Option<WorkflowRegistration>,
+    domain: EditDomain, registration: Option<WorkflowRegistration>, saved_text_recovery: bool,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     native_failure: Mutex<Option<(Reason, Instant)>>,
     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -779,7 +833,7 @@ struct Session {
     fixture_schedule: Arc<hosted_tests::Schedule>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_macos_pending: Mutex<installed_macos_observation::PendingReview>,
     resource_unknown: AtomicBool, startup: Mutex<Startup>, resources: AsyncMutex<Resources>,
     input: Arc<AsyncMutex<Pipe<ChildStdin>>>, output: Arc<AsyncMutex<Pipe<ChildStdout>>>,
@@ -846,10 +900,10 @@ struct ReadEnd { frames: usize, bytes: usize, eof: bool, closed: bool, failed: b
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledConfigFinality {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation"))]
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation"))]
     original: std::sync::Weak<Session>,
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
     pub(crate) writer_frames: usize, pub(crate) stdout_frames: usize,
@@ -860,7 +914,7 @@ pub(crate) struct InstalledConfigFinality {
 }
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledWorkflowFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -871,7 +925,7 @@ pub(crate) struct InstalledWorkflowFinality {
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledMetadataFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -882,7 +936,7 @@ pub(crate) struct InstalledMetadataFinality {
     pub(crate) runtime_ledger_settled: bool, pub(crate) runtime_settlement_joined: bool,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 #[derive(Clone)]
 pub(crate) struct InstalledVersionFinality {
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) owner_generation: String,
@@ -906,14 +960,14 @@ pub(crate) struct InstalledImagesFinality {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 enum InstalledEditFinality {
     Configuration(InstalledConfigFinality),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     GitHubWorkflows(InstalledWorkflowFinality),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     MetadataText(InstalledMetadataFinality),
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
     ReleaseVersion(InstalledVersionFinality),
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     MetadataImages(InstalledImagesFinality),
@@ -921,7 +975,7 @@ enum InstalledEditFinality {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"),
     any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-        all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
 impl InstalledEditFinality {
     fn bind_original(mut self, projection: &EditProjection) -> Option<Self> {
         if projection.phase != Phase::Final || projection.native_finality != NativeFinality::Settled || projection.late_settled { return None; }
@@ -930,17 +984,17 @@ impl InstalledEditFinality {
                 if projection.domain != EditDomain::Configuration || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::GitHubWorkflows(facts) => {
                 if projection.domain != EditDomain::GitHubWorkflows || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::MetadataText(facts) => {
                 if projection.domain != EditDomain::MetadataText || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
             },
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             Self::ReleaseVersion(facts) => {
                 if projection.domain != EditDomain::ReleaseVersion || projection.session_id != facts.session_id { return None; }
                 facts.project_id = projection.project_id.clone(); facts.owner_generation = projection.owner_generation.clone();
@@ -957,7 +1011,7 @@ impl InstalledEditFinality {
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod installed_macos_observation {
     use super::*;
     pub(crate) struct DocumentWitness { original: std::sync::Weak<Inner>, generation: String, tombstone: String }
@@ -1138,7 +1192,7 @@ mod installed_macos_observation {
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installed_macos_observation::{DocumentWitness as InstalledMacDocumentWitness, ReviewWitness as InstalledMacReviewWitness};
 
 // Decision DATA from actual original slots/joins, never a replacement receipt.
@@ -1321,7 +1375,7 @@ impl Inner {
         let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) else { return; };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         installed_macos_observation::retire(&a.session);
         let earlier = a.cleanup_start.is_none_or(|first| at < first);
         if earlier { a.cleanup_start = Some(at); }
@@ -1354,7 +1408,7 @@ impl Inner {
         if let Some(a) = r.active.as_mut().filter(|a| a.session.id == id) {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&a.session);
             a.unknown = true;
             a.projection.phase = Phase::Unknown;
@@ -1467,11 +1521,11 @@ impl EditOwner {
             #[cfg(all(test, feature = "development-runtime", any(target_os = "linux", target_os = "macos")))]
             fixture_next_schedule: Mutex::new(None),
             registry: Mutex::new(Registry { generation, loss_generation, window: None, document_bound: false, document_lost: false,
-                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(), workflow_recovery_projects: BTreeSet::new(),
+                revision: 0, exhausted: false, stopping: false, disabled, active: None, last: None, blocked_projects: BTreeSet::new(), image_recovery_projects: BTreeSet::new(), workflow_recovery_projects: BTreeSet::new(), domain_blocks: DomainBlocks::default(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
                     not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
                 installed_final: None,
             }) }) }
     }
@@ -1497,13 +1551,13 @@ impl EditOwner {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_observation_final(&self, session_id: &str) -> Option<InstalledConfigFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
         let facts = match r.installed_final.as_ref()? {
             InstalledEditFinality::Configuration(facts) => facts,
-            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+            #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
             InstalledEditFinality::GitHubWorkflows(_) | InstalledEditFinality::MetadataText(_) | InstalledEditFinality::ReleaseVersion(_) => return None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             InstalledEditFinality::MetadataImages(_) => return None,
@@ -1514,7 +1568,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_workflow_observation_final(&self, session_id: &str) -> Option<InstalledWorkflowFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1525,7 +1579,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_metadata_observation_final(&self, session_id: &str) -> Option<InstalledMetadataFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1536,7 +1590,7 @@ impl EditOwner {
             .then(|| facts.clone())
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
-        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+        not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_version_observation_final(&self, session_id: &str) -> Option<InstalledVersionFinality> {
         let r = self.inner.lock();
         let last = r.last.as_ref()?;
@@ -1580,7 +1634,7 @@ impl EditOwner {
         if !permit.gate_evidence() { return Err(crate::offline_preflight_owner::unavailable()); }
         let mut r = self.inner.lock();
         if r.active.is_some() || r.disabled || r.exhausted || r.stopping
-            || r.blocked_projects.iter().any(|project| project != id) {
+            || r.blocked_projects.iter().any(|project| project != id) || r.domain_blocks.0.contains_key(id) {
             return Err(crate::offline_preflight_owner::unavailable());
         }
         let changed = if present { r.blocked_projects.insert(id.into()) } else { r.blocked_projects.remove(id) };
@@ -1669,6 +1723,12 @@ impl EditOwner {
     pub(crate) fn release_version_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::ReleaseVersion)
     }
+    pub(crate) fn metadata_text_recovery_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
+        let mut ticket = self.metadata_text_open_ticket(window)?; ticket.saved_text_recovery = true; Ok(ticket)
+    }
+    pub(crate) fn release_version_recovery_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
+        let mut ticket = self.release_version_open_ticket(window)?; ticket.saved_text_recovery = true; Ok(ticket)
+    }
     pub(crate) fn metadata_images_open_ticket(&self, window: &str) -> Result<RegisteredOpenTicket, BridgeError> {
         self.registered_open_ticket(window, EditDomain::MetadataImages)
     }
@@ -1678,7 +1738,7 @@ impl EditOwner {
         // Entropy is obtained before the real document/selection mutex. This
         // private ticket performs no observation, registration, claim or spawn.
         let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false })
+        Ok(RegisteredOpenTicket { owner: self.inner.clone(), domain, id: nonce()?, executor, workflow_recovery: false, saved_text_recovery: false })
     }
     pub(crate) fn open_workflow(&self, window: &str, project_id: String, registration: WorkflowRegistration,
         ticket: WorkflowOpenTicket) -> Result<WorkflowEditStatus, BridgeError> {
@@ -1711,6 +1771,36 @@ impl EditOwner {
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ReleaseVersionEditStatus, BridgeError> {
         let root = registration.root.path.clone();
         self.open_domain(Some(publisher), window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
+    }
+    pub(crate) fn open_metadata_text_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        project_id: String, registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<MetadataTextEditStatus, BridgeError> {
+        if !ticket.saved_text_recovery || ticket.domain != EditDomain::MetadataText { return Err(invalid_owner()); }
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::MetadataText, Some(registration), Some(ticket), None, None)?.metadata_text()
+    }
+    pub(crate) fn prepare_metadata_text_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        args: saved_recovery::Prepare, registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::MetadataText, &args.session_id, &args.revision,
+            (0, 0), json!({"revision":&args.revision,"intent":"recover"}), Some(registration), Some(SavedTextSubmission::SavedTextRecovery))?.metadata_text()
+    }
+    pub(crate) fn apply_metadata_text_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        session_id: &str, plan_token: &str, registration: RegisteredEditRoot) -> Result<MetadataTextEditStatus, BridgeError> {
+        self.apply_domain_intent(Some(publisher), window, EditDomain::MetadataText, session_id, plan_token, Some(registration), true)?.metadata_text()
+    }
+    pub(crate) fn open_release_version_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        project_id: String, registration: RegisteredEditRoot, ticket: RegisteredOpenTicket) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        if !ticket.saved_text_recovery || ticket.domain != EditDomain::ReleaseVersion { return Err(invalid_owner()); }
+        let root = registration.root.path.clone();
+        self.open_domain(Some(publisher), window, project_id, root, EditDomain::ReleaseVersion, Some(registration), Some(ticket), None, None)?.release_version()
+    }
+    pub(crate) fn prepare_release_version_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        args: saved_recovery::Prepare, registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        self.prepare_domain(Some(publisher), window, EditDomain::ReleaseVersion, &args.session_id, &args.revision,
+            (0, 0), json!({"revision":&args.revision,"intent":"recover"}), Some(registration), Some(SavedTextSubmission::SavedTextRecovery))?.release_version()
+    }
+    pub(crate) fn apply_release_version_recovery_published(&self, publisher: &RegistrationPublisher, window: &str,
+        session_id: &str, plan_token: &str, registration: RegisteredEditRoot) -> Result<ReleaseVersionEditStatus, BridgeError> {
+        self.apply_domain_intent(Some(publisher), window, EditDomain::ReleaseVersion, session_id, plan_token, Some(registration), true)?.release_version()
     }
     pub(crate) fn open_metadata_images(&self, window: &str, project_id: String, data: images_wire::ImportData,
         registration: RegisteredEditRoot, ticket: RegisteredOpenTicket, claimed: &mut bool) -> Result<MetadataImagesEditStatus, BridgeError> {
@@ -1768,18 +1858,23 @@ impl EditOwner {
             if !permit.root(&self.inner, &root) { return Err(invalid_owner()); }
             Some(permit) // This same original permit must still be installed at spawn.
         } else { None };
+        #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        if ticket.as_ref().is_some_and(|ticket| ticket.saved_text_recovery) { return Err(invalid_owner()); }
         if project_id.is_empty() || project_id.len() > 128 { return Err(BridgeError::invalid()); }
         let root = root.to_str().filter(|s| s.len() <= 4096).ok_or_else(BridgeError::invalid)?;
-        let (id, executor, workflow_recovery) = match (domain, ticket) {
+        let (id, executor, workflow_recovery, saved_text_recovery) = match (domain, ticket) {
             (EditDomain::Configuration, None) => {
                 let executor = tokio::runtime::Handle::try_current().map_err(|_| BridgeError::unavailable("The native edit executor is unavailable."))?;
-                (nonce()?, executor, false)
+                (nonce()?, executor, false, false)
             },
             (EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion | EditDomain::MetadataImages, Some(ticket))
                 if ticket.domain == domain && Arc::ptr_eq(&self.inner, &ticket.owner)
-                    && (!ticket.workflow_recovery || domain == EditDomain::GitHubWorkflows) => (ticket.id, ticket.executor, ticket.workflow_recovery),
+                    && (!ticket.workflow_recovery || domain == EditDomain::GitHubWorkflows)
+                    && (!ticket.saved_text_recovery || matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion))
+                    => (ticket.id, ticket.executor, ticket.workflow_recovery, ticket.saved_text_recovery),
             _ => return Err(invalid_owner()),
         };
+        if saved_text_recovery && metadata.is_some() { return Err(invalid_owner()); }
         let image_details = match images.as_ref() {
             Some(ImageOpen::Import(data)) => Some(data.details()), Some(ImageOpen::Recover) => Some(images_wire::Details::recovery()), None => None,
         };
@@ -1787,7 +1882,9 @@ impl EditOwner {
         let mut params = match (domain, registration.as_ref(), metadata.as_ref(), images) {
             (EditDomain::Configuration, None, None, None) => json!({"root": root}),
             (EditDomain::GitHubWorkflows | EditDomain::ReleaseVersion, Some(binding), None, None) => json!({"root":root,"registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
-            (EditDomain::MetadataText, Some(binding), Some(context), None) if context.valid() => json!({"root":root,
+            (EditDomain::MetadataText, Some(binding), None, None) if saved_text_recovery => json!({"root":root,
+                "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity()}),
+            (EditDomain::MetadataText, Some(binding), Some(context), None) if context.valid() && !saved_text_recovery => json!({"root":root,
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"platform":context.platform,"locale":context.locale}),
             (EditDomain::MetadataImages, Some(binding), None, Some(ImageOpen::Import(data))) =>
                 images_wire::import_params(root, binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(), data)?,
@@ -1795,13 +1892,13 @@ impl EditOwner {
                 "registeredIdentity":binding.root.identity.posix().map_err(|_| invalid_owner())?.workflow_identity(),"intent":"recover"}),
             _ => return Err(invalid_owner()),
         };
-        if workflow_recovery { params["intent"] = json!("recover"); }
+        if workflow_recovery || saved_text_recovery { params["intent"] = json!("recover"); }
         let bytes = request_bytes(domain, &id, 0, "open", params)?;
         let (commands, receiver) = mpsc::channel(1);
         let (stop, _) = watch::channel(false);
         let (pipes, _) = watch::channel(PipeAcquisition::Pending);
         let (frames, frame_rx) = mpsc::channel(3);
-        let session = Arc::new(Session { domain, registration, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+        let session = Arc::new(Session { domain, registration, saved_text_recovery, id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_failure: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -1824,7 +1921,7 @@ impl EditOwner {
             fixture_schedule: self.inner.fixture_next_schedule.lock().map_err(|_| edit_unknown())?.take().unwrap_or_default(),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_pending: Mutex::new(installed_macos_observation::PendingReview::default()),
             startup: Mutex::new(Startup::default()), resources: AsyncMutex::new(Resources { frames: Some(frame_rx),
                 // Pure allocation BEFORE this Session is admitted or any
@@ -1840,8 +1937,10 @@ impl EditOwner {
             self.inner.admission(&r, window, domain)?;
             if r.active.is_some() { return Err(BridgeError::new("busy", "One original edit owner is already active.")); }
             if r.blocked_projects.contains(&project_id)
-                && !(domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)
-                    || domain == EditDomain::GitHubWorkflows && workflow_recovery && r.workflow_recovery_projects.contains(&project_id)) {
+                && !(r.domain_blocks.may_recover(&project_id, domain)
+                    && (domain == EditDomain::MetadataImages && image_recovery && r.image_recovery_projects.contains(&project_id)
+                        || domain == EditDomain::GitHubWorkflows && workflow_recovery && r.workflow_recovery_projects.contains(&project_id)
+                        || saved_text_recovery && matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion))) {
                 return Err(BridgeError::new("pending_state", "This project requires its separately authorized recovery; an import cannot retry it."));
             }
             let now = Instant::now();
@@ -1853,8 +1952,9 @@ impl EditOwner {
                 prepare_counters: None, claimed_seq: 0, opened: false, prepared: false, terminal: false, unknown: false,
                 projection: EditProjection { domain, workflow: (domain == EditDomain::GitHubWorkflows).then(||
                     if workflow_recovery { workflow_wire::Details::recovery() } else { workflow_wire::Details::default() }),
-                    metadata_text: metadata.map(metadata_wire::Details::new),
-                    release_version: (domain == EditDomain::ReleaseVersion).then(version_wire::Details::default),
+                    metadata_text: if domain == EditDomain::MetadataText && saved_text_recovery { Some(metadata_wire::Details::recovery()) }
+                        else { metadata.map(metadata_wire::Details::new) },
+                    release_version: (domain == EditDomain::ReleaseVersion).then(|| if saved_text_recovery { version_wire::Details::recovery() } else { version_wire::Details::default() }),
                     metadata_images: image_details,
                     project_id, session_id: id.clone(), owner_generation: generation, phase: Phase::Opening,
                     review_remaining_ms: REVIEW.as_millis() as u32, checkout: None, prepared: None, apply_submitted: false,
@@ -1978,12 +2078,12 @@ impl EditOwner {
             }
             match (domain, submission) {
                 (EditDomain::MetadataText, Some(SavedTextSubmission::MetadataText(submission))) => {
-                    let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid_for(detail.platform));
+                    let valid = a.projection.metadata_text.as_ref().is_some_and(|detail| detail.submission.is_none() && detail.normal_context().is_some_and(|context| submission.valid_for(context.platform)));
                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.metadata_text.as_mut() { detail.submission = Some(submission); }
                 },
                 (EditDomain::ReleaseVersion, Some(SavedTextSubmission::ReleaseVersion(submission))) => {
-                    let valid = a.projection.release_version.as_ref().is_some_and(|detail| detail.submission.is_none() && submission.valid());
+                    let valid = a.projection.release_version.as_ref().is_some_and(|detail| detail.recovery.is_none() && detail.submission.is_none() && submission.valid());
                     if !valid { self.inner.trigger_locked(&mut publication,&mut r, session_id, Reason::CallerLost, now); return Err(invalid_owner()); }
                     if let Some(detail) = a.projection.release_version.as_mut() { detail.submission = Some(submission); }
                 },
@@ -1993,6 +2093,9 @@ impl EditOwner {
                     }
                     if let Some(detail) = a.projection.metadata_images.as_mut() { detail.submission = Some(submission); }
                 },
+                (EditDomain::MetadataText | EditDomain::ReleaseVersion, Some(SavedTextSubmission::SavedTextRecovery))
+                    if a.session.saved_text_recovery && saved_text_recovery(&a.projection).and_then(|recovery| recovery.checkout.as_ref())
+                        .is_some_and(|checkout| checkout.view.state == saved_recovery::State::Recoverable && checkout.view.valid(domain)) => {},
                 (EditDomain::Configuration, None) => {},
                 (EditDomain::GitHubWorkflows, None) if workflow_intent_matches(&a.projection, false) => {},
                 (EditDomain::GitHubWorkflows, Some(SavedTextSubmission::WorkflowRecovery))
@@ -2063,12 +2166,12 @@ impl EditOwner {
         self.apply_domain_intent(supplied, window, domain, session_id, plan_token, registration, false)
     }
     fn apply_domain_intent(&self, supplied: Option<&RegistrationPublisher>, window: &str, domain: EditDomain, session_id: &str, plan_token: &str,
-        registration: Option<WorkflowRegistration>, workflow_recovery: bool) -> Result<DomainStatus, BridgeError> {
+        registration: Option<WorkflowRegistration>, recovery_intent: bool) -> Result<DomainStatus, BridgeError> {
         let mut publication = self.inner.publication(supplied, false)?;
         let result = (|| {
         if !wire::token(session_id) || !wire::token(plan_token) { return Err(BridgeError::invalid()); }
-        if workflow_recovery && domain != EditDomain::GitHubWorkflows { return Err(invalid_owner()); }
-        let params = if workflow_recovery { json!({"planToken": plan_token, "intent":"recover"}) } else { json!({"planToken": plan_token}) };
+        if recovery_intent && !matches!(domain, EditDomain::GitHubWorkflows | EditDomain::MetadataText | EditDomain::ReleaseVersion) { return Err(invalid_owner()); }
+        let params = if recovery_intent { json!({"planToken": plan_token, "intent":"recover"}) } else { json!({"planToken": plan_token}) };
         let bytes = request_bytes(domain, session_id, 2, "apply", params)?;
         let (session, reply) = {
             let mut r = self.inner.lock();
@@ -2076,9 +2179,11 @@ impl EditOwner {
             // Repeated exact Apply is observation only, including terminal/Unknown.
             let existing = r.active.as_ref().map(|a| &a.projection).filter(|p| p.domain == domain && p.session_id == session_id)
                 .or_else(|| r.last.as_ref().filter(|p| p.domain == domain && p.session_id == session_id));
-            if domain == EditDomain::GitHubWorkflows && existing.is_some_and(|p| !workflow_intent_matches(p, workflow_recovery)) {
+            if domain == EditDomain::GitHubWorkflows && existing.is_some_and(|p| !workflow_intent_matches(p, recovery_intent)) {
                 return Err(invalid_owner()); // Even exact repeated tokens cannot cross intent.
             }
+            if matches!(domain, EditDomain::MetadataText | EditDomain::ReleaseVersion)
+                && existing.is_some_and(|p| saved_text_recovery(p).is_some() != recovery_intent) { return Err(invalid_owner()); }
             if existing.is_some_and(|p| exact_apply_receipt(p, domain, &r.generation, session_id, plan_token)) {
                 return self.inner.snapshot_for(&r, domain);
             }
@@ -2096,7 +2201,7 @@ impl EditOwner {
             };
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&a.session);
             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
             a.projection.phase = Phase::Applying;
@@ -2403,8 +2508,8 @@ async fn read_output<T: AsyncRead + Unpin + OriginalClose>(inner: Arc<Inner>, ow
                             match owner.domain {
                                 EditDomain::Configuration => wire::decode(&frame, &owner.id),
                                 EditDomain::GitHubWorkflows => workflow_wire::decode(&frame, &owner.id),
-                                EditDomain::MetadataText => metadata_wire::decode(&frame, &owner.id),
-                                EditDomain::ReleaseVersion => version_wire::decode(&frame, &owner.id),
+                                EditDomain::MetadataText => metadata_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
+                                EditDomain::ReleaseVersion => version_wire::decode_with_intent(&frame, &owner.id, owner.saved_text_recovery),
                                 EditDomain::MetadataImages => images_wire::decode(&frame, &owner.id),
                             }
                         } else { Err(BridgeError::protocol()) };
@@ -2445,6 +2550,9 @@ fn terminal_sequence(seq: u32, claimed: u32, prepared: bool, cleaning: bool) -> 
     if cleaning { seq >= lowest && seq <= claimed } else { seq == claimed }
 }
 fn terminal_projection_admissible(projection: &EditProjection, plan_token: Option<&str>, core: &wire::CoreEditOutcome) -> bool {
+    if let Some(recovery) = saved_text_recovery(projection) {
+        return plan_token == projection.plan_token() && recovery.terminal_admissible(projection.apply_submitted, core);
+    }
     if projection.domain == EditDomain::GitHubWorkflows {
         if let Some(recovery) = projection.workflow.as_ref().and_then(|detail| detail.recovery.as_ref()) {
             return plan_token == projection.plan_token() && recovery.terminal_admissible(projection.apply_submitted, core);
@@ -2594,11 +2702,33 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                     }
                 }
             }
+            ChildFrame::MetadataTextRecoveryOpened(opened) | ChildFrame::ReleaseVersionRecoveryOpened(opened) => {
+                if !owner.saved_text_recovery || a.opened || a.prepared || a.claimed_seq != 0 || !opened.recovery.valid(owner.domain) { invalid = true; }
+                else if let Some(recovery) = saved_text_recovery_mut(&mut a.projection) {
+                    recovery.checkout = Some(saved_recovery::Checkout { revision: opened.revision, view: opened.recovery });
+                    a.opened = true;
+                    if a.cleanup_start.is_none() { a.projection.phase = Phase::Editing; a.phase_end = None; }
+                } else { invalid = true; }
+            }
+            ChildFrame::MetadataTextRecoveryPrepared(prepared) | ChildFrame::ReleaseVersionRecoveryPrepared(prepared) => {
+                if !owner.saved_text_recovery || !a.opened || a.prepared || a.claimed_seq != 1 || a.prepare_counters != Some((0, 0))
+                    || a.projection.revision() != Some(prepared.revision.as_str()) || !prepared.recovery.valid(owner.domain)
+                    || prepared.recovery.state != saved_recovery::State::Recoverable { invalid = true; }
+                else if let Some(recovery) = saved_text_recovery_mut(&mut a.projection) {
+                    if !recovery.checkout.as_ref().is_some_and(|checkout| checkout.view == prepared.recovery) { invalid = true; }
+                    else {
+                        recovery.prepared = Some(saved_recovery::Prepared { revision: prepared.revision,
+                            plan_token: prepared.plan_token, view: prepared.recovery });
+                        a.prepared = true;
+                        if a.cleanup_start.is_none() { a.projection.phase = Phase::Reviewing; a.phase_end = None; }
+                    }
+                } else { invalid = true; }
+            }
             ChildFrame::MetadataTextOpened(opened) => {
                 if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
                 else if let Some(detail) = a.projection.metadata_text.as_mut() {
-                    if !opened.baseline.valid_for(detail.platform)
-                        || !metadata_wire::target_context(&opened.metadata_root, detail.platform, &detail.locale) { invalid = true; }
+                    if !detail.normal_context().is_some_and(|context| opened.baseline.valid_for(context.platform)
+                        && metadata_wire::target_context(&opened.metadata_root, context.platform, &context.locale)) { invalid = true; }
                     else {
                         detail.checkout = Some(metadata_wire::Checkout { revision: opened.revision,
                             metadata_root: opened.metadata_root, baseline: opened.baseline });
@@ -2611,8 +2741,9 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
                 if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) {
                     invalid = true;
                 } else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.metadata_text.as_mut()) {
-                    if !detail.checkout.as_ref().is_some_and(|old| prepared.view.matches_checkout(old, detail.platform, &detail.locale)
-                        && detail.submission.as_ref().is_some_and(|submitted| submitted.matches(old, &prepared.view))) {
+                    if !detail.normal_context().is_some_and(|context| detail.checkout.as_ref().is_some_and(|old|
+                        prepared.view.matches_checkout(old, context.platform, &context.locale)
+                        && detail.submission.as_ref().is_some_and(|submitted| submitted.matches(old, &prepared.view)))) {
                         invalid = true;
                     } else {
                         detail.submission = None; // The accepted exact view retains these same bytes once.
@@ -2675,7 +2806,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
             }
             ChildFrame::ReleaseVersionOpened(opened) => {
                 if a.opened || a.prepared || a.claimed_seq != 0 { invalid = true; }
-                else if let Some(detail) = a.projection.release_version.as_mut() {
+                else if let Some(detail) = a.projection.release_version.as_mut().filter(|detail| detail.recovery.is_none()) {
                     detail.checkout = Some(version_wire::Checkout { revision: opened.revision, source: opened.source,
                         name_key: opened.name_key, build_key: opened.build_key, ios_enabled: opened.ios_enabled,
                         values: opened.values, baseline: opened.baseline });
@@ -2686,7 +2817,7 @@ fn accept_frame(inner: &Inner, owner: &Session, frame: ChildFrame) {
             ChildFrame::ReleaseVersionPrepared(prepared) => {
                 if !a.opened || a.prepared || a.claimed_seq != 1 || a.projection.revision() != Some(prepared.revision.as_str()) {
                     invalid = true;
-                } else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.release_version.as_mut()) {
+                } else if let (Some((draft_revision, baseline_generation)), Some(detail)) = (a.prepare_counters, a.projection.release_version.as_mut().filter(|detail| detail.recovery.is_none())) {
                     if !detail.checkout.as_ref().is_some_and(|old| prepared.view.matches_checkout(old)
                         && detail.submission.as_ref().is_some_and(|submitted| submitted.matches(old, &prepared.view))) {
                         invalid = true;
@@ -3123,7 +3254,7 @@ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
 async fn drive(inner: Arc<Inner>, owner: Arc<Session>) {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     let _pending_observation = installed_macos_observation::DriverScope::new(&owner);
     start_original(&inner, &owner).await;
     continue_original(inner, owner, true).await;
@@ -3248,7 +3379,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
     // Pending startup/pipe/IO objects remain here across a dropped future.
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if !_original_driver { installed_macos_observation::retire(&owner); }
     let mut book = owner.resources.lock().await;
     if book.inspection.is_some() && !book.inspection_joined && !book.inspection_join_failed {
@@ -3323,7 +3454,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         if owner.force_due.load(Ordering::SeqCst) && book.child.is_some() && !book.force_attempted && book.waited.is_none() {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&owner);
             book.force_attempted = true;
             if let Some(child) = book.child.as_mut() {
@@ -3338,7 +3469,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         if !wait_pending && !write_pending && !out_pending && !err_pending && !force_pending {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_observation::retire(&owner);
             // Consume all bounded already-queued receipts before finality.
             drain_frames(&mut book, &inner, &owner);
@@ -3346,7 +3477,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         installed_macos_observation::publish(&inner, &owner, &book, _original_driver);
         let event = {
             let Resources { child, writer, stdout, stderr, frames, .. } = &mut *book;
@@ -3362,7 +3493,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
         };
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         installed_macos_observation::returned(&owner, matches!(&event, Event::Wake));
         match event {
             Event::Wait(Ok(status)) => {
@@ -3413,7 +3544,7 @@ async fn continue_original(inner: Arc<Inner>, owner: Arc<Session>, _original_dri
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_macos_observation::retire(&owner);
     if child_expected { require_terminal(&inner, &owner); }
     // Retain installed originals throughout Open/Prepare/Review/Apply and all
@@ -3555,7 +3686,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     let mut installed_observed = None;
     let settled = {
         let mut book = owner.resources.lock().await;
@@ -3583,13 +3714,13 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if settled && installed_edit_selected(owner.domain, &inner.runtime) && startup.returned {
             if let (Some(write), Some(out), Some(err)) = (&book.write_end, &book.out_end, &book.err_end) {
                 if !write.failed && !out.failed && !err.failed && err.bytes == 0 {
                     installed_observed = match owner.domain {
                     EditDomain::Configuration => Some(InstalledEditFinality::Configuration(InstalledConfigFinality {
-                        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation"))]
+                        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation"))]
                         original: Arc::downgrade(&owner),
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3599,7 +3730,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::GitHubWorkflows => Some(InstalledEditFinality::GitHubWorkflows(InstalledWorkflowFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3609,7 +3740,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::MetadataText => Some(InstalledEditFinality::MetadataText(InstalledMetadataFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3619,7 +3750,7 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
                         io_joined, driver_joined: book.driver_joined, watchdog_joined: book.watchdog_joined, manager_joined: book.manager_joined,
                         runtime_ledger_settled: runtime_settled, runtime_settlement_joined: book.installed_settlement_joined,
                     })),
-                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
+                    #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer"))))]
                     EditDomain::ReleaseVersion => Some(InstalledEditFinality::ReleaseVersion(InstalledVersionFinality {
                         session_id: owner.id.clone(), project_id: String::new(), owner_generation: String::new(),
                         writer_frames: write.frames, stdout_frames: out.frames,
@@ -3665,6 +3796,9 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             // IDs only, bounded by the native 64-project picker registry. No
             // retained private history or guessed recovery controller.
             if r.blocked_projects.len() < 64 || r.blocked_projects.contains(&a.projection.project_id) {
+                let settled = !a.unknown && a.projection.core_outcome.as_ref().is_some_and(|core| core.resources == ResourceState::Settled);
+                let shared_present = r.blocked_projects.contains(&a.projection.project_id);
+                if !r.domain_blocks.record(&a.projection.project_id, a.projection.domain, shared_present, settled) { r.disabled = true; }
                 r.blocked_projects.insert(a.projection.project_id.clone());
                 if a.projection.domain == EditDomain::MetadataImages && !a.unknown
                     && a.projection.core_outcome.as_ref().is_some_and(|core| core.resources == ResourceState::Settled) {
@@ -3687,16 +3821,18 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
         }
         if r.workflow_recovery_projects.contains(&a.projection.project_id) && workflow_recovery_complete(&a.projection) {
             r.workflow_recovery_projects.remove(&a.projection.project_id);
-            r.blocked_projects.remove(&a.projection.project_id);
+            if r.domain_blocks.clear_domain(&a.projection.project_id, EditDomain::GitHubWorkflows)
+                && !r.image_recovery_projects.contains(&a.projection.project_id) { r.blocked_projects.remove(&a.projection.project_id); }
         }
         if r.image_recovery_projects.contains(&a.projection.project_id) && image_recovery_complete(&a.projection) {
             r.image_recovery_projects.remove(&a.projection.project_id);
-            r.blocked_projects.remove(&a.projection.project_id);
+            if r.domain_blocks.clear_domain(&a.projection.project_id, EditDomain::MetadataImages)
+                && !r.workflow_recovery_projects.contains(&a.projection.project_id) { r.blocked_projects.remove(&a.projection.project_id); }
         }
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"),
         any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
-            all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+            all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         {
             // Freeze the actual original resource facts at the SAME atomic
             // retirement as the correlated projection; never derive them from
@@ -3704,6 +3840,11 @@ async fn observe_final(inner: Arc<Inner>, owner: Arc<Session>) {
             r.installed_final = if !a.unknown {
                 installed_observed.and_then(|facts| facts.bind_original(&a.projection))
             } else { None };
+        }
+        if saved_text_recovery_complete(&a.projection)
+            && r.domain_blocks.clear_domain(&a.projection.project_id, a.projection.domain)
+            && !r.workflow_recovery_projects.contains(&a.projection.project_id) && !r.image_recovery_projects.contains(&a.projection.project_id) {
+            r.blocked_projects.remove(&a.projection.project_id);
         }
         r.last = Some(a.projection); // Atomic active -> one terminal projection.
         inner.bump(&mut r, &mut publication);
@@ -4398,7 +4539,7 @@ mod workflow_domain_tests {
                 assurance:metadata_wire::Assurance { basis:"schema-policy".into(),project_code_executed:false,tools_probed:false,credentials_read:false,
                     git_observed:false,store_contacted:false,writes_performed:false,release_readiness:"unknown".into() } };
             let view = metadata_wire::PreparedView { schema_version:1,platform:Platform::Android,locale:"en-US".into(),metadata_root:"release/metadata".into(),files,create_directories:Vec::new(),validation };
-            projection.metadata_text = Some(metadata_wire::Details { platform:Platform::Android,locale:"en-US".into(),checkout:Some(checkout),
+            projection.metadata_text = Some(metadata_wire::Details { platform:Some(Platform::Android),locale:Some("en-US".into()),recovery:None,checkout:Some(checkout),
                 prepared:Some(metadata_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),submission:None });
             projection
         };
@@ -4428,6 +4569,66 @@ mod workflow_domain_tests {
         }
     }
 
+    #[test]
+    fn saved_text_recovery_never_clears_foreign_unattributed_or_unknown_attention() {
+        let mut reasons = DomainBlocks::default();
+        assert!(reasons.record("p",EditDomain::MetadataText,false,true));
+        assert!(reasons.may_recover("p",EditDomain::MetadataText));
+        assert!(!reasons.may_recover("p",EditDomain::ReleaseVersion));
+        assert!(reasons.record("p",EditDomain::GitHubWorkflows,true,true));
+        assert!(!reasons.may_recover("p",EditDomain::MetadataText));
+        assert!(!reasons.clear_domain("p",EditDomain::MetadataText));
+        assert!(reasons.may_recover("p",EditDomain::GitHubWorkflows));
+        assert!(reasons.clear_domain("p",EditDomain::GitHubWorkflows));
+        assert!(!reasons.clear_domain("absent",EditDomain::MetadataText));
+        assert!(reasons.record("foreign",EditDomain::ReleaseVersion,true,true));
+        assert!(!reasons.may_recover("foreign",EditDomain::ReleaseVersion));
+        assert!(!reasons.clear_domain("foreign",EditDomain::ReleaseVersion));
+        assert!(reasons.record("unknown",EditDomain::MetadataText,false,false));
+        assert!(reasons.record("unknown",EditDomain::MetadataText,true,true));
+        assert!(!reasons.may_recover("unknown",EditDomain::MetadataText)); // No late promotion.
+        for index in 0..62 { assert!(reasons.record(&format!("p{index}"),EditDomain::MetadataImages,false,true)); }
+        assert!(!reasons.record("overflow",EditDomain::Configuration,false,true));
+    }
+    #[test]
+    fn saved_text_recovery_correlates_domain_action_plan_original_finality_and_no_normal_draft() {
+        for domain in [EditDomain::MetadataText,EditDomain::ReleaseVersion] {
+            for action in ["rollback","rolled_back_cleanup","committed_cleanup","preparing_cleanup"] {
+                let mut p=projection(false); p.domain=domain; p.workflow=None;
+                p.metadata_text=(domain==EditDomain::MetadataText).then(metadata_wire::Details::recovery);
+                p.release_version=(domain==EditDomain::ReleaseVersion).then(version_wire::Details::recovery);
+                let text=domain==EditDomain::MetadataText;
+                let paths=if text { vec!["release/metadata/android/en-US/title.txt","release/metadata/android/en-US/short_description.txt","release/metadata/android/en-US/full_description.txt"] }
+                    else { vec!["public/version.properties"] };
+                let view=saved_recovery::View::from_value(&json!({"schemaVersion":1,"kind":"saved-text-recovery",
+                    "domain":if text {"metadata_text"} else {"release_version"},"state":"recoverable","reason":"none","action":action,"transactionId":"e".repeat(32),
+                    "selection":if text { json!({"platform":"android","locale":"en-US","metadataRoot":"release/metadata"}) }
+                        else { json!({"source":"public/version.properties","nameKey":"VERSION_NAME","buildKey":"BUILD_NUMBER","iosEnabled":true}) },
+                    "files":paths.iter().map(|path| json!({"path":path,"before":null,"after":{"byteLength":0,"mode":420,"sha256":"a".repeat(64)},
+                        "effect":match action {"rollback"=>"remove_new","committed_cleanup"=>"keep_committed",_=>"preserve"}})).collect::<Vec<_>>(),
+                    "privateCleanup":{"fileCount":4,"directoryCount":0,"scope":"inspected-owned-journal-only"}}),domain).unwrap();
+                let details=saved_text_recovery_mut(&mut p).unwrap();
+                details.checkout=Some(saved_recovery::Checkout {revision:REVISION.into(),view:view.clone()});
+                details.prepared=Some(saved_recovery::Prepared {revision:REVISION.into(),plan_token:PLAN.into(),view:view.clone()});
+                let public=if text {serde_json::to_value(p.metadata_text_projection().unwrap()).unwrap()}
+                    else {serde_json::to_value(p.release_version_projection().unwrap()).unwrap()};
+                assert!(public["checkout"].is_null() && public["prepared"].is_null() && public["recovery"].is_object());
+                if text { assert!(public["platform"].is_null() && public["locale"].is_null()); }
+                p.apply_submitted=true; p.phase=Phase::Final; p.native_finality=NativeFinality::Settled; p.native_reason=Reason::None;
+                p.core_outcome=Some(wire::CoreEditOutcome {effect:view.expected_success().unwrap(),journal:Journal::Clean,resources:ResourceState::Settled,reason:CoreReason::None});
+                assert!(saved_text_recovery_complete(&p));
+                assert!(terminal_projection_admissible(&p,Some(PLAN),p.core_outcome.as_ref().unwrap()));
+                assert!(!terminal_projection_admissible(&p,Some(REVISION),p.core_outcome.as_ref().unwrap()));
+                for (late,finality,reason,submitted) in [(true,NativeFinality::Settled,Reason::None,true),(false,NativeFinality::Unknown,Reason::None,true),
+                    (false,NativeFinality::Settled,Reason::Discarded,true),(false,NativeFinality::Settled,Reason::None,false)] {
+                    let mut bad=p.clone(); bad.late_settled=late; bad.native_finality=finality; bad.native_reason=reason; bad.apply_submitted=submitted;
+                    assert!(!saved_text_recovery_complete(&bad));
+                }
+                let mut bad=p.clone(); saved_text_recovery_mut(&mut bad).unwrap().prepared.as_mut().unwrap().revision=SESSION.into();
+                assert!(!saved_text_recovery_complete(&bad));
+            }
+        }
+    }
     fn version_projection(action: version_wire::Action) -> EditProjection {
         use version_wire::{Action, Baseline, BaselineFile, Before, ContentDigest, Intent, LineEndings, LineStyle, TextContent, Values};
         let mut p = projection(false); p.domain = EditDomain::ReleaseVersion; p.workflow = None;
@@ -4450,7 +4651,7 @@ mod workflow_domain_tests {
             line_endings:LineEndings { before:if create { vec![] } else { vec![LineStyle::Lf] },after:vec![LineStyle::Lf],
                 final_newline_before:!create,final_newline_after:true,preserved:!create },
             validation:version_wire::Validation { valid:true,state:"format-valid".into(),issues:vec![] } };
-        p.release_version = Some(version_wire::Details { checkout:Some(checkout),
+        p.release_version = Some(version_wire::Details { recovery:None,checkout:Some(checkout),
             prepared:Some(version_wire::Prepared { revision:REVISION.into(),plan_token:PLAN.into(),draft_revision:1,baseline_generation:0,view }),
             submission:Some(version_wire::Submission { expected_baseline:baseline,intent,values }) });
         p

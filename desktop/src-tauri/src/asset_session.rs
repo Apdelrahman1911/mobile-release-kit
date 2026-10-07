@@ -367,7 +367,7 @@ impl OriginalWork {
                 selected: None, refusal: None }), selected_images: Mutex::new(None), wake: Notify::new(),
                 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                    target_os = "macos", target_arch = "aarch64"))]
+                    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 installed_native_response_witness: Mutex::new(None),
             }) })
     }
@@ -508,12 +508,12 @@ pub(crate) struct GuiCall {
     selected_images: Mutex<Option<Vec<std::path::PathBuf>>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_native_response_witness: Mutex<Option<InstalledNativeResponseWitness>>,
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[derive(Clone)]
 pub(crate) struct InstalledNativeResponseWitness {
     pub(crate) operation_id: u32,
@@ -539,7 +539,7 @@ fn project_path_gui_settled(facts: &GuiFacts, selected: bool) -> bool {
 impl GuiCall {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn record_installed_native_response(self: &Arc<Self>, id: u32, response: NativeResponse,
         selected: Option<&std::path::Path>) -> Result<(), ()> {
         let owner = self.owner().ok_or(())?;
@@ -556,7 +556,7 @@ impl GuiCall {
     }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn installed_native_response(&self) -> Result<Option<InstalledNativeResponseWitness>, ()> {
         // This data stays with the same original call, not a global panel
         // history. Read before replacing its slot; it grants no settlement.
@@ -932,7 +932,7 @@ struct Inner {
     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     installed_session: Mutex<Option<installed_session_observation::Book>>,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     installed_macos_session: Mutex<Option<installed_macos_observation::SessionBook>>,
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fixture: Option<Weak<Qualification>>,
@@ -1912,7 +1912,7 @@ impl DocumentBinding {
         let document = Self { inner: Arc::new(Inner { bridge, changes, session_identity: Arc::new(()), android_registration_control,
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             installed_session: Mutex::new(None),
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             installed_macos_session: Mutex::new(None),
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             fixture: None,
@@ -2035,11 +2035,11 @@ impl DocumentBinding {
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
         self.inner.bridge.android_build.admit_installed_observation(&self.inner.session_identity, token)
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn installed_recovery_identities(&self) -> (Weak<()>, Weak<()>) {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.project_recovery.installed_recovery_identity())
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_arch = "aarch64", feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     pub(crate) fn admit_installed_recovery(&self, token: crate::shell::installed_observation::recovery::Admission) -> Result<(), BridgeError> {
         let state = self.lock();
         if state.next_operation != 0 || state.next_context != 0 || state.session || state.slot.is_some() || state.context.is_some()
@@ -2047,11 +2047,11 @@ impl DocumentBinding {
             || !token.document_matches(&self.inner.session_identity) { return Err(BridgeError::invalid()); }
         self.inner.bridge.project_recovery.admit_installed_observation(token)
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn installed_ios_identities(&self) -> (Weak<()>, Weak<()>) {
         (Arc::downgrade(&self.inner.session_identity), self.inner.bridge.ios_archive.installed_ios_identity())
     }
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn admit_installed_ios(&self, token: crate::shell::installed_observation::ios::Admission) -> Result<(), BridgeError> {
         // Original setup only, under the same real document lock used by
         // Start/loss/selection. A Mac token cannot admit another document or
@@ -2105,7 +2105,7 @@ impl DocumentBinding {
         // Exact installed-profile DATA only. Neither the compatibility picker
         // nor SG1 nor the still-false asset capability qualifies this purpose.
         if self.inner.bridge.installed_project_path_selection_available() { return true; }
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if self.inner.installed_macos_session.try_lock().is_ok_and(|book| book.as_ref()
             .and_then(|book| book.project_fields.as_ref()).is_some_and(|control| control.permits(&self.inner.session_identity))) { return true; }
         false
@@ -4545,7 +4545,7 @@ impl DocumentBinding {
         let owner = slot.owner.clone();
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         self.installed_record_original(&owner, Some(slot.operation))?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         self.installed_macos_record_original(&owner, Some(slot.operation))?;
         let old_slot = state.slot.take().map(Box::new);
         if let Err(retirement) = owner.retain_retirement(Retirement { old_slot, ..Retirement::default() }) {
@@ -4816,7 +4816,7 @@ async fn execute_job(document: &DocumentBinding, owner: &Arc<OriginalWork>, job:
             if let Err(reason) = document.phase(owner, Phase::Capturing) { return Staged::Refused(reason); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             {
                 use tauri::Manager;
                 if let Some(q) = app.try_state::<Arc<crate::shell::installed_observation::Observation>>() {
@@ -5078,17 +5078,17 @@ impl DocumentBinding {
     pub(crate) async fn project_result(&self, id: u32) -> Result<Option<Project>, AssetError> {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         { self.project_result_original(id, None).await }
         #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64")))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.project_result_original(id).await }
     }
     async fn project_result_original(&self, id: u32,
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,
     ) -> Result<Option<Project>, AssetError> {
         loop {
@@ -5101,7 +5101,7 @@ impl DocumentBinding {
                     if slot.reason == Reason::None || slot.reason == Reason::UserCancelled {
                         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
                             not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                            target_os = "macos", target_arch = "aarch64"))]
+                            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                         if let (Some(companion), Some(project)) = (selection.as_deref_mut(), slot.project.as_ref()) {
                             // This guard still binds the original id/slot. Only
                             // saved DATA crosses the return, never an observer
@@ -5281,7 +5281,7 @@ impl DocumentBinding {
         let owner = OriginalWork::new(id, true, Arc::downgrade(&self.inner));
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.installed_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         if self.installed_macos_record_original(&owner, None).is_err() { state.unknown = true; self.bump(&mut state); return; }
         let previous = state.quit.replace(owner.clone());
         state.quit_pending = true; state.quit_accepted = false; state.quit_cleanup_end = None;
@@ -5350,7 +5350,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
 
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod installed_macos_observation {
     use super::*;
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6117,7 +6117,7 @@ mod installed_macos_observation {
 }
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installed_macos_observation::{ProjectWitness as InstalledMacProjectWitness, PickerWitness as InstalledMacPickerWitness,
     InstallationWitness as InstalledMacInstallationWitness,
     SessionSnapshot as InstalledMacSessionSnapshot, VaultSnapshot as InstalledMacVaultSnapshot,
@@ -8103,7 +8103,7 @@ fn installation_reveal_requires_original_document_and_blocks_pending_lifecycle()
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use installation::{ReadObservation as InstallationReadObservation, OriginalFacts as InstallationOriginalFacts};
 
 #[cfg(test)]

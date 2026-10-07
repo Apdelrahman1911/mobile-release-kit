@@ -6,6 +6,7 @@ import type { VersionEditProjection, VersionPreparedView } from '../releaseVersi
 import { currentVersionApplyBinding, versionDraftDirty, versionRetainsDraft } from '../releaseVersionEditController.ts';
 import type { ReleaseVersionEditController, VersionApplyBinding, VersionEditState, VersionResetBinding } from '../releaseVersionEditController.ts';
 import type { HelpContent } from '../types.ts';
+import { SavedTextRecoveryPanel } from './MetadataTextEditor.tsx';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 
 function RawVersion({ view, side }: { view: VersionPreparedView; side: 'before' | 'after' }) {
@@ -81,7 +82,7 @@ function Outcome({ owner }: { owner: VersionEditProjection }) {
       {owner.coreOutcome?.reason === 'ignore_conflict' && <p>Use Settings → Prepare save review to add the ten conservative ignore rules. This editor never repairs .gitignore.</p>}
       {owner.coreOutcome?.reason === 'invalid_params' && <p>Correct the two proposed strings, then review again after settlement. Empty, ambiguous or unsafe source files are unsupported, not Create permission.</p>}
       {owner.coreOutcome?.reason === 'stale_revision' && <p>The retained baseline changed. Close, then explicitly reload saved values and discard the earlier draft.</p>}
-      {(owner.phase === 'unknown' || owner.coreOutcome?.journal === 'recovery_required') && <p>Keep the original evidence. Do not retry, delete control state or treat cancellation as rollback. Desktop recovery remains unavailable.</p>}
+      {(owner.phase === 'unknown' || owner.coreOutcome?.journal === 'recovery_required') && <p>Keep the original evidence. Do not retry, delete control state or treat cancellation as rollback. Once native settlement is known, explicitly Inspect recovery below; legacy/incomplete or changed journals remain protected conflicts.</p>}
       {result && <p>This receipt is for the submitted revision only, not later edits. Read saved version again explicitly before using its new values for build consent.</p>}
     </div>
   </div>;
@@ -108,7 +109,7 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
   const [confirmation, setConfirmation] = useState<VersionApplyBinding | null>(null);
   const [reset, setReset] = useState<{ action: 'reload' | 'discard'; binding: VersionResetBinding } | null>(null);
   const [, tick] = useState(0), nameId = useId(), buildId = useId();
-  useEffect(() => { const timer = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(timer); }, []);
+  useEffect(() => { const timer = setInterval(() => { controller.recoveryTick(); tick((n) => n + 1); }, 1000); return () => clearInterval(timer); }, [controller]);
   const entry = controller.selectedEntry(), attempt = state.edit.attempt, owner = attempt?.projection;
   const current = currentVersionApplyBinding(state), prepared = owner?.prepared;
   const openReason = controller.openReason(), reviewReason = controller.reviewReason();
@@ -147,6 +148,10 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
       {reviewReason && <p className="subtle-note">{reviewReason}</p>}
       {entry.outcome && entry.outcome.sessionId !== owner?.sessionId && <><h3>Last submitted version attempt</h3><Outcome owner={entry.outcome} /></>}
     </>}
+    <SavedTextRecoveryPanel domain="release_version" projectId={state.projectId} attempt={state.edit.recovery} inspectReason={controller.inspectRecoveryReason()}
+      remainingMs={controller.remainingRecoveryReviewMs()} readPending={state.edit.readPending} current={controller.currentRecoveryApplyBinding()}
+      onInspect={() => { controller.inspectRecovery(); }} onClose={() => controller.requestRecoveryClose()} onStatus={() => void controller.checkStatus()}
+      canApply={(value) => controller.canApplyRecovery(value)} onApply={(value) => controller.applyRecovery(value)} />
     <ReleaseVersionSave state={state} controller={controller} onShowProject={onShowProject} />
     {ownView && prepared && <><VersionReview view={prepared.view} />
       <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>

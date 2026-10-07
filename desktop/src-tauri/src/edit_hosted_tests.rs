@@ -3409,7 +3409,8 @@ mod metadata {
         let editing=observed_metadata(&original.batch.owner,&session.id,Phase::Editing,false).await?;
         let checkout=editing.checkout.as_ref().ok_or(Failure::UnexpectedOutcome)?;
         require(checkout.baseline==baseline(&before,selection)? && checkout.metadata_root==selection.metadata_root
-            && editing.platform==selection.platform && editing.locale==selection.locale && editing.project_id==project.id,Failure::UnexpectedOutcome)?;
+            && editing.recovery.is_none() && editing.platform==Some(selection.platform)
+            && editing.locale.as_deref()==Some(selection.locale) && editing.project_id==project.id,Failure::UnexpectedOutcome)?;
         if case==Case::Isolation { opposite_commands(original,&project,selection,&session,&checkout.revision,&passive.baseline,EditDomain::MetadataText)?; }
         if case==Case::Stale {
             let reply=original.bridge.prepare_metadata_text_edit(&original.document,"main",prepare_args(&session.id,&checkout.revision,&passive.baseline,selection))

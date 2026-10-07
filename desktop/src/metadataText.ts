@@ -1,5 +1,6 @@
 // Public text stays in memory, outside the configuration draft. These renderer
 // identities correlate views only; native/core owns paths, bytes and authority.
+import type { SavedTextRecoveryOpenRequest, SavedTextRecoveryPrepareRequest, SavedTextRecoveryProjection } from './savedTextRecovery.ts';
 import { getValue, sameJson } from './catalog.ts';
 import { isDirty } from './drafts.ts';
 import type { ProjectSession } from './drafts.ts';
@@ -62,7 +63,8 @@ export interface PreparedMetadataTextView {
   createDirectories: string[];
   validation: MetadataTextValidation;
 }
-export interface MetadataTextEditProjection {
+export interface NormalMetadataTextEditProjection {
+  recovery?: never;
   domain: 'metadata_text';
   projectId: string;
   sessionId: string;
@@ -79,6 +81,7 @@ export interface MetadataTextEditProjection {
   nativeFinality: 'pending' | 'settled' | 'unknown';
   lateSettled: boolean;
 }
+export type MetadataTextEditProjection = NormalMetadataTextEditProjection | SavedTextRecoveryProjection<'metadata_text'>;
 export interface MetadataTextEditStatus {
   schemaVersion: 1;
   domain: 'metadata_text';
@@ -99,9 +102,9 @@ export interface PrepareMetadataTextEditRequest {
 export interface MetadataTextApi {
   observeMetadataText(input: { projectId: string; platform: MetadataPlatform; locale: string }): Promise<MetadataTextObservation>;
   validateMetadataText(input: { platform: MetadataPlatform; fields: MetadataTextField[] }): Promise<MetadataTextValidation>;
-  openMetadataTextEdit(input: { projectId: string; platform: MetadataPlatform; locale: string }): Promise<MetadataTextEditStatus>;
-  prepareMetadataTextEdit(input: PrepareMetadataTextEditRequest): Promise<MetadataTextEditStatus>;
-  applyMetadataTextEdit(sessionId: string, planToken: string): Promise<MetadataTextEditStatus>;
+  openMetadataTextEdit(input: { projectId: string; platform: MetadataPlatform; locale: string } | SavedTextRecoveryOpenRequest): Promise<MetadataTextEditStatus>;
+  prepareMetadataTextEdit(input: PrepareMetadataTextEditRequest | SavedTextRecoveryPrepareRequest): Promise<MetadataTextEditStatus>;
+  applyMetadataTextEdit(sessionId: string, planToken: string, intent?: 'recover'): Promise<MetadataTextEditStatus>;
   closeMetadataTextEdit(sessionId: string): Promise<MetadataTextEditStatus>;
   metadataTextEditStatus(): Promise<MetadataTextEditStatus>;
   subscribeMetadataTextEdit(onStatus: (status: unknown) => void): Promise<() => void>;
@@ -213,7 +216,7 @@ export function metadataProjectDirty(entries: Readonly<Record<string, MetadataTe
   return Object.values(entries).some((entry) => (projectId === undefined || entry.context.projectId === projectId) && metadataTextDirty(entry));
 }
 export function metadataTextSavedFresh(entry: MetadataTextDraft): boolean {
-  return entry.lastSave !== null && entry.lastSave.resultingBaselineGeneration === entry.baselineGeneration && entry.lastSave.draftRevision === entry.revision;
+  return !entry.stale && entry.lastSave !== null && entry.lastSave.resultingBaselineGeneration === entry.baselineGeneration && entry.lastSave.draftRevision === entry.revision;
 }
 
 // The textarea may display browser-normalized line endings. Its onChange value

@@ -88,6 +88,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/vault_store.rs"] mod vault_store;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
+#[path = "../src/saved_text_recovery_protocol.rs"] mod saved_text_recovery_protocol;
 #[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;
 #[path = "../src/metadata_images_edit_protocol.rs"] mod metadata_images_edit_protocol;
 #[path = "../src/release_version_edit_protocol.rs"] mod release_version_edit_protocol;

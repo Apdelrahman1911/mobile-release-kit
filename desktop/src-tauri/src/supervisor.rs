@@ -869,7 +869,7 @@ impl Supervisor {
     pub(crate) fn installed_persistence_available(&self, identity: &Arc<()>) -> bool { self.inner.runtime.installed_persistence_available(identity) }
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
         not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     pub(crate) fn assert_installed_session_available(&self, identity: &Arc<()>) -> Result<(), BridgeError> {
         let owners = lock(&self.inner.owners);
         if !owners.is_empty() || self.inner.next.load(Ordering::SeqCst) != 1 || self.stopping() || self.disabled() {

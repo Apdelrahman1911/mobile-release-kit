@@ -78,6 +78,101 @@ class MacProjectRecoverySourceTests(unittest.TestCase):
             self.assertIn('target_os = "linux"', prefix)
             self.assertNotIn('macos', prefix)
 
+
+        # Complete SOURCE census, not a Rust cfg interpreter or a native test.
+        # Keep the ordinary feature/negative gates in each full expression;
+        # only the Mac target term is shared by the two admitted LP64 targets.
+        target = ('target_os = "macos", target_pointer_width = "64", '
+                  'any(target_arch = "aarch64", target_arch = "x86_64")')
+        linux = 'all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")'
+        mac = ('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", '
+               'feature = "macos-installed-observation", not(feature = "development-runtime"), '
+               'not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), ' + target + ')')
+        joined = ('all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", '
+                  'not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), '
+                  'any(' + linux + ', all(' + target + ', feature = "macos-installed-observation", '
+                  'not(feature = "macos-installed-installer"))))')
+        short_mac = 'all(' + target + ', feature = "macos-installed-observation")'
+        short_joined = ('any(' + linux + ', all(' + target + ', feature = "macos-installed-observation", '
+                        'not(feature = "macos-installed-installer")))')
+        shapes = (mac, joined, 'not(' + mac + ')', short_mac, short_joined)
+        roster = {
+            'asset_session.rs': (19, 2, 1, 0, 0),
+            'asset_session_installation.rs': (11, 0, 1, 0, 0),
+            'asset_session_installation_memory.rs': (2, 0, 0, 0, 0),
+            'asset_session_keyring_macos.rs': (2, 0, 0, 0, 0),
+            'asset_session_vault.rs': (10, 0, 0, 0, 0),
+            'edit_owner.rs': (14, 15, 0, 2, 10),
+            'ios_archive_owner.rs': (1, 0, 0, 0, 0),
+            'project_recovery_owner.rs': (1, 3, 0, 0, 0),
+            'project_recovery_protocol.rs': (0, 1, 0, 0, 0),
+            'saved_command_owner.rs': (25, 9, 0, 0, 0),
+            'supervisor.rs': (1, 0, 0, 0, 0),
+            'vault_keyring_macos.rs': (14, 0, 0, 0, 0),
+        }
+        texts, actual_targets, total = {}, set(), 0
+        for filename, counts in roster.items():
+            body = (MAC / filename).read_text()
+            texts[filename] = ' '.join(body.split())
+            attrs = [' '.join(match.group(1).split())
+                     for match in re.finditer(r'#\[cfg\((.*?)\)\]', body, re.S)
+                     if 'macos-installed-observation' in match.group(1)]
+            self.assertEqual(len(attrs), sum(counts), filename)
+            self.assertEqual(set(attrs), {shape for shape, count in zip(shapes, counts) if count}, filename)
+            self.assertEqual(tuple(attrs.count(shape) for shape in shapes), counts, filename)
+            total += len(attrs)
+            for attr in attrs:
+                match = re.search(r'target_os = "([^"]+)", target_pointer_width = "([^"]+)", '
+                                  r'any\(target_arch = "([^"]+)", target_arch = "([^"]+)"\)', attr)
+                self.assertIsNotNone(match)
+                actual_targets.add(match.groups())
+        self.assertEqual(total, 144)
+        self.assertEqual(actual_targets, {('macos', '64', 'aarch64', 'x86_64')})
+        actual_os, actual_width, *actual_arches = next(iter(actual_targets))
+        for system, width, architecture, expected in (
+            ('macos', '64', 'aarch64', True), ('macos', '64', 'x86_64', True),
+            ('macos', '32', 'aarch64', False), ('macos', '32', 'x86_64', False),
+            ('macos', '64', 'powerpc64', False), ('linux', '64', 'x86_64', False),
+            ('windows', '64', 'x86_64', False), ('darwin', '64', 'aarch64', False),
+        ):
+            self.assertIs(system == actual_os and width == actual_width and architecture in actual_arches, expected)
+
+        # These are one signature/call and one memory-accounting alternative,
+        # not independent broad allowances. Normal builds keep their originals.
+        asset = texts['asset_session.rs']
+        self.assertIn('#[cfg(' + mac + ')] { self.project_result_original(id, None).await }', asset)
+        self.assertIn('#[cfg(not(' + mac + '))] { self.project_result_original(id).await }', asset)
+        self.assertIn('#[cfg(' + mac + ')] mut selection: Option<&mut Option<InstalledMacProjectSelectionData>>,', asset)
+        installation = texts['asset_session_installation.rs']
+        self.assertIn('#[cfg(' + mac + ')] let observation = {', installation)
+        self.assertIn('#[cfg(not(' + mac + '))] let observation = 0;', installation)
+
+        # Short child guards inherit the unchanged complete test/feature gate.
+        edit = texts['edit_owner.rs']
+        self.assertIn('#[cfg(' + joined + ')] #[derive(Clone)] pub(crate) struct InstalledConfigFinality { '
+                      '#[cfg(' + short_mac + ')] original: std::sync::Weak<Session>,', edit)
+        for parent in ('enum InstalledEditFinality {', 'impl InstalledEditFinality {',
+                       'pub(crate) fn installed_observation_final(',
+                       'let mut installed_observed = None;',
+                       'if settled && installed_edit_selected(owner.domain, &inner.runtime) && startup.returned {'):
+            self.assertIn('#[cfg(' + joined + ')] ' + parent, edit)
+        self.assertIn('InstalledConfigFinality { #[cfg(' + short_mac + ')] original: Arc::downgrade(&owner),', edit)
+
+        # Paired DATA check: choose ONE exact current-target protocol profile.
+        # No target-independent Some(Arm|Intel) allowance or production change.
+        check = texts['saved_command_owner.rs'].split('pub(crate) fn installed_offline_owner_data_check() -> bool {', 1)[1]
+        expected_profile = ('let expected_profile = if cfg!(target_arch = "aarch64") { '
+                            'wire::Profile::MacosArm64 } else { wire::Profile::MacosX64 };')
+        self.assertIn(expected_profile, check)
+        self.assertIn('if wire::Profile::current() != Some(expected_profile) '
+                      '|| wire::CONSENT != "saved-offline-android-v1" { return false; }', check)
+        self.assertIn('#[cfg(all(test, ' + target + '))] pub(crate) fn installed_offline_owner_data_check()',
+                      texts['saved_command_owner.rs'])
+        profiles = ' '.join((MAC / 'offline_preflight_protocol.rs').read_text().split())
+        mappings = re.findall(r'else if cfg!\(all\(target_os = "macos", target_arch = "(aarch64|x86_64)"\)\) '
+                              r'\{ Some\(Self::(MacosArm64|MacosX64)\) \}', profiles)
+        self.assertEqual(mappings, [('x86_64', 'MacosX64'), ('aarch64', 'MacosArm64')])
+
     def test_ordinary_original_selection_precedes_admission_and_no_new_ipc_or_mode(self):
         saved = (MAC / "saved_command_owner.rs").read_text()
         ios_selection = saved.split('fn ios_installed_selected(', 1)[1].split('fn android_original_document_matches(', 1)[0]

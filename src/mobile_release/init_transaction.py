@@ -389,6 +389,9 @@ class InitWorkspace:
         self._version_targets: Any = None
         self._image_targets: Any = None
         self._image_recovery: Any = None
+        self._saved_text_recovery: Any = None
+        self._saved_text_current: Any = None  # One fresh borrowed attempt, never serialized.
+        self._saved_text_recovery_mode = False
         self._image_recovery_journal = "unknown"
         self._workflow_recovery_mode = False
         self._workflow_recovery_guard: Any = None
@@ -434,6 +437,8 @@ class InitWorkspace:
         workspace._version_targets = scope.lease._version_targets
         workspace._image_targets = scope.lease._image_targets
         workspace._image_recovery = scope.lease._image_recovery
+        workspace._saved_text_recovery = scope.lease._saved_text_recovery
+        workspace._saved_text_recovery_mode = scope.lease._saved_text_recovery_mode
         workspace.fd = scope.fd
         workspace.flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         workspace.root_identity = _dir_identity(os.fstat(workspace.fd))
@@ -443,7 +448,7 @@ class InitWorkspace:
     def borrowed_workflow_recovery(cls, scope: Any) -> InitWorkspace:
         from .init_workspace_custody import LockedInitScope
         _require(type(scope) is LockedInitScope and scope.lease._workflow_recovery_mode
-                 and not scope.lease._image_recovery_mode
+                 and not scope.lease._image_recovery_mode and not scope.lease._saved_text_recovery_mode
                  and scope.lease.profile is TypedEditProfile.GITHUB_WORKFLOWS,
                  "workflow recovery requires its original registered lock scope")
         scope.check()
@@ -489,6 +494,22 @@ class InitWorkspace:
                  "an original inspected image restoration capability is required")
         value._check_workspace(self)
         return value
+
+    def _saved_text_restoration(self):
+        if self._saved_text_recovery is None:
+            return None
+        from .saved_text_recovery import SavedTextRecoveryRevision
+        value = self._saved_text_recovery
+        _require(type(value) is SavedTextRecoveryRevision and getattr(value, "_identity", None) is value,
+                 "an original inspected saved-text restoration capability is required")
+        value._check_workspace(self)
+        return value
+
+    def _target_restoration(self):
+        image = self._image_restoration()
+        _require(image is None or self._saved_text_recovery is None,
+                 "recovery capabilities cannot cross domains")
+        return image if image is not None else self._saved_text_restoration()
 
     @property
     def _original_controls_required(self) -> bool:
@@ -547,7 +568,7 @@ class InitWorkspace:
         This is never used to compare original ctime to writer-owned backups,
         installed replacements or restored objects after a rename.
         """
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if restoration is not None:
             restoration.check_preserved(self, item.path)
             return
@@ -568,7 +589,7 @@ class InitWorkspace:
         """
         if not self._saved_text_profile:
             return
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if restoration is not None:
             restoration.check_context(self, changing=changing)
             return
@@ -592,7 +613,7 @@ class InitWorkspace:
     def _dependency_only_parents(self) -> dict[str, dict[str, Any] | None]:
         if not self._saved_text_profile:
             return {}
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if restoration is not None:
             return restoration.dependency_only_parents
         targets = self._saved_text_targets()
@@ -642,6 +663,9 @@ class InitWorkspace:
         restoration = self._workflow_restoration()
         if restoration is not None:
             restoration.control_read(self, fd, name, item)  # Before header/plan/marker consumption.
+        saved = self._saved_text_restoration()
+        if saved is not None:
+            saved.control_read(self, fd, name, item)
         return item
 
     def _binding(self, fd: int, name: str, *, directory: bool = False, limit: int | None = None):
@@ -649,7 +673,8 @@ class InitWorkspace:
         return _binding(fd, name, directory=directory, limit=self._file_limit if limit is None else limit, owner=self)
 
     def _write(self, fd: int, name: str, data: bytes, mode: int = 0o600, *, preserve_mode: bool = False):
-        _require(not self._workflow_recovery_mode, "workflow recovery cannot stage new content")
+        _require(not (self._workflow_recovery_mode or self._saved_text_recovery_mode),
+                 "recovery cannot stage new content")
         self._checkpoint()
         return _write(fd, name, data, mode, preserve_mode=preserve_mode, owner=self)
 
@@ -659,7 +684,8 @@ class InitWorkspace:
         self._checkpoint()
 
     def _mkdir(self, name: str, mode: int, *, dir_fd: int) -> None:
-        _require(not self._workflow_recovery_mode, "workflow recovery cannot create a transaction")
+        _require(not (self._workflow_recovery_mode or self._saved_text_recovery_mode),
+                 "recovery cannot create a transaction")
         self._checkpoint()
         if self._guard is None:
             os.mkdir(name, mode, dir_fd=dir_fd)
@@ -692,15 +718,20 @@ class InitWorkspace:
     def _unlink(self, name: str, *, dir_fd: int, directory: bool = False) -> None:
         self._checkpoint()
         restoration = self._workflow_restoration()
+        saved = self._saved_text_restoration()
         with self._handoff():
             receipt = restoration.before_unlink(self, dir_fd, name, directory) if restoration is not None else None
+            saved_receipt = saved.before_unlink(self, dir_fd, name, directory) if saved is not None else None
             (os.rmdir if directory else os.unlink)(name, dir_fd=dir_fd)
             if restoration is not None:
                 restoration.unlinked(self, receipt, dir_fd, name)
+            if saved is not None:
+                saved.unlinked(self, saved_receipt, dir_fd, name)
         self._checkpoint()
 
     def _control_rename(self, source_fd: int, source: str, destination_fd: int, destination: str) -> None:
-        _require(not self._workflow_recovery_mode, "workflow recovery cannot publish a new plan")
+        _require(not (self._workflow_recovery_mode or self._saved_text_recovery_mode),
+                 "recovery cannot publish a new plan")
         self._checkpoint()
         with self._handoff():
             if self._guard is not None and not self._cleanup_mode:
@@ -838,6 +869,47 @@ class InitWorkspace:
                 self._image_restoration()
                 self._expect_unchanged(identity == self.private_identity and facts == self._private_facts,
                                        "inspected image journal changed")
+            self._private_check(fd, state)
+            yield state, fd
+            self._private_check(fd, state)
+
+
+    @contextmanager
+    def inspect_saved_text_recovery_state(self) -> Iterator[tuple[str | None, int | None]]:
+        """Inspect the current saved-text journal under this original recovery lock.
+
+        This only binds the currently opened private directory. Complete DATA,
+        target and control qualification lives in SavedTextRecoveryRevision; no
+        original transaction creation/staging receipt is manufactured here.
+        """
+        _require(self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION)
+                 and self._scope is not None and self._scope.lease._saved_text_recovery_mode,
+                 "saved-text inspection requires the original explicit recovery scope")
+        state = self.state()
+        if state is None:
+            self._scope.lease._saved_text_recovery_journal = (
+                "not_created" if self._saved_text_recovery is None and self._scope.lease._rechecks == 0 else "unknown")
+            yield None, None
+            return
+        # Existence is an observation, not authority to interpret or clean it.
+        # Keep this truthful even if private-directory or full-plan proof fails.
+        self._scope.lease._saved_text_recovery_journal = "recovery_required"
+        with self._descriptor(state, self.flags, dir_fd=self.fd) as fd:
+            from .build_inputs import _directory
+            value = os.fstat(fd)
+            identity = _dir_identity(value)
+            facts = tuple(sorted(_directory(value).items()))
+            _require(value.st_uid == os.geteuid() and stat.S_IMODE(value.st_mode) == 0o700
+                     and identity["device"] == self.root_identity["device"],
+                     "saved-text journal must be a private owned same-filesystem directory")
+            if self._saved_text_recovery is None:
+                _require(self.private_identity is None and self._private_facts is None,
+                         "the current saved-text journal can only be captured once")
+                self.private_identity, self._private_facts = identity, facts
+            else:
+                self._saved_text_restoration()
+                self._expect_unchanged(identity == self.private_identity and facts == self._private_facts,
+                                       "inspected saved-text journal changed")
             self._private_check(fd, state)
             yield state, fd
             self._private_check(fd, state)
@@ -984,6 +1056,9 @@ class InitWorkspace:
         restoration = self._workflow_restoration()
         receipt = (restoration.before_move(self, source_fd, source, destination_fd, destination,
                                           expected, directory, directory_path) if restoration is not None else None)
+        saved = self._saved_text_restoration()
+        saved_receipt = (saved.before_move(self, source_fd, source, destination_fd, destination,
+                                          expected, directory, directory_path) if saved is not None else None)
         failure: BaseException | None = None
         try:
             if self._guard is not None and not self._cleanup_mode:
@@ -1013,6 +1088,8 @@ class InitWorkspace:
                     # Inside the existing captured-object proof: rejection still
                     # takes its original user-object restoration/terminal path.
                     restoration.captured_move(self, receipt, source_fd, source, destination_fd, destination)
+                if saved is not None:
+                    saved.captured_move(self, saved_receipt, source_fd, source, destination_fd, destination)
                 if directory:
                     with self._descriptor(destination, self.flags, dir_fd=destination_fd) as handle:
                         self._expect_unchanged(not self._list(handle), "moved directory gained unrelated contents")
@@ -1058,6 +1135,8 @@ class InitWorkspace:
         self._fsync(destination_fd)
         if restoration is not None:
             restoration.moved(self, receipt, source_fd, source, destination_fd, destination)
+        if saved is not None:
+            saved.moved(self, saved_receipt, source_fd, source, destination_fd, destination)
 
     def _state_move(self, old: str, new: str) -> None:
         self._checkpoint()
@@ -1108,7 +1187,7 @@ class InitWorkspace:
     def _header(self, fd: int) -> dict[str, Any]:
         item = self._read(fd, "header.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing recovery header")
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if self._original_controls_required:
             self._workflow_control("header.json", item[0])
             if restoration is None:
@@ -1125,8 +1204,17 @@ class InitWorkspace:
             else:
                 _require(header.get("image") == self._saved_text_targets().journal_context(),
                          "image journal differs from the original saved context and complete sibling inventory")
+        schema = 1
+        if self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+            schema = 2
+            header_keys.add("recovery")
+            if restoration is not None:
+                restoration.check_header(item[1], header)
+            else:
+                _require(header.get("recovery") == self._saved_text_targets().journal_context(),
+                         "saved-text journal differs from its original dependency and selection context")
         _require(set(header) == header_keys
-                 and type(header["schemaVersion"]) is int and header["schemaVersion"] == 1
+                 and type(header["schemaVersion"]) is int and header["schemaVersion"] == schema
                  and isinstance(header["transactionId"], str)
                  and re.fullmatch(r"[0-9a-f]{32}", header["transactionId"]) is not None
                  and self._valid_identity(header["root"], directory=True)
@@ -1180,7 +1268,7 @@ class InitWorkspace:
         header = self._header(fd)
         item = self._read(fd, "plan.json", MAX_CONTROL_BYTES)
         _require(item is not None, "missing READY plan; preserve journal, do not guess")
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if self._original_controls_required:
             self._workflow_control("plan.json", item[0])
             if restoration is None:
@@ -1215,8 +1303,8 @@ class InitWorkspace:
                 _require(sum(len(raw) for _, _, raw in targets._dependencies)
                          + sum(v["size"] for entry in plan["files"] for v in (entry["before"], entry["after"]) if v)
                          <= MAX_TOTAL_BYTES, "image dependencies and transaction exceed combined bound")
-        if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
-            # Image sibling validation traverses the selected folder. A newly
+        if self._typed_profile is TypedEditProfile.METADATA_IMAGES or self._saved_text_recovery_mode:
+            # Recovery and image validation traverses the selected folder. A newly
             # staged directory identity is not yet its public parent identity;
             # preserve actual None/installed facts until _locations validates
             # the complete corresponding journal relationship.
@@ -1234,7 +1322,7 @@ class InitWorkspace:
 
     def _workflow_control(self, name: str, identity: Any) -> dict[str, Any]:
         """Return only original control authority, including renamed markers."""
-        restoration = self._image_restoration()
+        restoration = self._target_restoration()
         if restoration is not None:
             return restoration.control(name, identity)
         original = {"COMMITTED": "commit.pending", "ROLLED_BACK": "rollback.pending"}.get(name, name)
@@ -1335,7 +1423,7 @@ class InitWorkspace:
             before, after = entry["before"], entry["after"]
             if after is None:
                 self._expect_unchanged(current == before, "preserved input changed")
-                restoration = self._image_restoration()
+                restoration = self._target_restoration()
                 if restoration is not None:
                     restoration.check_preserved(self, entry["path"])
                 elif self._original_facts_required:
@@ -1373,6 +1461,9 @@ class InitWorkspace:
                 header["domain"] = self._saved_text_domain
             if self._typed_profile is TypedEditProfile.METADATA_IMAGES:
                 header["image"] = self._saved_text_targets().journal_context()
+            elif self._typed_profile in (TypedEditProfile.METADATA_TEXT, TypedEditProfile.RELEASE_VERSION):
+                header["schemaVersion"] = 2
+                header["recovery"] = self._saved_text_targets().journal_context()
             self._write(fd, "header.tmp", _json(header))
             self._control_rename(fd, "header.tmp", fd, "header.json")
             self._fsync(fd)
@@ -1485,7 +1576,7 @@ class InitWorkspace:
             return
         names = set(self._list(fd))
         if self._original_controls_required:
-            restoration = self._image_restoration()
+            restoration = self._target_restoration()
             _require(restoration is not None or self._workflow_complete,
                      "incomplete original workflow preparation must be retained")
             plan = self._load(fd)
@@ -1530,11 +1621,12 @@ class InitWorkspace:
         self._metadata_dependencies_check()
         with self._private(self._state_names[2]) as fd:
             current_recovery = self._workflow_restoration()
+            saved_recovery = self._saved_text_restoration()
             if current_recovery is not None:
                 current_recovery.cleanup_start(self, fd)
             workflow_entries: dict[str, tuple[bool, dict[str, Any]]] = {}
             if self._original_controls_required:
-                restoration = self._image_restoration()
+                restoration = self._target_restoration()
                 _require(restoration is not None or self._workflow_complete,
                          "incomplete original workflow preparation must be retained")
                 # A single original in-session cleanup starts with complete
@@ -1581,6 +1673,8 @@ class InitWorkspace:
                 entries[name] = (directory, binding)
                 if current_recovery is not None:
                     current_recovery.cleanup_entry(self, fd, name, directory, binding)
+                if saved_recovery is not None:
+                    saved_recovery.cleanup_entry(self, fd, name, directory, binding)
                 if self._original_controls_required:
                     _require(workflow_entries.get(name) == entries[name],
                              "original workflow cleanup entry changed")
@@ -1592,6 +1686,8 @@ class InitWorkspace:
                     directory, expected = entries[name]
                     if current_recovery is not None:
                         current_recovery.cleanup_entry(self, fd, name, directory, expected)
+                    if saved_recovery is not None:
+                        saved_recovery.cleanup_entry(self, fd, name, directory, expected)
                     if self._original_controls_required:
                         _require(workflow_entries.get(name) == (directory, expected),
                                  "original workflow cleanup proof changed")
@@ -1686,6 +1782,9 @@ class InitWorkspace:
         No additional IO, observer reopens, or exception-text interpretation is
         performed. The outer scope/lease adds its own close evidence.
         """
+        if self._saved_text_recovery_mode:
+            from .saved_text_recovery import recovery_outcome
+            return recovery_outcome(self._scope.lease, self, reason)
         if self._workflow_recovery_mode:
             from .github_workflow_recovery import recovery_outcome
             return recovery_outcome(self._scope.lease, self, reason)
@@ -1826,9 +1925,18 @@ class InitWorkspace:
         self._typed_claimed = True
         return original.apply(self)
 
+    def apply_saved_text_recovery(self, revision: Any) -> InitApplyOutcome:
+        """Apply only the one-use inspected capability, never forge CREATED."""
+        original = self._saved_text_restoration()
+        _require(original is not None and revision is original and not self._typed_claimed
+                 and self._saved_text_recovery_mode and self._scope is not None,
+                 "saved-text restoration belongs to its original inspected capability")
+        self._typed_claimed = True
+        return original.apply(self)
+
     def _apply_typed(self, changes: list[tuple[ObservedFile, bytes | None]],
                      profile: TypedEditProfile, *, workflow_resource_sha256: str | None = None) -> InitApplyOutcome:
-        if self._workflow_recovery_mode:
+        if self._workflow_recovery_mode or self._saved_text_recovery_mode:
             raise InitOperationFailure(self.current_outcome("invalid_params"))
         if (self._scope is None or self._guard is None or self._typed_claimed
                 or self._image_recovery is not None
@@ -1918,6 +2026,7 @@ class InitWorkspace:
         return self.current_outcome()
 
     def recover(self) -> str:
+        _require(not self._saved_text_recovery_mode, "saved-text restoration requires its explicit capability")
         if self._workflow_recovery_mode:
             _require(self._typed_claimed and self._workflow_restoration() is not None,
                      "workflow recovery cannot run without its inspected one-use guard")
@@ -1953,7 +2062,8 @@ class InitWorkspace:
         return result
 
     def apply(self, changes: list[tuple[ObservedFile, bytes | None]]) -> None:
-        if self._workflow_recovery_mode:
+        _require(not self._saved_text_recovery_mode, "saved-text restoration requires its explicit capability")
+        if self._workflow_recovery_mode or self._saved_text_recovery_mode:
             raise InitOperationFailure(self.current_outcome("invalid_params"))
         _require(not self._saved_text_profile,
                  "metadata requires its original typed target facade, not legacy apply")

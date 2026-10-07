@@ -515,7 +515,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     },
     openReleaseVersionEdit: (request) => versionCall('release_version_edit_open', request),
     prepareReleaseVersionEdit: (request) => versionCall('release_version_edit_prepare', request),
-    applyReleaseVersionEdit: (sessionId, planToken) => versionCall('release_version_edit_apply', { sessionId, planToken }),
+    applyReleaseVersionEdit: (sessionId, planToken, intent) => versionCall('release_version_edit_apply',
+      intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }),
     closeReleaseVersionEdit: (sessionId) => versionCall('release_version_edit_close', { sessionId }),
     releaseVersionEditStatus: () => versionCall('release_version_edit_status', {}),
     subscribeReleaseVersionEdit: async (onStatus) => {
@@ -528,7 +529,8 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
     validateMetadataText: (request) => metadataCall('metadata_text_validate', request, parseMetadataTextValidation),
     openMetadataTextEdit: (request) => metadataCall('metadata_text_edit_open', request, parseMetadataTextEditStatus),
     prepareMetadataTextEdit: (request) => metadataCall('metadata_text_edit_prepare', request, parseMetadataTextEditStatus),
-    applyMetadataTextEdit: (sessionId, planToken) => metadataCall('metadata_text_edit_apply', { sessionId, planToken }, parseMetadataTextEditStatus),
+    applyMetadataTextEdit: (sessionId, planToken, intent) => metadataCall('metadata_text_edit_apply',
+      intent === undefined ? { sessionId, planToken } : { sessionId, planToken, intent }, parseMetadataTextEditStatus),
     closeMetadataTextEdit: (sessionId) => metadataCall('metadata_text_edit_close', { sessionId }, parseMetadataTextEditStatus),
     metadataTextEditStatus: () => metadataCall('metadata_text_edit_status', {}, parseMetadataTextEditStatus),
     subscribeMetadataTextEdit: async (onStatus) => {

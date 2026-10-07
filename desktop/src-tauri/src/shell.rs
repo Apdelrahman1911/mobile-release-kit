@@ -957,7 +957,10 @@ async fn metadata_text_validate(webview: Webview, request: tauri::ipc::Request<'
 async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = metadata_text_commands::open(request_body(&request)?)?;
+    let args = match metadata_text_commands::open_request(request_body(&request)?)? {
+        metadata_text_commands::OpenRequest::Recover(args) => return state.bridge.open_metadata_text_recovery(&state.document, window, args),
+        metadata_text_commands::OpenRequest::Edit(args) => args,
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_open_request(&args); }
     let result = state.bridge.open_metadata_text_edit(&state.document, window, args);
@@ -969,7 +972,10 @@ async fn metadata_text_edit_open(webview: Webview, request: tauri::ipc::Request<
 async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = metadata_text_commands::prepare(request_body(&request)?)?;
+    let args = match metadata_text_commands::prepare_request(request_body(&request)?)? {
+        metadata_text_commands::PrepareRequest::Recover(args) => return state.bridge.prepare_metadata_text_recovery(&state.document, window, args),
+        metadata_text_commands::PrepareRequest::Edit(args) => args,
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_prepare_request(&args); }
     let result = state.bridge.prepare_metadata_text_edit(&state.document, window, args);
@@ -981,7 +987,11 @@ async fn metadata_text_edit_prepare(webview: Webview, request: tauri::ipc::Reque
 async fn metadata_text_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<MetadataTextEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = edit_commands::apply(request_body(&request)?)?;
+    let body = request_body(&request)?;
+    if body.get("intent").is_some() {
+        return state.bridge.apply_metadata_text_recovery(&state.document, window, crate::saved_text_recovery_protocol::apply(body)?);
+    }
+    let args = edit_commands::apply(body)?;
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.metadata_apply_request(&args.session_id, &args.plan_token); }
     let result = state.bridge.apply_metadata_text_edit(&state.document, window, &args.session_id, &args.plan_token);
@@ -1103,7 +1113,10 @@ async fn metadata_images_edit_status(webview: Webview, request: tauri::ipc::Requ
 async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let args = release_version_edit_commands::open(request_body(&request)?)?;
+    let args = match release_version_edit_commands::open_request(request_body(&request)?)? {
+        release_version_edit_commands::OpenRequest::Recover(args) => return state.bridge.open_release_version_recovery(&state.document, window, args),
+        release_version_edit_commands::OpenRequest::Edit(args) => args,
+    };
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
     if let Some(q) = &state.observation { q.version_open_request(&args); }
     let result = state.bridge.open_release_version_edit(&state.document, window, args);
@@ -1115,8 +1128,17 @@ async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Reques
 async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let result = request_body(&request).and_then(release_version_edit_commands::prepare)
-        .and_then(|args| {
+    let args = request_body(&request).and_then(release_version_edit_commands::prepare_request);
+    let args = match args {
+        Ok(release_version_edit_commands::PrepareRequest::Recover(args)) => {
+            let result = state.bridge.prepare_release_version_recovery(&state.document, window, args);
+            if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+            return result;
+        },
+        Ok(release_version_edit_commands::PrepareRequest::Edit(args)) => Ok(args),
+        Err(error) => Err(error),
+    };
+    let result = args.and_then(|args| {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.version_prepare_request(&args); }
         state.bridge.prepare_release_version_edit(&state.document, window, args)
@@ -1130,7 +1152,14 @@ async fn release_version_edit_prepare(webview: Webview, request: tauri::ipc::Req
 async fn release_version_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
-    let result = request_body(&request).and_then(edit_commands::apply)
+    let body = request_body(&request);
+    if body.as_ref().is_ok_and(|body| body.get("intent").is_some()) {
+        let result = body.and_then(crate::saved_text_recovery_protocol::apply)
+            .and_then(|args| state.bridge.apply_release_version_recovery(&state.document, window, args));
+        if result.is_err() { state.bridge.edits.retire_release_version_request(window); }
+        return result;
+    }
+    let result = body.and_then(edit_commands::apply)
         .and_then(|args| {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
         if let Some(q) = &state.observation { q.version_apply_request(&args.session_id, &args.plan_token); }

@@ -537,6 +537,42 @@ impl DesktopBridge {
         document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, session_id), |bridge, registration, publisher|
             bridge.edits.apply_release_version_published(publisher, window, session_id, plan_token, registration))
     }
+    pub(crate) fn open_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let ticket=self.edits.metadata_text_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.metadata_text_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_metadata_text_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_metadata_text_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_metadata_text_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::metadata_text_edit_protocol::MetadataTextEditStatus, BridgeError> {
+        document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_metadata_text_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
+    pub(crate) fn open_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let ticket=self.edits.release_version_recovery_open_ticket(window)?;
+        let selected=args.project_id.clone();
+        document.release_version_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_release_version_recovery_published(publisher, window, args.project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Prepare) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        let session_id=args.session_id.clone();
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_release_version_recovery_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_release_version_recovery(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::saved_text_recovery_protocol::Apply) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+        document.release_version_edit_admit_published(|bridge| bridge.edits.release_version_project(window, &args.session_id), |bridge, registration, publisher|
+            bridge.edits.apply_release_version_recovery_published(publisher, window, &args.session_id, &args.plan_token, registration))
+    }
     pub(crate) fn metadata_images_selection_available(&self) -> bool {
         self.edits.metadata_images_selection_profile_available()
     }

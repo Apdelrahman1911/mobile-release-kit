@@ -173,6 +173,7 @@ export function App() {
     iosArchiveControllerRef.current?.beforeWorkspaceAction(action);
     releaseVersionControllerRef.current?.beforeWorkspaceAction(action);
     versionEditControllerRef.current?.beforeWorkspaceAction(action);
+    metadataControllerRef.current?.beforeWorkspaceAction(action);
     releaseInputControllerRef.current?.beforeWorkspaceAction(action);
     imageControllerRef.current?.beforeWorkspaceAction(action);
     const previous = workspaceRef.current;
@@ -299,6 +300,12 @@ export function App() {
     },
     otherEditReason: (projectId) => savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId),
     otherOperationReason: savedCommandBusy,
+    onRecoveryBoundary: () => {
+      // Recovery changes persisted saved-file facts, never the retained draft.
+      // Invalidate existing passive/build consent; no replacement Read is made.
+      releaseVersion.saveIntent(); releaseInputs.saveIntent();
+      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+    },
   }));
   metadataControllerRef.current = metadataText;
   const metadataState = useSyncExternalStore(metadataText.subscribe, metadataText.getSnapshot, metadataText.getSnapshot);
@@ -587,6 +594,7 @@ export function App() {
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
       versionEditControllerRef.current?.shutdownIntent();
+      metadataControllerRef.current?.shutdownIntent();
       imageControllerRef.current?.shutdownIntent();
       if (Object.values(workspaceRef.current.projects).some(isDirty) ||
           versionEditControllerRef.current && versionProjectDirty(versionEditControllerRef.current.getSnapshot()) || metadataControllerRef.current && metadataProjectDirty(metadataControllerRef.current.getSnapshot().entries) ||
@@ -599,7 +607,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -617,6 +625,7 @@ export function App() {
   const loadSnapshot = async (projectId: string) => {
     metadataImages.snapshotIntent(projectId);
     versionEdit.snapshotIntent(projectId);
+    metadataText.snapshotIntent(projectId);
     retirePathPicker();
     offlinePreflight.snapshotIntent(projectId);
     androidBuild.snapshotIntent(projectId);

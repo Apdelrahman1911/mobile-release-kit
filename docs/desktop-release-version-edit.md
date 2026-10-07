@@ -14,6 +14,12 @@ schema 2 remain read-only and unchanged. Successful Read is not permission to
 write. Browser preview never fabricates a load, absent file, save or capability.
 Another edit domain's runtime/fixture/evidence cannot enable this writer.
 
+The source now also includes a separate **Inspect recovery → read-only review →
+confirm recovery** path for complete version journals after interruption or
+restart. It does not enable that closed writer or establish native recovery
+qualification. The normal Edit/Create commands and passive Read remain distinct;
+no fake source, values or absent-file baseline is manufactured for recovery.
+
 ## Ordinary application flow
 
 1. Select a native project. Save a format-valid `release/mobile-release.json`
@@ -160,11 +166,68 @@ Unknown is absorbing; late evidence can refine the original outcome, not enable
 retry or turn a late join into normal success. Missing invoke replies trigger
 one original-status observation, never mutation resubmission.
 
-Desktop version recovery is **unavailable**. Never commit/upload/delete its
-private transaction state or rerun a save to clear it. Preserve the original
-operation, report a sanitized blocker and obtain separately authorized recovery.
-Legacy `init --recover` and other edit domains must refuse version state;
-they are not a recovery fallback.
+## Explicit saved-version recovery
+
+When the same native version-writer domain is qualified and original resources
+are known settled, Dashboard's version editor offers **Inspect recovery** for the
+registered project. Close an existing review and wait for its original settlement
+first. No normal Open, draft, selected source or Create baseline is required.
+Inspection cannot bypass a live/unknown owner, another domain's journal or changed
+native registration, and never runs automatically on navigation or restart.
+
+Only newly written text/version schema-2 journals contain their original saved
+config/ignore byte digests and derived selection. A fresh original core lease
+must verify those held dependencies and the complete journal controls, object
+identities and exact public/private location graph. Version selection remains
+one saved-config-derived source with the original name/build keys and iOS policy;
+config and ignore are never writable entries. A renderer summary/token cannot
+reconstruct filesystem authority.
+
+Inspect and read-only Prepare expose only a closed summary: saved selection,
+transaction, action, one exact path, recorded before/after byte lengths/digests/
+modes, effect and owned-private cleanup counts. A complete interrupted ready
+save permits **rollback only**, never replay/continue of the save. A bound prior
+commit permits **committed cleanup** with its public file unchanged; a prior
+rollback permits **rolled-back cleanup**; complete unused preparation permits
+**private preparation cleanup**. Partly cleaned state needs surviving complete
+evidence of exactly its remaining owned subset. No raw version text is exported
+by recovery and an absent before-side is not a new normal Create proposal.
+
+A separate frozen confirmation requires the review acknowledgement and exact
+**RECOVER**. It binds the original project/domain/session/revision/plan/action and
+current consent context, not the latest two-string draft. Project/navigation/
+service/review-expiry changes retire pre-Apply consent. Original status is checked
+after a lost reply; Apply and cleanup are not automatically retried.
+
+Successful rollback or rolled-back cleanup requires `rolled_back`; committed
+cleanup requires `committed`; preparation cleanup requires `not_started`. Each
+also needs a clean journal, settled core and native resources, reason `none`, and
+no prior uncertainty/late-settled promotion. Only the exact submitted successful
+action clears this domain/project's alert. An inspected commit followed by Close
+retains its known commit and recovery-required journal, not a fabricated failure
+or successful Save. Idle, conflict, discard, other-domain and unknown blocks are
+not cleared.
+
+Recovery never replaces a dirty/newer value, changes its comparison baseline or
+rewrites a retained normal Save outcome. It marks old observations stale and
+invalidates existing passive/build/offline consent without auto-loading files.
+Use the existing explicitly confirmed **Reload saved values and discard this
+draft** to reconcile, then review any new normal save separately. Cleaning an
+earlier commit is not saving the current draft. Recovery-page alerts remain
+session-only; that page neither scans persisted journals nor proves cleanliness.
+
+### Legacy, incomplete or changed journals stay protected
+
+A legacy schema-1 journal lacks original recovery context; the supported route
+cannot infer or upgrade it. Partial controls, contradictory/foreign evidence,
+changed dependencies/targets or replaced private objects remain conflicts or
+truthful custody/I/O failures. Keep public files and private journal names and
+contents in place, preserve original operation details and unsaved drafts
+separately, and obtain manual reconciliation assistance. Do not commit/upload,
+delete/rename/reset private controls, force another edit, use generic
+`init --recover`, or repeatedly retry a conflict. Other edit domains must refuse
+version state; they are not a recovery fallback. Not every interruption can be
+safely repaired by this narrowly supported route.
 
 ## Required distinct verification
 
@@ -174,5 +237,14 @@ admission needs a **new** source-bound core ZIP, exact member inventory,
 bootstrap/manifest/compiler binding and separate version-writer profile review.
 The old installed A payload and metadata/configuration positives cannot be
 borrowed. Only then can separately authorized original-owner Linux
-filesystem/UI/process/finality cases be collected. Windows, macOS writer
-qualification, persisted recovery and shipping remain closed.
+filesystem/UI/process/finality cases be collected. Windows/macOS writer and
+shipping qualification remain closed by this source change.
+
+Recovery additionally requires actual new-context writer journals, interrupted
+first-process settlement and a genuinely fresh process inspecting/preparing/
+confirming the persisted state, with both existing-file and originally-absent
+version cases. Complete/partial cleanup, stale/foreign/legacy refusals and
+original-resource faults need separate evidence. Node promise/DTO tests do not
+establish those filesystem or installed UI restart facts. Native recovery
+qualification remains pending, with the existing owner/deadlines/caps unchanged
+and an additional closed recovery summary bounded to 16 KiB.

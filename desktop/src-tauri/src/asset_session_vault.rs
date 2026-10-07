@@ -15,7 +15,7 @@ pub(super) fn qualified(document: &DocumentBinding) -> bool {
 #[cfg(feature = "desktop-shell")]
 pub(super) enum Qualification {
     Ordinary,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     Installed(crate::shell::installed_observation::vault::Selection),
 }
 #[cfg(feature = "desktop-shell")]
@@ -118,9 +118,9 @@ pub(super) struct Work {
     // continuation. That continuation reuses this OriginalWork/child slot; it
     // cannot turn failure/STOP into a second work attempt or a renewed lease.
     original_join: Option<JoinReceipt>, failed_child_join: Option<JoinReceipt>,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     observed_storage: QualificationStorage,
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     observed_preview_consumed: bool,
 }
 
@@ -841,7 +841,7 @@ pub(super) fn execute(owner: &Arc<OriginalWork>, child: Child) -> Result<ChildRe
             Ok(ChildResult::Released)
         },
     })();
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     { if initialization { owner.vault.lock().map_err(|_| Reason::CleanupUnknown)?.observed_storage = QualificationStorage::from_original(&book); } }
     remember(owner, &book, mutation)?;
     if initialization {
@@ -1897,7 +1897,7 @@ impl DocumentBinding {
         self.gate(state, false)?;
         let qualified = match selection {
             Qualification::Ordinary => self.persistence_qualified(),
-            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             Qualification::Installed(selection) => {
                 use crate::shell::installed_observation::vault::Action;
                 let action = match _action { QualifiedAction::Open => Action::Open, QualifiedAction::Prepare => Action::Prepare,
@@ -2014,7 +2014,7 @@ impl DocumentBinding {
                 if state.vault.as_ref().is_none_or(|session| session.state != State::Uninitialized || session.revoked || session.key.is_some()) { return Err(AssetError::invalid()); }
                 let mut slot = self.vault_owner(&mut state, Operation::Initialize, None, None, review, false)?;
                 slot.phase = Phase::Mutating; slot.vault.initialize = Some(identity); slot.vault.generation = Some(roster.generation);
-                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+                #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
                 { slot.owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.observed_preview_consumed = true; }
                 slot.owner.vault.lock().map_err(|_| AssetError::new(Reason::CleanupUnknown))?.outcome = Some(store::StorageOutcome {
                     effect: store::Effect::NotStarted, durability: store::Durability::NotRun, cleanup: store::Cleanup::Pending });
@@ -2105,11 +2105,11 @@ impl DocumentBinding {
 }
 
 
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[derive(Clone, Copy, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QualificationStorage { reservation: (bool, bool), header: (bool, bool), durability: (bool, bool) }
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl QualificationStorage {
     fn from_original(book: &store::StoreBook) -> Self {
         let (reservation, header) = book.initialization_effects();
@@ -2120,11 +2120,11 @@ impl QualificationStorage {
     pub(crate) fn header_durable(self) -> bool { self.header == (true, true) && self.durability.1 }
     pub(crate) fn header_entered(self) -> bool { self.header.0 }
 }
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(super) fn qualification_state(state: &DocumentState) -> (Option<&'static str>, bool) {
     state.vault.as_ref().map_or((None, false), |s|(Some(s.state.name()), s.key.is_some()))
 }
-#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(super) fn qualification_storage(owner: &OriginalWork) -> Option<(QualificationStorage, bool)> {
     let work = owner.vault.try_lock().ok()?;
     Some((work.observed_storage, work.observed_preview_consumed))

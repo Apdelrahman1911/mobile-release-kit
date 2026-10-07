@@ -167,6 +167,7 @@ mod vault_store;
 pub mod edit_protocol;
 pub mod github_workflow_edit_protocol;
 pub mod metadata_text_edit_protocol;
+mod saved_text_recovery_protocol;
 mod metadata_images_edit_protocol;
 pub mod release_version_edit_protocol;
 pub mod github_connection_protocol;

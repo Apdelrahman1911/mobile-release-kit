@@ -109,7 +109,10 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
         raise ProtocolError("Invalid edit envelope")
     op, params = value["op"], value["params"]
     if sequence == 0:
-        if protocol == METADATA_PROTOCOL:
+        recovering_text = protocol in {METADATA_PROTOCOL, VERSION_PROTOCOL} and "intent" in params
+        if recovering_text:
+            names = {"root", "registeredIdentity", "intent"}
+        elif protocol == METADATA_PROTOCOL:
             names = {"root", "registeredIdentity", "platform", "locale"}
         elif protocol in {WORKFLOW_PROTOCOL, VERSION_PROTOCOL}:
             names = {"root", "registeredIdentity"}
@@ -122,7 +125,9 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
             registered_identity(params["registeredIdentity"])
         if valid and protocol == WORKFLOW_PROTOCOL and "intent" in params:
             valid = params["intent"] == "recover"
-        if valid and protocol == METADATA_PROTOCOL:
+        if valid and recovering_text:
+            valid = params["intent"] == "recover"
+        if valid and protocol == METADATA_PROTOCOL and not recovering_text:
             try:
                 platform_value(params["platform"])
                 locale_value(params["locale"])
@@ -130,6 +135,9 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
                 valid = False
     elif op == "discard":
         valid = not params
+    elif sequence == 1 and protocol in {METADATA_PROTOCOL, VERSION_PROTOCOL} and params.get("intent") == "recover":
+        valid = (op == "prepare" and set(params) == {"revision", "intent"}
+                 and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None)
     elif sequence == 1 and protocol == VERSION_PROTOCOL:
         valid = (op == "prepare" and set(params) == {"revision", "expectedBaseline", "intent", "values"}
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
@@ -171,7 +179,7 @@ def parse_request(raw: bytes, *, sequence: int, session: str | None,
                  and type(params["revision"]) is str and TOKEN.fullmatch(params["revision"]) is not None
                  and (params["expectedBase"] is None or type(params["expectedBase"]) is dict)
                  and type(params["draft"]) is dict)
-    elif sequence == 2 and protocol == WORKFLOW_PROTOCOL and "intent" in params:
+    elif sequence == 2 and protocol in {WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL} and "intent" in params:
         valid = (op == "apply" and set(params) == {"planToken", "intent"} and params["intent"] == "recover"
                  and type(params["planToken"]) is str and TOKEN.fullmatch(params["planToken"]) is not None)
     else:
@@ -188,7 +196,16 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
         return images_response(request, kind, result)
     if kind not in {"opened", "prepared", "terminal"} or request.protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL}:
         raise ProtocolError("Invalid edit response")
-    if request.protocol == VERSION_PROTOCOL:
+    recovering_text = (request.protocol in {METADATA_PROTOCOL, VERSION_PROTOCOL}
+                       and request.params.get("intent") == "recover" and kind != "terminal")
+    if recovering_text:
+        keys = {"revision", "recovery", "scopeResources"} | ({"planToken"} if kind == "prepared" else set())
+        if (type(result) is not dict or set(result) != keys or result["scopeResources"] != "settled"
+                or type(result["recovery"]) is not dict
+                or result["recovery"].get("domain") != ("metadata_text" if request.protocol == METADATA_PROTOCOL else "release_version")):
+            raise ProtocolError("Invalid saved-text recovery response")
+        _workflow_value(result["recovery"], depth_limit=16, byte_limit=16 * 1024)
+    if request.protocol == VERSION_PROTOCOL and not recovering_text:
         keys = ({"revision", "source", "nameKey", "buildKey", "iosEnabled", "values", "baseline", "scopeResources"}
                 if kind == "opened" else {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
                 {"kind", "planToken", "effect", "journal", "resources", "reason"})
@@ -196,7 +213,7 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
                 or kind == "terminal" and result["kind"] != "outcome"
                 or kind != "terminal" and result["scopeResources"] != "settled"):
             raise ProtocolError("Invalid saved-version edit response")
-    if request.protocol == METADATA_PROTOCOL:
+    if request.protocol == METADATA_PROTOCOL and not recovering_text:
         keys = ({"revision", "metadataRoot", "baseline", "scopeResources"} if kind == "opened" else
                 {"revision", "planToken", "view", "scopeResources"} if kind == "prepared" else
                 {"kind", "planToken", "effect", "journal", "resources", "reason"})
@@ -212,11 +229,11 @@ def response(request: EditRequest, kind: str, result: dict[str, Any]) -> bytes:
             _workflow_value(result, depth_limit=16, byte_limit=WORKFLOW_RESPONSE_LIMIT)
         elif request.protocol == VERSION_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=VERSION_OPENED_LIMIT if kind == "opened" else VERSION_RESPONSE_LIMIT)
-            if kind == "prepared":
+            if kind == "prepared" and not recovering_text:
                 _workflow_value(result["view"], depth_limit=16, byte_limit=VERSION_PREPARED_LIMIT)
         elif request.protocol == METADATA_PROTOCOL:
             _workflow_value(result, depth_limit=16, byte_limit=METADATA_RESPONSE_LIMIT)
-            if kind == "prepared":
+            if kind == "prepared" and not recovering_text:
                 _workflow_value(result["view"], depth_limit=16, byte_limit=MAX_PREPARED_BYTES)
         raw = json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
     except (ValueError, UnicodeError, RecursionError, OverflowError):

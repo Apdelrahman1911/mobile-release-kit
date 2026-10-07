@@ -71,7 +71,7 @@ pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'
 fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if !document.inner.installed_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
-    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if !document.inner.installed_macos_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if document.inner.fixture.is_some(){return false;}
@@ -286,7 +286,7 @@ mod known {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 feature = "macos-installed-observation", not(feature = "development-runtime"),
                 not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             {
                 let witness = value.installed_native_response_witness.try_lock().map_err(|_| Reason::Capacity)?;
                 if let Some(witness) = &*witness {

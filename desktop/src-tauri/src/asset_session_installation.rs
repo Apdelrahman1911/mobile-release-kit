@@ -29,7 +29,7 @@ pub(super) struct Work {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         feature = "macos-installed-observation", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     observation: Mutex<Option<Arc<ReadObservation>>>,
 }
 impl Work {
@@ -41,7 +41,7 @@ impl Work {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 feature = "macos-installed-observation", not(feature = "development-runtime"),
                 not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-                target_os = "macos", target_arch = "aarch64"))]
+                target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             observation: Mutex::new(None),
         }
     }
@@ -89,7 +89,7 @@ impl Work {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
             feature = "macos-installed-observation", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64"))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         let observation = {
             let held = self.observation.try_lock().ok()?;
             held.as_ref().map_or(Some(0), |control| control.retained_bytes_if_quiet())?
@@ -97,7 +97,7 @@ impl Work {
         #[cfg(not(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
             feature = "macos-installed-observation", not(feature = "development-runtime"),
             not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-            target_os = "macos", target_arch = "aarch64")))]
+            target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         let observation = 0;
         SIGNAL_BYTES.checked_add(native)?.checked_add(observation)
     }
@@ -122,7 +122,7 @@ pub(super) fn failure(owner: &OriginalWork, reason: CheckReason, at: Instant) {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if let Ok(held) = work.observation.try_lock() {
         if held.as_ref().is_some_and(|control| !control.stop()) { work.poisoned.store(true, Ordering::SeqCst); }
     }
@@ -298,7 +298,7 @@ impl DocumentBinding {
     fn installation_fixture_memory_gate(&self) -> Result<(), Reason> {
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         fixture_history_absent(&self.inner.installed_session)?;
-        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_arch = "aarch64"))]
+        #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         fixture_history_absent(&self.inner.installed_macos_session)?;
         #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "development-runtime", target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         if self.inner.fixture.is_some() { return Err(Reason::Busy); }
@@ -407,7 +407,7 @@ fn read_returned(_owner: &OriginalWork, _files: u32, _bytes: u64) {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         feature = "macos-installed-observation", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     if let Some(work) = &_owner.installation {
         let control = match work.observation.lock() {
             Ok(row) => row.clone(),
@@ -438,7 +438,7 @@ pub(super) async fn run(owner: &Arc<OriginalWork>) -> Staged {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct ReadObservation {
     pause: bool, first: AtomicBool, files: std::sync::atomic::AtomicU32, bytes: std::sync::atomic::AtomicU64,
     released: Mutex<bool>, changed: std::sync::Condvar,
@@ -446,7 +446,7 @@ pub(crate) struct ReadObservation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl ReadObservation {
     fn new(pause: bool) -> Self {
         Self { pause, first: AtomicBool::new(false), files: std::sync::atomic::AtomicU32::new(0),
@@ -499,7 +499,7 @@ impl ReadObservation {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OriginalFacts {
@@ -510,7 +510,7 @@ pub(crate) struct OriginalFacts {
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
     feature = "macos-installed-observation", not(feature = "development-runtime"),
     not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-    target_os = "macos", target_arch = "aarch64"))]
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl DocumentBinding {
     pub(crate) fn inspect_installation_observed(&self, pause_after_first_read: bool)
         -> Result<(CheckStatus, Arc<ReadObservation>), BridgeError> {
@@ -557,7 +557,7 @@ pub(super) fn assert_owner_contracts() {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
         feature = "macos-installed-observation", not(feature = "development-runtime"),
         not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
-        target_os = "macos", target_arch = "aarch64"))]
+        target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         // Ordinary absent/present/contended DATA: no read boundary, native
         // object or join proof is manufactured for these allocation checks.

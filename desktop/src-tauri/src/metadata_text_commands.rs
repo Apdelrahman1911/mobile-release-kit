@@ -36,6 +36,17 @@ pub(crate) fn prepare(body: &Value) -> Result<PrepareMetadataTextEdit, BridgeErr
     Ok(value)
 }
 
+pub(crate) enum OpenRequest { Edit(Open), Recover(crate::saved_text_recovery_protocol::Open) }
+pub(crate) enum PrepareRequest { Edit(PrepareMetadataTextEdit), Recover(crate::saved_text_recovery_protocol::Prepare) }
+pub(crate) fn open_request(body: &Value) -> Result<OpenRequest, BridgeError> {
+    if body.get("intent").is_some() { crate::saved_text_recovery_protocol::open(body).map(OpenRequest::Recover) }
+    else { open(body).map(OpenRequest::Edit) }
+}
+pub(crate) fn prepare_request(body: &Value) -> Result<PrepareRequest, BridgeError> {
+    if body["intent"] == "recover" { crate::saved_text_recovery_protocol::prepare(body).map(PrepareRequest::Recover) }
+    else { prepare(body).map(PrepareRequest::Edit) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,4 +84,21 @@ mod tests {
         let mut bad = body.clone(); bad["expectedBaseline"]["fields"][0]["byteLength"] = json!(0); assert!(prepare(&bad).is_err());
         let mut bad = body; bad["expectedBaseline"]["config"]["byteLength"] = json!(0); assert!(prepare(&bad).is_err());
     }
+    #[test]
+    fn explicit_recovery_has_separate_closed_arguments_and_never_a_normal_placeholder() {
+        let body=json!({"projectId":"p","intent":"recover"});
+        assert!(open(&body).is_err()); assert!(matches!(open_request(&body),Ok(OpenRequest::Recover(_))));
+        for key in ["root","registeredIdentity","platform","locale","source","expectedBaseline"] {
+            let mut bad=body.clone(); bad[key]=Value::Null; assert!(open_request(&bad).is_err());
+        }
+        let prepare_body=json!({"sessionId":"a".repeat(32),"revision":"b".repeat(32),"intent":"recover"});
+        assert!(prepare(&prepare_body).is_err()); assert!(matches!(prepare_request(&prepare_body),Ok(PrepareRequest::Recover(_))));
+        for key in ["draftRevision","baselineGeneration","expectedBaseline","values","fields","action"] {
+            let mut bad=prepare_body.clone(); bad[key]=Value::Null; assert!(prepare_request(&bad).is_err());
+        }
+        let apply=json!({"sessionId":"a".repeat(32),"planToken":"c".repeat(32),"intent":"recover"});
+        assert!(crate::saved_text_recovery_protocol::apply(&apply).is_ok());
+        let mut bad=apply; bad["intent"]=json!("edit"); assert!(crate::saved_text_recovery_protocol::apply(&bad).is_err());
+    }
+
 }
