@@ -60,13 +60,23 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertIn('lockAllConfigurations()', build)
         self.assertIn('lockMode = LockMode.STRICT', build)
         self.assertIn("classpath 'com.android.tools.build:gradle:8.9.2'", build)
+        import xml.etree.ElementTree as ET
+        manifest = ET.fromstring(bodies['project/app/src/main/AndroidManifest.xml'])
+        application = manifest.find('application')
+        self.assertIsNotNone(application)
+        self.assertNotIn('{http://schemas.android.com/apk/res/android}debuggable', application.attrib)
+        release_build = bodies['project/app/build.gradle'].decode()
+        self.assertIn('debuggable false', release_build)
+        for suppression in ('lintOptions', 'lint {', 'abortOnError', 'checkReleaseBuilds', 'disable', 'baseline'):
+            self.assertNotIn(suppression, release_build)
+        self.assertNotIn('tools:ignore', bodies['project/app/src/main/AndroidManifest.xml'].decode())
         for incompatible in ('failOnDynamicVersions', 'failOnChangingVersions', 'failOnNonReproducibleResolution'):
             self.assertNotIn(incompatible, build)
         self.assertIn('dependencyVerificationMode = DependencyVerificationMode.STRICT', bodies['project/settings.gradle'].decode())
         self.assertIn('<verify-metadata>true</verify-metadata>',
                       (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_text())
         total = sum(map(len, bodies.values()))
-        self.assertEqual(total, 3989)
+        self.assertEqual(total, 3962)
         materializer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'materialize')
         bound = next(n for n in ast.walk(materializer) if isinstance(n, ast.Call) and len(n.args) == 2
                      and isinstance(n.args[1], ast.Constant) and n.args[1].value == 'fixture-decoded-bound')
@@ -716,7 +726,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             originals = helper.materialize(work, project_raw, verification, Clock())
             decoded = {name.removeprefix('project/'): base64.b64decode(raw, validate=True)
                        for name, raw in json.loads(project_raw)['files'].items()}
-            self.assertEqual(sum(map(len, decoded.values())), 3989)
+            self.assertEqual(sum(map(len, decoded.values())), 3962)
             decoded['gradle/verification-metadata.xml'] = verification
             self.assertEqual(originals, {name: helper.digest(raw) for name, raw in decoded.items()})
             self.assertEqual({name: (work / 'run/project' / name).read_bytes() for name in decoded}, decoded)
@@ -932,6 +942,10 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                          [(1, 'TaskExecutionException.java', 41), (2, 'ResourceTask.kt', 73), (2, 'ResourceTask.kt', 74)])
         self.assertIn('filesystem-read-only', context['facts'])
         self.assertNotIn('PRIVATE', helper.encoded(context).decode())
+        issue = helper.gradle_failure_projection(b'', work, project_raw, verification,
+            stdout=b'Error: PRIVATE-MESSAGE [HardcodedDebugMode]\n')
+        self.assertIn('HardcodedDebugMode', issue['symbols'])
+        self.assertNotIn('PRIVATE', helper.encoded(issue).decode())
         stdout_only = helper.gradle_failure_projection(b'', work, project_raw, verification, stdout=stdout_context)
         self.assertEqual(stdout_only['tasks'][0]['stream'], 'stdout')
         self.assertIn('filesystem-read-only', stdout_only['facts'])
