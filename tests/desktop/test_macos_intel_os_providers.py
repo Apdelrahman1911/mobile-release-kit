@@ -209,6 +209,152 @@ class IntelOSProviderData(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "system-tool-root-ancestor"):
             PROBE.system_tool(book, selected)
 
+        # The real admission failure is never converted into tool authority by
+        # a later metadata sample, including a safe-looking after-refusal mode.
+        class DirectoryRefused(ValueError):
+            pass
+
+        fixture = SimpleNamespace(context_timeout=context_timeout, completed=completed, canonical=canonical,
+                                  Refused=DirectoryRefused)
+        deadline = 120_000_000_000
+        for mode in ("group-write", "wrong-owner", "safe-after", "changed-named", "changed-fd",
+                     "missing-parent", "closed", "expired", "observation-error", "no-new-entry", "foreign-path"):
+            with self.subTest(directory_refusal=mode):
+                book, calls, tools, dispatched = MemoryBook(), [], {}, []
+                clock = SimpleNamespace(CLOCK_MONOTONIC=1, now=0)
+                clock.clock_gettime_ns = lambda which: clock.now
+                progress = {"stage": "host-admission", "role": None, "sourceSlot": None}
+                primary = DirectoryRefused("directory-owner-mode")
+                state = SimpleNamespace(entry=None, parent=None, samples=[], info=None)
+                original_directory = book.directory
+
+                def rejected_directory(path):
+                    if Path(path) != PROBE.APPLICATIONS:
+                        return original_directory(path)
+                    if mode == "no-new-entry":
+                        raise primary
+                    parent = original_directory(PROBE.APPLICATIONS.parent)
+                    state.parent = parent
+                    state.entry = {"fd": 900, "path": PROBE.APPLICATIONS, "kind": "directory",
+                                   "identity": None, "closed": False}
+                    book.entries.append(state.entry)
+                    permissions = 0o755 if mode in ("wrong-owner", "safe-after") else 0o775
+                    state.info = SimpleNamespace(st_dev=1, st_ino=900, st_mode=stat.S_IFDIR | permissions,
+                                                 st_uid=502 if mode == "wrong-owner" else 0, st_gid=0,
+                                                 st_nlink=2, st_size=64, st_mtime_ns=8, st_ctime_ns=8)
+                    if mode == "missing-parent":
+                        del book.directories[PROBE.APPLICATIONS.parent]
+                    elif mode == "closed":
+                        state.entry.update(fd=None, closed=True)
+                    elif mode == "expired":
+                        clock.now = deadline
+                    elif mode == "foreign-path":
+                        state.entry["path"] = Path("/private/NEVER-PRINT-directory")
+                    raise primary
+
+                def sampled(fd):
+                    self.assertEqual(fd, 900)
+                    state.samples.append("fstat")
+                    if mode == "observation-error":
+                        raise OSError("NEVER-PRINT-fstat-error")
+                    if mode == "changed-fd" and state.samples.count("fstat") == 2:
+                        return SimpleNamespace(**dict(vars(state.info), st_ctime_ns=9))
+                    return state.info
+
+                def named_directory(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual((name, dir_fd, follow_symlinks),
+                                     ("Applications", state.parent["fd"], False))
+                    state.samples.append("named")
+                    return (SimpleNamespace(**dict(vars(state.info), st_ino=901))
+                            if mode == "changed-named" else state.info)
+
+                fake_os = SimpleNamespace(path=os.path, fstat=sampled, stat=named_directory, getuid=lambda: 501)
+
+                def resolver(argv, **kwargs):
+                    self.assertEqual(argv, ["/usr/bin/xcrun", "--find", "dyld_info"])
+                    self.assertEqual(kwargs["output_limit"], 65536)
+                    self.assertLessEqual(kwargs["timeout"], 30)
+                    dispatched.append(list(argv))
+                    return subprocess.CompletedProcess(argv, 0, (str(selected) + "\n").encode("ascii"), b"")
+
+                with mock.patch.object(book, "directory", side_effect=rejected_directory), \
+                        mock.patch.object(PROBE, "os", fake_os), mock.patch.object(PROBE, "time", clock):
+                    with self.assertRaises(DirectoryRefused) as refusal:
+                        PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=resolver), deadline,
+                                                Path("/private/test"), calls, tools, progress)
+                self.assertIs(refusal.exception, primary)
+                self.assertEqual(len(dispatched), 1)
+                self.assertEqual([row["role"] for row in calls], [PROBE.ROLES[0]])
+                self.assertIs(calls[0]["originalReturned"], True)
+                self.assertEqual(set(tools), {"xcrun"})
+                self.assertEqual((progress["stage"], progress["role"]), ("selected-tool-admission", PROBE.ROLES[0]))
+                data = progress["directoryAfterRefusal"]
+                if mode in ("group-write", "wrong-owner", "safe-after"):
+                    self.assertEqual(data, {"when": "after-refusal", "ancestorSlot": "applications", "sameOriginal": True,
+                                           "permissionBits": stat.S_IMODE(state.info.st_mode), "isDirectory": True,
+                                           "ownerIsRoot": mode != "wrong-owner", "ownerIsCurrent": False,
+                                           "groupWritable": mode == "group-write", "otherWritable": False})
+                    self.assertEqual(state.samples, ["fstat", "named", "fstat"])
+                else:
+                    self.assertIsNone(data)
+                if mode in ("missing-parent", "closed", "expired", "no-new-entry", "foreign-path"):
+                    self.assertEqual(state.samples, [])
+                if state.entry is not None:
+                    self.assertIsNone(state.entry["identity"])
+                    self.assertNotIn("parent", state.entry)
+                self.assertTrue(book.finish())
+                self.assertTrue(all(entry["fd"] is None and entry["closed"] for entry in book.entries))
+
+        # Only the fixed ancestor slots are observable; no rejected path is
+        # serialized or reopened, and the original dictionary stays unbound.
+        suffix = PROBE.TOOL_SUFFIX.split("/")[:-1]
+        directory_paths = [PROBE.APPLICATIONS] + [Path("/Applications/Xcode_26.6.app").joinpath(*suffix[:n])
+                                                  for n in range(len(suffix) + 1)]
+        self.assertEqual(len(directory_paths), len(PROBE.DIRECTORY_SLOTS))
+        for slot, path in zip(PROBE.DIRECTORY_SLOTS, directory_paths):
+            book = MemoryBook()
+            parent = book.directory(path.parent)
+            mark = len(book.entries)
+            entry = {"fd": 900, "path": path, "kind": "directory", "identity": None, "closed": False}
+            book.entries.append(entry)
+            info = SimpleNamespace(st_dev=1, st_ino=900, st_mode=stat.S_IFDIR | 0o777, st_uid=501, st_gid=0,
+                                   st_nlink=2, st_size=64, st_mtime_ns=8, st_ctime_ns=8)
+            def same_named(name, *, dir_fd, follow_symlinks):
+                self.assertEqual((name, dir_fd, follow_symlinks), (path.name, parent["fd"], False))
+                return info
+            def same_fd(fd):
+                self.assertEqual(fd, 900)
+                return info
+            clock = SimpleNamespace(CLOCK_MONOTONIC=1, clock_gettime_ns=lambda which: 1)
+            fake_os = SimpleNamespace(path=os.path, stat=same_named, fstat=same_fd, getuid=lambda: 501)
+            with mock.patch.object(PROBE, "os", fake_os), mock.patch.object(PROBE, "time", clock):
+                value = PROBE.directory_refusal_data(fixture, book, deadline, mark, DirectoryRefused("directory-owner-mode"))
+                self.assertEqual(value["ancestorSlot"], slot)
+                self.assertIs(value["ownerIsCurrent"], True)
+                self.assertIs(value["ownerIsRoot"], False)
+                self.assertIs(value["groupWritable"], True)
+                self.assertIs(value["otherWritable"], True)
+                for bad_mark in (-1, True, len(book.entries), len(book.entries) + 1):
+                    self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, bad_mark,
+                                                                   DirectoryRefused("directory-owner-mode")))
+                self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, mark,
+                                                               DirectoryRefused("directory-owner-mode", "NEVER-PRINT")))
+                self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, mark, RuntimeError("other")))
+                for wrong_type in (RuntimeError, ValueError):
+                    self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, mark,
+                                                                   wrong_type("directory-owner-mode")))
+                del entry["identity"]
+                self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, mark,
+                                                               DirectoryRefused("directory-owner-mode")))
+                entry["identity"] = None
+                entry["parent"] = parent
+                self.assertIsNone(PROBE.directory_refusal_data(fixture, book, deadline, mark,
+                                                               DirectoryRefused("directory-owner-mode")))
+                del entry["parent"]
+            self.assertIsNone(entry["identity"])
+            self.assertNotIn("parent", entry)
+            self.assertTrue(book.finish())
+
         fixture = SimpleNamespace(context_timeout=context_timeout, completed=completed, canonical=canonical)
         for mode in ("observed", "missing-first", "unparsed-first", "resolver-foreign", "wrong-original", "unknown", "late"):
             with self.subTest(mode=mode):
@@ -398,6 +544,28 @@ class IntelOSProviderData(unittest.TestCase):
                 value = json.loads(stderr[-1])
                 self.assertEqual(value["sourceSlot"], source_slot if type(source_slot) is int
                                  and 0 <= source_slot < len(PROBE.SOURCE_PINS) + 2 else None)
+            directory = {"when": "after-refusal", "ancestorSlot": "default-toolchain", "sameOriginal": True,
+                         "permissionBits": 0o7777, "isDirectory": True, "ownerIsRoot": False,
+                         "ownerIsCurrent": False, "groupWritable": True, "otherWritable": True}
+            for slot in PROBE.DIRECTORY_SLOTS:
+                row = dict(directory, ancestorSlot=slot)
+                PROBE.emit_refusal(RuntimeError("directory-owner-mode"), "fixed-observations",
+                                   dict(fixed, directoryAfterRefusal=row), originals, {"xcrun": {}}, **flags)
+                self.assertEqual(json.loads(stderr[-1])["directoryAfterRefusal"], row)
+            for bad in (dict(directory, when=secret), dict(directory, ancestorSlot=secret),
+                        dict(directory, permissionBits=True), dict(directory, permissionBits=-1),
+                        dict(directory, permissionBits=0o10000), dict(directory, sameOriginal=1),
+                        dict(directory, ownerIsRoot=1), dict(directory, rawPath=secret), secret, None):
+                PROBE.emit_refusal(RuntimeError("directory-owner-mode"), "fixed-observations",
+                                   dict(fixed, directoryAfterRefusal=bad), originals, {"xcrun": {}}, **flags)
+                self.assertIsNone(json.loads(stderr[-1])["directoryAfterRefusal"])
+            for reason, phase, stage, tools in (("source-pin", "fixed-observations", "selected-tool-admission", {}),
+                                               ("directory-owner-mode", "private-work", "selected-tool-admission", {}),
+                                               ("directory-owner-mode", "fixed-observations", "source-post", {}),
+                                               ("directory-owner-mode", "fixed-observations", "selected-tool-admission", {"dyld_info": {}})):
+                PROBE.emit_refusal(RuntimeError(reason), phase,
+                                   dict(fixed, stage=stage, directoryAfterRefusal=directory), originals, tools, **flags)
+                self.assertIsNone(json.loads(stderr[-1])["directoryAfterRefusal"])
             # Actual main exits before any filesystem or loader call. This is
             # an inert local module binding, not a patch to shared sys/os/time.
             fake_sys = SimpleNamespace(version_info=(0, 0, 0))
@@ -438,7 +606,7 @@ class IntelOSProviderData(unittest.TestCase):
         tree = ast.parse(helper)
         functions = {node.name: ast.get_source_segment(helper, node) for node in tree.body if isinstance(node, ast.FunctionDef)}
         self.assertEqual(len(PROBE.SOURCE_PINS), 11)
-        self.assertEqual(sum(row[0] for row in PROBE.SOURCE_PINS.values()), 1057880)
+        self.assertEqual(sum(row[0] for row in PROBE.SOURCE_PINS.values()), 1058004)
         self.assertEqual(PROBE.ROLES, ("resolve-dyld-info", "provider-javavm", "provider-libgcc", "provider-ncurses"))
         self.assertEqual(PROBE.REF, "refs/heads/verify/desktop-macos-intel-os-providers")
         self.assertEqual(PROBE.OPTIONS, ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths"))
@@ -453,6 +621,28 @@ class IntelOSProviderData(unittest.TestCase):
         self.assertNotIn("repr(error)", functions["emit_refusal"])
         self.assertIn("os.write(2, body)", functions["emit_refusal"])
         self.assertIn("len(body) <= DIAGNOSTIC_LIMIT", functions["emit_refusal"])
+        self.assertEqual(PROBE.DIRECTORY_SLOTS, ("applications", "bundle", "contents", "developer", "toolchains",
+                                               "default-toolchain", "usr", "bin"))
+        refusal = ast.parse(functions["directory_refusal_data"])
+        calls = [node for node in ast.walk(refusal) if isinstance(node, ast.Call)]
+        self.assertEqual(sum(isinstance(node.func, ast.Attribute) and node.func.attr == "fstat" for node in calls), 2)
+        self.assertEqual(sum(isinstance(node.func, ast.Attribute) and node.func.attr == "stat" for node in calls), 1)
+        self.assertEqual(functions["directory_refusal_data"].count("fixture.context_timeout(deadline,"), 2)
+        self.assertNotIn("book.check()", functions["directory_refusal_data"])
+        self.assertNotIn("book.register(", functions["directory_refusal_data"])
+        self.assertNotIn("os.open(", functions["directory_refusal_data"])
+        self.assertNotIn("os.close(", functions["directory_refusal_data"])
+        self.assertIn('"when": "after-refusal"', functions["directory_refusal_data"])
+        self.assertIn("type(error) is not fixture.Refused", functions["directory_refusal_data"])
+        self.assertIn('entry["identity"] is not None', functions["directory_refusal_data"])
+        self.assertIn('progress["directoryAfterRefusal"] = directory_refusal_data(', functions["observe_providers"])
+        handlers = [node for node in ast.walk(ast.parse(functions["observe_providers"]))
+                    if isinstance(node, ast.ExceptHandler) and any(isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name) and child.func.id == "directory_refusal_data"
+                    for child in ast.walk(node))]
+        self.assertEqual(len(handlers), 1)
+        self.assertIsInstance(handlers[0].body[-1], ast.Raise)
+        self.assertIsNone(handlers[0].body[-1].exc)
         self.assertIn('deadline = started + 120 * 1_000_000_000', functions["main"])
         self.assertLess(functions["main"].index('source_closed = book.finish()'), functions["main"].index('passed = publish_record('))
         self.assertIn('head == (commit + "\\n").encode("ascii")', functions["main"])

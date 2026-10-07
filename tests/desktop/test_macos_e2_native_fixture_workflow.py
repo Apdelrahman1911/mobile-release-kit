@@ -95,10 +95,24 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             if not newline or name in cls.steps:
                 raise AssertionError("missing or duplicate named step")
             cls.steps[name] = content
+        for name, relative, attribute in (
+                (STEP_NAMES[3], "desktop/tools/macos_maintenance_fixture_prepare.sh", "preparation_source"),
+                (STEP_NAMES[5], "desktop/tools/macos_maintenance_fixture_publish.sh", "publication_source")):
+            step = cls.steps[name]
+            key = "        run: |\n"
+            if step.count(key) != 1 or step.split(key, 1)[1].rstrip("\n") != "          builtin source ./" + relative:
+                raise AssertionError("fixed maintenance same-shell caller")
+            body = (ROOT / relative).read_text(encoding="utf-8")
+            setattr(cls, attribute, textwrap.indent(body, "          "))
+        cls.actual_source = cls.workflow + cls.preparation_source + cls.publication_source
 
     def test_fixed_hosted_source_route_and_readonly_actions(self):
         self.assertEqual(active(self.header), active(EXPECTED_HEADER))
         self.assertEqual(tuple(self.steps), STEP_NAMES)
+        for raw in self.steps.values():
+            if "        run: |\n" in raw:
+                decoded = textwrap.dedent(raw.split("        run: |\n", 1)[1]).rstrip("\n") + "\n"
+                self.assertLessEqual(len(decoded), 21000)
         actions = [line.strip().split(" #", 1)[0]
                    for line in self.workflow.splitlines()
                    if line.startswith("        uses: ")]
@@ -143,7 +157,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         for unfinished in ("${{ github.sha", "${{ format('unfinished }}"):
             with self.assertRaisesRegex(AssertionError, "unterminated GitHub expression"):
                 references_github_secrets(unfinished)
-        self.assertFalse(references_github_secrets(self.workflow))
+        self.assertFalse(references_github_secrets(self.actual_source))
         # Actions also evaluates unwrapped if predicates. Freeze the complete
         # occurrence roster: additions, quoted keys, multiline or moved forms fail.
         self.assertEqual(
@@ -154,10 +168,10 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         for forbidden in ("contents: write", "id-token:", "pull_request_target:",
                           "workflow_dispatch:", "repository_dispatch:", "matrix:", "services:"):
             with self.subTest(expanded_authority=forbidden):
-                self.assertNotIn(forbidden, active(self.workflow))
+                self.assertNotIn(forbidden, active(self.actual_source))
 
     def test_reviewed_original_owner_is_the_only_native_route(self):
-        prepare, native = (self.steps[name] for name in STEP_NAMES[3:5])
+        prepare, native = self.preparation_source, self.steps[STEP_NAMES[4]]
         # Exact active entry prevents an extra native command or inherited env.
         self.assertEqual(active(native), active(EXPECTED_NATIVE))
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
@@ -289,11 +303,11 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         for raw_path in ("subprocess.", "os.system(", "os.posix_spawn(", "os.fork(",
                          "/usr/sbin/installer", "/bin/launchctl"):
             with self.subTest(unowned_workflow_path=raw_path):
-                self.assertNotIn(raw_path, active(self.workflow))
+                self.assertNotIn(raw_path, active(self.actual_source))
 
     def preparation_diagnostic(self):
         """Extract literal tables and ONE pure function, not the preparation program."""
-        prepare = self.steps[STEP_NAMES[3]]
+        prepare = self.preparation_source
         body = textwrap.dedent(section(prepare, "          import hashlib", "          PY_PREPARE"))
         tree = ast.parse(body)
         names = {"PREPARATION_COMMANDS", "PREPARATION_PHASES", "PREPARATION_REFUSALS"}
@@ -369,7 +383,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
 
     def test_preparation_diagnostic_stages_do_not_change_original_failure_or_cleanup(self):
         _report, tables, tree = self.preparation_diagnostic()
-        prepare = self.steps[STEP_NAMES[3]]
+        prepare = self.preparation_source
         self.assertIn('SOURCE], git_env, 15, 2097152)\n              phase = "source-roster-decode"', prepare)
         for phase, operation in (
             ("source-roster-decode", 'raw_rows = roster.split(b"\\0")'),
@@ -415,7 +429,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
 
     def test_direct_image_tools_keep_exact_versions_and_only_locked_fetch_network(self):
         report, tables, _tree = self.preparation_diagnostic()
-        prepare = self.steps[STEP_NAMES[3]]
+        prepare = self.preparation_source
         compiler = section(self.owner, "    def compiler_environment(self, target):", "    def begin(self):")
         assignment = 'bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"'
         self.assertEqual(prepare.count(assignment), 1)
@@ -463,7 +477,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
 
     def native_owner_diagnostic(self):
         """Extract literal tables and ONE pure function, not publication/owner code."""
-        publish = self.steps[STEP_NAMES[5]]
+        publish = self.publication_source
         body = textwrap.dedent(section(publish, "          import hashlib", "          PY_PUBLISH"))
         tree = ast.parse(body)
         names = {"OWNER_DIAGNOSTIC_PHASES", "OWNER_DIAGNOSTIC_REFUSALS", "OWNER_DIAGNOSTIC_ROLES"}
@@ -490,8 +504,17 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
 
 
     def test_acceptance_requires_actual_outcome_and_bounded_closed_summary(self):
-        publish, upload, final = (self.steps[name] for name in STEP_NAMES[5:])
-        self.assertIn("MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", active(publish))
+        publish = self.publication_source
+        upload, final = (self.steps[name] for name in STEP_NAMES[6:])
+        source_loop = section(publish, "              for relative in (", "                  row = rows[relative]")
+        self.assertEqual(flat(source_loop), flat(
+            'for relative in ("desktop/tools/macos_e2_native_fixture.py", '
+            '".github/workflows/desktop-macos-maintenance-fixture.yml", '
+            '"desktop/tools/macos_maintenance_fixture_prepare.sh", '
+            '"desktop/tools/macos_maintenance_fixture_publish.sh", '
+            '"desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE, fixture.LAYOUT_SOURCE):'))
+        self.assertLess(publish.index('"summary-source-correspondence"'), publish.index('_entry, result_body ='))
+        self.assertIn("MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", active(self.steps[STEP_NAMES[5]]))
         self.assertIn('outcome = os.environ["MRK_NATIVE_STEP_OUTCOME"]', active(publish))
         gates = section(publish, "              known_pass = (", "              summary.update(")
         self.assertEqual(flat(gates), flat("""known_pass = (

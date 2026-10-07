@@ -35,7 +35,7 @@ SOURCE_PINS = {
     'src/mobile_release/_command_process.py': (172299, '30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69'),
     'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'),
     'src/mobile_release/cancellation.py': (31041, '5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35'),
-    'desktop/tools/macos_e2_native_fixture.py': (281171, 'd93b8149c52ce82843f580ef09548a64a88da342c9904576e4981b122bfd98cb'),
+    'desktop/tools/macos_e2_native_fixture.py': (281295, '1e242cd423ebd9e76bbdfa86719cdf9712b44b32bde4821d34b12cbc23d693d8'),
     'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'),
     'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'),
     'src/mobile_release/_lifetime_evidence.py': (19072, 'f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3'),
@@ -61,6 +61,8 @@ PROVIDERS = (
 ROLES = ("resolve-dyld-info", "provider-javavm", "provider-libgcc", "provider-ncurses")
 OPTIONS = ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths")
 ATTRIBUTES = ("upward", "delay-init", "weak-link", "re-export")
+DIRECTORY_SLOTS = ("applications", "bundle", "contents", "developer", "toolchains",
+                   "default-toolchain", "usr", "bin")
 DIAGNOSTIC_LIMIT = 1536
 DIAGNOSTIC_PHASES = ("host-admission", "source-admission", "host-system-version", "private-work",
                      "fixed-observations", "source-post", "publication")
@@ -354,6 +356,61 @@ def failure_kind(error):
                  if type(error) is kind), "other")
 
 
+def directory_refusal_data(fixture, book, deadline, first_new_entry, error):
+    """New samples after refusal; never bind or admit the rejected original."""
+    try:
+        if type(error) is not fixture.Refused or error.args != ("directory-owner-mode",):
+            return None
+        fixture.context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 30)
+        entries = book.entries
+        if (type(entries) is not list or type(first_new_entry) is not int
+                or not 0 <= first_new_entry < len(entries) <= 2048
+                or not 1 <= len(entries) - first_new_entry <= len(DIRECTORY_SLOTS)):
+            return None
+        entry = entries[-1]
+        if (type(entry) is not dict or entry.get("kind") != "directory"
+                or entry.get("identity", False) is not None or entry.get("closed") is not False
+                or type(entry.get("fd")) is not int or entry["fd"] < 0 or "parent" in entry):
+            return None
+        path = entry.get("path")
+        if not isinstance(path, Path) or str(path) != os.path.normpath(path):
+            return None
+        if path == APPLICATIONS:
+            slot = DIRECTORY_SLOTS[0]
+        else:
+            parts = path.parts
+            if (not 3 <= len(parts) <= 9 or parts[:2] != APPLICATIONS.parts
+                    or not (parts[2] == "Xcode.app" or re.fullmatch(VERSIONED_XCODE, parts[2], re.ASCII))
+                    or parts[3:] != tuple(TOOL_SUFFIX.split("/")[:-1])[:len(parts) - 3]):
+                return None
+            slot = DIRECTORY_SLOTS[len(parts) - 2]
+        parent = book.directories.get(path.parent)
+        if (type(parent) is not dict or parent.get("path") != path.parent
+                or book.directories.get(path) is entry):
+            return None
+        book.check_one(parent)
+        fd = entry["fd"]
+        before = os.fstat(fd)
+        named = os.stat(path.name, dir_fd=parent["fd"], follow_symlinks=False)
+        after = os.fstat(fd)
+        book.check_one(parent)
+        current_uid = os.getuid()
+        fixture.context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 30)
+        if (book.entries is not entries or entry is not entries[-1]
+                or book.directories.get(path.parent) is not parent or entry["fd"] != fd or entry["closed"] is not False
+                or entry["identity"] is not None or identity(before) != identity(named)
+                or identity(before) != identity(after)):
+            return None
+        return {"when": "after-refusal", "ancestorSlot": slot, "sameOriginal": True,
+                "permissionBits": stat.S_IMODE(before.st_mode),
+                "isDirectory": stat.S_ISDIR(before.st_mode), "ownerIsRoot": before.st_uid == 0,
+                "ownerIsCurrent": before.st_uid == current_uid,
+                "groupWritable": bool(before.st_mode & 0o020),
+                "otherWritable": bool(before.st_mode & 0o002)}
+    except BaseException:
+        return None  # Preserve the primary error and all original retirement obligations.
+
+
 def emit_refusal(error, phase, progress, calls, tools, *, record_prepared,
                  source_post_known, source_closed, bootstrap_closed, post_failed, close_failed):
     """Best-effort fixed stderr DATA, never a result or permission to clean/publish."""
@@ -371,12 +428,27 @@ def emit_refusal(error, phase, progress, calls, tools, *, record_prepared,
                                      for name in ("dispatched", "contained", "cleanupComplete")}})
         slot = progress.get("sourceSlot")
         number = error.errno if isinstance(error, OSError) else None
+        directory = progress.get("directoryAfterRefusal")
+        if not (reason == "directory-owner-mode" and phase == "fixed-observations"
+                and progress.get("stage") == "selected-tool-admission"
+                and progress.get("role") == ROLES[0] and "dyld_info" not in tools
+                and type(directory) is dict and set(directory) == {
+                    "when", "ancestorSlot", "sameOriginal", "permissionBits", "isDirectory",
+                    "ownerIsRoot", "ownerIsCurrent", "groupWritable", "otherWritable"}
+                and type(directory["when"]) is str and directory["when"] == "after-refusal"
+                and type(directory["ancestorSlot"]) is str and directory["ancestorSlot"] in DIRECTORY_SLOTS
+                and directory["sameOriginal"] is True and type(directory["permissionBits"]) is int
+                and 0 <= directory["permissionBits"] <= 0o7777
+                and all(type(directory[name]) is bool for name in
+                        ("isDirectory", "ownerIsRoot", "ownerIsCurrent", "groupWritable", "otherWritable"))):
+            directory = None
         data = {"type": "mrk-intel-os-provider-refusal-v1", "diagnosticOnly": True,
                 "completeEvidence": False, "supplierAuthority": False,
                 "phase": phase if phase in DIAGNOSTIC_PHASES else "unknown",
                 "stage": progress.get("stage") if progress.get("stage") in DIAGNOSTIC_STAGES else "unknown",
                 "role": progress.get("role") if progress.get("role") in ROLES else None,
                 "sourceSlot": slot if type(slot) is int and 0 <= slot < len(SOURCE_PINS) + 2 else None,
+                "directoryAfterRefusal": directory,
                 "reason": reason, "errorKind": failure_kind(error) if error is not None else "none",
                 "errnoName": DIAGNOSTIC_ERRNOS.get(number, "other") if type(number) is int else None,
                 "recordPrepared": record_prepared is True, "resolverAdmitted": "xcrun" in tools,
@@ -444,7 +516,12 @@ def observe_providers(fixture, book, owner, deadline, work, calls, tools, progre
     progress["stage"] = "selected-tool-path"
     selected = selected_tool_path(result.stdout)
     progress["stage"] = "selected-tool-admission"
-    tools["dyld_info"] = selected_tool(book, selected)
+    first_new_entry = len(book.entries)
+    try:
+        tools["dyld_info"] = selected_tool(book, selected)
+    except BaseException as error:
+        progress["directoryAfterRefusal"] = directory_refusal_data(fixture, book, deadline, first_new_entry, error)
+        raise
     checkpoint()
     observations = []
     for role, path in zip(ROLES[1:], PROVIDERS):

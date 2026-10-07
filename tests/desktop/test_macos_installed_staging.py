@@ -6914,8 +6914,32 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertIn('include_str!("../../templates/workflows/' + template + '")', build)
 
         workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
-        data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
-        names = ast.literal_eval(TOOL.re.search(r"          names = (\[\n.*?\n          \])\n", data, TOOL.re.S).group(1))
+        data_step = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
+        self.assertEqual(data_step, (
+            "        id: data_contracts\n"
+            "        if: github.ref == 'refs/heads/verify/desktop-macos-preview'\n"
+            "        timeout-minutes: 28\n"
+            "        shell: bash\n"
+            "        run: |\n"
+            "          builtin source ./desktop/tools/macos_installed_data_contracts.sh\n"))
+        helper_path = "desktop/tools/macos_installed_data_contracts.sh"
+        self.assertEqual(workflow.count("builtin source ./" + helper_path), 1)
+        data = (root / helper_path).read_text(encoding="utf-8")
+        self.assertTrue(data.startswith("set -euo pipefail\nset -o noclobber\numask 077\n"))
+        # This workflow uses only fixed literal scalars. Do not silently ignore
+        # a new scalar form or an oversized embedded program (GitHub limit).
+        run_lines = workflow.splitlines(keepends=True)
+        run_starts = [i for i, line in enumerate(run_lines) if TOOL.re.match(r"^\s*run:", line)]
+        self.assertEqual(len(run_starts), 41)
+        for start in run_starts:
+            self.assertEqual(run_lines[start], "        run: |\n")
+            end = start + 1
+            while end < len(run_lines) and (not run_lines[end].strip() or run_lines[end].startswith("          ")):
+                end += 1
+            scalar = "".join(line[10:] if line.startswith("          ") else "\n"
+                             for line in run_lines[start + 1:end]).rstrip("\n") + "\n"
+            self.assertLessEqual(len(scalar), 21000, "run scalar at line " + str(start + 1))
+        names = ast.literal_eval(TOOL.re.search(r"\nnames = (\[\n.*?\n\])\n", data, TOOL.re.S).group(1))
         digest = lambda selected: TOOL.digest(TOOL.json.dumps(selected, separators=(",", ":")).encode())
         self.assertEqual(len(names), 84)
         self.assertEqual(len(set(names)), 84)
@@ -6934,8 +6958,8 @@ class MacCurrentRuntimeData(unittest.TestCase):
             'test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only',
             'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
         ])
-        sources = ast.literal_eval(TOOL.re.search(r"          source_names = (\(\n.*?\n          \))\n", data, TOOL.re.S).group(1))
-        self.assertEqual(len(sources), 77)
+        sources = ast.literal_eval(TOOL.re.search(r"\nsource_names = (\(\n.*?\n\))\n", data, TOOL.re.S).group(1))
+        self.assertEqual(len(sources), 78)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
         self.assertEqual(sources[64:69], (
@@ -6945,7 +6969,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             "desktop/src-tauri/src/macos_install_paths.rs",
             "desktop/src-tauri/tauri.conf.json",
         ))
-        self.assertEqual(sources[69:], (
+        self.assertEqual(sources[69:77], (
             "tests/desktop/test_android_build_tools.py",
             "src/mobile_release/android_build_tools.py",
             "src/mobile_release/android_build_tools_macos.py",
@@ -6955,6 +6979,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             "src/mobile_release/credentials.py",
             "src/mobile_release/local_signing.py",
         ))
+        self.assertEqual(sources[77:], (helper_path,))
         for name in names[57:]:
             module, cls, method = name.split(".")
             path = "tests/desktop/" + module + ".py"
@@ -6987,13 +7012,53 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn('--expected-app-binary "$MRK_MACOS_DESKTOP_FACADE_SHA256"', assembly)
         self.assertIn('--desktop-image "$CARGO_TARGET_DIR/$MRK_MACOS_TARGET/release/libmrk_desktop_image.dylib"', assembly)
         self.assertIn('--expected-desktop-image "$MRK_MACOS_DESKTOP_IMAGE_SHA256"', assembly)
-        self.assertIn('--expected-desktop-image "$MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"', inputs)
+        # The reviewed notary owner now supplies the former direct input CLI.
+        delegated = ('desktop/tools/macos_android_helper_package.py notarize-payload '
+                     '--target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/input-result.json"')
+        self.assertEqual(inputs.count(delegated), 1)
+        self.assertIn('desktop_image_sha=$(/usr/bin/shasum -a 256 "$desktop_image")', assembly)
+        self.assertIn('MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\\n', assembly)
+        self.assertIn('"$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"', assembly)
+        package_source = (root / "desktop/tools/macos_android_helper_package.py").read_text(encoding="utf-8")
+        operation = next(node for node in ast.parse(package_source).body
+                         if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        notarize_node = next(node for node in operation.body
+                             if isinstance(node, ast.FunctionDef) and node.name == "notarize_payload")
+        notarize = ast.get_source_segment(package_source, notarize_node)
+        arguments = [node.value for node in notarize_node.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "arguments" for target in node.targets)]
+        self.assertEqual(len(arguments), 1)
+        self.assertIsInstance(arguments[0], ast.Call)
+        self.assertEqual(ast.get_source_segment(package_source, arguments[0].func), "argparse.Namespace")
+        for key, expected in (
+                ("expected_desktop_image", 'self.environment.get("MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256") if self.environment["MRK_MACOS_PACKAGE_ROLE"] == "ordinary-image" else None'),
+                ("app", "app_path")):
+            self.assertEqual([ast.get_source_segment(package_source, item.value) for item in arguments[0].keywords
+                              if item.arg == key], [expected])
+        self.assertIn('app_path = self.work / "app" / self.stager.APP_NAME', notarize)
+        input_calls = [ast.get_source_segment(package_source, node) for node in ast.walk(notarize_node)
+                       if isinstance(node, ast.Call) and any(
+                           ast.get_source_segment(package_source, argument) == "self.stager.input_command"
+                           for argument in node.args)]
+        self.assertEqual(input_calls, [
+            'self.notary_io("notary-preflight-input", self.stager.input_command, arguments)',
+            'self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)',
+        ])
+        self.assertIn('arguments.output = self.work / "input"', notarize)
+        self.assertIn('self.notary_final["snapshot"]["files"].get("install-inventory.json", (None, None))[1] == result["inventorySha256"]', notarize)
+        self.assertIn('body = operation.notary_result.decode("ascii")', package_source)
+        self.assertIn('need(sys.stdout.write(body) == len(body), "notary-final-stdout-short-write")', package_source)
+        self.assertIn('inventory=$("$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/input-result.json"', inputs)
+        self.assertIn('value = json.loads(data)["inventorySha256"]', inputs)
+        self.assertIn("printf 'MRK_MACOS_INSTALL_INVENTORY_SHA256=%s\\n' \"$inventory\" >> \"$GITHUB_ENV\"", inputs)
         self.assertIn("MRK_IMAGE_RELEASE_ID: $" + "{{ steps.android_helper.outputs['image-release-id'] }}", build)
         self.assertIn('--desktop-image-cargo-messages "$MRK_MACOS_WORK/normal-build.jsonl"', assembly)
-        self.assertIn('--app "$MRK_MACOS_WORK/app/Mobile Release Kit.app"', inputs)
         # The preview's separate debug DATA contract is not the shipped binary.
-        data = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
-        self.assertEqual(workflow.count("macos-installed-observation"), data.count("macos-installed-observation"))
+        data_step = workflow_step(workflow, "Compile and run only fixed native DATA contracts and exact host-Python regressions")
+        self.assertEqual(data_step.split("        run: |\n", 1)[1],
+                         "          builtin source ./desktop/tools/macos_installed_data_contracts.sh\n")
+        data = (root / "desktop/tools/macos_installed_data_contracts.sh").read_text(encoding="utf-8")
+        self.assertNotIn("macos-installed-observation", workflow)
         self.assertEqual(data.count("macos-installed-observation"), 1)
         self.assertIn('"--features", "desktop-shell,custom-protocol,macos-installed-observation"', data)
         self.assertIn('"--test", "installed-shell-observation", "--no-run", "--message-format=json"', data)
@@ -7009,7 +7074,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             for forbidden in ("macos-installed-observation", "installed_shell_observation", "development-runtime"):
                 self.assertFalse(forbidden in block, "normal shipping step: " + forbidden)
         for forbidden in ("development-runtime", "--scope ", "qualification.main("):
-            self.assertFalse(forbidden in workflow, forbidden)
+            self.assertFalse(forbidden in workflow + data, forbidden)
         # The sole qualifier filename loads only the existing process owner;
         # it is not a qualifier CLI or Aqua journey invocation.
         direct = workflow_step(workflow, "Admit the fixed image Rust tools without installing a distribution")

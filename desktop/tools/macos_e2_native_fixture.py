@@ -2734,6 +2734,8 @@ def source_names(rows):
     """Actual three-graph inputs, including core compile-time DATA and owner imports."""
     explicit = {
         ".github/workflows/desktop-macos-maintenance-fixture.yml",
+        "desktop/tools/macos_maintenance_fixture_prepare.sh",
+        "desktop/tools/macos_maintenance_fixture_publish.sh",
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
         "desktop/packaging/macos-install-producer-signing.profile",

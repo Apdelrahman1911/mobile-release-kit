@@ -33,6 +33,38 @@ BINDING = M.Binding("a" * 40, "123", "1")
 UID, GID = 501, 20
 
 
+def aqua_headless_source():
+    """Fixed helper SOURCE with the actual same-shell caller, never execution."""
+    workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text(encoding="utf-8")
+    marker = "      - name: Compile headless Mac libraries and run the exact selected DATA regressions first\n"
+    if workflow.count(marker) != 1:
+        raise AssertionError("fixed aqua_headless_source step")
+    step = workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
+    key = "        run: |\n"
+    if step.count(key) != 1 or step.split(key, 1)[1].rstrip("\n") != "          builtin source ./desktop/tools/macos_aqua_headless_data.sh":
+        raise AssertionError("fixed aqua_headless_source same-shell caller")
+    source = (PATH.parents[2] / "desktop/tools/macos_aqua_headless_data.sh").read_text(encoding="utf-8")
+    # Keep legacy SOURCE assertions literal without replacing raw YAML policy.
+    return "".join("          " + line if line.strip() else line
+                   for line in source.splitlines(keepends=True))
+
+
+def aqua_wrapping_source():
+    """Fixed helper SOURCE with the actual same-shell caller, never execution."""
+    workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text(encoding="utf-8")
+    marker = "      - name: Compile native wrapping variants once and run fixed cohorts and creator-reader pair\n"
+    if workflow.count(marker) != 1:
+        raise AssertionError("fixed aqua_wrapping_source step")
+    step = workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
+    key = "        run: |\n"
+    if step.count(key) != 1 or step.split(key, 1)[1].rstrip("\n") != "          builtin source ./desktop/tools/macos_aqua_wrapping_private.sh":
+        raise AssertionError("fixed aqua_wrapping_source same-shell caller")
+    source = (PATH.parents[2] / "desktop/tools/macos_aqua_wrapping_private.sh").read_text(encoding="utf-8")
+    # Keep legacy SOURCE assertions literal without replacing raw YAML policy.
+    return "".join("          " + line if line.strip() else line
+                   for line in source.splitlines(keepends=True))
+
+
 def captured(value, prefix=b"", suffix=b""):
     return prefix + M.MARKER + json.dumps(value, separators=(",", ":")).encode() + b"\n" + suffix
 
@@ -450,7 +482,7 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count(headless_label), 1)
         self.assertLess(workflow.index(headless_label), workflow.index(
             "      - name: Fail fast on native Scripts ownership and package format (never Installer)\n"))
-        headless = workflow.split(headless_label, 1)[1].split("\n      - name:", 1)[0]
+        headless = aqua_headless_source()
         self.assertLess(headless.index("cd desktop/src-tauri"), headless.index('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test --locked --no-default-features'))
         self.assertEqual(headless.count('"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" test '), 1)
         self.assertIn("--package mobile-release-kit-desktop --package mrk-macos-installed-native", headless)
@@ -7088,13 +7120,20 @@ class ProjectFieldsAquaDataTests(unittest.TestCase):
 class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
     def test_source_fixed_read_only_route_excludes_every_build_and_keeps_failure_post(self):
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        actual_source = workflow + aqua_headless_source() + aqua_wrapping_source()
         self.assertEqual(workflow.count("      MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}\n"), 1)
-        self.assertNotIn("workflow_dispatch", workflow)
+        self.assertNotIn("workflow_dispatch", actual_source)
         steps = {}
         for block in workflow.split("      - name: ")[1:]:
             name, body = block.split("\n", 1)
             self.assertNotIn(name, steps)
             steps[name] = body
+        # Literal run-size contract; raw policy is never replaced by helper SOURCE.
+        for raw in steps.values():
+            if "        run: |\n" in raw:
+                lines = raw.split("        run: |\n", 1)[1].splitlines(keepends=True)
+                decoded = "".join(line[10:] if line.startswith("          ") else line for line in lines).rstrip("\n") + "\n"
+                self.assertLessEqual(len(decoded), 21000)
         admitted = {
             "Admit only this exact disposable-hosted source route",
             "Check out exact reviewed source without retained credentials",
@@ -7199,9 +7238,9 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         clock = steps["Admit the fixed image Rust tools without installing a distribution"]
         self.assertNotIn("xcode-installed-classification", clock)
         self.assertIn("timeout-minutes: 4", clock)
-        self.assertNotIn("rustup toolchain install", workflow)
-        self.assertNotIn("rustup update", workflow)
-        self.assertNotIn("rustup override", workflow)
+        self.assertNotIn("rustup toolchain install", actual_source)
+        self.assertNotIn("rustup update", actual_source)
+        self.assertNotIn("rustup override", actual_source)
         self.assertLess(workflow.index("Bind the complete reviewed first-party checkout before compilation"), workflow.index("Admit the fixed image Rust tools without installing a distribution"))
         self.assertLess(workflow.index("Admit the fixed image Rust tools without installing a distribution"), workflow.index("Compile headless Mac libraries"))
         for required in ("('toolchains/stable-' + build_target + '/bin')", "line.partition(':')[0].strip() == 'commit-hash'",
@@ -7315,11 +7354,14 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
                      "Compile the fixed debug actual-main observer and normal embedded frontend once",
                      "Build the fixed one-shot root Installer and scripts-only package"):
             selected_direct = direct if name == "Compile native wrapping variants once and run fixed cohorts and creator-reader pair" else '"/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo"'
-            self.assertIn(selected_direct, steps[name])
-            self.assertNotIn('["cargo",', steps[name])
+            selected_source = (aqua_wrapping_source() if name == "Compile native wrapping variants once and run fixed cohorts and creator-reader pair"
+                               else aqua_headless_source() if name == "Compile headless Mac libraries and run the exact selected DATA regressions first"
+                               else steps[name])
+            self.assertIn(selected_direct, selected_source)
+            self.assertNotIn('["cargo",', selected_source)
         mixed = steps["Compile the fixed debug actual-main observer and normal embedded frontend once"]
         self.assertLess(mixed.index("npm run build"), mixed.index('PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin"'))
-        self.assertIn('RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"', steps["Compile native wrapping variants once and run fixed cohorts and creator-reader pair"])
+        self.assertIn('RUSTC="/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"', aqua_wrapping_source())
         classify = steps["Classify installed Xcode originals without preparing or selecting a toolchain"]
         self.assertIn("timeout-minutes: 2", classify)
         self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", classify)
@@ -7360,6 +7402,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
 
     def test_selected_scope_keeps_unique_artifacts_and_three_private_variants(self):
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        actual_source = workflow + aqua_headless_source() + aqua_wrapping_source()
         header = workflow.split("    steps:\n", 1)[0]
         expected_job = (
             '  aqua:\n    if: github.event_name == \'push\' && github.ref == \'refs/heads/verify/desktop-macos-aqua\'\n    name: aqua-${{ matrix.scope }}-${{ matrix.target }}\n    environment: ${{ contains(fromJSON(\'["project-fields","ios-current-synthetic","android-inputs","project-fields-android-inputs","vault-helper-shipping","installation-inspection","vault-helper-shipping-installation-inspection","project-recovery-pending","ios-recovery-pending","doctor-preflight2","local-edits3"]\'), matrix.scope) && \'macos-developer-id\' || \'macos-engineering\' }}\n    permissions:\n      contents: read\n      actions: read\n    strategy:\n      fail-fast: false\n      matrix:\n        include:\n          - scope: local-edits3\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: \'2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d\'\n            supplier_tar: \'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695\'\n            supplier_source: \'158cdff422e3837f7ab5e6192af76a578faf6fab\'\n            supplier_run: \'37467019389\'\n            supplier_attempt: \'1\'\n            supplier_artifact: \'11415902210\'\n          - scope: local-edits3\n            target: x86_64-apple-darwin\n            runner: macos-26-intel\n            supplier_receipt: \'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b\'\n            supplier_tar: \'739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd\'\n            supplier_source: \'079ab2a2c8fef88f01bf909e7669c685f07e1375\'\n            supplier_run: \'37476532238\'\n            supplier_attempt: \'1\'\n            supplier_artifact: \'11419502465\'\n    runs-on: ${{ matrix.runner }}\n    timeout-minutes: ${{ matrix.scope == \'doctor-preflight2\' && 212 || contains(fromJSON(\'["project-fields","ios-current-synthetic","android-inputs","project-fields-android-inputs","vault-helper-shipping","installation-inspection","vault-helper-shipping-installation-inspection","project-recovery-pending","ios-recovery-pending","doctor-preflight2","local-edits3"]\'), matrix.scope) && 137 || 75 }}\n'
@@ -7375,7 +7418,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         ):
             self.assertEqual(header.count(line), 1)
         for forbidden in ("workflow_dispatch", "continue-on-error"):
-            self.assertNotIn(forbidden, workflow)
+            self.assertNotIn(forbidden, actual_source)
         steps = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
         compiler = "Compile the fixed debug actual-main observer and normal embedded frontend once"
         self.assertEqual(workflow.count("      - name: " + compiler + "\n"), 1)
@@ -7383,6 +7426,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
         self.assertEqual(steps[compiler].count("npm run build"), 1)
         private = steps["Compile native wrapping variants once and run fixed cohorts and creator-reader pair"]
         self.assertIn("if: success() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private'", private)
+        private = aqua_wrapping_source()
         for required in (
             'for role, features, flags in (("normal", [], ""), ("observer", ["installed-observation"], ""),\n'
             '                                            ("qualification", ["installed-observation"], "--cfg mrk_wrapping_keychain_qualification")):',
@@ -7529,8 +7573,8 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         import ast
         import re
         import textwrap
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        script = aqua_wrapping_source()
+        body = script.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         module = ast.parse(textwrap.dedent(body))
         names = {"pairs", "parse", "exact_keys", "ints", "settled_policy", "settled_raw", "cohort_profile",
                  "admit_before_item_terminal", "public_report", "admit_native_report"}
@@ -7701,7 +7745,7 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         self.assertEqual(len({row[0] for row in cohorts}), 3)
         self.assertEqual(len({row[3] for row in cohorts}), 3)
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        private = workflow.split("      - name: Compile native wrapping variants once and run fixed cohorts and creator-reader pair\n", 1)[1].split("      - name: ", 1)[0]
+        private = aqua_wrapping_source()
         self.assertEqual(private.count('argv = ["/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo", "test", "--locked"'), 1)
         self.assertIn('owner = qualification.load_owner(checkout)', private)
         self.assertIn('for cohort in receipt["nativeCohorts"]:', private)
@@ -7863,8 +7907,8 @@ class PrivateProcessPolicyDataTests(unittest.TestCase):
                 lambda v: v["lookup"]["raw"]["policy"]["calls"][4].__setitem__(1, 0)):
             bad = deepcopy(good); mutate(bad)
             with self.assertRaises(ValueError): f["admit_reader_report"](self.captured(bad, True))
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        script = aqua_wrapping_source()
+        body = script.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         final = body.split('receipt["passed"] = private_batch_finality(', 1)[1]
         self.assertIn('receipt["perQueryUIFailQualified"] = False', final)
         self.assertIn('receipt["processNonInteractionQualified"] = receipt["passed"]', final)
@@ -7872,13 +7916,13 @@ class PrivateProcessPolicyDataTests(unittest.TestCase):
 
     def test_both_helper_compiler_originals_bind_fixed_example_source_profile_and_path(self):
         import textwrap
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        script = aqua_wrapping_source()
         # Execute only this actual DATA admission slice, stopping BEFORE any
         # compiler-original file copy, signing, descriptor or helper invocation.
         first = "                      reader_rows = [parse(line) for line in result.stdout.splitlines()]"
         last = "                      reader_path = copy_reader_compiler_original("
-        self.assertEqual(workflow.count(first), 1); self.assertEqual(workflow.count(last), 1)
-        source = textwrap.dedent(workflow[workflow.index(first):workflow.index(last)])
+        self.assertEqual(script.count(first), 1); self.assertEqual(script.count(last), 1)
+        source = textwrap.dedent(script[script.index(first):script.index(last)])
         code = compile(source, "<two-helper-compiler-DATA-only>", "exec")
         native = Path("/inert/native"); target = Path("/inert/qualification-target")
         package = "path+" + native.as_uri() + "#mrk-macos-installed-native@0.1.0"
@@ -7936,7 +7980,24 @@ class PrivateProcessPolicyDataTests(unittest.TestCase):
         self.assertLess(native_return.index("mrk_w_policy_finish("), native_return.index("MRK_W_BEFORE_DELIVERY"))
         self.assertLess(native_return.index("s->interaction.cleanup = NULL"), native_return.index("s->result.run_returned = 1"))
         independent = rust.split('extern "C" fn cleanup_admission_bridge(', 1)[1].split("/// Holds the actual outcome", 1)[0]
-        self.assertIn("original.admit_at(slot, Instant::now())", independent)
+        self.assertIn("original.admit_current(slot)", independent)
+        current = rust.split("    fn admit_current(", 1)[1].split("    fn admit_at(", 1)[0]
+        cutoff = rust.split("    fn admit_at(", 1)[1].split("    fn failed(", 1)[0]
+        self.assertIn('#[cfg(feature = "vault-helper")]\n        if self.transported {', current)
+        for original in (current, cutoff):
+            self.assertIn("!matches!(slot, 3 | 4) || self.seen & (1 << slot) != 0", original)
+            self.assertIn("slot == 4 && self.seen & (1 << 3) == 0", original)
+            self.assertIn("self.seen |= 1 << slot; self.checks += 1;", original)
+            self.assertIn("if self.uncertain || self.panic.is_some() { return Admission::Unknown; }", original)
+        self.assertIn("let result = crate::vault_helper::cleanup_admission();", current)
+        self.assertIn("Admission::Unknown => self.uncertain = true", current)
+        self.assertIn("Admission::Cutoff => self.expired = true", current)
+        self.assertIn("return if self.uncertain { Admission::Unknown }", current)
+        self.assertIn("else if self.expired { Admission::Cutoff } else { Admission::Continue }", current)
+        self.assertLess(current.index("crate::vault_helper::cleanup_admission()"),
+                        current.index("self.admit_at(slot, Instant::now())"))
+        self.assertIn("if self.cutoff.is_none_or(|cutoff| now >= cutoff) { self.expired = true; }", cutoff)
+        self.assertIn("if self.expired { Admission::Cutoff } else { Admission::Continue }", cutoff)
         for forbidden in ("AdmissionBridge", "bridge.admission", "ReaderPhase", ".native(", "forward.panic"):
             self.assertNotIn(forbidden, independent)
         self.assertIn("!matches!(slot, 3 | 4)", rust)
@@ -7956,12 +8017,18 @@ class PrivateProcessPolicyDataTests(unittest.TestCase):
             self.assertLess(main.index("args"), main.index("ACTIVE.swap(true"))
             self.assertNotIn("std::thread", helper)
         app = (root / "desktop/src-tauri/src/lib.rs").read_text()
-        self.assertIn("#[cfg(any(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native))]", app)
-        self.assertIn('compile_error!("process-only wrapping qualification is forbidden in the Desktop application")', app)
-        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertIn('["/usr/bin/nm", "-u", str(cell["path"])]', workflow)
-        self.assertIn('role != "qualification" and imported & policy_imports', workflow)
-        self.assertIn('("creator", cohort_path, creator_identifier)', workflow)
+        private_guard = (
+            "#[cfg(any(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native))]\n"
+            'compile_error!("process-only wrapping qualification is forbidden in the Desktop application");\n'
+        )
+        self.assertEqual(app.count(private_guard), 1)
+        app_build = (root / "desktop/src-tauri/build.rs").read_text()
+        for name in ("mrk_wrapping_keychain_qualification", "mrk_wrapping_keychain_qualification_native"):
+            self.assertEqual(app_build.count('println!("cargo:rustc-check-cfg=cfg(' + name + ')");'), 1)
+        script = aqua_wrapping_source()
+        self.assertIn('["/usr/bin/nm", "-u", str(cell["path"])]', script)
+        self.assertIn('role != "qualification" and imported & policy_imports', script)
+        self.assertIn('("creator", cohort_path, creator_identifier)', script)
 
     def test_largest_source_bounded_projection_including_all_policy_books_fits_existing_output_cap(self):
         # Conservative scalar widths and complete reachable arrays, NOT a native
@@ -8068,8 +8135,8 @@ class PrivateProcessPolicyDataTests(unittest.TestCase):
             self.assertTrue(settled([dict(data, role="normal-policy-tests")]))
         returned = {"role": "normal-policy-tests", "returned": True, "returncode": 0}
         self.assertFalse(settled([returned, returned]))
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        script = aqua_wrapping_source()
+        body = script.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         dispatch = body.split('                  if role == "normal":\n', 1)[1].split('                  if role == "qualification":\n', 1)[0]
         for required in ('"--exact", "--test-threads=1", "--color=never", "--format=pretty", *policy_names',
                          'cwd=work, timeout=30, limit=64 * 1024)', 'policy_home.rmdir()', 'policy_tmp.rmdir()',
@@ -8096,8 +8163,8 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         import re
         import struct
         import textwrap
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        script = aqua_wrapping_source()
+        body = script.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         tree = ast.parse(textwrap.dedent(body))
         names = {"pairs", "parse", "exact_keys", "ints", "settled_policy", "settled_raw", "record_bytes", "owner_budget", "launch_admitted",
                  "acknowledge_admitted", "pair_finality", "admit_peer_case", "admit_controls", "public_reader_report",
@@ -8181,15 +8248,15 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         self.assertIn("mrk_qp_same(&held, &p->pins[i], 1)", native)
         self.assertIn("No partial/EINTR retry.", native)
         self.assertIn("One original close; NEVER retry.", native)
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        pair = workflow.split("          def run_creator_reader(", 1)[1].split("          try:\n              # Version queries", 1)[0]
+        script = aqua_wrapping_source()
+        pair = script.split("          def run_creator_reader(", 1)[1].split("          try:\n              # Version queries", 1)[0]
         self.assertNotIn("sig(root_pin)[:6]", pair)
         self.assertNotIn("actual.st_nlink != 2", pair)
         self.assertIn('sig(ack_cell["pin"])[:7] != sig(staging["pin"])[:7]', pair)
         self.assertIn('sig(request_cell["pin"]) != sig(request_written["pin"])', pair)
         self.assertIn('if set(os.listdir(root_fd)) != {"request", "ready", "reader-settled"}', pair)
         self.assertIn('if os.listdir(root_fd): raise ValueError("pair-control-not-empty")', pair)
-        self.assertIn('stage = "wrapping-creator-reader"\n              run_creator_reader(cohort_binary, reader_binary)', workflow)
+        self.assertIn('stage = "wrapping-creator-reader"\n              run_creator_reader(cohort_binary, reader_binary)', script)
 
     def test_prelaunch_first_failure_labels_are_closed_and_later_errors_do_not_replace(self):
         f = self.functions()
@@ -8773,10 +8840,10 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
                 facts = {}
                 with self.assertRaises(ValueError): identify(display, identifier, facts)
                 assert_facts(facts, reason)
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        self.assertIn('row["identityAdmission"] = identity_facts', workflow)
-        self.assertLess(workflow.index('row["identityAdmission"] = identity_facts'),
-                        workflow.index('identities.append(signature_identity(result, identifier, identity_facts))'))
+        script = aqua_wrapping_source()
+        self.assertIn('row["identityAdmission"] = identity_facts', script)
+        self.assertLess(script.index('row["identityAdmission"] = identity_facts'),
+                        script.index('identities.append(signature_identity(result, identifier, identity_facts))'))
 
     def test_peer_settled_requires_verified_zero_helpers_for_both_originals(self):
         # Source contract plus labelled scalar DATA, never a native CaseReturn,
@@ -9108,7 +9175,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         pair = (native / "src/wrapping_keychain_pair.rs").read_text()
         fixture = (native / "src/wrapping_keychain_fixture.m").read_text()
         native_calls = (native / "src/wrapping_keychain.m").read_text()
-        workflow = (root / ".github/workflows/desktop-macos-aqua.yml").read_text()
+        script = aqua_wrapping_source()
         clock = pair.split("struct ReaderClock {", 1)[1].split("// One qualification-only diagnostic original", 1)[0]
         self.assertIn("entry: Instant", clock)
         self.assertIn("entry, cutoff: entry.checked_add(Duration::from_secs(READER_SECONDS))", clock)
@@ -9157,7 +9224,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         self.assertEqual(writer.count("pwrite("), 1); self.assertNotIn("MRKQDG", writer)
         self.assertIn("kSecUseAuthenticationUIFail", native_calls)
         self.assertIn("READER_SECONDS: u64 = 10", pair)
-        self.assertIn("owner_budget(reader_started, forward_end, 15)", workflow)
+        self.assertIn("owner_budget(reader_started, forward_end, 15)", script)
 
     def test_source_fixed_profile_barrier_charges_and_no_candidate_reader(self):
         root = PATH.parents[2]; native = root / "desktop/native/macos-installed-native"
@@ -9189,7 +9256,7 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
         self.assertIn('name = "wrapping_peer_reader"', (native / "Cargo.toml").read_text())
         self.assertIn('test = false', (native / "Cargo.toml").read_text())
         self.assertIn('compile_error!', (native / "examples/wrapping_peer_reader.rs").read_text())
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        body = aqua_wrapping_source().split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         self.assertLess(body.index('invoke("reader-build"'), body.index('cells = [admit_file(out / "libmrk'))
         self.assertLess(body.index('code_role + "-adhoc-sign"'), body.index('cells = [admit_file(out / "libmrk'))
         self.assertIn('ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)', body)
@@ -9270,8 +9337,8 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         import pathlib
         import re
         import textwrap
-        workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        script = aqua_wrapping_source()
+        body = script.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         tree = ast.parse(textwrap.dedent(body))
         names = {"pairs", "parse", "admit_codec_compiler", "admit_fixed_data_results", "admit_codec_results",
                  "admit_policy_results", "fixed_test_original_settled", "codec_original_settled", "policy_original_settled",
@@ -9414,7 +9481,7 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         self.assertTrue(public["testOriginalReturned"]); self.assertEqual(public["testReturncode"], 101)
         self.assertTrue(public["receiptProvisionalUntilSourcePostAndStepExitZero"])
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
-        body = workflow.split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
+        body = aqua_wrapping_source().split("<<'PY_WRAPPING'\n", 1)[1].split("\n          PY_WRAPPING", 1)[0]
         dispatch = body.split('              stage = "codec-target-preparation"', 1)[1].split('              qualification_binary, reader_binary, cohort_binary = None, None, None', 1)[0]
         for required in ('codec_environment = dict(build_env, CARGO_TARGET_DIR=str(codec_target), RUSTFLAGS="")',
                          '"--package", "mobile-release-kit-desktop"', '"--manifest-path", str(app / "Cargo.toml")',
@@ -9804,12 +9871,13 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
     def source():
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-aqua.yml").read_text()
         blocks = dict(block.split("\n", 1) for block in workflow.split("      - name: ")[1:])
-        headless = blocks["Compile headless Mac libraries and run the exact selected DATA regressions first"]
+        headless = aqua_headless_source()
         body = headless.split("<<'PY_HEADLESS'\n", 1)[1].split("          PY_HEADLESS", 1)[0]
         return workflow, blocks, headless, ast.parse("\n".join(line[10:] for line in body.splitlines()))
 
     def test_exact_twelve_route_excludes_app_suppliers_and_preserves_original_test_results(self):
         workflow, blocks, headless, tree = self.source()
+        actual_source = workflow + aqua_headless_source() + aqua_wrapping_source()
         selected = next(node for node in tree.body if isinstance(node, ast.If)
                         and isinstance(node.test, ast.Name) and node.test.id == "android_lifecycle"
                         and any(isinstance(child, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "names"
@@ -9879,7 +9947,7 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
             "headless-native-tests.stderr", "headless-native-tests.status", "headless-tests.receipt.json", "bounded-diagnostics.json"])
         self.assertIn("if-no-files-found: error", upload)
         for forbidden in ("workflow_dispatch", "continue-on-error: true"):
-            self.assertNotIn(forbidden, workflow)
+            self.assertNotIn(forbidden, actual_source)
         compiler_argv = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
                              and any(isinstance(target, ast.Name) and target.id == "compiler_argv" for target in node.targets))
         expected_argv = ast.parse('[rust_bin + "/cargo", "test", "--locked", "--no-default-features", "--jobs", "1",'
@@ -11363,7 +11431,7 @@ class ShippingCapacityDataWiringTests(unittest.TestCase):
         self.assertLess(workflow.index('      - name: ' + label), workflow.index('      - name: Compile native wrapping variants once'))
         self.assertIn(
             "        include:\n          - scope: local-edits3\n            target: aarch64-apple-darwin\n            runner: macos-26\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n          - scope: local-edits3\n            target: x86_64-apple-darwin\n            runner: macos-26-intel\n            supplier_receipt: 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b'\n            supplier_tar: '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd'\n            supplier_source: '079ab2a2c8fef88f01bf909e7669c685f07e1375'\n            supplier_run: '37476532238'\n            supplier_attempt: '1'\n            supplier_artifact: '11419502465'\n    runs-on: ${{ matrix.runner }}\n", workflow)
-        headless = blocks['Compile headless Mac libraries and run the exact selected DATA regressions first']
+        headless = aqua_headless_source()
         self.assertNotIn('SHIPPING_CAPACITY', headless)
         self.assertIn('main_count, native_count = 6, 7', headless)
         self.assertIn('calls_entered == calls_returned == 3', headless)
@@ -11645,12 +11713,12 @@ class CatalogueHeadlessControlDataTests(unittest.TestCase):
     """Synthetic closed-parser/batch controls, not compiler or native evidence.
 
     The existing module imports qualification M under its admitted DATA closure.
-    This class never calls M; only its one pinned public workflow SOURCE read is
+    This class never calls M; only its one pinned public headless SOURCE read is
     real I/O; every batch owner, clock, digest, directory, publisher and FD is inert.
     """
 
-    _WORKFLOW_BYTES = 284835
-    _WORKFLOW_SHA256 = "c0f64f39240d926135262491bd969f5d6b9f3e2f5add31ccacdad4a0ac95e8b5"
+    _SCRIPT_BYTES = 48542
+    _SCRIPT_SHA256 = "c6efa4f622e3784ecd89129f89986352aac2faf5f5f647bb62aa9a5a3f7a6735"
     _HELPER_SHA256 = "9a25cbc411843de619678e9db1739762e5dd4a1c7415a29d39f6575d5992763c"
 
     @classmethod
@@ -11659,7 +11727,7 @@ class CatalogueHeadlessControlDataTests(unittest.TestCase):
         import os
         import re
 
-        source = Path(__file__).absolute().parents[2] / ".github" / "workflows" / "desktop-macos-aqua.yml"
+        source = Path(__file__).absolute().parents[2] / "desktop/tools/macos_aqua_headless_data.sh"
         def identity(value):
             return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
                     value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
@@ -11674,26 +11742,28 @@ class CatalogueHeadlessControlDataTests(unittest.TestCase):
             fds.append(descriptor)
             info = os.fstat(descriptor)
             before = identity(info)
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != cls._WORKFLOW_BYTES
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != cls._SCRIPT_BYTES
                     or before != identity(os.stat(source.name, dir_fd=directory, follow_symlinks=False))):
                 raise AssertionError("catalogue-control-source-original")
             parts = []
-            for offset in range(0, cls._WORKFLOW_BYTES, 65536):
-                length = min(65536, cls._WORKFLOW_BYTES - offset)
+            for offset in range(0, cls._SCRIPT_BYTES, 65536):
+                length = min(65536, cls._SCRIPT_BYTES - offset)
                 block = os.pread(descriptor, length, offset)
                 if len(block) != length:
                     raise AssertionError("catalogue-control-source-short-read")
                 parts.append(block)
             raw = b"".join(parts)
-            if (len(raw) != cls._WORKFLOW_BYTES or os.pread(descriptor, 1, len(raw)) != b""
-                    or hashlib.sha256(raw).hexdigest() != cls._WORKFLOW_SHA256
+            if (len(raw) != cls._SCRIPT_BYTES or os.pread(descriptor, 1, len(raw)) != b""
+                    or hashlib.sha256(raw).hexdigest() != cls._SCRIPT_SHA256
                     or before != identity(os.fstat(descriptor))
                     or before != identity(os.stat(source.name, dir_fd=directory, follow_symlinks=False))):
                 raise AssertionError("catalogue-control-source-binding")
         finally:
             for descriptor in reversed(fds):
                 os.close(descriptor)
-        text = raw.decode("utf-8", "strict")
+        # Same literal indentation view after authenticating the actual helper.
+        text = "".join("          " + line if line.strip() else line
+                       for line in raw.decode("utf-8", "strict").splitlines(keepends=True))
         begin = "          # BEGIN_CATALOGUE_HEADLESS_CONTROL\n"
         end = "          # END_CATALOGUE_HEADLESS_CONTROL\n"
         if text.count(begin) != 1 or text.count(end) != 1:

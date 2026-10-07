@@ -1,5 +1,7 @@
 //! Typed desktop services. Passive queries and finite configuration transactions
 //! have separate original-resource owners; neither is a generic release runner.
+#[cfg(any(mrk_wrapping_keychain_qualification, mrk_wrapping_keychain_qualification_native))]
+compile_error!("process-only wrapping qualification is forbidden in the Desktop application");
 #[cfg(all(feature = "development-runtime", not(debug_assertions)))]
 compile_error!("development-runtime is forbidden when debug assertions are disabled");
 #[cfg(all(feature = "desktop-shell", not(feature = "development-runtime"), not(feature = "custom-protocol")))]

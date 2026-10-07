@@ -178,6 +178,8 @@ fn github_release_tooling() {
 }
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification)");
+    println!("cargo:rustc-check-cfg=cfg(mrk_wrapping_keychain_qualification_native)");
     // Cargo's target, not the host running this build script, selects DATA.
     let target = env::var("TARGET").expect("Cargo target required");
     let target_os = env::var("CARGO_CFG_TARGET_OS").expect("Cargo target OS required");

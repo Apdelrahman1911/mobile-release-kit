@@ -555,14 +555,19 @@ def _zip_directory(p: _Pass):
         old_unix = _extra(variable_bytes[name_len:name_len + extra_len])
         creator = made >> 8
         mode = external >> 16
-        if creator not in (0, 3) or mode & ~0o170777:
+        # A legacy JAR directory sentinel is inert metadata, not POSIX mode
+        # authority. Recognize only the exact empty encoding; retain raw bits.
+        opaque_directory = (p.opaque and creator == 3 and external == 0xffff0010
+                            and raw_name.endswith(b"/") and flags == 0 and method == 0
+                            and crc == compressed == size == 0)
+        if not opaque_directory and (creator not in (0, 3) or mode & ~0o170777):
             _fail("zip_member_mode_or_creator")
         file_type = mode & 0o170000
         directory = raw_name.endswith(b"/")
-        if file_type not in (0, 0o040000, 0o100000) \
-            or file_type == 0o040000 and not directory \
-            or file_type == 0o100000 and directory or external & 0x10 and not directory \
-            or directory and size != 0:
+        if not opaque_directory and (file_type not in (0, 0o040000, 0o100000)
+            or file_type == 0o040000 and not directory
+            or file_type == 0o100000 and directory or external & 0x10 and not directory
+            or directory and size != 0):
             _fail("zip_non_regular_member")
         name = p.member_name(raw_name, directory=directory)
         row = Member(name, "directory" if directory else "file", mode, size,
@@ -671,8 +676,19 @@ def _zip(p: _Pass):
                 descriptor = descriptor[4:]
             if struct.unpack("<3I", descriptor) != (row.crc, row.compressed, row.size):
                 _fail("zip_descriptor_disagreement")
-        elif (crc, compressed, size) != (row.crc, row.compressed, row.size) or end != next_at:
-            _fail("zip_local_sizes_or_extent")
+        else:
+            local_tuple = (crc, compressed, size)
+            # Soong's stored JAR manifest may leave local CRC/compressed zero.
+            # This exact opaque case still uses the full central payload extent,
+            # CRC and hash below; ordinary supplier archives remain strict.
+            opaque_manifest = (p.opaque and row.kind == "file"
+                               and row.raw_name == b"META-INF/MANIFEST.MF"
+                               and flags == 0 and method == 0
+                               and local_tuple == (0, 0, row.size)
+                               and row.compressed == row.size > 0 and end == next_at)
+            if end != next_at or (local_tuple != (row.crc, row.compressed, row.size)
+                                  and not opaque_manifest):
+                _fail("zip_local_sizes_or_extent")
         row.data = data
         expected = next_at
     if expected != cd_at:

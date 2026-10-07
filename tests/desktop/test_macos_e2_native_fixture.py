@@ -556,6 +556,8 @@ class CargoTests(unittest.TestCase):
 
         required = {
             ".github/workflows/desktop-macos-maintenance-fixture.yml",
+            "desktop/tools/macos_maintenance_fixture_prepare.sh",
+            "desktop/tools/macos_maintenance_fixture_publish.sh",
             "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
             "desktop/packaging/macos-android-service-signing.profile",
             "desktop/packaging/macos-install-producer-signing.profile",
@@ -576,8 +578,12 @@ class CargoTests(unittest.TestCase):
                      "desktop/packaging/other-signing.profile"}
         self.assertEqual(fixture.source_names(required), sorted(required))
         self.assertEqual(fixture.source_names(required | certificates | unrelated), sorted(required | certificates))
-        with self.assertRaisesRegex(fixture.Refused, "^required-source-roster$"):
-            fixture.source_names(required - {"desktop/packaging/macos-install-producer-signing.profile"})
+        for missing in ("desktop/packaging/macos-install-producer-signing.profile",
+                        "desktop/tools/macos_maintenance_fixture_prepare.sh",
+                        "desktop/tools/macos_maintenance_fixture_publish.sh"):
+            with self.subTest(missing_required_source=missing):
+                with self.assertRaisesRegex(fixture.Refused, "^required-source-roster$"):
+                    fixture.source_names(required - {missing})
 
         class UnknownOriginal(Exception):
             dispatched, contained, cleanup_complete = True, False, False
@@ -3833,6 +3839,10 @@ class InstallerContextTests(unittest.TestCase):
         source = PATH.read_text(encoding="utf-8")
         observer = (PATH.parents[1] / "native/macos-installed-native/src/e2_installer_context.c").read_text(encoding="utf-8")
         workflow = (PATH.parents[2] / ".github/workflows/desktop-macos-maintenance-fixture.yml").read_text(encoding="utf-8")
+        for name in ("macos_maintenance_fixture_prepare.sh", "macos_maintenance_fixture_publish.sh"):
+            self.assertEqual(workflow.count("          builtin source ./desktop/tools/" + name + "\n"), 1)
+        prepare = (PATH.parent / "macos_maintenance_fixture_prepare.sh").read_text(encoding="utf-8")
+        publish = (PATH.parent / "macos_maintenance_fixture_publish.sh").read_text(encoding="utf-8")
         self.assertIn('"--nopayload", "--scripts"', source)
         self.assertIn('self.stager._cpio_members(archive, (os.getuid(), os.getgid())) == expected', source)
         self.assertIn('"${0%/*}/mrk-context-observer" ', source)
@@ -3845,10 +3855,10 @@ class InstallerContextTests(unittest.TestCase):
         self.assertIn('clock_gettime(CLOCK_MONOTONIC', observer)
         self.assertIn('output_closed && parent_closed && timely()', observer)
         self.assertNotIn('"outputClosed"', observer)
-        self.assertNotIn('/var/log/install.log', source + observer + workflow)
+        self.assertNotIn('/var/log/install.log', source + observer + workflow + prepare + publish)
         self.assertNotIn('--forget', source)
-        self.assertIn('fixture.installer_context_data(result["installerContext"], source)', workflow)
-        self.assertIn('installer_context is not None and installer_context["completed"]', workflow)
+        self.assertIn('fixture.installer_context_data(result["installerContext"], source)', publish)
+        self.assertIn('installer_context is not None and installer_context["completed"]', publish)
 
 
 if __name__ == "__main__":

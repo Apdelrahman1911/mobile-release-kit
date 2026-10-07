@@ -701,8 +701,11 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn("steps.normal_diagnostics_ui_result.outcome == 'success'", cleanup.split('        run: |', 1)[0])
         self.assertIn('root / "normal-ui/diagnostics-test.xcresult"', cleanup)
         self.assertIn('"diagnostics-test.log", "diagnostics-summary.raw.json", "diagnostics-summary.stderr"', cleanup)
-        data = blocks['data_contracts']
-        names = ast.literal_eval(re.search(r'          names = (\[\n.*?\n          \])\n', data, re.S)[1])
+        data_step = blocks['data_contracts']
+        self.assertEqual(data_step.split('        run: |\n', 1)[1],
+                         '          builtin source ./desktop/tools/macos_installed_data_contracts.sh\n')
+        data = (ROOT / 'desktop/tools/macos_installed_data_contracts.sh').read_text(encoding='utf-8')
+        names = ast.literal_eval(re.search(r'\nnames = (\[\n.*?\n\])\n', data, re.S)[1])
         selected_digest = lambda values: digest(json.dumps(values, separators=(',', ':')).encode())
         self.assertEqual(len(names), 84)
         self.assertEqual(len(set(names)), 84)
@@ -717,8 +720,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         ])
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
         self.assertEqual(data.count(ROSTER_SHA256), 2)
-        sources = ast.literal_eval(re.search(r'          source_names = (\(\n.*?\n          \))\n', data, re.S)[1])
-        self.assertEqual(len(sources), 77)
+        sources = ast.literal_eval(re.search(r'\nsource_names = (\(\n.*?\n\))\n', data, re.S)[1])
+        self.assertEqual(len(sources), 78)
         self.assertEqual(len(sources), len(set(sources)))
         self.assertEqual(selected_digest(sources[:53]), "5d544a55d63d5ac1f14f341b0ba51509c6c77e762e2f7e7c964fc9f87ec44bf4")
         self.assertEqual(list(sources[53:64]), SAVED_CHECKS_SOURCE_REFS)
@@ -729,7 +732,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             "desktop/src-tauri/src/macos_install_paths.rs",
             "desktop/src-tauri/tauri.conf.json",
         ])
-        self.assertEqual(list(sources[69:]), [
+        self.assertEqual(list(sources[69:77]), [
             "tests/desktop/test_android_build_tools.py",
             "src/mobile_release/android_build_tools.py",
             "src/mobile_release/android_build_tools_macos.py",
@@ -738,6 +741,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             "src/mobile_release/android.py", "src/mobile_release/credentials.py",
             "src/mobile_release/local_signing.py",
         ])
+        self.assertEqual(list(sources[77:]), ['desktop/tools/macos_installed_data_contracts.sh'])
         self.assertTrue(set(SOURCE_REFS).issubset(sources))
         for fragment in ('len(names) != 84 or len(set(names)) != 84', 'suite.countTestCases() != 84',
                          'facts["testsRun"] == 84', 'counts.get("testsRun") != 84', '"pythonExpectedCount": 84',

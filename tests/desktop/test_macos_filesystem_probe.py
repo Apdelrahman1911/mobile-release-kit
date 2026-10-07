@@ -12,9 +12,9 @@ from pathlib import Path
 class MacFilesystemProbeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        workflow = (Path(__file__).resolve().parents[2]
-                    / ".github/workflows/desktop-macos-installed.yml").read_text()
-        body = workflow.split("<<'PY_DATA_CONTRACTS'\n", 1)[1].split("          PY_DATA_CONTRACTS\n", 1)[0]
+        script = (Path(__file__).resolve().parents[2]
+                  / "desktop/tools/macos_installed_data_contracts.sh").read_text()
+        body = script.split("<<'PY_DATA_CONTRACTS'\n", 1)[1].split("PY_DATA_CONTRACTS\n", 1)[0]
         parsed = ast.parse(textwrap.dedent(body))
         functions = [node for node in parsed.body
                      if isinstance(node, ast.FunctionDef) and node.name in ("filesystem_device", "filesystem_volume")]
