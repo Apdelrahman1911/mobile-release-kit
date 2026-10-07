@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fixed ARM engineering AGP lock preparation A; never protected UI admission.
+"""Fixed ARM engineering AGP locked replay B; never protected UI admission.
 
-No phase B exists before distinct review of genuine A locks and inventory.
+Fixed reviewed A DATA is pinned below; missing nomination still refuses before SDK/network.
 The current-use cohort is derived from actual reviewed provisioned Mac evidence.
 A receipt marker is not a licence or delegated agreement.
 """
@@ -27,7 +27,28 @@ import xml.etree.ElementTree as ET
 SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
 REF = 'refs/heads/verify/desktop-macos-android-dependencies'
 WORKFLOW = '.github/workflows/desktop-macos-android-dependencies.yml'
-RUN_SCOPE = 'prepare-a'  # Fixed SOURCE selection; no workflow/runtime switch.
+RUN_SCOPE = 'prepare-b'  # Fixed locked replay; reviewed A does not assert B success.
+# Exact public A originals and distinct source-bound DATA review, not a B receipt.
+B_DATA = {'schemaVersion': 1,
+ 'source': 'e4106b69437c55ffa16dada025f334f7fa47854b',
+ 'tree': 'c403360097467861208edfcf7b9f2e5ff751cf25',
+ 'run': 37672292531,
+ 'attempt': 1,
+ 'job': 112966835099,
+ 'artifactId': 11504893918,
+ 'artifactSha256': '2541d5407203df454070ae84a7ded0797eb523e2c682167881adadb341ca3f41',
+ 'reviewSha256': '25215bad11a28655c21ad86d4cc439ef3f589c6aca4ab54a6c99f6611d304fb7',
+ 'pythonExecutable': '/Library/Frameworks/Python.framework/Versions/3.14/bin/python',
+ 'resources': {'receipt.json': [5163,
+                                '9d3a0ff5a5c3b6d7f5081275d1e7ccf820547c8a788ace47db003ee155c9d903'],
+               'inventory.json': [70247,
+                                  '8d1d81338e66793ab2dd6e466be89b4c6470e6a1f51475dc7e56d0e2e80bec38'],
+               'buildscript-gradle.lockfile': [6566,
+                                               'ff53ec4b7427f2da997ed040dd338b0086c856564fe7001a0d030583c778ac85'],
+               'app-gradle.lockfile': [326,
+                                       'b8ca8e27e9b203531b6bd0d08c8d9a906ba8fecf63a7797fbbb64cd34e316ec4']}}
+B_DATA_ROSTER = {'receipt.json': 16384, 'inventory.json': 1 << 20,
+                 'buildscript-gradle.lockfile': 32 << 10, 'app-gradle.lockfile': 32 << 10}
 SDK_CURRENT_USE = {'existingSelectedReceiptId': '24333f8a63b6825ea9c5514f83c2829b004d1fee', 'files': {'build-tools/35.0.0/package.xml': {'bytes': 18408, 'mode': 420, 'ownerUid': 501, 'sha256': 'efe1bc3424e93863725a90df610fae21e29aca6634f99dd3510d5b42fa2ff049'}, 'build-tools/35.0.0/source.properties': {'bytes': 63, 'mode': 420, 'ownerUid': 501, 'sha256': '084847d70abc41284feee7ea717e7c92eab0d1be05f048c27445a359cfe109d8'}, 'licenses/android-sdk-license': {'bytes': 41, 'mode': 420, 'ownerUid': 501, 'sha256': 'c43fa37686457c3f18caa3607945f4ec52a9d1beaaad8117e50dc4e863270c85'}, 'platforms/android-35/package.xml': {'bytes': 18510, 'mode': 420, 'ownerUid': 501, 'sha256': '7bca67e2f0f7258856d6f7ff0aa1a883e67ec8cce2553dbaf56baa79876e657f'}, 'platforms/android-35/source.properties': {'bytes': 257, 'mode': 420, 'ownerUid': 501, 'sha256': '2c3764446f335ad2cc44383a0360fe247620b7c774ec100d5087771ac8ed3b28'}}, 'image': {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'}, 'licenseDefinitionSha256': 'aaf80cd0aee7e569ffa8a4be1b61189c0fefccf23068e38dfafe336289b8c723', 'productVersion': '26.6.2', 'root': '/Users/runner/Library/Android/sdk'}  # Reviewed observation3f082944, never legal authority.
 CHUNK = 65536
 TOOL_BYTES = 1 << 30
@@ -158,7 +179,7 @@ def admit_work(path):
 def publish_json(private, name, value):
     """Only two closed diagnostic leaves, through the retained private original."""
     limits = {'sdk-observation.json': 16384, 'observe-sdk-failure.json': 4096,
-              'prepare-a-failure.json': 4096, 'acquire-failure.json': 4096, 'cleanup-failure.json': 4096}
+              'prepare-b-failure.json': 4096, 'acquire-failure.json': 4096, 'cleanup-failure.json': 4096}
     need(name in limits, 'diagnostic-leaf')
     raw = encoded(value)
     need(0 < len(raw) <= limits[name], 'diagnostic-bound')
@@ -195,13 +216,14 @@ def publish_json(private, name, value):
 
 
 def publish_preparation(work, relative, raw, *, clock=None):
-    """Only fixed A leaves; same retained-parent/original readback as diagnostics."""
+    """Only fixed B leaves; same retained-parent/original readback as diagnostics."""
     limits = {'tool-roster.json': 4 << 20, 'directory-roster.json': 4 << 20,
         'acquisition.json': 16384, 'evidence/acquisition-commands.json': 16384,
         'evidence/failed-commands.json': 16384, 'evidence/gradle-failure.json': 12 << 10,
         'evidence/inventory.json': 1 << 20,
         'evidence/buildscript-gradle.lockfile': 32 << 10, 'evidence/app-gradle.lockfile': 32 << 10,
-        'evidence/receipt.json': 16384, 'run/project/gradle/verification-metadata.xml': 128 << 10}
+        'evidence/receipt.json': 16384, 'run/project/gradle/verification-metadata.xml': 128 << 10,
+        'run/project/buildscript-gradle.lockfile': 32 << 10, 'run/project/app/gradle.lockfile': 32 << 10}
     for name in ('settings.gradle', 'build.gradle', 'app/build.gradle', 'app/src/main/AndroidManifest.xml',
                  'app/src/main/java/org/example/saved/MainActivity.java',
                  'gradle/wrapper/gradle-wrapper.properties', 'release/version.properties',
@@ -371,13 +393,13 @@ def clean_environment(work):
     return {'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC', 'PATH': '/usr/bin:/bin',
             'HOME': str(work), 'TMPDIR': str(work)}
 
-def observe_sdk_current_use(work, *, private=None):
+def observe_sdk_current_use(work, *, private=None, clock=None):
     """Five fixed readonly SDK originals; absence is DATA, never legal acceptance."""
     owned_private = private is None
     if owned_private: private = admit_work(work)
     primary = None
     try:
-        clock = N.PhaseClock(30)
+        if clock is None: clock = N.PhaseClock(30)
         report = {'classification': 'current-run-provisioned-sdk-observation-not-license-entitlement',
                   'source': os.environ['GITHUB_SHA'], 'status': 'refused', 'files': {}}
         try:
@@ -804,6 +826,7 @@ class Acquisition:
         return digest(raw + directories)
 
 def acquire(work, *, private=None):
+    admit_b_nomination(B_DATA)
     # This flag selects the internal role; it is NOT parent authentication.
     need(os.environ.get('MRK_ANDROID_ACQUISITION_CHILD') == '1' and private is not None, 'acquisition-original-required')
     python_executable = observed_python_executable()
@@ -972,7 +995,300 @@ def inventory(work, verification, clock):
             rows.append({'group': key[0], 'name': key[1], 'version': key[2], 'artifact': key[3], 'bytes': size, 'sha256': sha})
     need(rows, 'maven-inventory-absent')
     return {'classification': 'actual-cache-artifacts-not-independent-task-resolution-graph',
-            'locksAreOriginalGradleTaskOutputs': True, 'rows': sorted(rows, key=lambda r: tuple(r.values()))}
+            'locksAreOriginalGradleTaskOutputs': False, 'locksAreReviewedAInputs': True, 'rows': sorted(rows, key=lambda r: tuple(r.values()))}
+
+
+def admit_a_locks(buildscript_raw, app_raw):
+    """Pure Gradle8.14.5 lock DATA; neither genuine A nomination nor B admission.
+
+    Return canonical per-file configuration states, preserving named-empty
+    states. The caller still owns raw originals/pins and actual task coverage;
+    lock text cannot prove the absence of an external changing-module flag.
+    """
+    need(type(buildscript_raw) is bytes and type(app_raw) is bytes
+         and len(buildscript_raw) > 0 and len(app_raw) > 0
+         and len(buildscript_raw) + len(app_raw) <= (32 << 10), 'a-locks-input-bound')
+    headers = ('# This is a Gradle generated file for dependency locking.',
+               '# Manual edits can break the build and are not advised.',
+               '# This file is expected to be part of source control.')
+    # Closed token policy for the fixed project, not every possible Gradle name.
+    token = re.compile(r'[A-Za-z0-9_.-]+')
+
+    def configurations(value, *, allow_empty=False):
+        if allow_empty and value == '':
+            return ()
+        names = value.split(',')
+        need(all(token.fullmatch(name) is not None for name in names), 'a-locks-configuration-token')
+        need(len(set(names)) == len(names), 'a-locks-duplicate-configuration')
+        return tuple(names)
+
+    def states(raw):
+        try:
+            text = raw.decode('utf-8', 'strict').replace('\r\n', '\n')
+        except UnicodeDecodeError:
+            raise Refused('a-locks-utf8') from None
+        need(all(char == '\n' or char.isprintable() for char in text), 'a-locks-text-control')
+        lines = text.split('\n')
+        need(tuple(lines[:3]) == headers, 'a-locks-header')
+        by_configuration = {}; seen = set(); empty_names = None
+        for line in lines[3:]:
+            if not line or line.startswith('#'):
+                continue
+            need(line.count('=') == 1, 'a-locks-record-shape')
+            coordinate, configured = line.split('=')
+            if coordinate == 'empty':
+                need(empty_names is None, 'a-locks-duplicate-empty-record')
+                empty_names = configurations(configured, allow_empty=True)
+                continue
+            need(empty_names is None, 'a-locks-empty-record-order')
+            gav = tuple(coordinate.split(':'))
+            need(len(gav) == 3 and all(token.fullmatch(part) is not None for part in gav),
+                 'a-locks-coordinate-token')
+            group, artifact, version = gav
+            need(not version.lower().startswith('latest.') and not version.upper().endswith('SNAPSHOT'),
+                 'a-locks-nonfixed-version')
+            need(gav not in seen, 'a-locks-duplicate-coordinate'); seen.add(gav)
+            names = configurations(configured)
+            for name in names:
+                modules = by_configuration.setdefault(name, {})
+                key = (group, artifact)
+                need(key not in modules, 'a-locks-conflicting-module-state')
+                modules[key] = version
+        need(empty_names is not None, 'a-locks-missing-empty-record')
+        for name in empty_names:
+            need(name not in by_configuration, 'a-locks-empty-state-conflict')
+            by_configuration[name] = {}
+        need(by_configuration, 'a-locks-absent-configuration-state')
+        return tuple((name, tuple((group, artifact, version)
+                                  for (group, artifact), version in sorted(modules.items())))
+                     for name, modules in sorted(by_configuration.items()))
+
+    root_states, app_states = states(buildscript_raw), states(app_raw)
+    need(('com.android.tools.build', 'gradle', '8.9.2') in dict(root_states).get('classpath', ()),
+         'a-locks-required-root-agp-classpath')
+    return root_states, app_states
+
+def admit_a_inventory(raw, verification, verification_pin):
+    """Pure bounded A DATA predicate; no nomination, SOURCE, filesystem or B role.
+
+    The caller must separately admit the exact A artifact and review. This checks
+    its inventory shape/content against an explicitly supplied reviewed XML pin;
+    it does not turn cache rows into task-resolution edges or native evidence.
+    """
+    need(type(raw) is bytes and 0 < len(raw) <= 1 << 20, 'a-inventory-input-bound')
+    need(type(verification_pin) in (tuple, list) and len(verification_pin) == 2
+         and type(verification_pin[0]) is int and 0 < verification_pin[0] <= 128 << 10
+         and type(verification_pin[1]) is str and re.fullmatch('[0-9a-f]{64}', verification_pin[1])
+         and type(verification) is bytes and len(verification) == verification_pin[0]
+         and digest(verification) == verification_pin[1],
+         'a-inventory-verification-pin')
+    # document() is intentionally not reused: its 64KiB limit is for small
+    # receipts, while this independently bounded inventory admits up to 1MiB.
+    value = json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=N.pairs,
+                       parse_constant=lambda _: need(False, 'a-inventory-nonfinite'))
+    need(type(value) is dict and set(value) == {'classification', 'locksAreOriginalGradleTaskOutputs', 'rows'}
+         and value['classification'] == 'actual-cache-artifacts-not-independent-task-resolution-graph'
+         and value['locksAreOriginalGradleTaskOutputs'] is True, 'a-inventory-fields')
+    ns = {'v': 'https://schema.gradle.org/dependency-verification'}
+    xml = ET.fromstring(verification)
+    need(xml.tag == '{' + ns['v'] + '}verification-metadata'
+         and xml.findtext('v:configuration/v:verify-metadata', namespaces=ns) == 'true', 'a-inventory-xml-policy')
+    allowed = {}; components = set()
+    for component in xml.findall('v:components/v:component', ns):
+        gav = tuple(component.attrib[key] for key in ('group', 'name', 'version'))
+        need(gav not in components, 'a-inventory-xml-duplicate-component'); components.add(gav)
+        for artifact in component.findall('v:artifact', ns):
+            key = gav + (artifact.attrib['name'],)
+            checksums = artifact.findall('v:sha256', ns)
+            need(key not in allowed and len(checksums) == 1, 'a-inventory-xml-artifact')
+            sha = checksums[0].attrib['value']
+            need(re.fullmatch('[0-9a-f]{64}', sha) is not None, 'a-inventory-xml-sha256')
+            allowed[key] = sha
+    need(len(components) == 234 and len(allowed) == 386, 'a-inventory-xml-roster')
+    need(type(value['rows']) is list and 0 < len(value['rows']) <= 1024, 'a-inventory-row-bound')
+    rows = []; seen = set(); total = 0
+    for row in value['rows']:
+        need(type(row) is dict and set(row) == {'group', 'name', 'version', 'artifact', 'bytes', 'sha256'},
+             'a-inventory-row-fields')
+        need(all(type(row[key]) is str for key in ('group', 'name', 'version', 'artifact', 'sha256'))
+             and type(row['bytes']) is int and 0 < row['bytes'] <= 64 << 20, 'a-inventory-row-types')
+        key = tuple(row[field] for field in ('group', 'name', 'version', 'artifact'))
+        need(key not in seen, 'a-inventory-duplicate-artifact'); seen.add(key)
+        need(allowed.get(key) == row['sha256'], 'a-inventory-unreviewed-artifact')
+        total += row['bytes']; need(total <= MAVEN_BYTES, 'a-inventory-byte-bound')
+        rows.append(key + (row['bytes'], row['sha256']))
+    return tuple(sorted(rows))
+
+def admit_b_nomination(value):
+    """Fixed reviewed-A nomination shape, not an artifact fetch or pass claim."""
+    need(value is not None, 'b-data-not-nominated')
+    fields = {'schemaVersion', 'source', 'tree', 'run', 'attempt', 'job', 'artifactId',
+              'artifactSha256', 'reviewSha256', 'pythonExecutable', 'resources'}
+    need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
+         and value['schemaVersion'] == 1, 'b-nomination-fields')
+    need(all(type(value[k]) is str and re.fullmatch('[0-9a-f]{40}', value[k]) for k in ('source', 'tree'))
+         and all(type(value[k]) is str and re.fullmatch('[0-9a-f]{64}', value[k])
+                 for k in ('artifactSha256', 'reviewSha256'))
+         and all(type(value[k]) is int and 0 < value[k] < 1 << 63
+                 for k in ('run', 'attempt', 'job', 'artifactId')), 'b-nomination-cohort')
+    python = value['pythonExecutable']
+    need(type(python) is str and 1 < len(python) <= 1024 and python.startswith('/')
+         and all('!' <= char <= '~' for char in python)
+         and all(part not in ('', '.', '..') for part in python.split('/')[1:]), 'b-nomination-python')
+    need(type(value['resources']) is dict and set(value['resources']) == set(B_DATA_ROSTER), 'b-nomination-resources')
+    for name, maximum in B_DATA_ROSTER.items():
+        pin = value['resources'][name]
+        need(type(pin) in (list, tuple) and len(pin) == 2 and type(pin[0]) is int and 0 < pin[0] <= maximum
+             and type(pin[1]) is str and re.fullmatch('[0-9a-f]{64}', pin[1]), 'b-nomination-resource-pin')
+    need(sum(value['resources'][name][0] for name in ('buildscript-gradle.lockfile', 'app-gradle.lockfile')) <= 32 << 10,
+         'b-nomination-lock-bound')
+    return value
+
+def b_arguments(work):
+    """Same fixed environment/tools/task, with no lock/update/checksum learning."""
+    env, command, jdk = arguments(work)
+    need(command[-4:] == ['--dependency-verification', 'strict', '--write-locks', ':app:bundleRelease'],
+         'b-fixed-a-command-tail')
+    need(command.count('--write-locks') == 1, 'b-fixed-a-write-flag')
+    command = [arg for arg in command if arg != '--write-locks']
+    need(not any(arg.startswith(('--write-locks', '--update-locks', '--write-verification-metadata')) for arg in command),
+         'b-no-write-flags')
+    return env, command, jdk
+
+def admit_a_receipt(raw, nomination, project_raw, verification):
+    """Old A context is explicit; never impersonate it with current globals."""
+    nominated = admit_b_nomination(nomination)
+    need(type(raw) is bytes and len(raw) == nominated['resources']['receipt.json'][0]
+         and digest(raw) == nominated['resources']['receipt.json'][1], 'b-a-receipt-pin')
+    value = N.document(raw)
+    fields = {'schemaVersion', 'phase', 'status', 'source', 'workflow', 'ref', 'wrapperReturncodeRequired',
+        'commands', 'sourcePrePost', 'toolRosterSha256', 'acquisitionSha256', 'acquisitionClock',
+        'sdkObservationSha256', 'sdkMetadata', 'aab', 'fixtureSha256', 'verificationSha256',
+        'workIdentity', 'disposalIdentities', 'protectedRegistration', 'uiQualification', 'phaseClock'}
+    need(set(value) == fields and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+         and value['phase'] == 'A' and value['status'] == 'closed-awaiting-distinct-data-review'
+         and value['source'] == nominated['source'] and value['workflow'] == WORKFLOW and value['ref'] == REF
+         and value['sourcePrePost'] is True and type(value['wrapperReturncodeRequired']) is int
+         and value['wrapperReturncodeRequired'] == 0 and value['protectedRegistration'] is False
+         and value['uiQualification'] is False and value['sdkMetadata'] == SDK_METADATA, 'b-a-receipt-fields')
+    need(value['fixtureSha256'] == digest(project_raw) and value['verificationSha256'] == digest(verification)
+         and all(type(value[k]) is str and re.fullmatch('[0-9a-f]{64}', value[k])
+                 for k in ('toolRosterSha256', 'acquisitionSha256', 'sdkObservationSha256')), 'b-a-receipt-source')
+    clock_record(value['phaseClock'], PHASE_SECONDS); clock_record(value['acquisitionClock'], ACQUISITION_SECONDS)
+    # The public A receipt does not expose its random private work path. Its
+    # three vendor argv hashes remain pinned DATA for distinct A review, not
+    # independently reconstructed argv. Fixed source/acquisition args are known.
+    head = ['/usr/bin/git', '-C', str(SOURCE), 'rev-parse', 'HEAD']
+    clean = ['/usr/bin/git', '-C', str(SOURCE), 'status', '--porcelain=v1', '--untracked-files=all']
+    expected = [('source-head-pre', head, 10, 4096), ('source-clean-pre', clean, 10, 16384),
+        ('android-public-tool-acquisition', [nominated['pythonExecutable'], '-I', '-S', '-B',
+            str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384),
+        ('android-dependency-jdk-version', None, 15, 8192),
+        ('android-dependency-gradle-version', None, 15, 8192),
+        ('android-dependency-lock-task', None, 900, 2 << 20),
+        ('source-head-post', head, 10, 4096), ('source-clean-post', clean, 10, 16384)]
+    need(type(value['commands']) is list and len(value['commands']) == len(expected), 'b-a-command-count')
+    for record, (role, argv, cap, limit) in zip(value['commands'], expected):
+        need(type(record) is dict and set(record) == {'role', 'returncode', 'timeoutSeconds', 'roleCapSeconds',
+             'outputLimitBytes', 'argvSha256', 'stdoutBytes', 'stdoutSha256', 'stderrBytes', 'stderrSha256'}, 'b-a-command-fields')
+        need(record['role'] == role and type(record['returncode']) is int and record['returncode'] == 0
+             and type(record['roleCapSeconds']) is int and record['roleCapSeconds'] == cap
+             and type(record['timeoutSeconds']) is int and 1 <= record['timeoutSeconds'] <= cap
+             and type(record['outputLimitBytes']) is int and record['outputLimitBytes'] == limit
+             and type(record['argvSha256']) is str and re.fullmatch('[0-9a-f]{64}', record['argvSha256'])
+             and (argv is None or record['argvSha256'] == digest(N.encoded(argv))), 'b-a-command-original')
+        need(all(type(record[k]) is int and 0 <= record[k] <= limit for k in ('stdoutBytes', 'stderrBytes'))
+             and record['stdoutBytes'] + record['stderrBytes'] <= limit
+             and all(type(record[k]) is str and re.fullmatch('[0-9a-f]{64}', record[k])
+                     for k in ('stdoutSha256', 'stderrSha256')), 'b-a-command-output')
+        if role.startswith('source-'):
+            body = (nominated['source'] + '\n').encode() if 'head' in role else b''
+            need(record['stdoutBytes'] == len(body) and record['stdoutSha256'] == digest(body)
+                 and record['stderrBytes'] == 0 and record['stderrSha256'] == digest(b''), 'b-a-source-command')
+    need(type(value['aab']) is dict and set(value['aab']) == {'bytes', 'sha256'}
+         and type(value['aab']['bytes']) is int and 0 < value['aab']['bytes'] <= 64 << 20
+         and type(value['aab']['sha256']) is str and re.fullmatch('[0-9a-f]{64}', value['aab']['sha256']), 'b-a-aab')
+    need(type(value['disposalIdentities']) is dict and set(value['disposalIdentities']) == {'archives', 'tools', 'run'}, 'b-a-identities')
+    for identity in [value['workIdentity'], *value['disposalIdentities'].values()]:
+        need(type(identity) is list and len(identity) == 5 and all(type(v) is int and v >= 0 for v in identity)
+             and stat.S_ISDIR(identity[2]) and stat.S_IMODE(identity[2]) == 0o700, 'b-a-identity-shape')
+    # These are historical DATA only. Do not compare with a current B inode/uid.
+    return value
+
+def read_b_inputs(source, nomination, project_raw, verification, verification_pin, clock):
+    nominated = admit_b_nomination(nomination)  # Absent prerequisite before any read/network/tool.
+    bodies = {}; originals = {}
+    for name in B_DATA_ROSTER:
+        raw, identity = read(source / 'desktop/tools/android_dependency_preparation_data/phase-a' / name,
+                             nominated['resources'][name][0], clock=clock)
+        need((len(raw), digest(raw)) == tuple(nominated['resources'][name]), 'b-input-original-pin')
+        bodies[name] = raw; originals[name] = identity
+    receipt = admit_a_receipt(bodies['receipt.json'], nominated, project_raw, verification)
+    rows = admit_a_inventory(bodies['inventory.json'], verification, verification_pin)
+    # The separately reviewed pure parser preserves named-empty configurations;
+    # only the fixed reviewed A nomination permits these DATA into replay.
+    locks = admit_a_locks(bodies['buildscript-gradle.lockfile'], bodies['app-gradle.lockfile'])
+    ns = {'v': 'https://schema.gradle.org/dependency-verification'}
+    allowed = {tuple(node.attrib[k] for k in ('group', 'name', 'version'))
+               for node in ET.fromstring(verification).findall('v:components/v:component', ns)}
+    need(all(gav in allowed for file_states in locks for _, gavs in file_states for gav in gavs),
+         'b-lock-unreviewed-coordinate')
+    clock.check()
+    return {'nomination': nominated, 'raw': bodies, 'originals': originals,
+            'receipt': receipt, 'inventoryRows': rows, 'lockStates': locks}
+
+def b_input_post(source, inputs, clock):
+    nominated = admit_b_nomination(inputs['nomination'])
+    need(set(inputs['raw']) == set(inputs['originals']) == set(B_DATA_ROSTER), 'b-input-original-roster')
+    for name in B_DATA_ROSTER:
+        raw, identity = read(source / 'desktop/tools/android_dependency_preparation_data/phase-a' / name,
+                             nominated['resources'][name][0], clock=clock)
+        need(identity == inputs['originals'][name] and raw == inputs['raw'][name]
+             and (len(raw), digest(raw)) == tuple(nominated['resources'][name]), 'b-input-original-post')
+
+def b_materialize_locks(work, inputs, clock):
+    nominated = admit_b_nomination(inputs['nomination']); originals = {}
+    for resource, relative in (('buildscript-gradle.lockfile', 'buildscript-gradle.lockfile'),
+                               ('app-gradle.lockfile', 'app/gradle.lockfile')):
+        raw = inputs['raw'][resource]
+        need(type(raw) is bytes and len(raw) == nominated['resources'][resource][0]
+             and digest(raw) == nominated['resources'][resource][1], 'b-lock-input-pin')
+        publish_preparation(work, 'run/project/' + relative, raw, clock=clock)
+        actual, identity = read(work / 'run/project' / relative, 32 << 10, clock=clock)
+        need(actual == raw, 'b-lock-materialized-readback'); originals[relative] = (identity, digest(raw))
+    return originals
+
+def b_lock_post(work, originals, clock):
+    need(type(originals) is dict and set(originals) == {'buildscript-gradle.lockfile', 'app/gradle.lockfile'},
+         'b-lock-post-roster')
+    records = []
+    for relative, record in originals.items():
+        need(type(record) in (tuple, list) and len(record) == 2, 'b-lock-post-record')
+        before, sha = record
+        need(type(before) in (tuple, list) and len(before) == 9
+             and all(type(value) is int and value >= 0 for value in before)
+             and stat.S_ISREG(before[2]) and before[5] == 1 and 0 < before[6] <= 32 << 10
+             and type(sha) is str and re.fullmatch('[0-9a-f]{64}', sha), 'b-lock-post-original')
+        records.append((relative, tuple(before), sha))
+    need(sum(before[6] for _, before, _ in records) <= 32 << 10, 'b-lock-post-combined-bound')
+    for relative, before, sha in records:
+        raw, identity = read(work / 'run/project' / relative, 32 << 10, clock=clock)
+        need(identity == before and digest(raw) == sha, 'b-lock-original-post')
+
+def b_inventory_document(inputs):
+    fields = ('group', 'name', 'version', 'artifact', 'bytes', 'sha256')
+    return {'classification': 'actual-cache-artifacts-not-independent-task-resolution-graph',
+            'locksAreOriginalGradleTaskOutputs': False, 'locksAreReviewedAInputs': True,
+            'rows': [dict(zip(fields, row)) for row in inputs['inventoryRows']]}
+
+
+def b_input_statement(nomination):
+    nominated = admit_b_nomination(nomination)
+    return {'aSource': nominated['source'], 'aTree': nominated['tree'], 'aRun': nominated['run'],
+            'aAttempt': nominated['attempt'], 'aJob': nominated['job'], 'aArtifactId': nominated['artifactId'],
+            'aArtifactSha256': nominated['artifactSha256'], 'aReviewSha256': nominated['reviewSha256'],
+            'aInputs': nominated['resources'], 'locksAreReviewedAInputs': True,
+            'locksAreOriginalGradleTaskOutputs': False}
 
 
 def gradle_failure_projection(stderr, work, project_raw, verification, *, stdout=b'', clock=None):
@@ -1208,7 +1524,7 @@ def publish_gradle_failure(work, result, project_raw, verification, clock):
                  'recognition': 'projection-unavailable', 'stderrBytes': len(result.stderr),
                  'stderrSha256': digest(result.stderr), 'stdoutBytes': len(result.stdout),
                  'stdoutSha256': digest(result.stdout)}
-    value.update(source=os.environ['GITHUB_SHA'], role='android-dependency-lock-task',
+    value.update(source=os.environ['GITHUB_SHA'], role='android-dependency-locked-task',
                  originalReturncode=result.returncode, originalTaskSuccess=False)
     try: publish_preparation(work, 'evidence/gradle-failure.json', encoded(value), clock=clock)
     except BaseException: pass  # Never mask the original task failure or reopen unknown output.
@@ -1222,11 +1538,24 @@ def source_original(phase, suffix):
 
 
 def prepare(work, *, private=None):
+    nominated = admit_b_nomination(B_DATA)  # Before SDK, reads, acquisition or vendor execution.
     need(os.statvfs(work).f_bavail * os.statvfs(work).f_frsize >= 8 << 30, 'eight-gib-free-prerequisite')
-    observed_sdk = observe_sdk_current_use(work, private=private)
+    admission_clock = N.PhaseClock(30)
+    try:
+        project_raw, verification = resources()
+        inputs = read_b_inputs(SOURCE, nominated, project_raw, verification,
+            RESOURCES['desktop/tools/android_dependency_preparation_data/verification-v1.xml'], admission_clock)
+    except BaseException:
+        # Input originals close inside read(). Preserve the first failure, and
+        # terminate this same endpoint rather than starting an SDK allowance.
+        try: admission_clock.finish()
+        except BaseException: pass
+        admission_clock.failed = True
+        raise
+    # Observation consumes the same endpoint on success; never finish it twice.
+    observed_sdk = observe_sdk_current_use(work, private=private, clock=admission_clock)
     admit_sdk_current_use(observed_sdk)  # Refuses BEFORE download/materialization/native task.
     owner = N.load_normal_owner(SOURCE)
-    project_raw, verification = resources()
     for name in ('archives', 'tools', 'run', 'evidence'):
         os.mkdir(work / name, 0o700)
     identities = {name: list(nine(os.lstat(work / name))[:5]) for name in ('archives', 'tools', 'run')}
@@ -1256,26 +1585,26 @@ def prepare(work, *, private=None):
     clock.finish()
     clock = N.PhaseClock(PHASE_SECONDS)
     originals = materialize(work, project_raw, verification, clock)
+    lock_originals = b_materialize_locks(work, inputs, clock)
+    b_input_post(SOURCE, inputs, clock); b_lock_post(work, lock_originals, clock)
     before_tools = tool_post(work, clock)
     need(before_tools == acquired['toolRosterSha256'], 'acquisition-live-tool-roster')
-    env, command, jdk = arguments(work)
+    env, command, jdk = b_arguments(work)
     phase = N.NormalPhase(owner, env, work / 'run/project', clock)
     try:
         for role, argv in [('android-dependency-jdk-version', [str(jdk / 'bin/java'), '-version']),
                            ('android-dependency-gradle-version', ['/bin/sh', str(work / 'tools/gradle/bin/gradle'), '--version'])]:
             result = phase.call(role, argv, 15, 8192); need(result.returncode == 0, 'tool-version-original-return')
-        result = phase.call('android-dependency-lock-task', command, 900, 2 << 20)
+        result = phase.call('android-dependency-locked-task', command, 900, 2 << 20)
         if result.returncode != 0:
             try: publish_gradle_failure(work, result, project_raw, verification, clock)
             except BaseException: pass  # Even diagnostic interruption cannot replace the actual task refusal.
         need(result.returncode == 0, 'gradle-original-return')
-        locks = {}
-        for name in ('buildscript-gradle.lockfile', 'app/gradle.lockfile'):
-            raw, _ = read(work / 'run/project' / name, 32 << 10, clock=clock)
-            need(raw and raw.startswith(b'# This is a Gradle generated file'), 'genuine-lock-shape')
-            locks[name] = raw
-        need(sum(map(len, locks.values())) <= 32 << 10, 'locks-combined-bound')
+        b_lock_post(work, lock_originals, clock); b_input_post(SOURCE, inputs, clock)
         actual = inventory(work, verification, clock)
+        need(actual == b_inventory_document(inputs), 'b-inventory-drift')
+        locks = {'buildscript-gradle.lockfile': inputs['raw']['buildscript-gradle.lockfile'],
+                 'app/gradle.lockfile': inputs['raw']['app-gradle.lockfile']}
         aab_size, aab_sha, prefix = file_digest(work / 'run/project/app/build/outputs/bundle/release/app-release.aab', 64 << 20, clock)
         need(prefix == b'PK\x03\x04', 'actual-aab-required')
         for name, sha in originals.items():
@@ -1283,13 +1612,17 @@ def prepare(work, *, private=None):
             need(digest(raw) == sha, 'project-source-post')
         source_original(phase, 'post')
         need(tool_post(work, clock) == before_tools and resources() == [project_raw, verification], 'source-tools-post')
+        b_lock_post(work, lock_originals, clock); b_input_post(SOURCE, inputs, clock)
         publish_preparation(work, 'evidence/inventory.json', encoded(actual), clock=clock)
         for name, raw in locks.items():
             publish_preparation(work, 'evidence/' + name.replace('/', '-'), raw, clock=clock)
-        receipt = {'schemaVersion': 1, 'phase': 'A', 'status': 'closed-awaiting-distinct-data-review',
+        receipt = {'schemaVersion': 1, 'phase': 'B', 'status': 'closed-awaiting-distinct-b-data-review',
             'source': os.environ['GITHUB_SHA'], 'workflow': WORKFLOW, 'ref': REF,
             'wrapperReturncodeRequired': 0, 'commands': acquisition.records + phase.records,
             'sourcePrePost': True, 'toolRosterSha256': before_tools,
+            'aInputStatement': b_input_statement(nominated),
+            'aInputOriginals': {name: list(identity) for name, identity in inputs['originals'].items()},
+            'lockOriginals': lock_originals, 'inventorySha256': digest(encoded(actual)),
             'acquisitionSha256': acquisition_sha, 'acquisitionClock': acquisition_clock,
             'sdkObservationSha256': acquired['sdkObservationSha256'], 'sdkMetadata': SDK_METADATA,
             'aab': {'bytes': aab_size, 'sha256': aab_sha}, 'fixtureSha256': digest(project_raw),
@@ -1309,16 +1642,17 @@ def cleanup_receipt(work, value, clock):
     fields = {'schemaVersion', 'phase', 'status', 'source', 'workflow', 'ref', 'wrapperReturncodeRequired',
         'commands', 'sourcePrePost', 'toolRosterSha256', 'acquisitionSha256', 'acquisitionClock',
         'sdkObservationSha256', 'sdkMetadata', 'aab', 'fixtureSha256', 'verificationSha256',
-        'workIdentity', 'disposalIdentities', 'protectedRegistration', 'uiQualification', 'phaseClock'}
+        'workIdentity', 'disposalIdentities', 'protectedRegistration', 'uiQualification', 'phaseClock',
+        'aInputStatement', 'aInputOriginals', 'lockOriginals', 'inventorySha256'}
     need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
-         and value['schemaVersion'] == 1 and value['phase'] == 'A'
-         and value['status'] == 'closed-awaiting-distinct-data-review'
+         and value['schemaVersion'] == 1 and value['phase'] == 'B'
+         and value['status'] == 'closed-awaiting-distinct-b-data-review'
          and value['source'] == os.environ['GITHUB_SHA'] and value['workflow'] == WORKFLOW and value['ref'] == REF
          and value['sourcePrePost'] is True and type(value['wrapperReturncodeRequired']) is int
          and value['wrapperReturncodeRequired'] == 0 and value['protectedRegistration'] is False
          and value['uiQualification'] is False and value['sdkMetadata'] == SDK_METADATA, 'cleanup-receipt')
     clock_record(value['phaseClock'], PHASE_SECONDS); clock_record(value['acquisitionClock'], ACQUISITION_SECONDS)
-    _, task, jdk = arguments(work)
+    _, task, jdk = b_arguments(work)
     head = ['/usr/bin/git', '-C', str(SOURCE), 'rev-parse', 'HEAD']
     clean = ['/usr/bin/git', '-C', str(SOURCE), 'status', '--porcelain=v1', '--untracked-files=all']
     expected = [('source-head-pre', head, 10, 4096), ('source-clean-pre', clean, 10, 16384),
@@ -1326,7 +1660,7 @@ def cleanup_receipt(work, value, clock):
             str(SOURCE / 'desktop/tools/macos_android_dependency_preparation.py'), 'acquire'], 840, 16384),
         ('android-dependency-jdk-version', [str(jdk / 'bin/java'), '-version'], 15, 8192),
         ('android-dependency-gradle-version', ['/bin/sh', str(work / 'tools/gradle/bin/gradle'), '--version'], 15, 8192),
-        ('android-dependency-lock-task', task, 900, 2 << 20),
+        ('android-dependency-locked-task', task, 900, 2 << 20),
         ('source-head-post', head, 10, 4096), ('source-clean-post', clean, 10, 16384)]
     need(type(value['commands']) is list and len(value['commands']) == len(expected), 'cleanup-command-count')
     for record, (role, argv, cap, limit) in zip(value['commands'], expected):
@@ -1349,6 +1683,20 @@ def cleanup_receipt(work, value, clock):
     need(value['acquisitionSha256'] == sha and value['sdkObservationSha256'] == acquired['sdkObservationSha256']
          and value['toolRosterSha256'] == acquired['toolRosterSha256'], 'cleanup-acquisition-binding')
     project, verification = resources()
+    inputs = read_b_inputs(SOURCE, B_DATA, project, verification,
+        RESOURCES['desktop/tools/android_dependency_preparation_data/verification-v1.xml'], clock)
+    need(value['aInputStatement'] == b_input_statement(inputs['nomination'])
+         and value['aInputOriginals'] == {name: list(identity) for name, identity in inputs['originals'].items()},
+         'cleanup-b-input-binding')
+    b_lock_post(work, value['lockOriginals'], clock)
+    need(all(value['lockOriginals'][relative][1] == inputs['nomination']['resources'][resource][1]
+             for resource, relative in (('buildscript-gradle.lockfile', 'buildscript-gradle.lockfile'),
+                                        ('app-gradle.lockfile', 'app/gradle.lockfile'))),
+         'cleanup-b-lock-input-binding')
+    inventory_raw, _ = read(work / 'evidence/inventory.json', 1 << 20, clock=clock)
+    need(inventory_raw == encoded(b_inventory_document(inputs))
+         and value['inventorySha256'] == digest(inventory_raw), 'cleanup-b-inventory-binding')
+    b_input_post(SOURCE, inputs, clock)
     need(value['fixtureSha256'] == digest(project) and value['verificationSha256'] == digest(verification), 'cleanup-resource-binding')
     for entry in SDK_METADATA:
         raw, _ = read(SOURCE / entry['path'], 32768, clock=clock)
@@ -1416,6 +1764,7 @@ def restore_sdk_for_cleanup(work, private, value, clock):
 
 
 def cleanup(work, *, private=None):
+    admit_b_nomination(B_DATA)
     need(os.environ.get('MRK_PREPARATION_WRAPPER_RETURN') == '0'
          and os.environ.get('MRK_PREPARATION_EVIDENCE_UPLOAD') == 'success'
          and private is not None, 'cleanup-original-gates')
@@ -1451,7 +1800,7 @@ def main():
         private = admit_work(Path(candidate))
         stage = 'scope-context'
         need(len(sys.argv) == 2 and ((RUN_SCOPE == 'observe-sdk' and sys.argv[1] == 'observe-sdk')
-             or (RUN_SCOPE == 'prepare-a' and sys.argv[1] in ('prepare-a', 'acquire', 'cleanup'))), 'fixed-source-scope')
+             or (RUN_SCOPE == 'prepare-b' and sys.argv[1] in ('prepare-b', 'acquire', 'cleanup'))), 'fixed-source-scope')
         work = context()
         need(work == private['path'], 'private-work-context')
         recheck_chain(private['fds'], private['originals'])
@@ -1468,7 +1817,7 @@ def main():
             need(report['status'] == 'observed-not-admitted' and 'reason' not in report
                  and report.get('originalsClosed') is True, 'sdk-observation-refused')
         else:
-            final_clock = {'prepare-a': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work, private=private)
+            final_clock = {'prepare-b': prepare, 'acquire': acquire, 'cleanup': cleanup}[sys.argv[1]](work, private=private)
         recheck_chain(private['fds'], private['originals'])
         result = 0
     except BaseException as error:
@@ -1476,7 +1825,7 @@ def main():
         if not re.fullmatch('[a-z0-9-]{1,96}', code): code = 'preparation-original-failure'
         if private is not None:
             try:
-                name = 'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-a') + '-failure.json'
+                name = 'observe-sdk-failure.json' if RUN_SCOPE == 'observe-sdk' else (sys.argv[1] if len(sys.argv) == 2 and sys.argv[1] in ('acquire', 'cleanup') else 'prepare-b') + '-failure.json'
                 report = {'status': 'refused', 'stage': stage, 'reason': code,
                     'scope': RUN_SCOPE, 'nativeOrTaskSuccess': False, 'cleanupAuthorized': False}
                 try:

@@ -1,6 +1,6 @@
-name: Mac Android dependency preparation A (engineering DATA only)
+name: Mac Android dependency preparation B (engineering DATA only)
 
-# Fixed reviewed prepare-a scope; no app, signing, protected registration or licence acceptance.
+# Fixed reviewed prepare-b scope; no app, signing, protected registration or licence acceptance.
 on:
   push:
     branches: [verify/desktop-macos-android-dependencies]
@@ -18,7 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare-a:
+  prepare-b:
     if: github.ref == 'refs/heads/verify/desktop-macos-android-dependencies'
     runs-on: macos-26
     # 2+3+3+1+37+2+2=50 explicit step minutes, plus3 reserve.
@@ -64,7 +64,7 @@ jobs:
           work="$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-android-dependencies.XXXXXXXX")"
           [[ "$work" =~ ^/Users/runner/work/_temp/mrk-android-dependencies\.[A-Za-z0-9]{8}$ ]]
           printf 'root=%s\n' "$work" >> "$GITHUB_OUTPUT"
-      - name: Genuine strict-verification AGP lock generation
+      - name: Fresh strict-verification AGP replay with reviewed locks
         id: prepare
         timeout-minutes: 37
         shell: bash
@@ -75,7 +75,7 @@ jobs:
         run: |
           set -uo pipefail
           umask 077
-          # Source-fixed A only; genuine locks still require distinct DATA review before B.
+          # Source-fixed B; B_DATA=None must not be dispatched until genuine A DATA nomination.
           /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
             HOME="$MRK_ANDROID_PREPARATION_WORK" TMPDIR="$MRK_ANDROID_PREPARATION_WORK" \
             GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
@@ -83,21 +83,21 @@ jobs:
             GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
             MRK_ANDROID_PREPARATION_WORK="$MRK_ANDROID_PREPARATION_WORK" \
             MRK_PROVISIONED_SDK_ROOT="${ANDROID_HOME:-}" ImageOS="${ImageOS:-}" ImageVersion="${ImageVersion:-}" \
-            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-a \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-b \
             > "$MRK_ANDROID_PREPARATION_WORK/wrapper.stdout" 2> "$MRK_ANDROID_PREPARATION_WORK/wrapper.stderr"
           code=$?
           printf 'returncode=%s\n' "$code" >> "$GITHUB_OUTPUT"
           exit "$code"
-      - name: Publish only finite engineering receipts and genuine locks
+      - name: Publish finite replay receipts and exact reviewed lock inputs
         id: evidence
         if: always() && steps.work.outcome == 'success'
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-android-dependency-preparation-a-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-android-dependency-preparation-b-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ steps.work.outputs.root }}/sdk-observation.json
-            ${{ steps.work.outputs.root }}/prepare-a-failure.json
+            ${{ steps.work.outputs.root }}/prepare-b-failure.json
             ${{ steps.work.outputs.root }}/acquire-failure.json
             ${{ steps.work.outputs.root }}/acquisition.json
             ${{ steps.work.outputs.root }}/evidence/acquisition-commands.json

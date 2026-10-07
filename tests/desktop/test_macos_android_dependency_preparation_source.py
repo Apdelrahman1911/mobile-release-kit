@@ -43,7 +43,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertEqual(constants['SDK_CURRENT_USE']['image'], {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'})
         self.assertEqual(constants['SDK_CURRENT_USE']['productVersion'], '26.6.2')
         self.assertEqual(len(constants['SDK_CURRENT_USE']['files']), 5)
-        self.assertEqual(constants['RUN_SCOPE'], 'prepare-a')
+        self.assertEqual(constants['RUN_SCOPE'], 'prepare-b')
         for entry in constants['SDK_METADATA']:
             raw = (ROOT / entry['path']).read_bytes()
             self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (entry['bytes'], entry['sha256']))
@@ -89,6 +89,35 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertNotIn('self.parent(', seal_source[seal_source.index('self.seal_sdk_root()'):])
         self.assertIn("'pythonExecutable': python_executable", source)
         self.assertIn("value['pythonExecutable'] == observed_python_executable()", source)
+        # Fixed B argv remains the exact A command minus one write flag.
+        helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_b_argv_data')
+        source_nomination = helper.B_DATA
+        self.assertIs(helper.admit_b_nomination(source_nomination), source_nomination)
+        self.assertNotIn('work', source_nomination)
+        work = Path('/inert/work')
+        a_env, a_command, a_jdk = helper.arguments(work)
+        b_env, b_command, b_jdk = helper.b_arguments(work)
+        self.assertEqual((a_env, a_jdk), (b_env, b_jdk))
+        self.assertEqual(b_command, [arg for arg in a_command if arg != '--write-locks'])
+        self.assertEqual(b_command[-3:], ['--dependency-verification', 'strict', ':app:bundleRelease'])
+        self.assertNotIn('--write-locks', b_command)
+        self.assertFalse(any(arg.startswith(('--write-locks', '--update-locks', '--write-verification-metadata'))
+                             for arg in b_command))
+        self.assertEqual(helper.RUN_SCOPE, 'prepare-b')
+        helper.N = types.SimpleNamespace()
+        helper.B_DATA = None
+        try:
+            for operation in (helper.prepare, helper.acquire, helper.cleanup):
+                with self.subTest(operation=operation.__name__), self.assertRaisesRegex(helper.Refused, '^b-data-not-nominated$'):
+                    operation(work, private=object())
+        finally:
+            helper.B_DATA = source_nomination
+        self.assertIs(helper.B_DATA, source_nomination)
+        for name in ('main',):
+            function = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
+            self.assertFalse(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                                 and n.func.id in ('read_b_inputs', 'b_arguments', 'b_materialize_locks', 'b_input_statement')
+                                 for n in ast.walk(function)))
         for text in ('N.NormalPhase(', 'N.load_normal_owner(SOURCE)', 'C.compile_archive(',
                      'capture.consume_rows(self.terminal_row)', 'self.verify_binding()',
                      "'unsupported-vendor-alias'", 'os.O_NOFOLLOW', 'os.O_EXCL',
@@ -97,7 +126,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                      'ACQUISITION_SECONDS = 900', "command, 900, 2 << 20", 'READ_BYTES = 8 << 30',
                      'shutil.rmtree.avoids_symlink_attacks', 'shutil.rmtree(leaf, dir_fd=fd)'):
             self.assertIn(text, source)
-        for text in ('--write-verification-metadata', 'sdkmanager', 'subprocess.run(', 'extractall(', 'gradle --stop'):
+        for text in ('sdkmanager', 'subprocess.run(', 'extractall(', 'gradle --stop'):
             self.assertNotIn(text, source)
         workflow = (ROOT / '.github/workflows/desktop-macos-android-dependencies.yml').read_text()
         self.assertIn('branches: [verify/desktop-macos-android-dependencies]', workflow)
@@ -107,7 +136,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('python-version: \'3.14.7\'', workflow)
         self.assertNotIn("macos_android_dependency_preparation.py observe-sdk", workflow)
-        self.assertIn("macos_android_dependency_preparation.py prepare-a", workflow)
+        self.assertIn("macos_android_dependency_preparation.py prepare-b", workflow)
         self.assertIn("MRK_PREPARATION_EVIDENCE_UPLOAD", source)
         self.assertNotIn('secrets.', workflow)
         self.assertNotIn('workflow_dispatch:', workflow)
@@ -149,7 +178,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         environment = {'GITHUB_SHA': 'a' * 40, 'MRK_PROVISIONED_SDK_ROOT': sdk,
                        'ImageOS': 'macos26', 'ImageVersion': '20261005.1'}
         try:
-            def invoke(changes=None, *, late=None, publication=None):
+            def invoke(changes=None, *, late=None, publication=None, shared=False):
                 frames = dict(bodies)
                 frames.update(changes or {})
                 reads, publications, clocks = [], [], []
@@ -194,9 +223,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 helper.P = transport  # Real properties decoder; no hash/parser stubs.
                 helper.os = types.SimpleNamespace(**dict(vars(os), environ=dict(environment)))
                 helper.read, helper.publish_json = readonly, publish
+                supplied = Clock(30) if shared else None
                 returned, failure = None, None
                 try:
-                    returned = helper.observe_sdk_current_use(Path('/case/inert-output'), private=admitted)
+                    returned = helper.observe_sdk_current_use(Path('/case/inert-output'), private=admitted, clock=supplied)
+                    if shared:
+                        self.assertIs(clocks[0], supplied)
                 except BaseException as error:
                     failure = error
                 return returned, failure, reads, publications, clocks
@@ -219,6 +251,13 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             self.assertEqual(returned['packages'][1]['properties'], {'Pkg.Revision': '35.0.0'})
             self.assertEqual(set(returned['files']), {path[len(sdk) + 1:] for path, _ in expected_reads[1:]})
             self.assertTrue(clocks[0].finished)
+            shared_value, shared_error, shared_reads, shared_publications, shared_clocks = invoke(shared=True)
+            self.assertIsNone(shared_error)
+            self.assertEqual(shared_value, returned)
+            self.assertEqual(shared_reads, expected_reads)
+            self.assertEqual(shared_publications, [returned])
+            self.assertEqual(len(shared_clocks), 1)
+            self.assertTrue(shared_clocks[0].finished)
             self.assertEqual(helper.SDK_CURRENT_USE['productVersion'], '26.6.2')
             with self.assertRaisesRegex(helper.Refused, '^provisioned-sdk-source-nomination-mismatch$'):
                 helper.admit_sdk_current_use(returned)
@@ -492,7 +531,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     return types.SimpleNamespace()
                 environment = {'MRK_ANDROID_PREPARATION_WORK': '../unsafe' if kind == 'unsafe-name' else str(expected_path)}
                 helper.os = types.SimpleNamespace(**dict(vars(os), environ=environment))
-                helper.sys = types.SimpleNamespace(argv=['fixed-source', 'observe-sdk' if kind == 'wrong-scope' else 'prepare-a'])
+                helper.sys = types.SimpleNamespace(argv=['fixed-source', 'observe-sdk' if kind == 'wrong-scope' else 'prepare-b'])
                 helper.admit_work, helper.context, helper.load = admit, context, load
                 result = None
                 try:
@@ -515,7 +554,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     self.assertEqual(admitted, [])
                     self.assertEqual(loads, [])
                 else:
-                    self.assertEqual(leaves, ['prepare-a-failure.json'])
+                    self.assertEqual(leaves, ['prepare-b-failure.json'])
                     path = directory / leaves[0]
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
                     raw = path.read_bytes()
@@ -526,7 +565,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     self.assertEqual(value['status'], 'refused')
                     self.assertFalse(value['nativeOrTaskSuccess'])
                     self.assertFalse(value['cleanupAuthorized'])
-                    self.assertEqual(value['scope'], 'prepare-a')
+                    self.assertEqual(value['scope'], 'prepare-b')
                     self.assertEqual(value['stage'], {'wrong-scope': 'scope-context', 'context': 'scope-context',
                                                      'normal-load': 'normal-helper-load', 'transport-load': 'transport-helper-load'}[kind])
                     self.assertEqual(value['reason'], {'wrong-scope': 'fixed-source-scope', 'context': 'fixed-native-python-host',
@@ -774,7 +813,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 self_outer = self
                 helper.admit_work = admit
                 helper.os = types.SimpleNamespace(**dict(vars(os), environ={'MRK_ANDROID_PREPARATION_WORK': str(expected)}))
-                helper.sys = types.SimpleNamespace(argv=['fixed', 'prepare-a'])
+                helper.sys = types.SimpleNamespace(argv=['fixed', 'prepare-b'])
                 helper.context = lambda: expected; helper.load = lambda *args: types.SimpleNamespace()
                 helper.prepare = lambda work, private: FinalClock()
                 try: result = helper.main()
@@ -844,7 +883,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 def failed_publish(*args): raise KeyboardInterrupt('inert-publication-failure')
                 namespace.admit_work = admit
                 namespace.os = types.SimpleNamespace(**dict(vars(os), environ={'MRK_ANDROID_PREPARATION_WORK': str(expected)}))
-                namespace.sys = types.SimpleNamespace(argv=['fixed', 'prepare-a'])
+                namespace.sys = types.SimpleNamespace(argv=['fixed', 'prepare-b'])
                 namespace.context = lambda: expected; namespace.load = lambda *args: types.SimpleNamespace()
                 namespace.prepare = refuse
                 if mutation == 'publish-failure': namespace.publish_json = failed_publish
@@ -858,7 +897,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 self.assertEqual(result, 78); self.assertEqual(remaining, [])
                 if mutation == 'publish-failure':
                     self.assertEqual(list(work.iterdir()), []); continue
-                raw = (work / 'prepare-a-failure.json').read_bytes(); report = json.loads(raw)
+                raw = (work / 'prepare-b-failure.json').read_bytes(); report = json.loads(raw)
                 self.assertLessEqual(len(raw), 4096); self.assertNotIn(b'private-token', raw)
                 self.assertNotIn(str(work).encode(), raw)
                 self.assertEqual(report['reason'], str(primary))
@@ -872,6 +911,62 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         normal = fixture_module('desktop/tools/macos_normal_ui_runner.py', '_mrk_a_record_data')
         helper.N = normal
         scratch = Path(os.environ['TMPDIR']); sha = 'c' * 40
+        # Synthetic custody negatives remain separate from the fixed real A
+        # nomination, which is read through the actual input boundary below.
+        b = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_b_input_data')
+        b.N = normal
+        source_nomination = b.B_DATA
+        self.assertIs(b.admit_b_nomination(source_nomination), source_nomination)
+        class BClock:
+            def check(self): return 1
+        saved_read = b.read
+        b.read = lambda *args, **kwargs: self.fail('unnominated B reached a file read')
+        try:
+            with self.assertRaisesRegex(b.Refused, '^b-data-not-nominated$'):
+                b.read_b_inputs(Path('/absent'), None, b'', b'', (), BClock())
+        finally: b.read = saved_read
+        synthetic = {'schemaVersion': 1, 'source': 'a' * 40, 'tree': 'b' * 40, 'run': 1, 'attempt': 1,
+            'job': 1, 'artifactId': 1, 'artifactSha256': 'c' * 64, 'reviewSha256': 'd' * 64,
+            'pythonExecutable': '/inert/public/python',
+            'resources': {name: [1, 'e' * 64] for name in b.B_DATA_ROSTER}}
+        self.assertEqual(b.admit_b_nomination(synthetic), synthetic)
+        self.assertNotIn('work', synthetic)
+        statement = b.b_input_statement(synthetic)
+        self.assertTrue(statement['locksAreReviewedAInputs'])
+        self.assertFalse(statement['locksAreOriginalGradleTaskOutputs'])
+        for changed in (dict(synthetic, source='x' * 40), dict(synthetic, run=True),
+                        dict(synthetic, pythonExecutable='/inert/../python'), dict(synthetic, work='/private/other'),
+                        dict(synthetic, extra=True), dict(synthetic, resources={})):
+            with self.assertRaises(b.Refused): b.admit_b_nomination(changed)
+        with tempfile.TemporaryDirectory(prefix='b-original-', dir=scratch) as temporary:
+            root = Path(temporary)
+            data_root = root / 'source/desktop/tools/android_dependency_preparation_data/phase-a'
+            data_root.mkdir(parents=True, mode=0o700)
+            originals = {}; bodies = {}
+            for name in b.B_DATA_ROSTER:
+                body = ('inert-' + name).encode(); (data_root / name).write_bytes(body); (data_root / name).chmod(0o600)
+                bodies[name], originals[name] = b.read(data_root / name, b.B_DATA_ROSTER[name], clock=BClock())
+            nominated = dict(synthetic, resources={name: [len(raw), b.digest(raw)] for name, raw in bodies.items()})
+            inputs = {'nomination': nominated, 'raw': bodies, 'originals': originals}
+            b.b_input_post(root / 'source', inputs, BClock())
+            # Same bytes in a replaced inode are not the same admitted original.
+            path = data_root / 'inventory.json'; replacement = data_root / 'replacement'
+            replacement.write_bytes(path.read_bytes()); replacement.chmod(0o600); replacement.replace(path)
+            with self.assertRaisesRegex(b.Refused, '^b-input-original-post$'):
+                b.b_input_post(root / 'source', inputs, BClock())
+            (root / 'run/project/app').mkdir(parents=True, mode=0o700)
+            lock_originals = b.b_materialize_locks(root, inputs, BClock())
+            b.b_lock_post(root, lock_originals, BClock())
+            # JSON receipts retain the same nine-field identity, not tuple type.
+            b.b_lock_post(root, json.loads(b.encoded(lock_originals)), BClock())
+            for invalid in ({}, dict(lock_originals, extra=()),
+                            dict(lock_originals, **{'app/gradle.lockfile': [[], '0' * 64]})):
+                with self.assertRaises(b.Refused):
+                    b.b_lock_post(root, invalid, BClock())
+            path = root / 'run/project/app/gradle.lockfile'; replacement = path.with_name('replacement')
+            replacement.write_bytes(path.read_bytes()); replacement.chmod(0o600); replacement.replace(path)
+            with self.assertRaisesRegex(b.Refused, '^b-lock-original-post$'):
+                b.b_lock_post(root, lock_originals, BClock())
         helper.os = types.SimpleNamespace(**dict(vars(os), environ={'GITHUB_SHA': sha}))
         class Clock:
             def check(self): return 1
@@ -881,6 +976,33 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             name and not name.startswith('/') and all(p not in ('', '.', '..') for p in name.split('/'))))
         project_raw = (ROOT / 'desktop/tools/android_dependency_preparation_data/project-v1.json').read_bytes()
         verification = (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_bytes()
+        # Real reviewed A DATA: no vendor execution or simulated nomination.
+        # The existing reader owns exact raw pins, receipt/lock/XML admission
+        # and original-FD closure; POST must retain those same four originals.
+        real_inputs = b.read_b_inputs(ROOT, source_nomination, project_raw, verification,
+                                      (len(verification), b.digest(verification)), BClock())
+        self.assertIs(real_inputs['nomination'], source_nomination)
+        self.assertEqual(real_inputs['receipt']['source'], source_nomination['source'])
+        self.assertFalse(real_inputs['receipt']['protectedRegistration'])
+        self.assertFalse(real_inputs['receipt']['uiQualification'])
+        self.assertEqual(set(real_inputs['originals']), set(b.B_DATA_ROSTER))
+        self.assertTrue(all(len(identity) == 9 and stat.S_ISREG(identity[2])
+                            for identity in real_inputs['originals'].values()))
+        self.assertEqual({name: [len(raw), b.digest(raw)] for name, raw in real_inputs['raw'].items()},
+                         source_nomination['resources'])
+        self.assertEqual(len(real_inputs['inventoryRows']), 345)
+        self.assertEqual(sum(row[4] for row in real_inputs['inventoryRows']), 209839014)
+        self.assertEqual(sum(len(real_inputs['raw'][name]) for name in
+                             ('buildscript-gradle.lockfile', 'app-gradle.lockfile')), 6892)
+        root_states, app_states = real_inputs['lockStates']
+        self.assertEqual(tuple(name for name, _ in root_states), ('classpath',))
+        self.assertEqual(len(root_states[0][1]), 123)
+        self.assertIn(('com.android.tools.build', 'gradle', '8.9.2'), root_states[0][1])
+        self.assertEqual(app_states, tuple((name, ()) for name in
+            ('androidApis', 'androidJdkImage', 'lintChecks', 'releaseAnnotationProcessorClasspath',
+             'releaseCompileClasspath', 'releaseReverseMetadataValues', 'releaseRuntimeClasspath')))
+        b.b_input_post(ROOT, real_inputs, BClock())
+        self.assertIs(b.B_DATA, source_nomination)
         with tempfile.TemporaryDirectory(prefix='a-fixture-', dir=scratch) as temporary:
             work = Path(temporary)
             originals = helper.materialize(work, project_raw, verification, Clock())
@@ -969,15 +1091,105 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 'fixtureSha256': helper.digest(b'project'), 'verificationSha256': helper.digest(b'verification'),
                 'workIdentity': identity, 'disposalIdentities': {k: identity for k in ('archives', 'tools', 'run')},
                 'protectedRegistration': False, 'uiQualification': False, 'phaseClock': record_clock(1200)}
+            # The pure prior-A predicate uses supplied A context, not today's
+            # GITHUB_SHA/Python path or current uid/inodes as old authority.
+            nominated = dict(synthetic, source=sha, pythonExecutable=sys.executable)
+            old_value = json.loads(json.dumps(value))
+            # No public old private-work path exists. These vendor hashes are
+            # opaque pinned DATA, not an independently reconstructed command.
+            for index in (3, 4, 5): old_value['commands'][index]['argvSha256'] = str(index) * 64
+            old_raw = b.encoded(old_value)
+            nominated['resources'] = dict(nominated['resources'], **{'receipt.json': [len(old_raw), b.digest(old_raw)]})
+            self.assertEqual(b.admit_a_receipt(old_raw, nominated, b'project', b'verification'), old_value)
+            with self.assertRaisesRegex(b.Refused, '^b-a-command-original$'):
+                b.admit_a_receipt(old_raw, dict(nominated, pythonExecutable='/inert/other/python'), b'project', b'verification')
+            wrong = json.loads(old_raw); wrong['commands'][5]['returncode'] = 1
+            wrong_raw = b.encoded(wrong)
+            wrong_nomination = dict(nominated, resources=dict(nominated['resources'], **{'receipt.json': [len(wrong_raw), b.digest(wrong_raw)]}))
+            with self.assertRaisesRegex(b.Refused, '^b-a-command-original$'):
+                b.admit_a_receipt(wrong_raw, wrong_nomination, b'project', b'verification')
+            for index, invalid_hash in ((0, '0' * 64), (2, '0' * 64), (3, ''), (4, None), (5, 'g' * 64)):
+                invalid_receipt = json.loads(old_raw); invalid_receipt['commands'][index]['argvSha256'] = invalid_hash
+                invalid_raw = b.encoded(invalid_receipt)
+                invalid_nomination = dict(nominated, resources=dict(nominated['resources'],
+                    **{'receipt.json': [len(invalid_raw), b.digest(invalid_raw)]}))
+                with self.subTest(old_argv=index), self.assertRaisesRegex(b.Refused, '^b-a-command-original$'):
+                    b.admit_a_receipt(invalid_raw, invalid_nomination, b'project', b'verification')
+            with self.assertRaisesRegex(b.Refused, '^b-a-receipt-pin$'):
+                b.admit_a_receipt(old_raw + b' ', nominated, b'project', b'verification')
+            # Real fixed-four reader + all three DATA predicates on tiny synthetic
+            # inputs. These constructed receipts are NOT genuine A evidence.
+            input_receipt = json.loads(old_raw)
+            input_receipt.update(fixtureSha256=b.digest(project_raw), verificationSha256=b.digest(verification))
+            ns = {'v': 'https://schema.gradle.org/dependency-verification'}
+            first_component = b.ET.fromstring(verification).find('v:components/v:component', ns)
+            first_artifact = first_component.find('v:artifact', ns)
+            input_row = dict(first_component.attrib, artifact=first_artifact.attrib['name'], bytes=1,
+                             sha256=first_artifact.find('v:sha256', ns).attrib['value'])
+            input_inventory = {'classification': 'actual-cache-artifacts-not-independent-task-resolution-graph',
+                               'locksAreOriginalGradleTaskOutputs': True, 'rows': [input_row]}
+            input_header = (b'# This is a Gradle generated file for dependency locking.\n'
+                            b'# Manual edits can break the build and are not advised.\n'
+                            b'# This file is expected to be part of source control.\n')
+            input_raw = {'receipt.json': b.encoded(input_receipt), 'inventory.json': b.encoded(input_inventory),
+                         'buildscript-gradle.lockfile': input_header + b'com.android.tools.build:gradle:8.9.2=classpath\nempty=unusedRoot\n',
+                         'app-gradle.lockfile': input_header + b'empty=unusedApp\n'}
+            input_nomination = dict(nominated, resources={name: [len(raw), b.digest(raw)] for name, raw in input_raw.items()})
+            input_source = work / 'fixed-input-source'
+            input_directory = input_source / 'desktop/tools/android_dependency_preparation_data/phase-a'
+            input_directory.mkdir(parents=True, mode=0o700)
+            for name, raw in input_raw.items():
+                (input_directory / name).write_bytes(raw); (input_directory / name).chmod(0o600)
+            input_pin = (len(verification), b.digest(verification))
+            admitted_inputs = b.read_b_inputs(input_source, input_nomination, project_raw, verification, input_pin, BClock())
+            self.assertEqual(admitted_inputs['raw'], input_raw)
+            self.assertEqual(set(admitted_inputs['originals']), set(b.B_DATA_ROSTER))
+            self.assertEqual(admitted_inputs['lockStates'],
+                ((('classpath', (('com.android.tools.build', 'gradle', '8.9.2'),)), ('unusedRoot', ())), (('unusedApp', ()),)))
+            self.assertEqual(admitted_inputs['inventoryRows'],
+                (tuple(input_row[key] for key in ('group', 'name', 'version', 'artifact', 'bytes', 'sha256')),))
+            b.b_input_post(input_source, admitted_inputs, BClock())
+            wrong_pin = dict(input_nomination, resources=dict(input_nomination['resources'],
+                **{'inventory.json': [len(input_raw['inventory.json']), '0' * 64]}))
+            with self.assertRaisesRegex(b.Refused, '^b-input-original-pin$'):
+                b.read_b_inputs(input_source, wrong_pin, project_raw, verification, input_pin, BClock())
+            unreviewed_lock = input_raw['buildscript-gradle.lockfile'].replace(b'empty=unusedRoot',
+                b'unreviewed.synthetic:must-refuse:1.0=classpath\nempty=unusedRoot')
+            (input_directory / 'buildscript-gradle.lockfile').write_bytes(unreviewed_lock)
+            unreviewed_nomination = dict(input_nomination, resources=dict(input_nomination['resources'],
+                **{'buildscript-gradle.lockfile': [len(unreviewed_lock), b.digest(unreviewed_lock)]}))
+            with self.assertRaisesRegex(b.Refused, '^b-lock-unreviewed-coordinate$'):
+                b.read_b_inputs(input_source, unreviewed_nomination, project_raw, verification, input_pin, BClock())
+            self.assertIs(b.B_DATA, source_nomination)
+            value['phase'] = 'B'; value['status'] = 'closed-awaiting-distinct-b-data-review'
+            _, locked_task, _ = helper.b_arguments(work)
+            value['commands'][5]['role'] = 'android-dependency-locked-task'
+            value['commands'][5]['argvSha256'] = helper.digest(normal.encoded(locked_task))
+            cleanup_inputs = {'nomination': synthetic, 'originals': {name: (1,) * 9 for name in helper.B_DATA_ROSTER},
+                              'inventoryRows': ()}
+            value.update(aInputStatement=helper.b_input_statement(synthetic),
+                         aInputOriginals={name: [1] * 9 for name in helper.B_DATA_ROSTER},
+                         lockOriginals={relative: [[1] * 9, synthetic['resources'][resource][1]]
+                             for resource, relative in (('buildscript-gradle.lockfile', 'buildscript-gradle.lockfile'),
+                                                        ('app-gradle.lockfile', 'app/gradle.lockfile'))},
+                         inventorySha256=helper.digest(helper.encoded(helper.b_inventory_document(cleanup_inputs))))
+            helper.read_b_inputs = lambda *args: cleanup_inputs
+            helper.b_lock_post = lambda *args: None
+            helper.b_input_post = lambda *args: None
             helper.acquisition_receipt = lambda work, clock: ({'sdkObservationSha256': '3' * 64, 'toolRosterSha256': '1' * 64}, '2' * 64)
             helper.resources = lambda: (b'project', b'verification')
-            helper.read = lambda path, limit, clock: ((ROOT / path.relative_to(helper.SOURCE)).read_bytes(), None)
+            helper.read = lambda path, limit, clock: (helper.encoded(helper.b_inventory_document(cleanup_inputs)), None) if path == work / 'evidence/inventory.json' else ((ROOT / path.relative_to(helper.SOURCE)).read_bytes(), None)
             helper.cleanup_receipt(work, value, Clock())
-            mutations = [('phase', 'B'), ('workflow', 'wrong'), ('source', 'e' * 40), ('wrapperReturncodeRequired', False),
-                         ('toolRosterSha256', '9' * 64), ('fixtureSha256', '9' * 64), ('commands', records[:-1])]
+            mutations = [('phase', 'A'), ('workflow', 'wrong'), ('source', 'e' * 40), ('wrapperReturncodeRequired', False),
+                         ('toolRosterSha256', '9' * 64), ('fixtureSha256', '9' * 64), ('commands', records[:-1]),
+                         ('aInputStatement', {}), ('aInputOriginals', {}), ('inventorySha256', '9' * 64)]
             for key, invalid in mutations:
                 with self.subTest(field=key), self.assertRaises(helper.Refused):
                     helper.cleanup_receipt(work, dict(value, **{key: invalid}), Clock())
+            for relative in value['lockOriginals']:
+                modified = json.loads(json.dumps(value)); modified['lockOriginals'][relative][1] = '0' * 64
+                with self.subTest(lock_input=relative), self.assertRaisesRegex(helper.Refused, '^cleanup-b-lock-input-binding$'):
+                    helper.cleanup_receipt(work, modified, Clock())
             for key, invalid in (('argvSha256', 'f' * 64), ('roleCapSeconds', 901), ('timeoutSeconds', 0),
                                  ('returncode', False), ('stdoutBytes', (2 << 20) + 1)):
                 modified = json.loads(json.dumps(value)); modified['commands'][5][key] = invalid
@@ -1013,7 +1225,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 if mutation == 'sdk-mode': sdk.chmod(0o700)
                 if mutation == 'sdk-symlink': sdk.rmdir(); sdk.symlink_to(outside, target_is_directory=True)
                 private = disposal.admit_work(work); opened, closed, chmods, deleted = [], [], [], []
-                original = disposal.os, disposal.shutil, disposal.cleanup_receipt
+                original = disposal.os, disposal.shutil, disposal.cleanup_receipt, disposal.B_DATA
                 fault = OSError('inert-restore-primary')
                 def validate(work, value, clock):
                     if mutation == 'receipt': raise disposal.Refused('cleanup-receipt')
@@ -1038,6 +1250,9 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 disposal.os = types.SimpleNamespace(**dict(vars(os), environ=environment,
                     open=tracked_open, close=tracked_close, fchmod=tracked_chmod))
                 disposal.shutil = types.SimpleNamespace(rmtree=retire); disposal.cleanup_receipt = validate
+                # Explicit synthetic nomination only for this isolated disposal fixture.
+                # Real B input/receipt gates are independently exercised above.
+                disposal.B_DATA = synthetic
                 test_primary = None
                 try:
                     if mutation == 'none': disposal.cleanup(work, private=private)
@@ -1047,7 +1262,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 except BaseException as error:
                     test_primary = error; raise
                 finally:
-                    disposal.os, disposal.shutil, disposal.cleanup_receipt = original
+                    disposal.os, disposal.shutil, disposal.cleanup_receipt, disposal.B_DATA = original
                     rescue_failure = None
                     try: disposal.close_chain(private['fds'], private['originals'])
                     except BaseException as error: rescue_failure = error
@@ -1078,6 +1293,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         # must equal the first live tool POST BEFORE any Java/Gradle entry. These
         # synthetic return values are control-flow DATA, never native receipts.
         flow = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_a_roster_flow_data')
+        flow_nomination = flow.B_DATA
         class FlowClock:
             def __init__(self, seconds): self.seconds = seconds
             def before_publication(self): return {'inertSeconds': self.seconds}
@@ -1086,9 +1302,14 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             environ={k: 'inert' for k in ('GITHUB_REPOSITORY', 'GITHUB_EVENT_NAME', 'GITHUB_REF', 'GITHUB_SHA',
                 'GITHUB_WORKFLOW_SHA', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKSPACE', 'RUNNER_ENVIRONMENT',
                 'RUNNER_OS', 'RUNNER_ARCH', 'MRK_ANDROID_PREPARATION_WORK')}))
-        flow.observe_sdk_current_use = lambda work, private: object()
+        flow.observe_sdk_current_use = lambda work, private, clock: object()
         flow.admit_sdk_current_use = lambda value: None
         flow.resources = lambda: (b'project', b'verification')
+        flow.admit_b_nomination = lambda value: {}
+        flow.read_b_inputs = lambda *args: {}
+        flow.b_materialize_locks = lambda *args: {}
+        flow.b_lock_post = lambda *args: None
+        flow.b_input_post = lambda *args: None
         flow.source_original = lambda phase, suffix: None
         flow.publish_preparation = lambda *args, **kwargs: None
         flow.acquisition_receipt = lambda work, clock: ({'toolRosterSha256': '1' * 64}, '2' * 64)
@@ -1102,7 +1323,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     def call(self, role, *args):
                         calls.append(role)
                         if mismatch is None:
-                            return types.SimpleNamespace(returncode=1 if role == 'android-dependency-lock-task' else 0, stderr=b'inert')
+                            return types.SimpleNamespace(returncode=1 if role == 'android-dependency-locked-task' else 0, stderr=b'inert')
                         if role != 'android-public-tool-acquisition': raise reached
                         return types.SimpleNamespace(returncode=0)
                 flow.N = types.SimpleNamespace(PhaseClock=FlowClock, NormalPhase=Phase, load_normal_owner=lambda source: object())
@@ -1113,7 +1334,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     with self.assertRaisesRegex(flow.Refused, '^gradle-original-return$'):
                         flow.prepare(Path(temporary), private=object())
                     self.assertEqual(calls, ['android-public-tool-acquisition', 'android-dependency-jdk-version',
-                                            'android-dependency-gradle-version', 'android-dependency-lock-task'])
+                                            'android-dependency-gradle-version', 'android-dependency-locked-task'])
                 elif mismatch:
                     with self.assertRaisesRegex(flow.Refused, '^acquisition-live-tool-roster$'):
                         flow.prepare(Path(temporary), private=object())
@@ -1122,6 +1343,293 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                     with self.assertRaises(ValueError) as caught: flow.prepare(Path(temporary), private=object())
                     self.assertIs(caught.exception, reached)
                     self.assertEqual(calls, ['android-public-tool-acquisition', 'android-dependency-jdk-version'])
+
+        # Complete B orchestration uses only explicit in-memory tool/reader DATA.
+        # Run the actual prepare body, but never a vendor, SDK or network owner.
+        # Both late original changes and semantic cache drift forbid a receipt.
+        for failure in (None, 'inventory', 'late-lock', 'late-input', 'early-input', 'early-finish'):
+            with self.subTest(b_replay=failure), tempfile.TemporaryDirectory(prefix='b-replay-flow-', dir=scratch) as temporary:
+                clocks, events, calls, emitted = [], [], [], []
+                counters = {'input': 0, 'lock': 0}
+                initial_failure = flow.Refused('inert-b-input-refusal')
+                raw_inputs = {'receipt.json': b'inert-receipt', 'inventory.json': b'inert-inventory',
+                    'buildscript-gradle.lockfile': b'inert-buildscript', 'app-gradle.lockfile': b'inert-app'}
+                nominated_b = dict(synthetic, resources={name: [len(raw), flow.digest(raw)] for name, raw in raw_inputs.items()})
+                identities = {name: (1, index, stat.S_IFREG | 0o600, os.getuid(), os.getgid(), 1, len(raw), 1, 1)
+                              for index, (name, raw) in enumerate(raw_inputs.items(), 1)}
+                input_b = {'nomination': nominated_b, 'raw': raw_inputs, 'originals': identities,
+                    'inventoryRows': (('inert.synthetic', 'artifact', '1.0', 'artifact-1.0.jar', 1, 'a' * 64),)}
+                lock_b = {relative: (identities[name], flow.digest(raw_inputs[name]))
+                          for name, relative in (('buildscript-gradle.lockfile', 'buildscript-gradle.lockfile'),
+                                                 ('app-gradle.lockfile', 'app/gradle.lockfile'))}
+                class ReplayClock:
+                    def __init__(clock, seconds):
+                        clock.seconds = seconds; clock.failed = False; clock.finished = False; clock.finishes = 0
+                        clocks.append(clock)
+                    def check(clock):
+                        self.assertFalse(clock.finished or clock.failed)
+                    def before_publication(clock):
+                        clock.check(); return {'inertSeconds': clock.seconds}
+                    def finish(clock):
+                        clock.finishes += 1
+                        if failure == 'early-finish' and clock.seconds == 30:
+                            raise KeyboardInterrupt('inert-secondary-clock-failure')
+                        clock.check(); clock.finished = True
+                class ReplayPhase:
+                    def __init__(phase, owner, environment, cwd, clock):
+                        phase.records = []; phase.clock = clock
+                    def call(phase, role, argv, cap, limit):
+                        phase.clock.check(); calls.append((role, argv, cap, limit))
+                        body = (sha + '\n').encode() if role.startswith('source-head') else b''
+                        phase.records.append({'role': role, 'returncode': 0, 'timeoutSeconds': cap,
+                            'roleCapSeconds': cap, 'outputLimitBytes': limit, 'argvSha256': flow.digest(normal.encoded(argv)),
+                            'stdoutBytes': len(body), 'stdoutSha256': flow.digest(body),
+                            'stderrBytes': 0, 'stderrSha256': flow.digest(b'')})
+                        return types.SimpleNamespace(returncode=0, stdout=body, stderr=b'')
+                def input_read(source, nomination, project, xml, pin, clock):
+                    self.assertIs(clock, clocks[0]); self.assertEqual(clock.seconds, 30)
+                    self.assertEqual(len(clocks), 1); clock.check(); events.append('inputs')
+                    if failure in ('early-input', 'early-finish'): raise initial_failure
+                    return input_b
+                def sdk_observe(work, private, clock):
+                    self.assertIs(clock, clocks[0]); self.assertEqual(events, ['inputs'])
+                    clock.finish(); events.append('sdk'); return object()
+                def input_post(source, inputs, clock):
+                    self.assertIs(inputs, input_b); clock.check(); counters['input'] += 1
+                    if failure == 'late-input' and counters['input'] == 3:
+                        raise flow.Refused('inert-late-input-post')
+                def lock_post(work, originals, clock):
+                    self.assertIs(originals, lock_b); clock.check(); counters['lock'] += 1
+                    if failure == 'late-lock' and counters['lock'] == 3:
+                        raise flow.Refused('inert-late-lock-post')
+                def source_post(phase, suffix):
+                    phase.call('source-head-' + suffix,
+                        ['/usr/bin/git', '-C', str(flow.SOURCE), 'rev-parse', 'HEAD'], 10, 4096)
+                    phase.call('source-clean-' + suffix,
+                        ['/usr/bin/git', '-C', str(flow.SOURCE), 'status', '--porcelain=v1', '--untracked-files=all'], 10, 16384)
+                def cache_inventory(work, verification, clock):
+                    clock.check(); document = flow.b_inventory_document(input_b)
+                    if failure == 'inventory': document['rows'][0]['bytes'] += 1
+                    return document
+                def capture(work, name, raw, *, clock=None):
+                    if clock is not None: clock.check()
+                    self.assertIs(type(raw), bytes); emitted.append((name, raw))
+                flow.N = types.SimpleNamespace(PhaseClock=ReplayClock, NormalPhase=ReplayPhase, load_normal_owner=lambda source: object())
+                flow.os.environ['GITHUB_SHA'] = sha
+                flow.resources = lambda: [b'project', b'verification']
+                flow.admit_b_nomination = lambda value: nominated_b
+                flow.read_b_inputs = input_read; flow.observe_sdk_current_use = sdk_observe
+                flow.b_materialize_locks = lambda *args: lock_b
+                flow.b_input_post = input_post; flow.b_lock_post = lock_post
+                flow.source_original = source_post; flow.publish_preparation = capture
+                flow.acquisition_receipt = lambda work, clock: (
+                    {'toolRosterSha256': '1' * 64, 'sdkObservationSha256': '3' * 64}, '2' * 64)
+                flow.tool_post = lambda work, clock: '1' * 64
+                flow.inventory = cache_inventory
+                flow.file_digest = lambda *args: (4, '4' * 64, b'PK\x03\x04')
+                returned = caught = None
+                try: returned = flow.prepare(Path(temporary), private=object())
+                except BaseException as error: caught = error
+                receipts = [json.loads(raw) for name, raw in emitted if name == 'evidence/receipt.json']
+                if failure in ('early-input', 'early-finish'):
+                    self.assertIs(caught, initial_failure)
+                    self.assertEqual(events, ['inputs']); self.assertEqual(calls, []); self.assertEqual(emitted, [])
+                    self.assertEqual(len(clocks), 1); self.assertEqual(clocks[0].finishes, 1)
+                    self.assertTrue(clocks[0].failed)
+                    self.assertEqual(clocks[0].finished, failure == 'early-input')
+                    self.assertIsNone(returned)
+                    continue
+                self.assertEqual(events, ['inputs', 'sdk'])
+                self.assertEqual([clock.seconds for clock in clocks], [30, 900, 1200])
+                self.assertEqual([clock.finishes for clock in clocks], [1, 1, 0])
+                self.assertEqual([call[0] for call in calls[:6]], ['source-head-pre', 'source-clean-pre',
+                    'android-public-tool-acquisition', 'android-dependency-jdk-version',
+                    'android-dependency-gradle-version', 'android-dependency-locked-task'])
+                self.assertEqual(calls[5][1][-3:], ['--dependency-verification', 'strict', ':app:bundleRelease'])
+                self.assertFalse(any(arg.startswith(('--write-locks', '--update-locks', '--write-verification-metadata'))
+                                     for arg in calls[5][1]))
+                self.assertEqual(calls[5][2:], (900, 2 << 20))
+                if failure is not None:
+                    self.assertIsInstance(caught, flow.Refused)
+                    self.assertEqual(str(caught), {'inventory': 'b-inventory-drift',
+                        'late-lock': 'inert-late-lock-post', 'late-input': 'inert-late-input-post'}[failure])
+                    self.assertEqual(receipts, []); self.assertIsNone(returned)
+                    self.assertIn('evidence/failed-commands.json', [name for name, raw in emitted])
+                else:
+                    self.assertIsNone(caught); self.assertIs(returned, clocks[-1]); self.assertFalse(returned.finished)
+                    self.assertEqual(counters, {'input': 3, 'lock': 3}); self.assertEqual(len(receipts), 1)
+                    self.assertEqual([call[0] for call in calls[-2:]], ['source-head-post', 'source-clean-post'])
+                    self.assertEqual(len(calls), 8)
+                    receipt_b = receipts[0]
+                    self.assertEqual(receipt_b['phase'], 'B')
+                    self.assertEqual(receipt_b['status'], 'closed-awaiting-distinct-b-data-review')
+                    self.assertEqual(receipt_b['aInputStatement'], flow.b_input_statement(nominated_b))
+                    self.assertEqual(receipt_b['aInputOriginals'], {name: list(identity) for name, identity in identities.items()})
+                    self.assertEqual(receipt_b['lockOriginals'], json.loads(flow.encoded(lock_b)))
+                    self.assertFalse(receipt_b['protectedRegistration']); self.assertFalse(receipt_b['uiQualification'])
+                    evidence = dict(emitted)
+                    inventory_b = json.loads(evidence['evidence/inventory.json'])
+                    self.assertTrue(inventory_b['locksAreReviewedAInputs'])
+                    self.assertFalse(inventory_b['locksAreOriginalGradleTaskOutputs'])
+                    self.assertEqual(receipt_b['inventorySha256'], flow.digest(evidence['evidence/inventory.json']))
+                    self.assertEqual(evidence['evidence/buildscript-gradle.lockfile'], raw_inputs['buildscript-gradle.lockfile'])
+                    self.assertEqual(evidence['evidence/app-gradle.lockfile'], raw_inputs['app-gradle.lockfile'])
+                    self.assertIs(flow.B_DATA, flow_nomination)
+
+        # Separate synthetic cases: pure A inventory DATA admission, without
+        # nominating a run or claiming these synthetic sizes are native evidence.
+        import xml.etree.ElementTree as ET
+        xml_raw = (ROOT / 'desktop/tools/android_dependency_preparation_data/verification-v1.xml').read_bytes()
+        xml_pin = (len(xml_raw), helper.digest(xml_raw))
+        xml = ET.fromstring(xml_raw); ns = {'v': 'https://schema.gradle.org/dependency-verification'}
+        all_rows = []
+        for component in xml.findall('v:components/v:component', ns):
+            for artifact in component.findall('v:artifact', ns):
+                all_rows.append(dict(component.attrib, artifact=artifact.attrib['name'], bytes=1,
+                                     sha256=artifact.find('v:sha256', ns).attrib['value']))
+        def inventory_data(rows):
+            return {'classification': 'actual-cache-artifacts-not-independent-task-resolution-graph',
+                    'locksAreOriginalGradleTaskOutputs': True, 'rows': rows}
+        data = inventory_data(all_rows)
+        raw = helper.encoded(data)
+        self.assertGreater(len(raw), 65536); self.assertLess(len(raw), 1 << 20)
+        admitted = helper.admit_a_inventory(raw, xml_raw, xml_pin)
+        self.assertEqual(len(admitted), 386)
+        self.assertEqual(admitted, helper.admit_a_inventory(helper.encoded(inventory_data(all_rows[::-1])), xml_raw, xml_pin))
+        self.assertEqual(admitted, tuple(sorted(tuple(row[k] for k in ('group', 'name', 'version', 'artifact', 'bytes', 'sha256'))
+                                              for row in all_rows)))
+        minimal = inventory_data([all_rows[0]])
+        tiny = helper.encoded(minimal)
+        self.assertEqual(helper.admit_a_inventory(tiny + b' ' * ((1 << 20) - len(tiny)), xml_raw, xml_pin),
+                         helper.admit_a_inventory(tiny, xml_raw, xml_pin))
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-input-bound$'):
+            helper.admit_a_inventory(tiny + b' ' * ((1 << 20) + 1 - len(tiny)), xml_raw, xml_pin)
+        for invalid in (b'', None):
+            with self.assertRaisesRegex(helper.Refused, '^a-inventory-input-bound$'):
+                helper.admit_a_inventory(invalid, xml_raw, xml_pin)
+        for changed in (dict(minimal, extra=True), dict(minimal, locksAreOriginalGradleTaskOutputs=False),
+                        dict(minimal, classification='independent-resolution-graph')):
+            with self.assertRaisesRegex(helper.Refused, '^a-inventory-fields$'):
+                helper.admit_a_inventory(helper.encoded(changed), xml_raw, xml_pin)
+        for rows in ([], [all_rows[0]] * 1025):
+            with self.assertRaisesRegex(helper.Refused, '^a-inventory-row-bound$'):
+                helper.admit_a_inventory(helper.encoded(inventory_data(rows)), xml_raw, xml_pin)
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-duplicate-artifact$'):
+            helper.admit_a_inventory(helper.encoded(inventory_data([all_rows[0], all_rows[0]])), xml_raw, xml_pin)
+        for change, reason in (({'bytes': True}, 'row-types'), ({'bytes': 0}, 'row-types'),
+                ({'bytes': (64 << 20) + 1}, 'row-types'), ({'sha256': '0' * 64}, 'unreviewed-artifact'),
+                ({'group': 'private.unreviewed'}, 'unreviewed-artifact'), ({'name': []}, 'row-types'),
+                ({'extra': 1}, 'row-fields')):
+            with self.subTest(inventory_change=change), self.assertRaisesRegex(helper.Refused, '^a-inventory-' + reason + '$'):
+                helper.admit_a_inventory(helper.encoded(inventory_data([dict(all_rows[0], **change)])), xml_raw, xml_pin)
+        full_budget = [dict(row, bytes=64 << 20) for row in all_rows[:4]]
+        self.assertEqual(sum(row[4] for row in helper.admit_a_inventory(helper.encoded(inventory_data(full_budget)), xml_raw, xml_pin)), 256 << 20)
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-byte-bound$'):
+            helper.admit_a_inventory(helper.encoded(inventory_data(full_budget + [all_rows[4]])), xml_raw, xml_pin)
+        duplicate = tiny.replace(b'"rows":', b'"rows":[],"rows":', 1)
+        with self.assertRaisesRegex(normal.Refused, '^duplicate-json-key$'):
+            helper.admit_a_inventory(duplicate, xml_raw, xml_pin)
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-nonfinite$'):
+            helper.admit_a_inventory(tiny.replace(b'"bytes":1', b'"bytes":NaN'), xml_raw, xml_pin)
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-verification-pin$'):
+            helper.admit_a_inventory(tiny, xml_raw + b' ', xml_pin)
+        # Even explicitly provided altered XML DATA cannot collapse duplicate rows.
+        first = xml.find('v:components/v:component', ns)
+        first.append(ET.fromstring(ET.tostring(first.find('v:artifact', ns))))
+        duplicate_xml = ET.tostring(xml)
+        with self.assertRaisesRegex(helper.Refused, '^a-inventory-xml-artifact$'):
+            helper.admit_a_inventory(tiny, duplicate_xml, (len(duplicate_xml), helper.digest(duplicate_xml)))
+
+        # Dormant pure lock DATA only. All coordinates/configurations below
+        # are synthetic test inputs, not a nomination of successful A evidence.
+        lock_header = (b'# This is a Gradle generated file for dependency locking.\n'
+                       b'# Manual edits can break the build and are not advised.\n'
+                       b'# This file is expected to be part of source control.\n')
+        def lock_data(records):
+            return lock_header + ('\n'.join(records) + '\n').encode('utf-8')
+        root_rows = ['com.android.tools.build:gradle:8.9.2=classpath',
+                     'example.synthetic:shared:1.0-jre=other,classpath',
+                     'example.synthetic:shared:2.0-rc1=alternate', 'empty=unusedRoot']
+        app_rows = ['example.synthetic:runtime:3.0=releaseRuntimeClasspath,releaseCompileClasspath',
+                    'example.synthetic:support:4.0=releaseRuntimeClasspath', 'empty=unusedApp,lintOnly']
+        root_raw, app_raw = lock_data(root_rows), lock_data(app_rows)
+        original_locks = root_raw, app_raw
+        expected_locks = (
+            (('alternate', (('example.synthetic', 'shared', '2.0-rc1'),)),
+             ('classpath', (('com.android.tools.build', 'gradle', '8.9.2'),
+                            ('example.synthetic', 'shared', '1.0-jre'))),
+             ('other', (('example.synthetic', 'shared', '1.0-jre'),)), ('unusedRoot', ())),
+            (('lintOnly', ()),
+             ('releaseCompileClasspath', (('example.synthetic', 'runtime', '3.0'),)),
+             ('releaseRuntimeClasspath', (('example.synthetic', 'runtime', '3.0'),
+                                         ('example.synthetic', 'support', '4.0'))), ('unusedApp', ())))
+        admitted_locks = helper.admit_a_locks(root_raw, app_raw)
+        self.assertEqual(admitted_locks, expected_locks)
+        self.assertEqual((root_raw, app_raw), original_locks)
+        self.assertIs(type(admitted_locks), tuple)
+        for file_states in admitted_locks:
+            self.assertIs(type(file_states), tuple)
+            for state in file_states:
+                self.assertIs(type(state), tuple); self.assertIs(type(state[1]), tuple)
+                for gav in state[1]: self.assertIs(type(gav), tuple)
+        permuted_root = lock_data([root_rows[2], root_rows[1].replace('other,classpath', 'classpath,other'),
+                                   root_rows[0], root_rows[3]])
+        permuted_app = lock_data([app_rows[1], app_rows[0].replace('releaseRuntimeClasspath,releaseCompileClasspath',
+                                      'releaseCompileClasspath,releaseRuntimeClasspath'), 'empty=lintOnly,unusedApp'])
+        self.assertEqual(helper.admit_a_locks(permuted_root, permuted_app), expected_locks)
+        self.assertEqual(helper.admit_a_locks(root_raw.replace(b'\n', b'\r\n'),
+                                             app_raw.replace(b'\n', b'\r\n')), expected_locks)
+        self.assertEqual(helper.admit_a_locks(root_raw + b'# retained comment\n\n', app_raw), expected_locks)
+        minimal_root = lock_data([root_rows[0], 'empty='])
+        empty_app = lock_data(['empty=secondEmpty,firstEmpty'])
+        self.assertEqual(helper.admit_a_locks(minimal_root, empty_app),
+                         ((('classpath', (('com.android.tools.build', 'gradle', '8.9.2'),)),),
+                          (('firstEmpty', ()), ('secondEmpty', ()))))
+        padding = (32 << 10) - len(root_raw) - len(app_raw)
+        padded_root = root_raw + b'#' + b'x' * (padding - 2) + b'\n'
+        self.assertEqual(len(padded_root) + len(app_raw), 32 << 10)
+        self.assertEqual(helper.admit_a_locks(padded_root, app_raw), expected_locks)
+        with self.assertRaisesRegex(helper.Refused, '^a-locks-input-bound$'):
+            helper.admit_a_locks(padded_root + b'x', app_raw)
+        for bad in (b'', None, '', bytearray(root_raw), memoryview(root_raw), 1):
+            for values in ((bad, app_raw), (root_raw, bad)):
+                with self.subTest(lock_type=type(bad).__name__), self.assertRaisesRegex(helper.Refused, '^a-locks-input-bound$'):
+                    helper.admit_a_locks(*values)
+        malformed = [root_raw.replace(b'# This is', b'# Not this', 1), root_raw + b'\xff',
+                     root_raw.replace(b'\n', b'\r', 1), root_raw + b'\x00', root_raw + b'\t',
+                     lock_data(['example.synthetic:shared=classpath', 'empty=']),
+                     lock_data([':shared:1=classpath', 'empty=']),
+                     lock_data(['example.synthetic:shared:1:classifier=classpath', 'empty=']),
+                     lock_data([root_rows[0] + '=extra', 'empty=']),
+                     lock_data([root_rows[0] + ',', 'empty=']),
+                     lock_data([root_rows[0].replace('=classpath', '='), 'empty=']),
+                     lock_data([root_rows[0].replace('=classpath', '=class path'), 'empty=']),
+                     lock_data([root_rows[0].replace('=classpath', '=clásspath'), 'empty=']),
+                     lock_data([root_rows[0]]), lock_data([root_rows[0], 'empty=', 'empty=other']),
+                     lock_data(['empty=other', root_rows[0]]),
+                     lock_data([root_rows[0], root_rows[0], 'empty=']),
+                     lock_data([root_rows[0], root_rows[0].replace('=classpath', '=other'), 'empty=']),
+                     lock_data([root_rows[0] + ',classpath', 'empty=']),
+                     lock_data([root_rows[0], 'empty=other,other']),
+                     lock_data([root_rows[0], 'empty=,other']),
+                     lock_data([root_rows[0], 'empty=classpath']),
+                     lock_data([root_rows[0], 'com.android.tools.build:gradle:8.9.1=classpath', 'empty='])]
+        for version in ('1.+', '[1.0,2.0)', '(1.0,2.0]', 'latest.release', 'latest.integration', '1.0-SNAPSHOT'):
+            malformed.append(lock_data([root_rows[0], 'example.synthetic:shared:' + version + '=other', 'empty=']))
+        for bad in malformed:
+            with self.subTest(lock_sha256=helper.digest(bad)), self.assertRaises(helper.Refused) as refused:
+                helper.admit_a_locks(bad, app_raw)
+            self.assertTrue(str(refused.exception).startswith('a-locks-'))
+        for bad in (lock_data(['empty=']), lock_data(['empty=other', 'example.synthetic:x:1=release'])):
+            with self.assertRaises(helper.Refused): helper.admit_a_locks(root_raw, bad)
+        missing_agp = [lock_data(['example.synthetic:other:1=classpath', 'empty=']),
+                       lock_data([root_rows[0].replace('8.9.2', '8.9.1'), 'empty=']),
+                       lock_data([root_rows[0].replace('=classpath', '=other'), 'empty=']),
+                       lock_data([root_rows[0].replace('=classpath', '=Classpath'), 'empty=']),
+                       lock_data(['empty=classpath'])]
+        for bad in missing_agp:
+            with self.assertRaisesRegex(helper.Refused, '^a-locks-required-root-agp-classpath$'):
+                helper.admit_a_locks(bad, lock_data([root_rows[0], 'empty=']))
 
         # One bounded realistic failure projection: nested public causes and
         # SOURCE-derived locations/API/modules, never raw stderr or private text.
@@ -1282,6 +1790,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             self.assertEqual(emitted[0][0], 'evidence/gradle-failure.json')
             self.assertEqual(emitted[0][1]['recognition'], 'projection-unavailable')
             self.assertFalse(emitted[0][1]['originalTaskSuccess'])
+            self.assertEqual(emitted[0][1]['role'], 'android-dependency-locked-task')
+            self.assertEqual(emitted[0][1]['originalReturncode'], 1)
             helper.publish_preparation = interrupted
             helper.publish_gradle_failure(work, result, project_raw, verification, Clock())
         finally: helper.gradle_failure_projection, helper.publish_preparation = saved_projection, saved_publish
