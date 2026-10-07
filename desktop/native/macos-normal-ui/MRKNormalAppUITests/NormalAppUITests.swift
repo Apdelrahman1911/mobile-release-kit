@@ -46,6 +46,8 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private var packagedRequireDiagnosticActive = false
     @MainActor private var packagedRequireDiagnosticEmitted = false
+    @MainActor private var engineeringRequireDiagnosticActive = false
+    @MainActor private var engineeringRequireDiagnosticEmitted = false
     @MainActor private var originalLaunch: OrdinaryLaunch?
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
@@ -530,6 +532,11 @@ final class NormalAppUITests: XCTestCase {
                     print("MRK_MACOS_PACKAGED_DASHBOARD_FAILURE=v1;line=\(line);ordinal=\(sample.ordinal);waiter=\(waiter.rawValue);enabled=\(sample.enabled ? 1 : 0);hittable=\(sample.hittable ? 1 : 0);reason=\(sample.reason.rawValue);sample=pre-wait;nonAtomic=1")
                 }
             }
+            if engineeringRequireDiagnosticActive && originalFailureAbsent && !engineeringRequireDiagnosticEmitted
+                && line >= 1 && line <= 65535 {
+                engineeringRequireDiagnosticEmitted = true
+                print("MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line=\(line);check=\(check.rawValue)")
+            }
             throw refusal
         }
         try checkOriginalOwners()
@@ -808,6 +815,8 @@ final class NormalAppUITests: XCTestCase {
 
     @MainActor
     func testEngineeringMainCatalogueAndQuit() throws {
+        engineeringRequireDiagnosticActive = true
+        defer { engineeringRequireDiagnosticActive = false }
         continueAfterFailure = false
         executionTimeAllowance = 60
         try beginCase(seconds: 60) // Includes original host/source/input admission.

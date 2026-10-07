@@ -1050,6 +1050,31 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             self.assertEqual(case_body.count(f"try dashboard(renderer, diagnosticOrdinal: {ordinal})"), 1)
         clock = source.split("func fail(_ reason: String) -> Refusal {", 1)[1].split("private func now()", 1)[0]
         self.assertIn("if firstFailure == nil { firstFailure = reason }\n            return .condition(firstFailure!)", clock)
+        # The engineering fixture owns a distinct first-site marker, not a new
+        # launch/ordinary selection or a second observation after a failure.
+        self.assertEqual(source.count("engineeringRequireDiagnosticActive = true"), 1)
+        self.assertEqual(source.count("engineeringRequireDiagnosticActive = false"), 2)
+        self.assertEqual(source.count("engineeringRequireDiagnosticEmitted = false"), 1)
+        self.assertEqual(source.count("engineeringRequireDiagnosticEmitted = true"), 1)
+        self.assertEqual(source.count("MRK_MACOS_ENGINEERING_REQUIRE_FAILURE="), 1)
+        engineering = source.split("func testEngineeringMainCatalogueAndQuit() throws {", 1)[1].split(
+            "    // End engineering main fixture", 1)[0]
+        activation = ("engineeringRequireDiagnosticActive = true",
+                      "defer { engineeringRequireDiagnosticActive = false }", "try beginCase(seconds: 60)")
+        self.assertEqual([engineering.index(item) for item in activation],
+                         sorted(engineering.index(item) for item in activation))
+        engineering_guard = false_guard.split("if engineeringRequireDiagnosticActive", 1)[1].split("throw refusal", 1)[0]
+        ordering = ("originalFailureAbsent && !engineeringRequireDiagnosticEmitted", "line >= 1 && line <= 65535",
+                    "engineeringRequireDiagnosticEmitted = true",
+                    'print("MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line=\\(line);check=\\(check.rawValue)")')
+        self.assertEqual([engineering_guard.index(item) for item in ordering],
+                         sorted(engineering_guard.index(item) for item in ordering))
+        self.assertLess(false_guard.index("let refusal = caseClock?.fail(reason)"),
+                        false_guard.index("if engineeringRequireDiagnosticActive"))
+        self.assertNotIn("reason", engineering_guard)
+        self.assertNotIn("engineeringRequireDiagnosticActive", shared)
+        self.assertNotIn("testEngineeringMainCatalogueAndQuit",
+                         tuple(method for methods, _, _ in MODULE.NORMAL_SELECTIONS.values() for method in methods))
 
     def test_source_uses_nonrenewable_case_clock_and_all_terminal_gates(self):
         source = SWIFT.read_text()
@@ -1829,8 +1854,11 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(len(published), 1)
                     request, failure = published[0]
                     self.assertEqual(request["work"], engineering_work)
-                    self.assertEqual(set(failure), {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
-                                                   "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"})
+                    expected_fields = {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
+                                       "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}
+                    if fault in ("native", "query"):
+                        expected_fields.add("nativeDiagnostics")
+                    self.assertEqual(set(failure), expected_fields)
                     self.assertEqual(failure["scope"], "generated-ui-runner-refused")
                     self.assertFalse(failure["productReady"])
                     self.assertTrue(failure["unknownStateRetained"])
@@ -1840,6 +1868,11 @@ class NormalPhaseDataTests(unittest.TestCase):
                         self.assertEqual(len(failure["commands"]), 1)
                         self.assertEqual(failure["commands"][0]["returncode"], 65)
                         self.assertEqual(failure["commands"][0]["stdoutSha256"], hashlib.sha256(private).hexdigest())
+                        native_diagnostic = failure["nativeDiagnostics"]
+                        self.assertEqual(native_diagnostic["scope"], "engineering-main-ui-failure-diagnostic-only")
+                        self.assertEqual(native_diagnostic["phase"], "query" if fault == "query" else "build")
+                        self.assertEqual(native_diagnostic["originalReturncode"], 65)
+                        self.assertFalse(native_diagnostic["markers"]["selectedCaseStarted"])
                         self.assertEqual(output.getvalue(), private)
                     else:
                         self.assertEqual(failure["commands"], [])
@@ -2367,6 +2400,173 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertEqual(published[0][0].name, "toolchain.failure-diagnostics.json")
                     self.assertEqual(output.getvalue(), b"")
                 if fault == "publication": self.assertIn(b"normal-failure-diagnostic-publication-failed\n", errors.getvalue())
+
+        engineering_selection = "engineering-test.xcresult"
+        engineering_method = "testEngineeringMainCatalogueAndQuit"
+        engineering_marker = b"MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line=821;check=condition\n"
+        engineering_case = "-[MRKNormalAppUITests.NormalAppUITests " + engineering_method + "]"
+        engineering_body = (f"Test Case '{engineering_case}' started.\n"
+            f"NormalAppUITests.swift:821:7: error: {engineering_case} : ".encode() + secret + b"\n" + engineering_marker +
+            f"Test Case '{engineering_case}' failed (1.234 seconds).\n".encode())
+        native_error = b"Error Domain=FBSOpenApplicationServiceErrorDomain Code=1 description=" + secret + b"\n** TEST EXECUTE FAILED **\n"
+        engineering_original = subprocess.CompletedProcess(["fixed-original"], 65, engineering_body, native_error)
+        observed = MODULE.normal_failure_diagnostics("test", engineering_selection, engineering_original, engineering=True)
+        self.assertEqual(observed["scope"], "engineering-main-ui-failure-diagnostic-only")
+        self.assertEqual(observed["selection"], engineering_selection)
+        self.assertEqual(observed["originalReturncode"], 65)
+        self.assertTrue(observed["markers"]["selectedCaseStarted"] and observed["markers"]["selectedCaseFailed"])
+        self.assertEqual(observed["sourceFailures"], [{"stream": "stdout", "source": "NormalAppUITests.swift",
+            "method": engineering_method, "line": 821, "column": 7}])
+        self.assertEqual(observed["requireObservations"], [{"source": "NormalAppUITests.swift", "line": 821, "check": "condition"}])
+        self.assertEqual(observed["errorCodes"], [{"stream": "stderr", "domain": "FBSOpenApplicationServiceErrorDomain", "code": 1}])
+        self.assertEqual(observed["queryObservations"], [])
+        self.assertIsNone(observed["dashboardReadiness"])
+        self.assertNotIn(secret, MODULE.encoded(observed))
+        framework_only = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess([], 65, b"", native_error), engineering=True)
+        self.assertFalse(framework_only["markers"]["selectedCaseStarted"])
+        self.assertFalse(framework_only["markers"]["selectedCaseFailed"])
+        self.assertEqual(framework_only["requireObservations"], [])  # Unobserved is not proof of nonexecution.
+        for line, check, end in ((1, "condition", b"\n"), (42, "singleton", b"\r\n"), (65535, "actionable", b"\n")):
+            mark = f"MRK_MACOS_ENGINEERING_REQUIRE_FAILURE=v1;line={line};check={check}".encode() + end
+            one = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, mark, b""), engineering=True)
+            self.assertEqual(one["requireObservations"], [{"source": "NormalAppUITests.swift", "line": line, "check": check}])
+        invalid_engineering = (engineering_marker[:-1], engineering_marker.replace(b"821", b"0"),
+            engineering_marker.replace(b"821", b"0821"), engineering_marker.replace(b"821", b"65536"),
+            engineering_marker.replace(b"condition", secret), b"prefix " + engineering_marker,
+            engineering_marker + engineering_marker, engineering_marker + engineering_marker[:-1],
+            engineering_marker + b"MRK_MACOS_ENGINEERING_REQUIRE", engineering_marker.replace(b"v1", b"v2"),
+            engineering_marker[:-1] + b";private=" + secret + b"\n")
+        for raw in invalid_engineering:
+            bad = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, raw, b""), engineering=True)
+            self.assertEqual(bad["requireObservations"], [])
+            self.assertEqual(bad["status"], "unavailable")
+            self.assertNotIn(secret, MODULE.encoded(bad))
+        for stdout, stderr in ((b"", engineering_marker), (engineering_marker, engineering_marker)):
+            bad = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, stdout, stderr), engineering=True)
+            self.assertEqual(bad["requireObservations"], [])
+            self.assertEqual(bad["status"], "unavailable")
+        foreign = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess([], 65, body + marker, b""), engineering=True)
+        self.assertFalse(foreign["markers"]["selectedCaseStarted"])
+        self.assertEqual(foreign["sourceFailures"], [])
+        self.assertEqual(foreign["requireObservations"], [])
+        self.assertEqual(foreign["queryObservations"], [])
+        ordinary = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+            subprocess.CompletedProcess([], 65, engineering_body, b""))
+        self.assertEqual(ordinary["requireObservations"], [])
+        self.assertEqual(ordinary["sourceFailures"], [])
+        self.assertFalse(ordinary["markers"]["selectedCaseStarted"])
+        for phase, selection in (("build", None), ("query", None), ("summary", engineering_selection)):
+            outside = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, engineering_marker, b""), engineering=True)
+            self.assertEqual(outside["requireObservations"], [])
+        for engineering, selection in ((False, engineering_selection), (True, "test.xcresult"),
+                (True, "packaged-entry.xcresult"), (True, "foreign.xcresult"), (1, engineering_selection)):
+            with self.subTest(engineering=engineering, selection=selection), self.assertRaises(MODULE.Refused):
+                MODULE.normal_failure_diagnostics("test", selection, engineering_original, engineering=engineering)
+        for code in (0, True):
+            with self.assertRaises(MODULE.Refused):
+                MODULE.normal_failure_diagnostics("test", engineering_selection,
+                    subprocess.CompletedProcess([], code, b"", b""), engineering=True)
+        with self.assertRaises(MODULE.Refused):
+            MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, b"x" * (1048576 + 1), b""), engineering=True)
+
+        engineering_work = Path("/Users/runner/work/_temp/mrk-macos-engineering-ui.ABCDef12")
+        engineering_tmp = str(engineering_work / "normal-ui/tmp") + "/"
+        request = MODULE.engineering_request(["--engineering-main-test", "--work", str(engineering_work)], engineering_tmp)
+        owner = SimpleNamespace(ProcessError=OSError, ProcessInterrupted=InterruptedError)
+        original_generic = MODULE.normal_admission_failure("diagnostic", MODULE.NativeQueryFailure(engineering_original), owner, [])
+        enhanced = MODULE.engineering_native_failure(request, engineering_original, owner, [])
+        self.assertEqual({key: value for key, value in enhanced.items() if key != "nativeDiagnostics"}, original_generic)
+        self.assertEqual(enhanced["nativeDiagnostics"], observed)
+        for fault in ("base", "format", "oversize"):
+            with self.subTest(engineering_formatter=fault), ExitStack() as stack:
+                if fault == "base": stack.enter_context(patch.object(MODULE, "failure_base", side_effect=ValueError(secret.decode())))
+                elif fault == "format": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(secret.decode())))
+                else: stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", return_value={"private": "x" * 5000}))
+                failed = MODULE.engineering_native_failure(request, engineering_original, owner, [])
+                if fault == "base": self.assertEqual(failed, original_generic)
+                else: self.assertEqual(failed["nativeDiagnostics"]["status"], "unavailable")
+                self.assertNotIn(secret, MODULE.encoded(failed))
+        # NativeQueryFailure can carry a verify-app result larger than the4KiB
+        # diagnostic query cap. It remains the same original65, not main's1.
+        large_query = subprocess.CompletedProcess(["fixed-original"], 65, b"x" * 4097, b"")
+        large_generic = MODULE.normal_admission_failure("diagnostic", MODULE.NativeQueryFailure(large_query), owner, [])
+        self.assertEqual(MODULE.engineering_native_failure(request, large_query, owner, [], query=True), large_generic)
+        record = {"role": "one-admitted-ui-test", "argvSha256": "a" * 64, "returncode": 65,
+            "stdoutBytes": len(engineering_body), "stdoutSha256": hashlib.sha256(engineering_body).hexdigest(),
+            "stderrBytes": len(native_error), "stderrSha256": hashlib.sha256(native_error).hexdigest(),
+            "timeoutSeconds": 180, "roleCapSeconds": 180, "outputLimitBytes": 1048576}
+        outer_bound_exercised = False
+        for count in range(1, 65):
+            records = [record] * count
+            generic = MODULE.normal_admission_failure("diagnostic", MODULE.NativeQueryFailure(engineering_original), owner, records)
+            if len(MODULE.encoded(generic)) + 1 <= 16384 < len(MODULE.encoded({**generic, "nativeDiagnostics": observed})) + 1:
+                self.assertEqual(MODULE.engineering_native_failure(request, engineering_original, owner, records), generic)
+                outer_bound_exercised = True
+                break
+        self.assertTrue(outer_bound_exercised)
+
+        # Real main and existing failure publisher; only original native command,
+        # directory observations and exclusive write are inert DATA doubles.
+        for fault in ("none", "query-over-cap", "formatter", "oversize", "publication"):
+            with self.subTest(engineering_main_diagnostic=fault), ExitStack() as stack:
+                native = large_query if fault == "query-over-cap" else engineering_original
+                calls, published, closes = [], [], []
+                output, errors = io.BytesIO(), io.BytesIO()
+                stream = lambda buffer: SimpleNamespace(buffer=buffer, write=lambda value: buffer.write(value.encode()), flush=lambda: None)
+                observed_dir = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o700,
+                    st_uid=501, st_gid=20, st_nlink=2, st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+                fake_os = SimpleNamespace(environ={"TMPDIR": engineering_tmp}, getuid=lambda: 501, getgid=lambda: 20,
+                    fstat=lambda _fd: observed_dir, stat=lambda *_a, **_k: observed_dir,
+                    open=lambda *_a, **_k: 78, close=closes.append,
+                    O_RDONLY=os.O_RDONLY, O_DIRECTORY=os.O_DIRECTORY, O_NOFOLLOW=os.O_NOFOLLOW, O_CLOEXEC=os.O_CLOEXEC)
+                def native_call(*_args, **_kwargs):
+                    calls.append(1)
+                    return native
+                fake_owner = SimpleNamespace(ProcessError=OSError, ProcessInterrupted=InterruptedError, run_owned=native_call)
+                def execute(phase, _request, _source, _limits):
+                    result = phase.call("one-admitted-ui-test", ["fixed-original"], 180)
+                    if fault == "query-over-cap": raise MODULE.NativeQueryFailure(result)
+                    return result
+                def publish(path, data, cap):
+                    published.append((path, data, cap))
+                    if fault == "publication": raise OSError(secret.decode())
+                for context in (
+                    patch.object(MODULE.sys, "argv", ["helper", "--engineering-main-test", "--work", str(engineering_work)]),
+                    patch.object(MODULE, "os", fake_os), patch.object(MODULE.time, "monotonic_ns", return_value=0),
+                    patch.object(MODULE, "engineering_context", return_value=(Path("/inert"), "a" * 40, {}, (1024**3,) * 2)),
+                    patch.object(MODULE, "load_normal_owner", return_value=fake_owner),
+                    patch.object(MODULE, "execute_engineering_phase", side_effect=execute),
+                    patch.object(MODULE, "execute_normal_phase", side_effect=AssertionError("ordinary route selected")),
+                    patch.object(MODULE, "open_directory", return_value=77), patch.object(MODULE, "exclusive_output", side_effect=publish),
+                    patch.object(MODULE.sys, "stdout", stream(output)), patch.object(MODULE.sys, "stderr", stream(errors)),
+                ): stack.enter_context(context)
+                if fault == "formatter": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(secret.decode())))
+                if fault == "oversize": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", return_value={"private": "x" * 5000}))
+                self.assertEqual(MODULE.main(), 65)
+                self.assertEqual(calls, [1])
+                self.assertEqual(closes, [78, 77])
+                self.assertEqual(output.getvalue(), native.stdout)
+                self.assertTrue(errors.getvalue().endswith(native.stderr))
+                self.assertEqual(len(published), 1)
+                self.assertEqual(published[0][0].name, "engineering-test.failure-diagnostics.json")
+                self.assertEqual(published[0][2], 16384)
+                self.assertLessEqual(len(published[0][1]), 16384)
+                self.assertNotIn(secret, published[0][1])
+                diagnostic = json.loads(published[0][1])
+                self.assertEqual(diagnostic["commands"][0]["returncode"], 65)
+                if fault == "query-over-cap": self.assertNotIn("nativeDiagnostics", diagnostic)
+                else:
+                    self.assertEqual(diagnostic["nativeDiagnostics"]["originalReturncode"], 65)
+                    if fault in ("formatter", "oversize"):
+                        self.assertEqual(diagnostic["nativeDiagnostics"]["status"], "unavailable")
+                if fault == "publication": self.assertIn(b"engineering-failure-diagnostic-publication-failed\n", errors.getvalue())
 
     def test_dashboard_failure_diagnostics_preserve_finite_prewait_data(self):
         reasons = (

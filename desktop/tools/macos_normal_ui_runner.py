@@ -776,15 +776,18 @@ def execute_normal_phase(phase, request, source, file_limit):
     return original
 
 
-def failure_base(phase, selection, original):
-    need(phase in ("build", "test", "summary", "query")
-         and (selection is None if phase in ("build", "query") else selection in NORMAL_SELECTIONS),
+def failure_base(phase, selection, original, *, engineering=False):
+    # Diagnostic dispatch only: native/ordinary selection admission is unchanged.
+    need(type(engineering) is bool and phase in ("build", "test", "summary", "query")
+         and (selection is None if phase in ("build", "query") else
+              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS),
          "normal-diagnostic-selection")
     cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
          and 1 <= original.returncode <= 255 and type(original.stdout) is bytes and type(original.stderr) is bytes
          and len(original.stdout) + len(original.stderr) <= cap, "normal-diagnostic-original")
-    return {"schemaVersion": 1, "scope": "normal-macos-ui-failure-diagnostic-only", "phase": phase,
+    return {"schemaVersion": 1, "scope": ("engineering-main-ui-failure-diagnostic-only" if engineering
+            else "normal-macos-ui-failure-diagnostic-only"), "phase": phase,
         "selection": selection, "originalReturncode": original.returncode,
         "stdoutBytes": len(original.stdout), "stdoutSha256": sha(original.stdout),
         "stderrBytes": len(original.stderr), "stderrSha256": sha(original.stderr),
@@ -794,9 +797,9 @@ def failure_base(phase, selection, original):
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
 
 
-def normal_failure_diagnostics(phase, selection, original):
+def normal_failure_diagnostics(phase, selection, original, *, engineering=False):
     """Whole-original bounded text to fixed observations, never raw error/reason text."""
-    value = failure_base(phase, selection, original)
+    value = failure_base(phase, selection, original, engineering=engineering)
     domains = {domain.encode("ascii"): domain for domain in (
         "NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain", "NSMachErrorDomain",
         "XCTestErrorDomain", "XCTRunnerErrorDomain", "com.apple.dt.xctest.error",
@@ -805,7 +808,8 @@ def normal_failure_diagnostics(phase, selection, original):
         "IXUserPresentableErrorDomain")}
     codes = (rb"(?:\A|(?<=[ \t\r\n({\x5b]))Error[ \t]{1,8}Domain=(" + b"|".join(re.escape(x) for x in domains)
              + rb")[ \t]{1,8}Code=(-?(?:0|[1-9][0-9]{0,9}))(?=\Z|[ \t\r\n,;\"')}\x5d])")
-    methods = NORMAL_SELECTIONS[selection][0] if selection is not None else ()
+    methods = (("testEngineeringMainCatalogueAndQuit",) if engineering else
+               NORMAL_SELECTIONS[selection][0]) if selection is not None else ()
     method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
     case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
     locations = (rb"(?:\A|(?<=[/ \t\r\n]))NormalAppUITests\.swift:([1-9][0-9]{0,4})"
@@ -820,7 +824,7 @@ def normal_failure_diagnostics(phase, selection, original):
              rb"(initial|identifier|title|label|value|placeholderValue|containingSameStaticText)"
              rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
 
-    # The existing ordinary basic case alone owns this diagnostic grammar.
+    # Ordinary basic-case grammar stays separate from engineering diagnostics.
     # The packaged-entry route has separate admission and is not added here.
     require_invalid = False
     if phase == "test" and selection == "test.xcresult" and methods == ("testLaunchCancelAndQuit",):
@@ -851,6 +855,11 @@ def normal_failure_diagnostics(phase, selection, original):
                          rb"other-or-unobserved|ambiguous)"
                          rb";sample=pre-wait;nonAtomic=1")
     dashboard_candidates, dashboard_candidate = 0, None
+    engineering_require = engineering and phase == "test"
+    engineering_namespace = b"MRK_MACOS_ENGINEERING_REQUIRE_FAILURE"
+    engineering_pattern = (re.escape(engineering_namespace) + rb"=v1;line=([1-9][0-9]{0,4});"
+                           rb"check=(condition|singleton|actionable)")
+    engineering_candidates, engineering_candidate = 0, None
 
     def retain(key, finding, maximum, distinct=True):
         if not distinct or finding not in value[key]:
@@ -882,6 +891,17 @@ def normal_failure_diagnostics(phase, selection, original):
             record, offset = body[offset:end], end + 1
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
+            if engineering_require and (engineering_namespace in record
+                    or (record and engineering_namespace.startswith(record))
+                    or (not complete and any(record.endswith(engineering_namespace[:size])
+                                             for size in range(1, len(engineering_namespace))))):
+                engineering_candidates = min(2, engineering_candidates + 1)
+                match = re.fullmatch(engineering_pattern, record) if complete and stream == "stdout" else None
+                engineering_candidate = None
+                if engineering_candidates == 1 and match is not None and int(match.group(1)) <= 65535:
+                    engineering_candidate = {"source": "NormalAppUITests.swift",
+                        "line": int(match.group(1)), "check": match.group(2).decode("ascii")}
+                continue
             if dashboard_eligible and (dashboard_namespace in record or (record and dashboard_namespace.startswith(record))
                     or (not complete and any(record.endswith(dashboard_namespace[:size])
                                              for size in range(1, len(dashboard_namespace))))):
@@ -896,6 +916,8 @@ def normal_failure_diagnostics(phase, selection, original):
                 continue
             if not complete:
                 break  # Incomplete records may veto dashboard pairing, never become query observations.
+            if engineering:
+                continue  # Do not import ordinary query observations into this separate fixture.
             match = re.fullmatch(query, record)
             if match is None:
                 continue
@@ -907,6 +929,11 @@ def normal_failure_diagnostics(phase, selection, original):
             if exceeds == (count == 5):
                 retain("queryObservations", {"stream": stream, "kind": kind, "observation": observation,
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
+    if engineering_require and engineering_candidates:
+        if engineering_candidates == 1 and engineering_candidate is not None:
+            value["requireObservations"].append(engineering_candidate)
+        else:
+            require_invalid = True
     if (dashboard_eligible and not require_invalid and dashboard_candidates == 1
             and dashboard_candidate is not None and len(value["requireObservations"]) == 1
             and original.stderr.count(b"MRK_MACOS_PACKAGED_REQUIRE_FAILURE") == 0):
@@ -1627,6 +1654,30 @@ def execute_engineering_phase(phase, request, source, file_limit):
     return original
 
 
+def engineering_native_failure(request, original, owner, records, *, query=False):
+    """Supplement the same returned failure; diagnostic refusal cannot replace it."""
+    failure = normal_admission_failure("diagnostic", NativeQueryFailure(original), owner, records)
+    try:
+        need(type(query) is bool and request.get("engineering") is True
+             and request["phase"] in ("build", "test", "summary"), "engineering-diagnostic-request")
+        phase = "query" if query else request["phase"]
+        selection = None if phase in ("build", "query") else request["result"].name
+        unavailable = failure_base(phase, selection, original, engineering=True)
+        try:
+            value = normal_failure_diagnostics(phase, selection, original, engineering=True)
+            need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
+        except Exception:
+            value = unavailable
+        combined = {**failure, "nativeDiagnostics": value}
+        if len(encoded(combined)) + 1 <= 16384:
+            return combined
+    except Exception:
+        # Includes original admission: verify-app query output may exceed4KiB.
+        # Preserve the generic facts and exact primary nonzero, never enlarge caps.
+        pass
+    return failure
+
+
 def publish_engineering_failure(request, failure):
     """Best-effort closed facts only; never cleanup or completion authority."""
     try:
@@ -1688,7 +1739,8 @@ def main():
             # No subsequent query/build/source command after the original failed query.
             stage = "diagnostic"
             if engineering:
-                publish_engineering_failure(request, normal_admission_failure(stage, failure, owner, records))
+                publish_engineering_failure(request, engineering_native_failure(
+                    request, failure.original, owner, records, query=True))
                 sys.stdout.buffer.write(failure.original.stdout)
                 sys.stderr.buffer.write(failure.original.stderr)
                 sys.stdout.buffer.flush()
@@ -1701,7 +1753,7 @@ def main():
         if original.returncode != 0:
             stage = "diagnostic"
             if engineering:
-                publish_engineering_failure(request, normal_admission_failure(stage, NativeQueryFailure(original), owner, records))
+                publish_engineering_failure(request, engineering_native_failure(request, original, owner, records))
             else:
                 publish_failure_diagnostics(request, original)
         stage = "publication"
