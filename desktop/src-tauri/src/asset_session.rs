@@ -2640,7 +2640,7 @@ impl DocumentBinding {
                     source: SourceState::NotRun, settlement: Settlement::Pending, context: None, target: None,
                     review_end: None, cleanup_end: None, candidate: None, selection: None, assessment: None,
                     preview: None, assessment_context_revision: None, staged: None, error: None, project: None,
-                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None,
+                    discard: false, kind: None, result_record: None, retired_payload: None, evidence: None, project_path: None, path_result: None, android_source: None, images: None, image_batch: None, installation_result: None,
             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
             vault: vault::SlotData::default() });
             },

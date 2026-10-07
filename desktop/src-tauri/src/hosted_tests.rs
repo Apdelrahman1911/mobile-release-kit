@@ -309,7 +309,7 @@ impl Case {
         let outcome = task.await;
         slot.take();
         require(outcome.is_err_and(|error| error.is_cancelled()), "caller_not_abandoned")?;
-        require(lock(&owner.state).reply.as_ref().is_some_and(|reply| reply.is_closed()), "reply_receiver_not_closed")?;
+        require(matches!(lock(&owner.state).reply.as_ref(), Some(PassiveReply::Value { sender: Some(sender) }) if sender.is_closed()), "reply_receiver_not_closed")?;
         self.results.push(json!({"return":"caller-abandoned","oneshotClosed":true}));
         Ok(())
     }
