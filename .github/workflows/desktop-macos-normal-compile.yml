@@ -14,6 +14,12 @@ on:
         description: Exact reviewed verification commit (no app or native test execution)
         required: true
         type: string
+      target:
+        description: Fixed compiler target (both by default)
+        required: false
+        type: choice
+        default: both
+        options: [both, arm, intel]
 
 permissions:
   contents: read
@@ -29,20 +35,15 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - platform: macos
-            os: macos-26
-            target: aarch64-apple-darwin
-          - platform: macos
-            os: macos-26-intel
-            target: x86_64-apple-darwin
+        include: ${{ fromJSON(inputs.target == 'arm' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin"}]' || inputs.target == 'intel' && '[{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin"}]' || '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin"}]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 65 || 45 }}
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
       MRK_DESKTOP_HOSTED_CHECKS: macos-normal-compile-v1
       MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}
       NODE_DISABLE_COMPILE_CACHE: '1'
     steps:
       - name: Require exact disposable verification source
@@ -57,8 +58,14 @@ jobs:
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-normal-compile.yml@$GITHUB_REF" ]]
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
+            case "$MRK_COMPILE_SELECTION" in
+              both) ;;
+              arm) [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;
+              intel) [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin ]] ;;
+              *) exit 1 ;;
+            esac
           else
-            [[ "$GITHUB_EVENT_NAME" == push ]]
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both ]]
           fi
       - name: Check out exact source without persisted credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,7 +102,7 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
       - name: Compile actual frontend and native shell without launching them
-        timeout-minutes: 25
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 47 || 25 }}
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}

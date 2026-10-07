@@ -73,7 +73,396 @@ CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPE
 CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
                     "partitions", "identity", "certificates", "search-admit", "restrict", "search-restricted",
                     "search-after-callback", "restore", "search-restored", "delete", "default-after", "search-final",
-                    "producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
+                    "producer-adhoc", "producer-adhoc-verify", "producer-cdhash", "installer-chain")
+
+
+NOTARY_PHASES = ("notarize-payload",)
+NOTARY_PROFILE = "desktop/packaging/macos-notary-service.json"
+NOTARY_KEY_VARIABLE = "MRK_MACOS_NOTARY_API_KEY_BASE64"
+NOTARY_XCODE = Path("/Applications/Xcode.app/Contents/Developer")
+# Submission-copy basename only; original/installed APP_NAME is unchanged.
+NOTARY_APP_NAME = "MobileReleaseKit.app"
+NOTARY_ZIP_NAME = "MobileReleaseKit-notary-payload.zip"
+NOTARY_ROLES = ("resolve-notarytool", "resolve-stapler", "verify-inner-before", "verify-outer-before",
+                "payload-zip", "payload-submit", "payload-log", "staple-inner", "validate-inner",
+                "staple-outer", "validate-outer", "verify-inner-after", "verify-outer-after")
+NOTARY_TICKETS = ("Contents/CodeResources", "Contents/Helpers/MobileReleaseKitPayload.app/Contents/CodeResources")
+NOTARY_FREE_FLOOR = 3 * 1024 * 1024 * 1024
+NOTARY_STORAGE_RESERVE = 2 * 1024 * 1024 * 1024
+NOTARY_ZIP_LIMIT = 576 * 1024 * 1024
+
+
+def notary_json(body, limit):
+    need(type(body) is bytes and 0 < len(body) <= limit, "notary-json-bound")
+    def pairs(values):
+        need(len(values) <= 16 and len({key for key, _ in values}) == len(values), "notary-json-keys")
+        return dict(values)
+    def constant(_value):
+        raise Refused("notary-json-constant")
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeError, ValueError, RecursionError):
+        raise Refused("notary-json-format") from None
+    need(type(value) is dict, "notary-json-object")
+    return value
+
+
+def notary_uuid(value):
+    need(type(value) is str and re.fullmatch(r"[0-9A-Fa-f]{8}-(?:[0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}", value)
+         and value.replace("-", "") != "0" * 32, "notary-uuid")
+    return value.lower()  # UUID value only, never a filename/path normalization.
+
+
+def notary_service(body, identity):
+    value = notary_json(body, 1024)
+    need(type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1, "notary-profile-schema")
+    if value.get("mode") == "unconfigured":
+        need(set(value) == {"schemaVersion", "mode"}, "notary-profile-keys")
+        raise Refused("notary-profile-unconfigured")
+    need(set(value) == {"schemaVersion", "mode", "teamId", "keyId", "issuerId"}
+         and value["mode"] == "app-store-connect-team-key" and type(identity) is tuple and len(identity) == 2
+         and value["teamId"] == identity[0] and type(value["teamId"]) is str
+         and re.fullmatch(r"[A-Z0-9]{10}", value["teamId"])
+         and type(value["keyId"]) is str and re.fullmatch(r"[A-Z0-9]{10}", value["keyId"]), "notary-profile-source")
+    need(notary_uuid(value["issuerId"]) == value["issuerId"], "notary-profile-issuer")
+    return value
+
+
+def notary_key_data(environment):
+    value = environment.get(NOTARY_KEY_VARIABLE)
+    need(type(value) is str and 4 <= len(value) <= 10924 and value.isascii()
+         and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value), "notary-key-input")
+    try:
+        body = base64.b64decode(value, validate=True)
+    except ValueError:
+        raise Refused("notary-key-base64") from None
+    need(0 < len(body) <= 8192 and base64.b64encode(body).decode("ascii") == value
+         and body.isascii() and b"\0" not in body
+         and re.fullmatch(rb"-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n)+-----END PRIVATE KEY-----\n", body),
+         "notary-key-pem-shape")
+    return body  # Bounded PEM shape only. Apple performs actual authentication.
+
+
+def notary_text(value, bound):
+    if type(value) is not str:
+        return False
+    try:
+        return (0 < len(value.encode("utf-8")) <= bound
+                and all(ord(char) >= 0x20 and ord(char) != 0x7f for char in value))
+    except UnicodeError:
+        return False
+
+
+def notary_submit_data(body, *, archive_name=NOTARY_ZIP_NAME):
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg"), "notary-fixed-archive-name")
+    value = notary_json(body, 65536)
+    need({"id", "status"} <= set(value) <= {"id", "status", "message", "name", "createdDate"}
+         and value["status"] in ("Accepted", "Invalid"), "notary-submit-terminal")
+    for name in ("message", "name", "createdDate"):
+        if name in value:
+            need(notary_text(value[name], 2048), "notary-submit-metadata")
+    if "name" in value:
+        need(value["name"] == archive_name, "notary-submit-archive")
+    return {"id": notary_uuid(value["id"]), "status": value["status"]}
+
+
+def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP_NAME):
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg"), "notary-fixed-archive-name")
+    value = notary_json(body, 1024 * 1024)
+    required = {"logFormatVersion", "jobId", "status", "archiveFilename", "issues", "ticketContents"}
+    need(required <= set(value) <= required | {"statusSummary", "statusCode", "uploadDate", "sha256"}
+         and type(value["logFormatVersion"]) is int and value["logFormatVersion"] == 1
+         and notary_uuid(value["jobId"]) == submission["id"] and value["status"] == submission["status"]
+         and value["archiveFilename"] == archive_name, "notary-log-binding")
+    for name in ("statusSummary", "uploadDate"):
+        if name in value:
+            need(notary_text(value[name], 4096), "notary-log-metadata")
+    if "statusCode" in value:
+        need(type(value["statusCode"]) is int and 0 <= value["statusCode"] <= 999999
+             and (value["statusCode"] == 0) == (submission["status"] == "Accepted"), "notary-log-status-code")
+    if "sha256" in value:
+        need(value["sha256"] == archive_sha256, "notary-log-upload-sha256")
+    issues, tickets = value["issues"], value["ticketContents"]
+    need(issues is None or type(issues) is list and len(issues) <= 2048, "notary-log-issues-bound")
+    errors = warnings = 0
+    for row in issues or ():
+        need(type(row) is dict and {"severity", "path", "message"} <= set(row)
+             <= {"severity", "path", "message", "code", "docUrl", "architecture"}
+             and row["severity"] in ("warning", "error") and notary_text(row["path"], 4096)
+             and notary_text(row["message"], 8192), "notary-log-issue-shape")
+        for name in ("docUrl", "architecture"):
+            if name in row and row[name] is not None:
+                need(notary_text(row[name], 4096 if name == "docUrl" else 32), "notary-log-issue-metadata")
+        if "code" in row:
+            need(row["code"] is None or type(row["code"]) is int and 0 <= row["code"] <= 999999,
+                 "notary-log-issue-code")
+        errors += row["severity"] == "error"
+        warnings += row["severity"] == "warning"
+    need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
+    # Carrier-null architecture is bounded diagnostic metadata only, not
+    # a native slice, certificate, ticket or current-package authority.
+    for row in tickets or ():
+        need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
+             and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
+             and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
+             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg")
+                  and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
+    need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
+    return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
+            "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
+
+
+FINAL_IMAGE_PHASES = ("finalize-image",)
+FINAL_IMAGE_ROLES = ("final-image-resolve-notarytool", "final-image-resolve-stapler", "final-image-signature-before",
+                     "final-image-submit", "final-image-log", "final-image-staple", "final-image-validate",
+                     "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach")
+
+FINAL_PACKAGE_PHASES = ("finalize-package",)
+INSTALLER_PROFILE = "desktop/packaging/macos-installer-signing.json"
+INSTALLER_CREDENTIAL_VARIABLES = ("MRK_MACOS_INSTALLER_P12_BASE64", "MRK_MACOS_INSTALLER_P12_PASSWORD")
+FINAL_PACKAGE_ROLES = ("final-package-resolve-notarytool", "final-package-resolve-stapler",
+                       "final-package-sign", "final-package-signature-before", "final-package-submit",
+                       "final-package-log", "final-package-staple", "final-package-validate",
+                       "final-package-signature-after")
+IMAGE_CREDENTIAL_ROLES = {
+    "distribution-image": ("distribution-sign", "distribution-verify-signature"),
+    "observation-image": ("observation-sign", "observation-verify-signature"),
+}
+
+
+def final_package_json(body, maximum, label):
+    need(type(body) is bytes and 0 < len(body) <= maximum, label)
+
+    def pairs(values):
+        result = {}
+        for key, value in values:
+            need(key not in result, label)
+            result[key] = value
+        return result
+
+    def constant(_value):
+        raise Refused(label)
+
+    try:
+        return json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (UnicodeError, ValueError):
+        raise Refused(label) from None
+
+
+def installer_profile(body):
+    """Public SOURCE selection only, never an available signing identity."""
+    value = final_package_json(body, 1024, "installer-profile-json")
+    need(type(value) is dict and type(value.get("schemaVersion")) is int
+         and value["schemaVersion"] == 1, "installer-profile-schema")
+    if value == {"schemaVersion": 1, "mode": "unconfigured"}:
+        return None
+    fields = {"schemaVersion", "mode", "teamId", "identityCommonName", "leafSha1", "leafSha256",
+              "issuerSha256", "rootSha256"}
+    need(set(value) == fields and value["mode"] == "developer-id-installer"
+         and type(value["teamId"]) is str and re.fullmatch(r"[A-Z0-9]{10}", value["teamId"]) is not None,
+         "installer-profile-schema")
+    for name, width in (("leafSha1", 40), ("leafSha256", 64), ("issuerSha256", 64), ("rootSha256", 64)):
+        need(type(value[name]) is str and re.fullmatch(r"[0-9a-f]{" + str(width) + r"}", value[name]) is not None
+             and value[name] != "0" * width, "installer-profile-fingerprint")
+    need(len({value[name] for name in ("leafSha256", "issuerSha256", "rootSha256")}) == 3,
+         "installer-profile-chain")
+    name = value["identityCommonName"]
+    prefix, suffix = "Developer ID Installer: ", " (" + value["teamId"] + ")"
+    need(type(name) is str and name.isprintable() and name.startswith(prefix) and name.endswith(suffix)
+         and len(name) > len(prefix) + len(suffix), "installer-profile-common-name")
+    try:
+        encoded = name.encode("utf-8")
+    except UnicodeError:
+        raise Refused("installer-profile-common-name") from None
+    need(len(encoded) <= 256, "installer-profile-common-name")
+    return dict(value)
+
+
+def installer_identity(identity_body, certificate_body, selection, certificates):
+    """Bind the single private-key identity to public SOURCE, not its name alone."""
+    need(type(identity_body) is bytes and type(certificate_body) is bytes
+         and len(identity_body) <= 16384 and len(certificate_body) <= 16384
+         and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
+         and all(type(value) is bytes and 0 < len(value) <= 16384 for value in certificates),
+         "installer-private-identity-bound")
+    try:
+        text = identity_body.decode("utf-8")
+    except UnicodeError:
+        raise Refused("installer-private-identity-format") from None
+    expected = re.escape(selection["identityCommonName"])
+    rows, summaries = [], 0
+    for line in text.splitlines():
+        match = re.fullmatch(r'[ \t]*1\) ([0-9A-Fa-f]{40}) "' + expected + '"', line)
+        if match is not None:
+            rows.append(match[1].lower())
+        elif re.fullmatch(r"[ \t]*1 valid identities found", line):
+            summaries += 1
+        else:
+            need(not line.strip(), "installer-private-identity-format")
+    need(rows == [selection["leafSha1"]] and summaries == 1, "installer-private-source-identity")
+    pattern = rb"-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=\n]+)-----END CERTIFICATE-----\n"
+    values, end = [], 0
+    for match in re.finditer(pattern, certificate_body):
+        need(match.start() == end and len(values) < 3, "installer-private-certificate-format")
+        encoded = match[1].replace(b"\n", b"")
+        try:
+            value = base64.b64decode(encoded, validate=True)
+        except ValueError:
+            raise Refused("installer-private-certificate-format") from None
+        need(0 < len(value) <= 16384 and base64.b64encode(value) == encoded,
+             "installer-private-certificate-format")
+        values.append(value)
+        end = match.end()
+    need(end == len(certificate_body) and len(values) == 3 and len(set(values)) == 3
+         and set(values) == set(certificates), "installer-private-source-certificates")
+
+
+def package_signature_data(body, selection, certificates, path):
+    """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
+    need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
+         and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
+         and isinstance(path, Path) and path.name == "MobileReleaseKit.pkg", "package-signature-bound")
+    try:
+        text = body.decode("utf-8")
+    except UnicodeError:
+        raise Refused("package-signature-utf8") from None
+    need(all(character in "\n\t" or character.isprintable() for character in text), "package-signature-format")
+    lines = [line.strip(" \t") for line in text.splitlines() if line.strip(" \t")]
+    need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines)
+         and lines[0] in ('Package "' + path.name + '":', 'Package "' + str(path) + '":'),
+         "package-signature-header")
+    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X")
+    need(len(lines) > 4 and lines[1] in trusted
+         and lines[2].startswith("Signed with a trusted timestamp on: ")
+         and 0 < len(lines[2][len("Signed with a trusted timestamp on: "):]) <= 128
+         and lines[3] == "Certificate Chain:", "package-signature-trust-timestamp")
+    rows, current, fingerprint = [], None, None
+    for line in lines[4:]:
+        record = re.fullmatch(r"([123])\. (.{1,512})", line)
+        if record is not None:
+            need(int(record[1]) == len(rows) + 1, "package-signature-chain-order")
+            current = {"name": record[2], "sha256": None, "sha1": None, "expires": False}
+            rows.append(current)
+            fingerprint = None
+            continue
+        need(current is not None, "package-signature-chain-format")
+        label = re.fullmatch(r"(SHA256|SHA1) [Ff]ingerprint:(?: (.*))?", line)
+        if label is not None:
+            key = "sha256" if label[1] == "SHA256" else "sha1"
+            need(current[key] is None, "package-signature-fingerprint-repeated")
+            current[key] = ""
+            fingerprint = key
+            line = label[2] or ""
+            if not line:
+                continue
+        if re.fullmatch(r"[0-9A-Fa-f]{2}(?:[ \t]+[0-9A-Fa-f]{2})*", line):
+            need(fingerprint in ("sha256", "sha1"), "package-signature-fingerprint-position")
+            current[fingerprint] += "".join(line.split()).lower()
+            need(len(current[fingerprint]) <= (64 if fingerprint == "sha256" else 40),
+                 "package-signature-fingerprint-bound")
+        elif re.fullmatch(r"-{16,128}", line):
+            fingerprint = None
+        elif line.startswith("Expires: ") and 0 < len(line[9:]) <= 128:
+            need(not current["expires"], "package-signature-expiry-repeated")
+            current["expires"] = True
+            fingerprint = None
+        else:
+            raise Refused("package-signature-chain-format")
+    expected = [selection[key] for key in ("leafSha256", "issuerSha256", "rootSha256")]
+    need(len(rows) == 3 and rows[0]["name"] == selection["identityCommonName"]
+         and [row["sha256"] for row in rows] == expected, "package-signature-source-chain")
+    for row, certificate in zip(rows, certificates):
+        need(digest(certificate) == row["sha256"]
+             and (row["sha1"] is None or row["sha1"] == hashlib.sha1(certificate).hexdigest()),
+             "package-signature-source-fingerprint")
+    return {"trusted": True, "timestamp": True, "certificateSha256": expected}
+
+
+INSTALLER_CREDENTIAL_ROSTER = (
+    "search-before", "default-before", "create", "search-created", "settings", "unlock", "import", "partitions",
+    "identity", "certificates", "installer-chain", "search-admit", "restrict", "search-restricted",
+    "search-after-callback", "restore", "search-restored", "delete", "search-final", "default-after",
+)
+
+
+def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
+                          image_release, release_sha):
+    """Closed preceding original observation AND the current immutable P.
+
+    This is not a stand-alone cryptographic authority. The fixed workflow also
+    requires the actual earlier helper0 and its held status original; this
+    consumer repeats the complete Scripts audit before invoking the producer.
+    """
+    value = final_package_json(body, 16384, "final-package-receipt-json")
+    keys = {"schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
+            "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
+            "originalClosesKnown", "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified",
+            "androidBuildQualified", "developerIdOrNotarizationQualified", "productReady", "notaryAuthentication", "notarySubmission",
+            "finalPackage", "directStagerIOPending", "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"}
+    need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["phase"] == "finalize-package" and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
+         and value["source"] == environment["GITHUB_SHA"] == value["workflowSource"]
+         and value["workflow"] == environment["GITHUB_WORKFLOW_REF"]
+         and value["runId"] == environment["GITHUB_RUN_ID"] and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"]
+         and value["packageRole"] == environment["MRK_MACOS_PACKAGE_ROLE"]
+         and value["imageSourceCommit"] == environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] == value["source"]
+         and value["imageReleaseId"] == image_release and value["imageReleaseSourceSha256"] == release_sha
+         and value["toolchain"] is None and value["helperIdentifier"] is None, "final-package-receipt-source")
+    need(all(value[name] is True for name in ("targetRetired", "originalClosesKnown", "passed", "outerFinalityRequired"))
+         and all(value[name] is False for name in ("androidServiceAuthenticated", "androidRegisteredCopyQualified", "androidBuildQualified",
+                                                  "developerIdOrNotarizationQualified", "productReady"))
+         and value["directStagerIOPending"] is None and value["cleanupErrors"] == [], "final-package-receipt-finality")
+    calls, auxiliary = value["originalCalls"], value["credentialOriginals"]
+    need(type(calls) is list and len(calls) == len(FINAL_PACKAGE_ROLES)
+         and type(auxiliary) is list and len(auxiliary) == len(INSTALLER_CREDENTIAL_ROSTER), "final-package-receipt-original-count")
+    def sha(item):
+        return type(item) is str and re.fullmatch(r"[0-9a-f]{64}", item) is not None and item != "0" * 64
+    for row, role in zip(calls, FINAL_PACKAGE_ROLES):
+        need(type(row) is dict and set(row) == {"role", "entered", "returned", "capturesSettled", "returncode", "stdoutSha256", "stderrSha256"}
+             and row["role"] == role and all(row[key] is True for key in ("entered", "returned", "capturesSettled"))
+             and type(row["returncode"]) is int and row["returncode"] == 0
+             and sha(row["stdoutSha256"]) and sha(row["stderrSha256"]), "final-package-receipt-original")
+    for row, role in zip(auxiliary, INSTALLER_CREDENTIAL_ROSTER):
+        need(type(row) is dict and set(row) == {"role", "entered", "returned", "settled", "status"}
+             and row["role"] == role and all(row[key] is True for key in ("entered", "returned", "settled"))
+             and type(row["status"]) is int and row["status"] == 0, "final-package-receipt-credential-original")
+    contexts = value["credentialContexts"]
+    need(type(contexts) is list and len(contexts) == 1 and type(contexts[0]) is dict
+         and set(contexts[0]) == {"purpose", "searchRestored", "defaultUnchanged", "retired", "closed"}
+         and contexts[0]["purpose"] == "installer"
+         and all(contexts[0][key] is True for key in ("searchRestored", "defaultUnchanged", "retired", "closed")),
+         "final-package-receipt-credential-finality")
+    auth = value["notaryAuthentication"]
+    need(type(auth) is dict and set(auth) == {"created", "closed", "retired"}
+         and all(item is True for item in auth.values()), "final-package-receipt-key-finality")
+    final = value["finalPackage"]
+    fields = {"schemaVersion", "kind", "unsignedBytes", "unsignedSha256", "signedBytes", "signedSha256", "packageBytes", "packageSha256",
+              "packageMode", "originalPackageSha256", "packageInfoSha256", "scriptFileCount", "installerProfileSha256", "notaryProfileSha256",
+              "teamId", "certificateSha256", "submissionId", "status", "sha256Compared", "errorCount", "warningCount", "ticketRowCount", "logSha256",
+              "trustedSignatureBeforeAndAfter", "trustedTimestampBeforeAndAfter", "actualStaplerValidation", "signedPrefixUnchanged",
+              "completeScriptsAudited", "assurance"}
+    need(type(final) is dict and set(final) == fields and type(final["schemaVersion"]) is int and final["schemaVersion"] == 1
+         and final["kind"] == "mrk-final-installer-package" and final["teamId"] == selection["teamId"]
+         and final["certificateSha256"] == [selection[key] for key in ("leafSha256", "issuerSha256", "rootSha256")]
+         and final["installerProfileSha256"] == profile_sha and final["notaryProfileSha256"] == notary_sha,
+         "final-package-receipt-signing-source")
+    need(all(type(final[key]) is int and 0 < final[key] <= 512 * 1024 * 1024 for key in ("unsignedBytes", "signedBytes", "packageBytes"))
+         and final["signedBytes"] < final["packageBytes"] <= final["signedBytes"] + 1024 * 1024
+         and final["packageBytes"] == package_size and final["packageSha256"] == package_sha
+         and type(final["packageMode"]) is int and final["packageMode"] == 0o444
+         and type(final["scriptFileCount"]) is int and 0 < final["scriptFileCount"] <= 4096
+         and all(sha(final[key]) for key in ("unsignedSha256", "signedSha256", "packageSha256", "originalPackageSha256",
+                                           "packageInfoSha256", "installerProfileSha256", "notaryProfileSha256", "logSha256")),
+         "final-package-receipt-byte-correspondence")
+    need(final["status"] == "Accepted" and notary_uuid(final["submissionId"]) == final["submissionId"]
+         and type(final["sha256Compared"]) is bool and type(final["errorCount"]) is int and final["errorCount"] == 0
+         and all(type(final[key]) is int and 0 <= final[key] <= 2048 for key in ("warningCount", "ticketRowCount"))
+         and value["notarySubmission"] == {"id": final["submissionId"], "status": "Accepted"}
+         and all(final[key] is True for key in ("trustedSignatureBeforeAndAfter", "trustedTimestampBeforeAndAfter", "actualStaplerValidation",
+                                               "signedPrefixUnchanged", "completeScriptsAudited"))
+         and final["assurance"] == "final-package-observation-not-installed-or-final-carrier-authority",
+         "final-package-receipt-notarization")
+    return final
 
 
 def credential_values(environment):
@@ -278,7 +667,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -450,7 +839,8 @@ def signing_requirement(identity, identifier):
          and re.fullmatch(r"[A-Z0-9]{10}", identity[0])
          and re.fullmatch(r"[0-9a-f]{40}", identity[1]) and identity[1] != "0" * 40
          and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
-                            "dev.mobile-release-kit.desktop.observation", PYTHON_IDENTIFIER), "fixed-signing-requirement")
+                            "dev.mobile-release-kit.desktop.observation", PYTHON_IDENTIFIER,
+                             "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry"), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -518,16 +908,29 @@ class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES, "closed-phase")
+        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
         self.phase, self.environment, self.stager = phase, environment, stager
         self.entries, self.calls, self.errors = [], [], []
+        self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
         self.credential_active = None
         self.credential_unknown = self.credential_failed = self.signing_mutation_pending = False
         self.fixed_sign_complete = False
+        self.notary_started = self.notary_observed = None
+        self.notary_unknown = self.notary_mutation_pending = self.notary_retiring = self.notary_complete = False
+        self.notary_roots, self.notary_ticket_rows, self.notary_tools = [], [], {}
+        self.notary_profile = self.notary_copy = self.notary_zip = self.notary_zip_sha = None
+        self.notary_key = self.notary_final = self.notary_result = None
+        self.installer_selection = self.installer_certificates = self.installer_profile_sha = None
+        self.final_package_roots, self.final_package_inputs = [], []
+        self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_complete = False
+        self.final_image_roots, self.final_image_inputs = [], []
+        self.final_image_original = self.final_image_output_root = self.final_image_output = self.final_image_sha = None
+        self.final_image_complete = self.final_image_mount_verified = False
         self.directories = {}
         self.work_entry = self.target_entry = None
         self.profile_entry = self.source_entry = None
@@ -558,10 +961,16 @@ class Operation:
                         "outerFinalityRequired": True, "androidServiceAuthenticated": False,
                         "androidRegisteredCopyQualified": False, "androidBuildQualified": False,
                         "developerIdOrNotarizationQualified": False, "productReady": False}
+        if phase in FINAL_IMAGE_PHASES:
+            self.receipt["distributionQualified"] = False
+        if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+            self.receipt.update(notaryAuthentication={"created": False, "closed": False, "retired": False},
+                                toolchain=None, helperIdentifier=None)
 
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
+        self.entry_registry[id(entry)] = entry  # History retains the FD if this insertion raises.
         return entry
 
     def close(self, entry):
@@ -575,7 +984,8 @@ class Operation:
             self.errors.append({"stage": "close", "role": entry["role"], "type": type(error).__name__})
 
     def recheck_directory(self, entry):
-        need(any(owned is entry for owned in self.entries) and entry["kind"] == "directory"
+        need(type(entry) is dict and self.entry_registry.get(id(entry)) is entry
+             and entry["kind"] == "directory"
              and type(entry["fd"]) is int and not entry["closed"], "directory-original-unavailable")
         parent = entry.get("parent_entry")
         if parent is not None:
@@ -668,6 +1078,15 @@ class Operation:
 
     def call(self, role, argv, environment, *, cwd, timeout, limit):
         need(self.credential_known() and not self.credential_failed, "credential-dispatch-unknown")
+        image_purpose = {"distribution-sign": "distribution-image", "observation-sign": "observation-image"}.get(role)
+        if self.phase == "package-install" and image_purpose is not None:
+            need(self.credential_active is not None and self.credential_active.get("purpose") == image_purpose
+                 and self.credential_active["ready"] and self.credential_active["roles"] == IMAGE_CREDENTIAL_ROLES[image_purpose],
+                 "package-image-credential-required")
+        if role == "final-package-sign":
+            need(self.phase in FINAL_PACKAGE_PHASES and self.credential_active is not None
+                 and self.credential_active.get("purpose") == "installer" and self.credential_active["ready"]
+                 and self.credential_active["roles"] == (role,), "installer-credential-required")
         if self.credential_active is not None:
             context = self.credential_active
             need(context["ready"] and not context["retiring"] and role in context["roles"], "credential-callback-purpose")
@@ -675,7 +1094,36 @@ class Operation:
             need(now + (timeout + 3) * 1_000_000_000 < context["endpoint"] - 30_000_000_000, "credential-callback-deadline")
             self.credential_census(context)
             environment = dict(environment, HOME="/Users/runner")
-        need(not any(name in environment for name in CREDENTIAL_VARIABLES), "credential-child-environment")
+        need(not any(name in environment for name in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+                     + ("MRK_MACOS_NOTARY_API_KEY_BASE64",)), "credential-child-environment")
+        if self.phase in NOTARY_PHASES:
+            need(NOTARY_KEY_VARIABLE not in environment and self.credential_active is None
+                 and not self.notary_retiring and not self.notary_unknown and not self.errors
+                 and self.stager_io_pending is None and len(self.calls) < len(NOTARY_ROLES)
+                 and role == NOTARY_ROLES[len(self.calls)]
+                 and self.notary_mutation_pending == (role in ("staple-inner", "staple-outer"))
+                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
+                 "notary-original-dispatch-boundary")
+            self.notary_clock()
+        if self.phase in FINAL_PACKAGE_PHASES:
+            need(not self.notary_retiring and not self.notary_unknown and not self.errors
+                 and self.stager_io_pending is None and len(self.calls) < len(FINAL_PACKAGE_ROLES)
+                 and role == FINAL_PACKAGE_ROLES[len(self.calls)]
+                 and self.notary_mutation_pending == (role == "final-package-staple")
+                 and self.signing_mutation_pending == (role == "final-package-sign")
+                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
+                 "final-package-original-dispatch-boundary")
+            self.notary_clock()
+        if self.phase in FINAL_IMAGE_PHASES:
+            need(self.credential_active is None and not self.credential_calls and not self.credential_contexts
+                 and not self.notary_retiring and not self.notary_unknown and not self.errors
+                 and self.stager_io_pending is None and len(self.calls) < len(FINAL_IMAGE_ROLES)
+                 and role == FINAL_IMAGE_ROLES[len(self.calls)]
+                 and self.notary_mutation_pending == (role == "final-image-staple")
+                 and not self.signing_mutation_pending
+                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
+                 "final-image-original-dispatch-boundary")
+            self.notary_clock()
         if self.phase in PYTHON_PHASES:
             need(not self.python_retiring and not self.errors and self.stager_io_pending is None
                  and len(self.calls) < len(PYTHON_ROLES) and role == PYTHON_ROLES[len(self.calls)]
@@ -693,6 +1141,8 @@ class Operation:
                     self.mount_entered = True
                 elif role == "installer":
                     self.installer_entered = True
+            if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
+                self.mount_entered = True  # This SAME dispatch, after its clock/reserve admission.
             result = self.owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
                                           capture=True, text=False, output_limit=limit)
         except BaseException as error:
@@ -743,6 +1193,8 @@ class Operation:
             self.python_clock(work=not cleanup)
         elif self.package_endpoint is not None:
             self.package_clock()
+        elif self.phase in FINAL_PACKAGE_PHASES:
+            self.notary_clock(work=not cleanup)
         return now
 
     def credential_new_clock(self):
@@ -755,6 +1207,9 @@ class Operation:
         elif self.package_endpoint is not None:
             self.package_clock()
             endpoint = min(endpoint, self.package_endpoint)
+        elif self.phase in FINAL_PACKAGE_PHASES:
+            _observed, outer = self.notary_clock()
+            endpoint = min(endpoint, outer)
         return {"observed": now, "endpoint": endpoint, "ready": False, "retiring": False, "pending": None,
                 "directories": [], "root": None, "created": False, "p12": None, "entries": [], "roles": ()}
 
@@ -964,16 +1419,24 @@ class Operation:
     def credential_scope(self, purpose, *, producer=None):
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
+                 "installer": ("final-package-sign",), **IMAGE_CREDENTIAL_ROLES,
                  **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
-              or purpose == "producer" and self.phase == "package-install" or purpose in SIGNING_PHASES and self.phase == purpose)
+              or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
+              or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
+              or purpose in SIGNING_PHASES and self.phase == purpose)
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
         if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
             yield  # No secret read, directory, keychain or auxiliary call.
             return
         need(self.environment.get("HOME") == "/Users/runner", "credential-user-domain")
-        certificates = self.credential_sources()
+        certificates = self.installer_certificates if purpose == "installer" else self.credential_sources()
+        if purpose == "installer":
+            need(self.installer_selection is not None and type(certificates) is tuple and len(certificates) == 3
+                 and self.signing is not None and self.installer_selection["teamId"] == self.signing[0]
+                 and self.installer_selection["leafSha1"] != self.signing[1], "installer-credential-source-purpose")
         context = self.credential_new_clock()
+        context["purpose"] = purpose
         context["roles"] = pairs[purpose]
         fact = {"purpose": purpose, "searchRestored": False, "defaultUnchanged": False, "retired": False, "closed": False}
         primary, original_list, original_default, expected_list = None, None, None, None
@@ -982,7 +1445,13 @@ class Operation:
         try:
             self.credential_active = context  # Inside the whole acquisition/use/unwind guard.
             self.credential_contexts.append(fact)
-            body, secret = credential_values(self.environment)
+            if purpose == "installer":
+                need(not any(name in self.environment for name in CREDENTIAL_VARIABLES), "installer-no-application-secret")
+                body, secret = credential_values({old: self.environment.get(new)
+                    for old, new in zip(CREDENTIAL_VARIABLES, INSTALLER_CREDENTIAL_VARIABLES)})
+            else:
+                need(not any(name in self.environment for name in INSTALLER_CREDENTIAL_VARIABLES), "application-no-installer-secret")
+                body, secret = credential_values(self.environment)
             password = os.urandom(32).hex()
             self.credential_private_root(context, body)
             keychain = str(context["path"] / "identity.keychain-db")
@@ -1007,7 +1476,8 @@ class Operation:
                 partitions = "apple-tool:,cdhash:" + code_hash
             else:
                 need(producer is None, "credential-code-purpose")
-                trusted, partitions = "/usr/bin/codesign", "apple-tool:,apple:"
+                trusted = "/usr/bin/productsign" if purpose == "installer" else "/usr/bin/codesign"
+                partitions = "apple-tool:,apple:"
             self.credential_io(context, "p12-import-pre", self.credential_p12_post, context)
             self.credential_call(context, "import", ["/usr/bin/security", "import", str(context["path"] / "identity.p12"),
                 "-k", keychain, "-f", "pkcs12", "-P", secret, "-T", trusted, "-T", "/usr/bin/security"])
@@ -1017,17 +1487,28 @@ class Operation:
             secret = None
             self.credential_call(context, "partitions", ["/usr/bin/security", "set-key-partition-list", "-S", partitions,
                                                        "-s", "-k", password, keychain])
-            identities = self.credential_call(context, "identity", ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning", keychain])
+            policy = "basic" if purpose == "installer" else "codesigning"
+            identities = self.credential_call(context, "identity", ["/usr/bin/security", "find-identity", "-v", "-p", policy, keychain])
             certs = self.credential_call(context, "certificates", ["/usr/bin/security", "find-certificate", "-a", "-p", keychain])
             need(not identities.stderr and not certs.stderr, "credential-private-query-stderr")
-            credential_identity(identities.stdout, certs.stdout, self.signing, certificates)
+            if purpose == "installer":
+                installer_identity(identities.stdout, certs.stdout, self.installer_selection, certificates)
+                # This explicitly anchored local check does NOT establish system
+                # trust. Independent pkgutil trust/timestamp/chain and Accepted
+                # remain required after signing the actual package.
+                paths = [str(self.checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der"))
+                         for name in ("leaf", "issuer", "root")]
+                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L",
+                    "-c", paths[0], "-c", paths[1], "-r", paths[2]], timeout=30)
+            else:
+                credential_identity(identities.stdout, certs.stdout, self.signing, certificates)
             self.credential_search(context, "search-admit", expected=expected_list)
             self.credential_call(context, "restrict", ["/usr/bin/security", "list-keychains", "-d", "user", "-s", keychain])
             expected_list = (keychain,)
             self.credential_search(context, "search-restricted", expected=expected_list)
             for entry, data in self.package_sources:
                 need(self.read(entry) == data, "credential-source-post")
-            maximum = 126 if purpose == "producer" else 66
+            maximum = 126 if purpose == "producer" else 96 if purpose in IMAGE_CREDENTIAL_ROLES else 66
             need(self.credential_clock(context) + maximum * 1_000_000_000 < context["endpoint"] - 30_000_000_000,
                  "credential-callback-reserve")
             before = len(self.calls)
@@ -1238,6 +1719,1202 @@ class Operation:
         self.package_outputs.append((copied, digest(body)))
         self.package_post()
         return copied, body, code_hash
+
+    def notary_clock(self, *, work=True):
+        now = time.monotonic_ns()
+        need(type(now) is int and type(self.notary_started) is int
+             and self.notary_started <= self.notary_observed <= now, "notary-monotonic-clock")
+        self.notary_observed = now
+        endpoint = self.notary_started + (1740 if work else 1800) * 1_000_000_000
+        need(now < endpoint, "notary-group-deadline")
+        return now, endpoint
+
+    def notary_known(self):
+        return (not self.errors and not self.notary_unknown and not self.notary_mutation_pending
+                and self.stager_io_pending is None and self.credential_known() and not self.credential_failed
+                and self.credential_active is None and not self.signing_mutation_pending
+                and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls))
+
+    def notary_space(self, *, reserve=False):
+        self.recheck_directory(self.work_entry)
+        volume = os.fstatvfs(self.work_entry["fd"])
+        need(type(volume.f_frsize) is int and 0 < volume.f_frsize <= 1024 * 1024
+             and type(volume.f_bavail) is int and volume.f_bavail >= 0
+             and volume.f_bavail * volume.f_frsize >= NOTARY_FREE_FLOOR + (NOTARY_STORAGE_RESERVE if reserve else 0),
+             "notary-work-volume-reserve")
+
+    def notary_io(self, label, function, *args, **kwargs):
+        self.notary_clock()
+        need(self.notary_known() and not self.notary_retiring, "notary-io-unknown")
+        self.stage = label
+        self.stager_io_pending = label
+        result = function(*args, **kwargs)
+        self.notary_clock()
+        self.stager_io_pending = None  # Only actual normal return proves its internal closes.
+        return result
+
+    def notary_snapshot(self, root, path, *, work=True):
+        """Identity supplement to the actual stager tree, with bounded live FDs.
+
+        The existing tree supplies file/path/byte policy. This walk binds those
+        same bytes to original identities and records even empty directories;
+        at most one depth16 chain and one leaf are live, not2048 retained FDs.
+        """
+        self.notary_clock(work=work)
+        self.recheck_directory(root)
+        self.stager_io_pending = "notary-stager-tree"
+        files = self.stager.tree(path)
+        self.stager_io_pending = None
+        self.notary_clock(work=work)
+        result = {"directories": {}, "files": {}}
+        observed, nodes = set(), [0]
+        def visit(parent, prefix, depth):
+            self.notary_clock(work=work)
+            need(depth <= 16, "notary-original-depth")
+            self.recheck_directory(parent)
+            names = sorted(os.listdir(parent["fd"]))
+            nodes[0] += len(names)
+            need(nodes[0] <= 4096, "notary-original-node-bound")
+            result["directories"][prefix] = (parent["identity"], tuple(names))
+            for name in names:
+                relative = name if not prefix else prefix + "/" + name
+                need(self.stager.safe_path(relative), "notary-original-path")
+                before = os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+                entry = None
+                try:
+                    fd = os.open(name, READ_FLAGS | (os.O_DIRECTORY if stat.S_ISDIR(before.st_mode) else 0), dir_fd=parent["fd"])
+                    entry = self.register(fd, "notary-original", "directory" if stat.S_ISDIR(before.st_mode) else "file", parent["fd"], name)
+                    entry["parent_entry"] = parent
+                    opened = os.fstat(fd)
+                    need(signature(opened) == signature(before), "notary-original-open-changed")
+                    if stat.S_ISDIR(before.st_mode):
+                        entry["identity"] = directory_identity(opened)
+                        self.stager.no_xattrs(fd)
+                        visit(entry, relative, depth + 1)
+                    else:
+                        need(relative in files and stat.S_ISREG(opened.st_mode) and opened.st_nlink == 1
+                             and (opened.st_uid, opened.st_gid) == (os.getuid(), os.getgid())
+                             and 0 <= opened.st_size <= self.stager.MAX_BYTES, "notary-original-file")
+                        entry["identity"] = signature(opened)
+                        self.stager.no_xattrs(fd)
+                        body = self.read(entry)
+                        need(files[relative] == (body, stat.S_IMODE(opened.st_mode)), "notary-stager-original-correspondence")
+                        result["files"][relative] = (entry["identity"], digest(body))
+                        observed.add(relative)
+                finally:
+                    if entry is not None:
+                        self.close(entry)
+                need(not self.errors, "notary-original-close-unknown")
+            self.recheck_directory(parent)
+            need(sorted(os.listdir(parent["fd"])) == names, "notary-original-directory-post")
+        visit(root, "", 0)
+        need(observed == set(files), "notary-stager-original-roster")
+        self.recheck_directory(root)
+        self.notary_clock(work=work)
+        return result
+
+    def notary_stream(self, entry, *, work=True):
+        self.notary_clock(work=work)
+        self.recheck_directory(entry["parent_entry"])
+        need(signature(os.fstat(entry["fd"])) == entry["identity"]
+             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)), "notary-zip-original")
+        self.stager.no_xattrs(entry["fd"])
+        digestor, count = hashlib.sha256(), 0
+        while count < entry["identity"][6]:
+            self.notary_clock(work=work)
+            body = os.pread(entry["fd"], min(1024 * 1024, entry["identity"][6] - count), count)
+            need(body, "notary-zip-short-read")
+            digestor.update(body); count += len(body)
+        need(os.pread(entry["fd"], 1, count) == b"" and signature(os.fstat(entry["fd"])) == entry["identity"]
+             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)), "notary-zip-post")
+        self.recheck_directory(entry["parent_entry"])
+        return digestor.hexdigest()
+
+    def notary_tool(self, name):
+        need(name in ("notarytool", "stapler"), "notary-fixed-tool")
+        fixed = NOTARY_XCODE / "usr/bin" / name
+        canonical = fixed.resolve(strict=True)
+        applications = NOTARY_XCODE.parents[2]
+        need(canonical.is_absolute() and len(canonical.parts) <= 16
+             and applications.resolve(strict=True) in canonical.parents, "notary-selected-tool-path")
+        # Both the fixed Xcode.app alias and its independently resolved chain
+        # are originals. xcrun output cannot choose a different tool or root.
+        paths = {fixed, canonical, *fixed.parents, *canonical.parents}
+        originals = []
+        for path in sorted(paths, key=lambda item: (len(item.parts), str(item))):
+            info = path.lstat()
+            selected_alias = stat.S_ISLNK(info.st_mode) and path == NOTARY_XCODE.parent.parent
+            above_applications = path in applications.parents
+            need(info.st_uid in (0, os.getuid())
+                 and (selected_alias or (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                      and (above_applications or not info.st_mode & 0o022)), "notary-selected-tool-ancestry")
+            originals.append((path, signature(info), os.readlink(path) if stat.S_ISLNK(info.st_mode) else None))
+        fd = os.open(canonical, READ_FLAGS)
+        entry = self.register(fd, "notary-system-tool", "notary-system-tool")
+        info = os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 64 * 1024 * 1024
+             and info.st_mode & 0o111 and not info.st_mode & 0o022 and info.st_uid in (0, os.getuid())
+             and signature(info) == signature(canonical.lstat()), "notary-selected-tool-original")
+        entry["identity"] = signature(info)
+        value = {"fixed": fixed, "path": canonical, "entry": entry, "ancestors": originals}
+        self.notary_tools[name] = value
+        self.notary_tool_post(value)
+        return value
+
+    def notary_tool_post(self, tool):
+        for path, identity, link in tool["ancestors"]:
+            need(signature(path.lstat()) == identity and (link is None or os.readlink(path) == link),
+                 "notary-selected-tool-changed")
+        need(tool["fixed"].resolve(strict=True) == tool["path"]
+             and signature(os.fstat(tool["entry"]["fd"])) == tool["entry"]["identity"]
+             == signature(tool["path"].lstat()), "notary-selected-tool-changed")
+
+    def notary_post(self, *, work=True):
+        self.notary_clock(work=work)
+        need(not self.errors and self.stager_io_pending is None, "notary-post-unknown")
+        for entry, body in self.package_sources:
+            need(self.read(entry) == body, "notary-source-post")
+        for item in self.notary_roots:
+            need(self.notary_snapshot(item["entry"], item["path"], work=work) == item["snapshot"], "notary-payload-post")
+        if self.notary_copy is not None:
+            item = self.notary_copy
+            need(self.notary_snapshot(item["entry"], item["path"], work=work) == item["snapshot"], "notary-copy-post")
+        if self.notary_zip is not None:
+            need(self.notary_stream(self.notary_zip, work=work) == self.notary_zip_sha, "notary-zip-sha256-changed")
+        for tool in self.notary_tools.values():
+            self.notary_tool_post(tool)
+        if self.notary_key is not None:
+            key = self.notary_key
+            self.recheck_directory(key["root"])
+            need(os.listdir(key["root"]["fd"]) == [key["name"]]
+                 and self.read(key["entry"]) == key["body"], "notary-key-original-changed")
+        if self.phase in FINAL_PACKAGE_PHASES:
+            self.final_package_post(work=work)
+        if self.phase in FINAL_IMAGE_PHASES:
+            self.final_image_post(work=work)
+        if work:
+            self.notary_space()
+        self.notary_clock(work=work)
+
+    def notary_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
+        need(self.notary_known() and not self.notary_retiring and len(self.calls) < len(NOTARY_ROLES)
+             and NOTARY_ROLES[len(self.calls)] == role, "notary-fixed-role-order")
+        self.notary_post()
+        now, endpoint = self.notary_clock()
+        need(type(maximum) is int and 0 < maximum <= 1200, "notary-child-timeout")
+        timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
+        need(timeout >= 1, "notary-child-settlement-reserve")
+        need((self.notary_key is not None) == (role in ("payload-submit", "payload-log")), "notary-key-role")
+        environment = self.native_environment()
+        if developer:
+            environment["DEVELOPER_DIR"] = str(NOTARY_XCODE)
+        self.stage = role
+        changing = role in ("staple-inner", "staple-outer")
+        self.notary_mutation_pending = changing
+        try:
+            result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
+        except BaseException:
+            if not changing and self.notary_known():
+                try:
+                    self.notary_post()
+                except BaseException as post_error:
+                    self.notary_unknown = True
+                    self.errors.append({"stage": "notary-failed-original-post", "type": type(post_error).__name__})
+            raise
+        self.notary_clock()
+        if changing:
+            app = self.notary_roots[0]
+            actual = self.notary_snapshot(app["entry"], app["path"])
+            previous = app["snapshot"]
+            added = NOTARY_TICKETS[1] if role == "staple-inner" else NOTARY_TICKETS[0]
+            need(set(actual["files"]) == set(previous["files"]) | {added}
+                 and added not in previous["files"] and set(actual["directories"]) == set(previous["directories"]),
+                 "notary-ticket-only-addition")
+            for name, row in previous["files"].items():
+                need(actual["files"][name] == row, "notary-existing-file-changed")
+            parent, leaf = added.rsplit("/", 1)
+            for name, (identity, names) in previous["directories"].items():
+                expected_names = tuple(sorted((*names, leaf))) if name == parent else names
+                need(actual["directories"][name] == (identity, expected_names), "notary-existing-directory-changed")
+            info, sha = actual["files"][added]
+            need(0 < info[6] <= 1024 * 1024 and not stat.S_IMODE(info[2]) & 0o7133, "notary-ticket-shape")
+            self.notary_ticket_rows.append({"path": added, "bytes": info[6], "sha256": sha})
+            app["snapshot"] = actual
+            self.notary_mutation_pending = False
+        self.notary_post()
+        return result
+
+    def notary_rename_copy(self):
+        item = self.notary_copy
+        root = item["entry"]
+        child = self.directory(root, "app", "notary-copy-app")
+        root_identity, child_identity = root["identity"], child["identity"]
+        need(stat.S_IMODE(root_identity[2]) == stat.S_IMODE(child_identity[2]) == 0o555, "notary-copy-sealed-directories")
+        self.notary_mutation_pending = True
+        primary = None
+        try:
+            self.recheck_directory(root); self.recheck_directory(child)
+            os.fchmod(root["fd"], 0o755)
+            root["identity"] = directory_identity(os.fstat(root["fd"]))
+            need(root["identity"] == (*root_identity[:2], stat.S_IFDIR | 0o755, *root_identity[3:]), "notary-copy-parent-mode")
+            self.recheck_directory(root)
+            os.rename("app", NOTARY_APP_NAME, src_dir_fd=root["fd"], dst_dir_fd=root["fd"])
+            need(directory_identity(os.fstat(child["fd"])) == child_identity
+                 == directory_identity(os.stat(NOTARY_APP_NAME, dir_fd=root["fd"], follow_symlinks=False)), "notary-copy-rename-original")
+            del self.directories[(id(root), "app")]
+            child["name"] = NOTARY_APP_NAME
+            self.directories[(id(root), NOTARY_APP_NAME)] = child
+        except BaseException as error:
+            primary = error
+        finally:
+            try:
+                now = os.fstat(root["fd"])
+                need((now.st_dev, now.st_ino, now.st_uid, now.st_gid)
+                     == (root_identity[0], root_identity[1], root_identity[3], root_identity[4]), "notary-copy-parent-original")
+                os.fchmod(root["fd"], 0o555)
+                root["identity"] = directory_identity(os.fstat(root["fd"]))
+                need(root["identity"] == root_identity, "notary-copy-parent-restore")
+                self.recheck_directory(root)
+            except BaseException as error:
+                self.notary_unknown = True
+                self.errors.append({"stage": "notary-copy-parent-restore", "type": type(error).__name__})
+                if primary is None:
+                    primary = error
+        if primary is not None:
+            if not self.notary_unknown and not self.errors:
+                try:
+                    # A synchronous refusal before rename may leave the exact
+                    # original copy intact. Only that proven old state permits
+                    # known-only cleanup; an unknown/lost return is not success.
+                    need(self.notary_snapshot(root, item["path"]) == item["snapshot"], "notary-copy-failed-rename-post")
+                    self.recheck_directory(child)
+                    self.notary_mutation_pending = False
+                except BaseException as error:
+                    self.notary_unknown = True
+                    self.errors.append({"stage": "notary-copy-failed-rename-post", "type": type(error).__name__})
+            raise primary
+        def renamed(name):
+            return NOTARY_APP_NAME + name[3:] if name == "app" or name.startswith("app/") else name
+        expected = {"files": {renamed(name): row for name, row in item["snapshot"]["files"].items()}, "directories": {}}
+        for name, (identity, names) in item["snapshot"]["directories"].items():
+            expected["directories"][renamed(name)] = (identity, tuple(sorted(NOTARY_APP_NAME if part == "app" else part for part in names)) if name == "" else names)
+        need(self.notary_snapshot(root, item["path"]) == expected, "notary-copy-rename-post")
+        item["snapshot"] = expected
+        self.notary_mutation_pending = False
+        self.notary_post()
+
+    @contextlib.contextmanager
+    def notary_key_scope(self):
+        need((self.phase in NOTARY_PHASES and len(self.calls) == 5 or self.phase in FINAL_PACKAGE_PHASES and len(self.calls) == 4
+              or self.phase in FINAL_IMAGE_PHASES and len(self.calls) == 3)
+             and self.notary_key is None
+             and self.notary_known(), "notary-key-purpose")
+        body = notary_key_data(self.environment)
+        primary = None
+        try:
+            self.notary_clock()
+            self.stager_io_pending = "notary-private-key-create"
+            os.mkdir("notary-key", 0o700, dir_fd=self.target_entry["fd"])
+            root = self.directory(self.target_entry, "notary-key", "notary-key-directory")
+            name = "AuthKey_" + self.notary_profile["keyId"] + ".p8"
+            need(not os.listdir(root["fd"]), "notary-key-directory-empty")
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root["fd"])
+            entry = self.register(fd, "notary-private-key", "file", root["fd"], name)
+            entry["parent_entry"] = root
+            self.notary_key = {"root": root, "entry": entry, "name": name, "body": body}
+            self.receipt["notaryAuthentication"]["created"] = True
+            offset = 0
+            while offset < len(body):
+                count = os.write(fd, body[offset:])
+                need(type(count) is int and count > 0, "notary-key-short-write")
+                offset += count
+                self.notary_clock()
+            os.fsync(fd)
+            before = os.fstat(fd)
+            need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                 and (before.st_uid, before.st_gid) == (os.getuid(), os.getgid()) and before.st_size == len(body)
+                 and stat.S_IMODE(before.st_mode) == 0o600 and os.pread(fd, len(body) + 1, 0) == body, "notary-key-original")
+            self.stager.no_xattrs(fd)
+            os.fchmod(fd, 0o400)
+            entry["identity"] = signature(os.fstat(fd))
+            need(stat.S_IMODE(entry["identity"][2]) == 0o400 and self.read(entry) == body, "notary-key-readback")
+            self.stager_io_pending = None
+            self.notary_post()
+            yield ["--key", str(self.work / self.target_name / "notary-key" / name),
+                   "--key-id", self.notary_profile["keyId"], "--issuer", self.notary_profile["issuerId"]]
+        except BaseException as error:
+            primary = error
+        finally:
+            if self.notary_key is not None and self.notary_known():
+                try:
+                    self.notary_post(work=False)
+                    key = self.notary_key
+                    self.close(key["entry"])
+                    need(key["entry"]["closed"], "notary-key-close-unknown")
+                    self.receipt["notaryAuthentication"]["closed"] = True
+                    self.recheck_directory(key["root"])
+                    need(signature(os.stat(key["name"], dir_fd=key["root"]["fd"], follow_symlinks=False)) == key["entry"]["identity"],
+                         "notary-key-unlink-original")
+                    os.unlink(key["name"], dir_fd=key["root"]["fd"])
+                    need(not os.listdir(key["root"]["fd"]), "notary-key-retirement-census")
+                    self.recheck_directory(key["root"])
+                    self.close(key["root"])
+                    need(key["root"]["closed"], "notary-key-directory-close-unknown")
+                    self.recheck_directory(self.target_entry)
+                    need(directory_identity(os.stat("notary-key", dir_fd=self.target_entry["fd"], follow_symlinks=False)) == key["root"]["identity"],
+                         "notary-key-directory-retire-original")
+                    os.rmdir("notary-key", dir_fd=self.target_entry["fd"])
+                    need("notary-key" not in os.listdir(self.target_entry["fd"]), "notary-key-directory-remains")
+                    self.notary_key = None
+                    self.receipt["notaryAuthentication"]["retired"] = True
+                    self.notary_clock(work=False)
+                except BaseException as error:
+                    self.notary_unknown = True
+                    self.errors.append({"stage": "notary-key-retirement", "type": type(error).__name__})
+                    if primary is None:
+                        primary = error
+        if primary is not None:
+            raise primary
+
+    def notarize_payload(self):
+        need(self.phase in NOTARY_PHASES and self.signing is not None
+             and not any(key in self.environment for key in CREDENTIAL_VARIABLES), "notary-configured-purpose")
+        self.notary_space(reserve=True)
+        profile = self.source_original(NOTARY_PROFILE, "source-notary-profile", 1024)
+        profile_body = self.read(profile)
+        self.notary_profile = notary_service(profile_body, self.signing)
+        self.package_sources.append((profile, profile_body))
+        nomination = self.source_original("desktop/" + self.stager.SIGNED_RUNTIME_BINDING, "source-notary-runtime-nomination", self.stager.SIGNED_RUNTIME_BINDING_LIMIT)
+        nomination_body = self.read(nomination)
+        selected = self.stager.signed_runtime_binding_data(nomination_body, self.producer_profile, self.service_profile, target=self.target)
+        self.package_sources.append((nomination, nomination_body))
+        for variable, key in (("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "runtimeManifestSha256"),
+                              ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "sourceInputsSha256"),
+                              ("MRK_MACOS_SIGNED_PYTHON_SHA256", "signedPythonSha256"),
+                              ("MRK_MACOS_SIGNING_RECEIPT_SHA256", "signingReceiptSha256"),
+                              ("MRK_MACOS_SIGNING_SOURCE_COMMIT", "signingSourceCommit"),
+                              ("MRK_MACOS_SIGNING_RUN_ID", "signingRunId"), ("MRK_MACOS_SIGNING_RUN_ATTEMPT", "signingRunAttempt")):
+            need(self.environment.get(variable) == selected[key], "notary-configured-runtime-binding")
+        for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
+            entry = self.source_original("desktop/tools/" + filename, "source-notary-driver", 512 * 1024)
+            self.package_sources.append((entry, self.read(entry)))
+        app_path = self.work / "app" / self.stager.APP_NAME
+        for parts, path in ((("app", self.stager.APP_NAME), app_path), (("runtime",), self.work / "runtime")):
+            root = self.descend(self.work_entry, parts)
+            self.notary_roots.append({"entry": root, "path": path, "snapshot": self.notary_snapshot(root, path)})
+        runtime_files = self.notary_roots[1]["snapshot"]["files"]
+        need(runtime_files.get("manifest.json", (None, None))[1] == selected["runtimeManifestSha256"]
+             and runtime_files.get("python/bin/python3", (None, None))[1] == selected["signedPythonSha256"], "notary-current-runtime-bytes")
+        capsule_parent = self.directory(self.work_entry, "signed-python-capsule", "notary-signed-capsule")
+        capsule = self.original(capsule_parent, "python-signed-receipt.json", "notary-signed-capsule-receipt", 16384, (0o444, 0o600))
+        capsule_body = self.read(capsule)
+        need(digest(capsule_body) == selected["signingReceiptSha256"], "notary-current-capsule-bytes")
+        self.package_sources.append((capsule, capsule_body))
+        arguments = argparse.Namespace(target=self.target, package_role=self.environment["MRK_MACOS_PACKAGE_ROLE"], current_runtime=True,
+            expected_entry=self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256"), expected_app_binary=self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
+            expected_vault_helper=self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256"), expected_android_helper=self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256"),
+            expected_resident_image=self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"),
+            expected_desktop_image=self.environment.get("MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256") if self.environment["MRK_MACOS_PACKAGE_ROLE"] == "ordinary-image" else None,
+            expected_manifest=selected["runtimeManifestSha256"], app=app_path, runtime=self.work / "runtime",
+            output=self.work / self.target_name / "payload-input")
+        self.notary_post()
+        self.notary_io("notary-preflight-input", self.stager.input_command, arguments)
+        copied = self.directory(self.target_entry, "payload-input", "notary-disposable-payload")
+        self.notary_copy = {"entry": copied, "path": arguments.output, "snapshot": self.notary_snapshot(copied, arguments.output)}
+        self.notary_post()
+        self.notary_rename_copy()
+        for name in ("notarytool", "stapler"):
+            tool = self.notary_tool(name)
+            result = self.notary_call("resolve-" + name, ["/usr/bin/xcrun", "--find", name], limit=4096, developer=True)
+            need(result.stdout in ((str(tool["fixed"]) + "\n").encode(), (str(tool["path"]) + "\n").encode())
+                 and not result.stderr, "notary-tool-discovery-original")
+            self.notary_tool_post(tool)
+        inner_path = app_path / self.stager.PAYLOAD_RELATIVE
+        inner_requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop")
+        outer_requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop.entry")
+        for role, path, requirement in (("verify-inner-before", inner_path, inner_requirement), ("verify-outer-before", app_path, outer_requirement)):
+            verified = self.notary_call(role, ["/usr/bin/codesign", "--verify", "--strict", "-R=" + requirement, str(path)])
+            need(not verified.stdout and not verified.stderr, "notary-strict-verification-output")
+        archive_path = self.work / self.target_name / NOTARY_ZIP_NAME
+        need(NOTARY_ZIP_NAME not in os.listdir(self.target_entry["fd"]), "notary-zip-path-occupied")
+        self.notary_call("payload-zip", ["/usr/bin/ditto", "-c", "-k", "--keepParent", str(arguments.output), str(archive_path)], maximum=180)
+        self.notary_zip = self.original(self.target_entry, NOTARY_ZIP_NAME, "notary-submission-zip", NOTARY_ZIP_LIMIT, (0o400, 0o600, 0o644))
+        need(os.pread(self.notary_zip["fd"], 4, 0) == b"PK\x03\x04", "notary-submission-zip-format")
+        self.notary_zip_sha = self.notary_stream(self.notary_zip)
+        tool = str(self.notary_tools["notarytool"]["path"])
+        submission = log = None
+        with self.notary_key_scope() as key_arguments:
+            result = self.notary_call("payload-submit", [tool, "submit", str(archive_path), "--wait", "--output-format", "json", *key_arguments],
+                                      maximum=1200, developer=True)
+            submission = notary_submit_data(result.stdout)
+            self.receipt["notarySubmission"] = dict(submission)
+            invalid = Refused("notary-submission-invalid") if submission["status"] == "Invalid" else None
+            try:
+                result = self.notary_call("payload-log", [tool, "log", submission["id"], *key_arguments], limit=1024 * 1024, developer=True)
+                log = notary_log_data(result.stdout, submission, self.notary_zip_sha)
+            except BaseException as error:
+                if invalid is not None:
+                    self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
+                    raise invalid from None  # Diagnostic failure cannot replace the terminal refusal.
+                raise
+            if invalid is not None:
+                raise invalid
+        need(self.notary_key is None and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True},
+             "notary-authentication-not-retired")
+        tool = str(self.notary_tools["stapler"]["path"])
+        for role, verb, path in (("staple-inner", "staple", inner_path), ("validate-inner", "validate", inner_path),
+                                 ("staple-outer", "staple", app_path), ("validate-outer", "validate", app_path)):
+            self.notary_call(role, [tool, verb, str(path)], developer=True)
+        for role, path, requirement in (("verify-inner-after", inner_path, inner_requirement), ("verify-outer-after", app_path, outer_requirement)):
+            verified = self.notary_call(role, ["/usr/bin/codesign", "--verify", "--strict", "-R=" + requirement, str(path)])
+            need(not verified.stdout and not verified.stderr, "notary-strict-verification-output")
+        tickets = sorted(self.notary_ticket_rows, key=lambda row: NOTARY_TICKETS.index(row["path"]))
+        need(tuple(row["path"] for row in tickets) == NOTARY_TICKETS, "notary-ticket-pair")
+        arguments.output = self.work / "input"
+        result = self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)
+        self.notary_post()
+        self.notary_result = (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        need(len(self.notary_result) <= 2048 and result.get("qualification") == "fresh-install-input-not-installed"
+             and self.stager.sha(result.get("inventorySha256")), "notary-final-input-result")
+        final_root = self.directory(self.work_entry, "input", "notary-final-input")
+        self.notary_final = {"entry": final_root, "path": arguments.output, "snapshot": self.notary_snapshot(final_root, arguments.output)}
+        need(self.notary_final["snapshot"]["files"].get("install-inventory.json", (None, None))[1] == result["inventorySha256"],
+             "notary-final-inventory-original")
+        self.sha256 = result["inventorySha256"]
+        self.resident_image_sha256 = arguments.expected_resident_image
+        self.notary_complete = True
+        self.receipt["payloadNotarization"] = {"submissionId": submission["id"], "status": submission["status"], **log,
+            "archiveBytes": self.notary_zip["identity"][6], "archiveSha256": self.notary_zip_sha,
+            "tickets": tickets, "inventorySha256": self.sha256, "runtimeManifestSha256": selected["runtimeManifestSha256"],
+            "strictVerificationBeforeAndAfter": True, "actualStaplerValidation": True,
+            "assurance": "accepted-payload-and-two-ticket-observations-not-package-or-installed-authority"}
+        self.notary_clock()
+
+    def notary_retirement(self):
+        if self.phase not in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.notary_started is None or self.target_entry is None or not self.notary_known():
+            return
+        self.notary_retiring = True
+        try:
+            self.stage = "notary-known-private-retirement"
+            need(self.notary_key is None, "notary-private-key-retained")
+            self.notary_post(work=False)
+            if self.notary_final is not None:
+                item = self.notary_final
+                need(self.notary_snapshot(item["entry"], item["path"], work=False) == item["snapshot"], "notary-final-input-post")
+            if self.notary_copy is not None:
+                root = self.notary_copy["entry"]
+                expected = self.notary_copy["snapshot"]["directories"]
+                def writable(parent, prefix):
+                    self.notary_clock(work=False)
+                    self.recheck_directory(parent)
+                    need(parent["identity"] == expected[prefix][0], "notary-retirement-directory-original")
+                    os.fchmod(parent["fd"], 0o700)
+                    parent["identity"] = directory_identity(os.fstat(parent["fd"]))
+                    self.recheck_directory(parent)
+                    for name in expected[prefix][1]:
+                        relative = name if not prefix else prefix + "/" + name
+                        if relative not in expected:
+                            continue
+                        key = (id(parent), name)
+                        if key in self.directories:
+                            child = self.directories[key]
+                            writable(child, relative)
+                        else:
+                            fd = os.open(name, READ_FLAGS | os.O_DIRECTORY, dir_fd=parent["fd"])
+                            child = self.register(fd, "notary-retirement-directory", "directory", parent["fd"], name)
+                            child["parent_entry"] = parent
+                            child["identity"] = directory_identity(os.fstat(fd))
+                            try:
+                                writable(child, relative)
+                            finally:
+                                self.close(child)
+                            need(child["closed"], "notary-retirement-close-unknown")
+                writable(root, "")
+            self.notary_clock(work=False)
+        except BaseException as error:
+            self.notary_unknown = True
+            self.errors.append({"stage": "notary-private-state-retained", "type": type(error).__name__})
+
+    def final_image_known(self):
+        return (self.notary_known() and not self.credential_failed and self.credential_active is None
+                and not self.credential_calls and not self.credential_contexts)
+
+    def final_image_io(self, label, function, *args, **kwargs):
+        need(self.phase in FINAL_IMAGE_PHASES and self.final_image_known() and not self.notary_retiring,
+             "final-image-io-unknown")
+        self.notary_clock()
+        self.stage = self.stager_io_pending = label
+        value = function(*args, **kwargs)
+        self.notary_clock()
+        self.stager_io_pending = None  # Only a returned original clears this latch.
+        return value
+
+    def final_image_post(self, *, work=True):
+        self.notary_clock(work=work)
+        for root, names in self.final_image_roots:
+            self.recheck_directory(root)
+            need(set(os.listdir(root["fd"])) == names, "final-image-directory-census")
+        for entry, sha in self.final_image_inputs:
+            need(self.notary_stream(entry, work=work) == sha, "final-image-input-changed")
+        if self.final_image_output is not None:
+            need(self.notary_stream(self.final_image_output, work=work) == self.final_image_sha,
+                 "final-image-output-changed")
+        if self.target_entry is not None:
+            self.recheck_directory(self.target_entry)
+            names = {"tmp"}
+            if self.final_image_output_root is not None:
+                names.add("final-image")
+            if self.notary_key is not None:
+                names.add("notary-key")
+            need(set(os.listdir(self.target_entry["fd"])) == names, "final-image-target-census")
+            self.directory(self.target_entry, "tmp", "final-image-tmp")
+        self.notary_clock(work=work)
+
+    def final_image_input(self):
+        """Keep the preceding original statuses, receipts and final P distinct."""
+        selection = self.stager.BuildSelection(self.target,
+            self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
+        def retained(parent, name, limit, modes=(0o444, 0o600, 0o644, 0o400)):
+            entry = self.original(parent, name, "final-image-input-" + name, limit, modes)
+            body = self.read(entry)
+            self.final_image_inputs.append((entry, digest(body)))
+            self.notary_clock()
+            return entry, body
+        for name in ("package-install.status", "installer-output.status"):
+            need(retained(self.work_entry, name, 4)[1] == b"0\n", "final-image-original-status")
+        final_root = self.directory(self.work_entry, "package-final", "final-image-final-package")
+        need(os.listdir(final_root["fd"]) == ["MobileReleaseKit.pkg"], "final-image-final-package-roster")
+        self.final_image_roots.append((final_root, {"MobileReleaseKit.pkg"}))
+        package_entry, package = retained(final_root, "MobileReleaseKit.pkg", self.stager.MAX_BYTES, (0o444,))
+        self.package_finalization_input(package_entry, package)
+        self.final_image_inputs.extend(self.package_outputs)
+        _, owner_body = retained(self.work_entry, "android-helper-package-install.json", 16384, (0o600,))
+        owner = self.stager.maintenance_json(owner_body, 16384)
+        need(type(owner) is dict and type(owner.get("schemaVersion")) is int and owner["schemaVersion"] == 1
+             and owner.get("phase") == "package-install" and owner.get("target") == self.target
+             and all(owner.get(key) == self.environment[env] for key, env in
+                     (("source", "GITHUB_SHA"), ("workflowSource", "GITHUB_WORKFLOW_SHA"),
+                      ("workflow", "GITHUB_WORKFLOW_REF"), ("runId", "GITHUB_RUN_ID"), ("runAttempt", "GITHUB_RUN_ATTEMPT")))
+             and owner.get("imageSourceCommit") == self.image_source and owner.get("imageReleaseId") == selection.release
+             and owner.get("imageReleaseSourceSha256") == digest(self.read(self.release_entry))
+             and owner.get("packageRole") == "ordinary-image" and owner.get("passed") is True
+             and owner.get("targetRetired") is True and owner.get("originalClosesKnown") is True
+             and owner.get("outerFinalityRequired") is True and owner.get("cleanupErrors") == []
+             and owner.get("directStagerIOPending") is None
+             and owner.get("finalPackageReceiptSha256") == self.receipt["finalPackageReceiptSha256"],
+             "final-image-package-owner")
+        calls = owner.get("originalCalls")
+        need(type(calls) is list and len(calls) == len(self.stager.PACKAGING_CALL_ROLES)
+             and all(type(row) is dict for row in calls)
+             and tuple(row.get("role") for row in calls) == self.stager.PACKAGING_CALL_ROLES
+             and all(row.get("entered") is True and row.get("returned") is True and row.get("capturesSettled") is True
+                     and type(row.get("returncode")) is int
+                     and row["returncode"] in ((0, 1) if row["role"] in ("installer-log-cursor", "installer-log-capture") else (0,))
+                     for row in calls), "final-image-package-original-calls")
+        credentials, contexts = owner.get("credentialOriginals"), owner.get("credentialContexts")
+        need(type(credentials) is list and len(credentials) == 60 and all(type(row) is dict for row in credentials)
+             and tuple(row.get("role") for row in credentials) == ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + (CREDENTIAL_ROLES[:17] + ("search-final", "default-after")) * 3
+             and all(type(row.get("status")) is int and row["status"] == 0
+                     and all(row.get(k) is True for k in ("entered", "returned", "settled")) for row in credentials)
+             and type(contexts) is list and len(contexts) == 3
+             and all(type(row) is dict for row in contexts)
+             and tuple(row.get("purpose") for row in contexts) == ("producer", "distribution-image", "observation-image")
+             and all(type(row) is dict and all(row.get(k) is True for k in ("retired", "closed", "searchRestored", "defaultUnchanged")) for row in contexts),
+             "final-image-package-credentials-settled")
+        mount = owner.get("packageMount")
+        need(type(mount) is dict and mount == {"attachEntered": True, "originalKnown": True, "detached": True,
+             "retained": False, "installerEntered": True, "installerOriginalZero": True,
+             "sameRequestV2Readback": True, "systemServiceExitClaimed": False}, "final-image-original-mount")
+        distribution = owner.get("distribution")
+        need(type(distribution) is dict and type(distribution.get("schemaVersion")) is int and distribution["schemaVersion"] == 1
+             and distribution.get("kind") == "mrk-ordinary-package-observed-v2"
+             and distribution.get("target") == self.target and distribution.get("release") == selection.release
+             and distribution.get("packageVersion") == selection.package_version
+             and type(distribution.get("packageBytes")) is int and distribution["packageBytes"] == len(package)
+             and all(distribution.get(k) is True for k in ("originalInstallerReturnedZero", "sameRequestV2Readback",
+                                                          "originalMountDetached", "groupEndpointMet", "originalOuterReturnRequired")),
+             "final-image-original-distribution")
+        request = distribution.get("requestId")
+        need(self.stager.maintenance_hex(request, 32)
+             and retained(self.work_entry, "package-request-id.txt", 33)[1] == (request + "\n").encode("ascii"),
+             "final-image-original-request")
+        _, observed_body = retained(self.work_entry, "installation-observation.json", self.stager.INSTALLER_RESULT_BYTES)
+        observed = self.stager.maintenance_json(observed_body, self.stager.INSTALLER_RESULT_BYTES)
+        need(type(observed) is dict and type(observed.get("schemaVersion")) is int and observed["schemaVersion"] == 2 and observed.get("requestId") == request
+             and observed.get("sourceCommit") == self.image_source and observed.get("release") == selection.release
+             and observed.get("completedPackageSha256") == digest(package)
+             and observed.get("originalInstallerReturnedZero") is True and observed.get("originalWriterJoined") is True
+             and observed.get("historicalOuterExit") == "unverified"
+             and observed.get("applicationLaunched") is False and observed.get("guiSaveQualified") is False
+             and observed.get("inventorySha256") == self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+             and observed.get("runtimeManifestSha256") == self.environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+             "final-image-original-readback")
+        nested = self.stager.maintenance_result_data(self.stager.canonical(observed.get("originalInstallerResult")) + b"\n", request)
+        need(nested["invocation"] == observed.get("invocation"), "final-image-readback-invocation")
+        _, audit_body = retained(self.work_entry, "package-audit.json", 16384)
+        audit = self.stager.maintenance_json(audit_body, 16384)
+        need(type(audit) is dict and audit.get("packageSha256") == digest(package) and type(audit.get("packageSize")) is int
+             and audit["packageSize"] == len(package) and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
+             and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified", "final-image-package-audit")
+        root = self.directory(self.work_entry, "producer-root", "final-image-producer-root")
+        names = {"Install.pkg", "producer.json", "producer.sig"}
+        need(set(os.listdir(root["fd"])) == names, "final-image-producer-roster")
+        self.final_image_roots.append((root, names))
+        need(retained(root, "Install.pkg", self.stager.MAX_BYTES, (0o444,))[1] == package, "final-image-producer-package")
+        _, descriptor = retained(root, "producer.json", self.stager.PRODUCER_DESCRIPTOR_BYTES, (0o444,))
+        _, signed = retained(root, "producer.sig", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
+        need(retained(self.work_entry, "producer-descriptor-input.json", self.stager.PRODUCER_DESCRIPTOR_BYTES)[1] == descriptor,
+             "final-image-descriptor-input")
+        self.stager.emitted_package_data(self.stager.canonical(distribution.get("producerSummary")) + b"\n", b"", 0,
+                                        package, descriptor, signed, target=self.target)
+        producer = self.stager.maintenance_producer_data(descriptor, target=self.target)
+        current = producer["releaseSet"]["current"]
+        need(current["sourceCommit"] == self.image_source and current["release"] == selection.release
+             and current["packageVersion"] == selection.package_version and current["protocolSha256"] == self.stager.CURRENT_PROTOCOL
+             and current["inventorySha256"] == observed["inventorySha256"]
+             and current["runtimeManifestSha256"] == observed["runtimeManifestSha256"]
+             and (distribution.get("packageSha256"), distribution.get("descriptorSha256"), distribution.get("signatureSha256"))
+                 == (digest(package), digest(descriptor), digest(signed)), "final-image-producer-current")
+        source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
+        need(distribution.get("sourceProducerProfileSha256") == source.producer_sha256
+             and distribution.get("sourceServiceProfileSha256") == source.service_sha256, "final-image-package-source-profiles")
+        image_root = self.directory(self.work_entry, "distribution", "final-image-original-distribution")
+        names = {"MobileReleaseKit.dmg", "MobileReleaseKit-Observation.dmg"}
+        need(set(os.listdir(image_root["fd"])) == names, "final-image-original-roster")
+        self.final_image_roots.append((image_root, names))
+        original = self.original(image_root, "MobileReleaseKit.dmg", "final-image-original", self.stager.MAX_BYTES, (0o444,))
+        original_sha = self.notary_stream(original)
+        self.final_image_inputs.append((original, original_sha))
+        need(distribution.get("userImage") == {"file": "MobileReleaseKit.dmg", "bytes": original["identity"][6], "sha256": original_sha},
+             "final-image-original-digest")
+        self.final_image_original = original
+        binding = {"target": self.target, "release": selection.release, "packageVersion": selection.package_version, "requestId": request,
+                   "packageInstallReceiptSha256": digest(owner_body), "finalPackageReceiptSha256": self.receipt["finalPackageReceiptSha256"],
+                   "packageBytes": len(package), "packageSha256": digest(package),
+                   "descriptorBytes": len(descriptor), "descriptorSha256": digest(descriptor),
+                   "signatureBytes": len(signed), "signatureSha256": digest(signed),
+                   "producerProfileSha256": source.producer_sha256, "serviceProfileSha256": source.service_sha256,
+                   "originalImageBytes": original["identity"][6], "originalImageSha256": original_sha}
+        return {"Install.pkg": package, "producer.json": descriptor, "producer.sig": signed}, binding
+
+    def final_image_copy(self):
+        self.recheck_directory(self.target_entry)
+        os.mkdir("final-image", 0o700, dir_fd=self.target_entry["fd"])
+        root = self.directory(self.target_entry, "final-image", "final-image-copy-root")
+        self.final_image_output_root = root
+        need(stat.S_IMODE(root["identity"][2]) == 0o700 and not os.listdir(root["fd"]), "final-image-copy-directory")
+        fd = os.open("MobileReleaseKit.dmg", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root["fd"])
+        entry = self.register(fd, "final-image-copy", "file", root["fd"], "MobileReleaseKit.dmg")
+        entry["parent_entry"] = root
+        self.final_image_output = entry
+        original = self.final_image_original
+        original_sha = self.notary_stream(original)
+        offset, copied = 0, hashlib.sha256()
+        while offset < original["identity"][6]:
+            self.notary_clock()
+            block = os.pread(original["fd"], min(1024 * 1024, original["identity"][6] - offset), offset)
+            need(block and len(block) <= original["identity"][6] - offset, "final-image-copy-short-input")
+            copied.update(block)
+            position = 0
+            while position < len(block):
+                self.notary_clock()
+                count = os.write(fd, block[position:])
+                need(count > 0, "final-image-copy-short-write")
+                position += count
+            offset += len(block)
+        os.fsync(fd)
+        info = os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1
+             and info.st_uid == os.getuid() and info.st_gid == os.getgid() and info.st_size == offset
+             and copied.hexdigest() == original_sha and self.notary_stream(original) == original_sha,
+             "final-image-copy-original")
+        entry["identity"] = signature(info)
+        self.final_image_sha = self.notary_stream(entry)
+        need(self.final_image_sha == original_sha, "final-image-copy-digest")
+        self.final_image_roots.append((root, {"MobileReleaseKit.dmg"}))
+
+    def final_image_mutated(self, before):
+        # Apple DiskImageRep rewrites a signature SuperBlob AND trailing UDIF
+        # header. This is not S3's appended PKG trailer; no prefix claim/offset guess.
+        entry = self.final_image_output
+        self.recheck_directory(entry["parent_entry"])
+        after = signature(os.fstat(entry["fd"]))
+        need(after[:6] == before[:6] and 0 < after[6] <= self.stager.MAX_BYTES
+             and abs(after[6] - before[6]) <= 1024 * 1024
+             and after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+             "final-image-stapled-original")
+        self.stager.no_xattrs(entry["fd"])
+        entry["identity"] = after
+        self.final_image_sha = self.notary_stream(entry)
+        self.notary_mutation_pending = False  # Same original only; native integrity/mount gates still required.
+
+    def final_image_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
+        need(self.phase in FINAL_IMAGE_PHASES and self.final_image_known() and not self.notary_retiring
+             and len(self.calls) < len(FINAL_IMAGE_ROLES) and role == FINAL_IMAGE_ROLES[len(self.calls)], "final-image-fixed-role-order")
+        need((self.notary_key is not None) == (role in ("final-image-submit", "final-image-log")), "final-image-private-role")
+        bounds = {"final-image-resolve-notarytool": (30, 4096), "final-image-resolve-stapler": (30, 4096),
+                  "final-image-submit": (1200, 65536), "final-image-log": (30, 1024 * 1024),
+                  "final-image-verify": (120, 65536), "final-image-attach": (60, 65536)}
+        need((maximum, limit) == bounds.get(role, (30, 65536)), "final-image-original-bound")
+        self.notary_post()
+        now, endpoint = self.notary_clock()
+        timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
+        need(timeout >= 1, "final-image-original-settlement-reserve")
+        environment = self.native_environment()
+        if developer:
+            environment["DEVELOPER_DIR"] = str(NOTARY_XCODE)
+        self.stage = role
+        changing = role == "final-image-staple"
+        before = self.final_image_output["identity"] if changing else None
+        self.notary_mutation_pending = changing
+        try:
+            result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
+            self.notary_clock()
+            if changing:
+                self.final_image_mutated(before)
+            self.notary_post()
+            return result
+        except BaseException:
+            if self.final_image_known():
+                try:
+                    self.notary_post()
+                except BaseException as error:
+                    self.notary_unknown = True
+                    self.errors.append({"stage": "final-image-failed-original-post", "type": type(error).__name__})
+            raise
+
+    def final_image_publish(self):
+        need(self.final_image_known() and self.notary_key is None and self.mount_known and self.mount_detached
+             and self.final_image_mount_verified, "final-image-publication-unknown")
+        self.notary_post()
+        self.stage = self.stager_io_pending = "final-image-owned-publication"
+        entry, old_parent = self.final_image_output, self.final_image_output_root
+        before, sha = entry["identity"], self.final_image_sha
+        os.fchmod(entry["fd"], 0o444)
+        os.fsync(entry["fd"])
+        after = signature(os.fstat(entry["fd"]))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o444 and after[3:8] == before[3:8]
+             and signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)) == after, "final-image-owned-mode-transition")
+        entry["identity"] = after
+        need(self.notary_stream(entry) == sha, "final-image-mode-bytes")
+        self.recheck_directory(self.work_entry)
+        os.mkdir("distribution-final", 0o700, dir_fd=self.work_entry["fd"])
+        parent = self.directory(self.work_entry, "distribution-final", "final-image-publication")
+        need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]), "final-image-exclusive-publication")
+        self.recheck_directory(old_parent)
+        need(os.listdir(old_parent["fd"]) == [entry["name"]], "final-image-publication-input")
+        os.rename(entry["name"], entry["name"], src_dir_fd=old_parent["fd"], dst_dir_fd=parent["fd"])
+        moved = signature(os.fstat(entry["fd"]))
+        need(moved[:8] == after[:8] and not os.listdir(old_parent["fd"])
+             and os.listdir(parent["fd"]) == [entry["name"]]
+             and signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)) == moved, "final-image-publication-original")
+        entry.update(parent=parent["fd"], parent_entry=parent, identity=moved)
+        self.final_image_roots = [(root, set() if root is old_parent else names) for root, names in self.final_image_roots]
+        self.final_image_roots.append((parent, {entry["name"]}))
+        os.fsync(parent["fd"]); os.fsync(old_parent["fd"]); os.fsync(self.work_entry["fd"])
+        need(self.notary_stream(entry) == sha, "final-image-published-bytes")
+        self.recheck_directory(old_parent); self.recheck_directory(parent)
+        self.notary_clock()
+        self.stager_io_pending = None
+        self.notary_post()
+
+    def finalize_image(self):
+        need(self.phase in FINAL_IMAGE_PHASES and self.signing is not None
+             and self.environment.get("GITHUB_REF") == "refs/heads/verify/desktop-macos-preview"
+             and not any(name in self.environment for name in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES),
+             "final-image-configured-purpose")
+        self.notary_space(reserve=True)
+        profile = self.source_original(NOTARY_PROFILE, "source-final-image-notary-profile", 1024)
+        profile_body = self.read(profile)
+        self.notary_profile = notary_service(profile_body, self.signing)
+        self.package_sources.append((profile, profile_body))
+        for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
+            entry = self.source_original("desktop/tools/" + filename, "source-final-image-driver", 512 * 1024)
+            self.package_sources.append((entry, self.read(entry)))
+        expected, binding = self.final_image_input()
+        self.final_image_io("final-image-owned-copy", self.final_image_copy)
+        self.notary_post()
+        for name in ("notarytool", "stapler"):
+            tool = self.notary_tool(name)
+            result = self.final_image_call("final-image-resolve-" + name, ["/usr/bin/xcrun", "--find", name], limit=4096, developer=True)
+            need(result.stdout in ((str(tool["fixed"]) + "\n").encode(), (str(tool["path"]) + "\n").encode())
+                 and not result.stderr, "final-image-tool-original")
+            self.notary_tool_post(tool)
+        path = self.work / self.target_name / "final-image/MobileReleaseKit.dmg"
+        requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop.distribution")
+        self.final_image_call("final-image-signature-before", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
+        submitted_sha = self.final_image_sha
+        tool = str(self.notary_tools["notarytool"]["path"])
+        with self.notary_key_scope() as key_arguments:
+            result = self.final_image_call("final-image-submit", [tool, "submit", str(path), "--wait", "--output-format", "json", *key_arguments],
+                                           maximum=1200, developer=True)
+            submission = notary_submit_data(result.stdout, archive_name="MobileReleaseKit.dmg")
+            self.receipt["notarySubmission"] = dict(submission)
+            invalid = Refused("final-image-notary-invalid") if submission["status"] == "Invalid" else None
+            try:
+                result = self.final_image_call("final-image-log", [tool, "log", submission["id"], *key_arguments], limit=1024 * 1024, developer=True)
+                log = notary_log_data(result.stdout, submission, submitted_sha, archive_name="MobileReleaseKit.dmg")
+            except BaseException as error:
+                if invalid is not None:
+                    self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
+                    raise invalid from None
+                raise
+            if invalid is not None:
+                raise invalid
+        need(self.notary_key is None and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True},
+             "final-image-notary-key-not-retired")
+        tool = str(self.notary_tools["stapler"]["path"])
+        self.final_image_call("final-image-staple", [tool, "staple", str(path)], developer=True)
+        self.final_image_call("final-image-validate", [tool, "validate", str(path)], developer=True)
+        self.final_image_call("final-image-signature-after", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
+        self.final_image_call("final-image-verify", ["/usr/bin/hdiutil", "verify", str(path)], maximum=120)
+        self.package_name = "Install.pkg"  # Actual mounted_post fixed roster, never the observation request alias.
+        self.mount_placeholder = self.final_image_io("final-image-mount-placeholder", self.package_directory, "package-mount")
+        attached = self.final_image_call("final-image-attach", ["/usr/bin/hdiutil", "attach", str(path), "-readonly", "-nobrowse",
+            "-noautoopen", "-mountpoint", str(self.work / "package-mount"), "-plist"], maximum=60)
+        self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, self.work / "package-mount")
+        fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
+        self.mount_entry = self.register(fd, "final-image-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
+        info = os.fstat(fd)
+        self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        self.mount_known = True
+        self.mount_inputs(expected, self.package_name)
+        self.mounted_post()
+        self.final_image_mount_verified = True
+        self.detach_package_mount()
+        self.notary_post()
+        self.final_image_publish()
+        self.notary_post()
+        self.sha256 = self.final_image_sha
+        self.receipt["finalImage"] = {"schemaVersion": 1, "kind": "mrk-final-user-image", **binding,
+            "submittedSha256": submitted_sha, "imageBytes": self.final_image_output["identity"][6], "imageSha256": self.sha256,
+            "imageMode": 0o444, "notaryProfileSha256": digest(profile_body), "submissionId": submission["id"], "status": submission["status"], **log,
+            "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
+            "finalMountReadOnly": True, "finalMountOriginalsMatch": True, "originalMountDetached": self.mount_detached,
+            "assurance": "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority"}
+        self.final_image_complete = True
+        self.notary_clock()
+
+    def installer_sources(self):
+        """One SOURCE-selected Installer chain, distinct from Application use."""
+        entry = self.source_original(INSTALLER_PROFILE, "source-installer-profile", 1024)
+        body = self.read(entry)
+        selected = installer_profile(body)
+        need(selected is not None and self.signing is not None and selected["teamId"] == self.signing[0]
+             and selected["leafSha1"] != self.signing[1], "installer-source-configuration")
+        self.package_sources.append((entry, body))
+        certificates = []
+        for name, field in (("leaf", "leafSha256"), ("issuer", "issuerSha256"), ("root", "rootSha256")):
+            certificate = self.source_original("desktop/packaging/macos-installer-certificates/" + name + ".der",
+                                               "source-installer-" + name, 16384)
+            value = self.read(certificate)
+            need(digest(value) == selected[field], "installer-source-certificate")
+            self.package_sources.append((certificate, value))
+            certificates.append(value)
+        need(hashlib.sha1(certificates[0]).hexdigest() == selected["leafSha1"], "installer-source-leaf")
+        self.installer_selection, self.installer_certificates = selected, tuple(certificates)
+        self.installer_profile_sha = digest(body)
+        return selected
+
+    def final_package_known(self):
+        # An Installer callback may hold its own known credential context. All
+        # other final-P work (including P8) requires that context to be absent.
+        return (not self.errors and not self.notary_unknown and not self.notary_mutation_pending
+                and not self.signing_mutation_pending and self.stager_io_pending is None
+                and self.credential_known() and not self.credential_failed
+                and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls))
+
+    def final_package_io(self, label, function, *args, **kwargs):
+        need(self.phase in FINAL_PACKAGE_PHASES and self.final_package_known() and not self.notary_retiring,
+             "final-package-io-unknown")
+        self.notary_clock()
+        self.stage = label
+        self.stager_io_pending = label
+        result = function(*args, **kwargs)
+        self.notary_clock()
+        self.stager_io_pending = None  # No thrown parse/close token is transferable completion.
+        return result
+
+    def final_package_post(self, *, work=True):
+        """The S2 post/clock supplies SOURCE, scripts, selected tools and P8."""
+        self.notary_clock(work=work)
+        for root, names in self.final_package_roots:
+            self.recheck_directory(root)
+            need(set(os.listdir(root["fd"])) == names, "final-package-directory-census")
+        for entry, sha in self.final_package_inputs:
+            need(self.notary_stream(entry, work=work) == sha, "final-package-input-changed")
+        if self.final_package_output is not None:
+            need(self.notary_stream(self.final_package_output, work=work) == self.final_package_sha,
+                 "final-package-output-changed")
+        if self.target_entry is not None:
+            self.recheck_directory(self.target_entry)
+            names = {"tmp"}
+            if self.final_package_output_root is not None:
+                names.add("signed-package")
+            if self.notary_key is not None:
+                names.add("notary-key")
+            need(set(os.listdir(self.target_entry["fd"])) == names, "final-package-target-census")
+            # The original tool TMPDIR may contain its own intermediate files;
+            # preserve its directory identity rather than adopt a replacement.
+            self.directory(self.target_entry, "tmp", "final-package-tmp")
+        self.notary_clock(work=work)
+
+    def final_package_audit(self, entry, path):
+        self.notary_post()
+        size, sha = entry["identity"][6], self.notary_stream(entry)
+        result = self.final_package_io("final-package-original-audit", self.stager.audit_command,
+            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / "scripts", package=path,
+                               original_package=self.work / "MobileReleaseKit-original.pkg"))
+        need(type(result) is dict and result.get("packageSize") == size and type(result["packageSize"]) is int
+             and result.get("packageSha256") == sha and self.notary_stream(entry) == sha,
+             "final-package-audit-original")
+        self.notary_post()
+        return result
+
+    def final_package_adopt_signed(self):
+        # Only the one expected output of our returned productsign original.
+        # This pending span also bars credential cleanup if acquisition fails.
+        self.stage = self.stager_io_pending = "final-package-signed-output"
+        parent = self.final_package_output_root
+        self.recheck_directory(parent)
+        need(os.listdir(parent["fd"]) == ["MobileReleaseKit.pkg"], "final-package-signed-roster")
+        entry = self.original(parent, "MobileReleaseKit.pkg", "final-package-signed-original", self.stager.MAX_BYTES,
+                              (0o400, 0o444, 0o600, 0o644))
+        self.final_package_output = entry
+        self.final_package_sha = self.notary_stream(entry)
+        self.final_package_roots.append((parent, {"MobileReleaseKit.pkg"}))
+        self.notary_clock()
+        self.stager_io_pending = None
+        self.signing_mutation_pending = False
+
+    def final_package_appended(self, before, before_sha):
+        """Bind the POST prefix to the PRE whole hash, never two POST reads."""
+        entry = self.final_package_output
+        self.recheck_directory(entry["parent_entry"])
+        after = signature(os.fstat(entry["fd"]))
+        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+             and after[:6] == before[:6] and before[6] < after[6] <= before[6] + 1024 * 1024
+             and after[6] <= self.stager.MAX_BYTES, "final-package-ticket-original")
+        # Only size/mtime/ctime may change during stapling. Mode/owner/link/
+        # identity and both original directories are unchanged throughout.
+        whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
+        self.stager.no_xattrs(entry["fd"])
+        while offset < after[6]:
+            self.notary_clock()
+            block = os.pread(entry["fd"], min(1024 * 1024, after[6] - offset), offset)
+            need(block and len(block) <= after[6] - offset, "final-package-ticket-short-read")
+            whole.update(block)
+            if offset < before[6]:
+                prefix.update(block[:before[6] - offset])
+            offset += len(block)
+        need(prefix.hexdigest() == before_sha and os.pread(entry["fd"], 1, offset) == b""
+             and signature(os.fstat(entry["fd"])) == after
+             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+             "final-package-signed-prefix-changed")
+        self.recheck_directory(entry["parent_entry"])
+        entry["identity"], self.final_package_sha = after, whole.hexdigest()
+        self.notary_mutation_pending = False  # Only after full same-original POST.
+
+    def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
+        need(self.phase in FINAL_PACKAGE_PHASES and self.final_package_known() and not self.notary_retiring
+             and len(self.calls) < len(FINAL_PACKAGE_ROLES) and role == FINAL_PACKAGE_ROLES[len(self.calls)],
+             "final-package-fixed-role-order")
+        need((self.notary_key is not None) == (role in ("final-package-submit", "final-package-log"))
+             and (self.credential_active is None or role == "final-package-sign"
+                  and self.credential_active.get("purpose") == "installer"), "final-package-private-role")
+        bounds = {"final-package-resolve-notarytool": (30, 4096), "final-package-resolve-stapler": (30, 4096),
+                  "final-package-sign": (60, 65536), "final-package-submit": (1200, 65536),
+                  "final-package-log": (30, 1024 * 1024)}
+        need((maximum, limit) == bounds.get(role, (30, 65536)), "final-package-original-bound")
+        self.notary_post()
+        now, endpoint = self.notary_clock()
+        timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
+        need(timeout >= 1, "final-package-original-settlement-reserve")
+        environment = self.native_environment()
+        if developer:
+            environment["DEVELOPER_DIR"] = str(NOTARY_XCODE)
+        self.stage = role
+        changing = role == "final-package-staple"
+        before = self.final_package_output["identity"] if changing else None
+        before_sha = self.final_package_sha if changing else None
+        self.notary_mutation_pending = changing
+        self.signing_mutation_pending = role == "final-package-sign"
+        try:
+            result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
+            self.notary_clock()
+            if role == "final-package-sign":
+                self.final_package_adopt_signed()
+            elif changing:
+                self.final_package_appended(before, before_sha)
+            self.notary_post()
+            return result
+        except BaseException:
+            if self.final_package_known():
+                try:
+                    self.notary_post()
+                except BaseException as error:
+                    self.notary_unknown = True
+                    self.errors.append({"stage": "final-package-failed-original-post", "type": type(error).__name__})
+            raise
+
+    def final_package_publish(self):
+        need(self.final_package_known() and self.credential_active is None and self.notary_key is None,
+             "final-package-publication-unknown")
+        self.notary_post()
+        self.stage = self.stager_io_pending = "final-package-mode-and-publication"
+        entry, old_parent = self.final_package_output, self.final_package_output_root
+        before, sha = entry["identity"], self.final_package_sha
+        os.fchmod(entry["fd"], 0o444)
+        os.fsync(entry["fd"])
+        after = signature(os.fstat(entry["fd"]))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o444 and after[3:8] == before[3:8]
+             and signature(os.stat(entry["name"], dir_fd=old_parent["fd"], follow_symlinks=False)) == after,
+             "final-package-owned-mode-transition")
+        entry["identity"] = after
+        need(self.notary_stream(entry) == sha, "final-package-mode-bytes")
+        self.recheck_directory(self.work_entry)
+        os.mkdir("package-final", 0o700, dir_fd=self.work_entry["fd"])
+        parent = self.directory(self.work_entry, "package-final", "final-package-publication")
+        need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]), "final-package-fresh-publication")
+        self.recheck_directory(old_parent)
+        need(os.listdir(old_parent["fd"]) == [entry["name"]], "final-package-move-input")
+        os.rename(entry["name"], entry["name"], src_dir_fd=old_parent["fd"], dst_dir_fd=parent["fd"])
+        moved = signature(os.fstat(entry["fd"]))
+        need(moved[:8] == after[:8] and not os.listdir(old_parent["fd"])
+             and os.listdir(parent["fd"]) == [entry["name"]]
+             and signature(os.stat(entry["name"], dir_fd=parent["fd"], follow_symlinks=False)) == moved,
+             "final-package-move-original")
+        entry.update(parent=parent["fd"], parent_entry=parent, identity=moved)
+        self.final_package_roots = [(root, set() if root is old_parent else names) for root, names in self.final_package_roots]
+        self.final_package_roots.append((parent, {entry["name"]}))
+        os.fsync(parent["fd"]); os.fsync(old_parent["fd"]); os.fsync(self.work_entry["fd"])
+        need(self.notary_stream(entry) == sha, "final-package-published-bytes")
+        self.recheck_directory(old_parent); self.recheck_directory(parent)
+        self.notary_clock()
+        self.stager_io_pending = None
+        self.notary_post()
+
+    def finalize_package(self):
+        need(self.phase in FINAL_PACKAGE_PHASES and self.signing is not None
+             and not any(name in self.environment for name in CREDENTIAL_VARIABLES), "final-package-configured-purpose")
+        self.notary_space(reserve=True)  # Existing3GiB floor plus2GiB additional reservation.
+        self.installer_sources()
+        profile = self.source_original(NOTARY_PROFILE, "source-final-package-notary-profile", 1024)
+        profile_body = self.read(profile)
+        self.notary_profile = notary_service(profile_body, self.signing)
+        self.package_sources.append((profile, profile_body))
+        for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
+            source = self.source_original("desktop/tools/" + filename, "source-final-package-driver", 512 * 1024)
+            self.package_sources.append((source, self.read(source)))
+        scripts = self.directory(self.work_entry, "scripts", "final-package-scripts")
+        self.notary_roots.append({"entry": scripts, "path": self.work / "scripts",
+                                  "snapshot": self.notary_snapshot(scripts, self.work / "scripts")})
+        parent = self.directory(self.work_entry, "package-unsigned", "final-package-unsigned")
+        need(os.listdir(parent["fd"]) == ["MobileReleaseKit.pkg"], "final-package-unsigned-roster")
+        self.final_package_roots.append((parent, {"MobileReleaseKit.pkg"}))
+        unsigned = self.original(parent, "MobileReleaseKit.pkg", "final-package-unsigned-original", self.stager.MAX_BYTES, (0o444, 0o600, 0o644))
+        packager = self.original(self.work_entry, "MobileReleaseKit-original.pkg", "final-package-packager-original", self.stager.MAX_BYTES,
+                                (0o444, 0o600, 0o644))
+        for entry in (unsigned, packager):
+            self.final_package_inputs.append((entry, self.notary_stream(entry)))
+        unsigned_audit = self.final_package_audit(unsigned, self.work / "package-unsigned/MobileReleaseKit.pkg")
+        def output_directory():
+            self.recheck_directory(self.target_entry)
+            os.mkdir("signed-package", 0o700, dir_fd=self.target_entry["fd"])
+            self.final_package_output_root = self.directory(self.target_entry, "signed-package", "final-package-signed-directory")
+            need(stat.S_IMODE(self.final_package_output_root["identity"][2]) == 0o700
+                 and not os.listdir(self.final_package_output_root["fd"]), "final-package-signed-directory-empty")
+        self.final_package_io("final-package-output-directory", output_directory)
+        for name in ("notarytool", "stapler"):
+            tool = self.notary_tool(name)
+            result = self.final_package_call("final-package-resolve-" + name, ["/usr/bin/xcrun", "--find", name], limit=4096, developer=True)
+            need(result.stdout in ((str(tool["fixed"]) + "\n").encode(), (str(tool["path"]) + "\n").encode())
+                 and not result.stderr, "final-package-tool-discovery-original")
+            self.notary_tool_post(tool)
+        path = self.work / self.target_name / "signed-package/MobileReleaseKit.pkg"
+        with self.credential_scope("installer"):
+            need(self.final_package_output is None and not os.listdir(self.final_package_output_root["fd"]), "final-package-sign-output-absent")
+            self.final_package_call("final-package-sign", ["/usr/bin/productsign", "--sign", self.installer_selection["identityCommonName"],
+                "--keychain", str(self.credential_active["path"] / "identity.keychain-db"), "--timestamp",
+                str(self.work / "package-unsigned/MobileReleaseKit.pkg"), str(path)], maximum=60)
+        need(self.credential_active is None and self.credential_known() and len(self.credential_calls) == 20,
+             "final-package-installer-context-not-retired")
+        signed_audit = self.final_package_audit(self.final_package_output, path)
+        need({key: value for key, value in signed_audit.items() if key not in ("packageSha256", "packageSize")}
+             == {key: value for key, value in unsigned_audit.items() if key not in ("packageSha256", "packageSize")},
+             "final-package-signed-audit-changed")
+        checked = self.final_package_call("final-package-signature-before", ["/usr/sbin/pkgutil", "--check-signature", str(path)])
+        need(not checked.stderr, "final-package-signature-stderr")
+        before_signature = package_signature_data(checked.stdout, self.installer_selection, self.installer_certificates, path)
+        signed_size, signed_sha = self.final_package_output["identity"][6], self.final_package_sha
+        tool = str(self.notary_tools["notarytool"]["path"])
+        with self.notary_key_scope() as key_arguments:
+            result = self.final_package_call("final-package-submit", [tool, "submit", str(path), "--wait", "--output-format", "json", *key_arguments],
+                                             maximum=1200, developer=True)
+            submission = notary_submit_data(result.stdout, archive_name="MobileReleaseKit.pkg")
+            self.receipt["notarySubmission"] = dict(submission)
+            invalid = Refused("final-package-notary-invalid") if submission["status"] == "Invalid" else None
+            try:
+                result = self.final_package_call("final-package-log", [tool, "log", submission["id"], *key_arguments],
+                                                 limit=1024 * 1024, developer=True)
+                log = notary_log_data(result.stdout, submission, signed_sha, archive_name="MobileReleaseKit.pkg")
+            except BaseException as error:
+                if invalid is not None:
+                    self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
+                    raise invalid from None
+                raise
+            if invalid is not None:
+                raise invalid
+        need(self.notary_key is None and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True},
+             "final-package-notary-key-not-retired")
+        tool = str(self.notary_tools["stapler"]["path"])
+        self.final_package_call("final-package-staple", [tool, "staple", str(path)], developer=True)
+        self.final_package_call("final-package-validate", [tool, "validate", str(path)], developer=True)
+        checked = self.final_package_call("final-package-signature-after", ["/usr/sbin/pkgutil", "--check-signature", str(path)])
+        need(not checked.stderr, "final-package-signature-stderr")
+        after_signature = package_signature_data(checked.stdout, self.installer_selection, self.installer_certificates, path)
+        need(after_signature == before_signature, "final-package-signature-changed")
+        final_audit = self.final_package_audit(self.final_package_output, path)
+        need({key: value for key, value in final_audit.items() if key not in ("packageSha256", "packageSize")}
+             == {key: value for key, value in unsigned_audit.items() if key not in ("packageSha256", "packageSize")},
+             "final-package-stapled-audit-changed")
+        self.final_package_publish()
+        self.sha256 = self.final_package_sha
+        self.receipt["finalPackage"] = {"schemaVersion": 1, "kind": "mrk-final-installer-package",
+            "unsignedBytes": unsigned["identity"][6], "unsignedSha256": unsigned_audit["packageSha256"],
+            "signedBytes": signed_size, "signedSha256": signed_sha, "packageBytes": self.final_package_output["identity"][6],
+            "packageSha256": self.sha256, "packageMode": 0o444, "originalPackageSha256": unsigned_audit["originalPackageSha256"],
+            "packageInfoSha256": final_audit["packageInfoSha256"], "scriptFileCount": final_audit["scriptFileCount"],
+            "installerProfileSha256": self.installer_profile_sha, "notaryProfileSha256": digest(profile_body),
+            "teamId": self.installer_selection["teamId"], "certificateSha256": before_signature["certificateSha256"],
+            "submissionId": submission["id"], "status": submission["status"], **log,
+            "trustedSignatureBeforeAndAfter": True, "trustedTimestampBeforeAndAfter": True,
+            "actualStaplerValidation": True, "signedPrefixUnchanged": True, "completeScriptsAudited": True,
+            "assurance": "final-package-observation-not-installed-or-final-carrier-authority"}
+        self.final_package_complete = True
+        self.notary_clock()
+
+    def package_finalization_input(self, original, body):
+        """Require the actual closed preceding original and exact final P."""
+        self.package_clock()
+        self.installer_sources()
+        profile = self.source_original(NOTARY_PROFILE, "source-package-notary-profile", 1024)
+        profile_body = self.read(profile)
+        notary_service(profile_body, self.signing)
+        self.package_sources.append((profile, profile_body))
+        status = self.original(self.work_entry, "package-finalization.status", "final-package-status", 8, (0o400, 0o444, 0o600, 0o644))
+        status_body = self.read(status)
+        need(status_body == b"0\n", "package-finalization-original-status")
+        receipt = self.original(self.work_entry, "android-helper-finalize-package.json", "final-package-receipt", 16384, (0o600,))
+        receipt_body = self.read(receipt)
+        value = final_package_receipt(receipt_body, self.environment, self.target, self.installer_selection,
+                                      self.installer_profile_sha, digest(profile_body), len(body), digest(body),
+                                      self.image_release, digest(self.read(self.release_entry)))
+        need(self.read(original) == body, "package-finalization-package-post")
+        self.package_outputs.extend(((status, digest(status_body)), (receipt, digest(receipt_body))))
+        self.receipt["finalPackageReceiptSha256"] = digest(receipt_body)
+        self.package_clock()
+        return value
 
     def native_environment(self):
         return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.work),
@@ -1799,6 +3476,8 @@ class Operation:
                             residentImageOriginal=image["identity"])
 
     def package_clock(self):
+        if self.phase in FINAL_IMAGE_PHASES:
+            return self.notary_clock()[0]  # Same clock; never the package-install990s endpoint.
         now = time.monotonic_ns()
         need(type(now) is int and type(self.package_endpoint) is int
              and self.package_started <= self.package_observed <= now < self.package_endpoint, "package-group-deadline")
@@ -1834,6 +3513,11 @@ class Operation:
         return result
 
     def package_call(self, role, argv, *, environment=None, timeout=30, limit=65536, cwd=None):
+        if self.phase in FINAL_IMAGE_PHASES:
+            need(role == "distribution-detach" and argv == ["/usr/bin/hdiutil", "detach", self.mount_device]
+                 and timeout == 30 and limit == 65536 and environment is None and cwd is None,
+                 "final-image-fixed-detach-route")
+            return self.final_image_call("final-image-detach", argv)
         need(self.package_settled(), "package-io-finality-unknown")
         timeout = package_timeout_data(self.package_clock(), self.package_endpoint, timeout)
         result = self.call(role, argv, self.native_environment() if environment is None else environment,
@@ -1887,6 +3571,7 @@ class Operation:
         self.package_clock()
 
     def package_image(self, root, label):
+        need(label in ("distribution", "observation"), "package-image-fixed-label")
         path = self.work / "distribution" / ("MobileReleaseKit.dmg" if label == "distribution" else "MobileReleaseKit-Observation.dmg")
         identifier = "dev.mobile-release-kit.desktop." + label
         self.package_call(label + "-create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(self.work / root["name"]),
@@ -1894,21 +3579,22 @@ class Operation:
         self.package_post()
         # Only this fresh task-owned image is signed. SOURCE selects the exact
         # identity; missing credentials never fall back to an ad-hoc identity.
-        self.package_call(label + "-sign", ["/usr/bin/codesign", "--sign", self.signing[1], "--timestamp",
-            "--identifier", identifier, str(path)], timeout=60)
-        image = self.original(self.distribution_entry, path.name, label + "-signed-image", self.stager.MAX_BYTES, (0o600, 0o644, 0o444))
-        body = self.read(image)
-        before = image["identity"]
-        os.fchmod(image["fd"], 0o444)  # Authorized metadata change on our newly-created original only.
-        os.fsync(image["fd"])
-        after = signature(os.fstat(image["fd"]))
-        need(after[:2] == before[:2] and after[3:8] == before[3:8]
-             and after[2] == stat.S_IFREG | 0o444, "package-image-mode-transition")
-        image["identity"] = after  # fchmod may legitimately change ctime; bytes/other identity stay exact.
-        need(self.read(image) == body, "package-image-mode-bytes")
-        self.package_outputs.append((image, digest(body)))
-        self.package_call(label + "-verify-signature", ["/usr/bin/codesign", "--verify", "--strict",
-            "--test-requirement", signing_requirement(self.signing, identifier), str(path)])
+        with self.credential_scope(label + "-image"):
+            self.package_call(label + "-sign", ["/usr/bin/codesign", "--sign", self.signing[1], "--timestamp",
+                "--identifier", identifier, str(path)], timeout=60)
+            image = self.original(self.distribution_entry, path.name, label + "-signed-image", self.stager.MAX_BYTES, (0o600, 0o644, 0o444))
+            body = self.read(image)
+            before = image["identity"]
+            os.fchmod(image["fd"], 0o444)  # Authorized metadata change on our newly-created original only.
+            os.fsync(image["fd"])
+            after = signature(os.fstat(image["fd"]))
+            need(after[:2] == before[:2] and after[3:8] == before[3:8]
+                 and after[2] == stat.S_IFREG | 0o444, "package-image-mode-transition")
+            image["identity"] = after  # fchmod may legitimately change ctime; bytes/other identity stay exact.
+            need(self.read(image) == body, "package-image-mode-bytes")
+            self.package_outputs.append((image, digest(body)))
+            self.package_call(label + "-verify-signature", ["/usr/bin/codesign", "--verify", "--strict",
+                "--test-requirement", signing_requirement(self.signing, identifier), str(path)])
         self.package_call(label + "-verify-image", ["/usr/bin/hdiutil", "verify", str(path)], timeout=120)
         self.package_post()
         return {"file": path.name, "sha256": digest(body), "bytes": len(body)}, path
@@ -1993,13 +3679,16 @@ class Operation:
         source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
         need(self.signing == (source.team, source.leaf_sha1), "package-source-signing-selection")
         original = self.original(self.directory(self.work_entry, "package-final", "package-final"), "MobileReleaseKit.pkg",
-                                 "final-package-original", self.stager.MAX_BYTES, (0o600, 0o644, 0o444))
+                                 "final-package-original", self.stager.MAX_BYTES, (0o444,))
         body = self.read(original)
+        finalization = self.package_finalization_input(original, body)
         audit = self.package_stager_io("final-audit", argparse.Namespace(target=self.target, fixture=False,
             scripts=self.work / "scripts", package=self.work / "package-final/MobileReleaseKit.pkg",
             original_package=self.work / "MobileReleaseKit-original.pkg"))
         need(audit["packageSha256"] == digest(body) and audit["packageSize"] == len(body)
-             and self.read(original) == body, "package-final-audit-original")
+             and self.read(original) == body
+             and all(audit[key] == finalization[key] for key in ("originalPackageSha256", "packageInfoSha256", "scriptFileCount")),
+             "package-final-audit-original")
         self.package_outputs.append((original, digest(body)))
         self.publish("package-audit.json", self.stager.canonical(audit) + b"\n")
         self.package_clock()
@@ -2150,6 +3839,8 @@ class Operation:
     def finish(self):
         if self.phase in PYTHON_PHASES:
             self.python_retirement()
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+            self.notary_retirement()
         # Close every artifact/output/descendant first. Raised or malformed
         # original calls and any unknown close prevent target deletion.
         for entry in self.entries:
@@ -2161,6 +3852,7 @@ class Operation:
         if (self.target_entry and mount_safe and self.credential_known() and self.credential_active is None
                 and not self.signing_mutation_pending and self.stager_io_pending is None and not self.python_mutation_pending
                 and ordinary_closes and not self.errors
+                and (self.phase not in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.notary_retiring and self.notary_known() and self.notary_key is None)
                 and all(call["returned"] and call.get("capturesSettled") is True for call in self.calls)):
             try:
                 work_fd, target_fd = self.work_entry["fd"], self.target_entry["fd"]
@@ -2173,7 +3865,11 @@ class Operation:
                 if self.phase in PYTHON_PHASES:
                     need(self.python_retiring, "python-retirement-not-admitted")
                     self.python_clock(work=False)
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+                    self.notary_clock(work=False)
                 shutil.rmtree(self.target_name, dir_fd=work_fd)
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+                    self.notary_clock(work=False)
                 if self.phase in PYTHON_PHASES:
                     self.python_clock(work=False)
                 if self.phase == "package-install" and self.package_endpoint is not None:
@@ -2194,6 +3890,10 @@ class Operation:
                 "detached": self.mount_detached, "retained": self.mount_entered and not self.mount_detached,
                 "installerEntered": self.installer_entered, "installerOriginalZero": self.installer_zero,
                 "sameRequestV2Readback": self.installation_readback, "systemServiceExitClaimed": False}
+        if self.phase in FINAL_IMAGE_PHASES:
+            self.receipt["finalImageMount"] = {"attachEntered": self.mount_entered, "originalKnown": self.mount_known,
+                "detached": self.mount_detached, "retained": self.mount_entered and not self.mount_detached,
+                "installerEntered": self.installer_entered, "systemServiceExitClaimed": False}
         self.receipt["directStagerIOPending"] = self.stager_io_pending
         if self.phase in PYTHON_PHASES and self.python_started is not None:
             try:
@@ -2202,11 +3902,16 @@ class Operation:
                 self.errors.append({"stage": "python-post-close-deadline", "type": type(error).__name__})
         self.receipt["originalClosesKnown"] = (self.credential_known() and self.credential_active is None and not self.signing_mutation_pending
                                                and self.stager_io_pending is None and not self.python_mutation_pending
+                                               and (self.phase not in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or not self.notary_unknown
+                                                    and not self.notary_mutation_pending and self.notary_key is None)
                                                and all(entry["closed"] for entry in self.entries))
         self.receipt["cleanupErrors"] = self.errors
 
     def execute(self, expected=None):
         try:
+            if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+                self.notary_started = self.notary_observed = time.monotonic_ns()
+                self.notary_clock()
             if self.phase in PYTHON_PHASES:
                 self.python_started = self.python_observed = time.monotonic_ns()
                 self.python_clock()
@@ -2218,7 +3923,7 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "python-shipping") + SIGNING_PHASES)
+                allow_unconfigured=self.phase not in ("package-install", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
@@ -2233,6 +3938,12 @@ class Operation:
                     self.package_install()
                 elif self.phase in SIGNING_PHASES:
                     self.fixed_sign()
+                elif self.phase in NOTARY_PHASES:
+                    self.notarize_payload()
+                elif self.phase in FINAL_PACKAGE_PHASES:
+                    self.finalize_package()
+                elif self.phase in FINAL_IMAGE_PHASES:
+                    self.finalize_image()
                 else:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
@@ -2247,14 +3958,18 @@ class Operation:
                 if type(number) is int and 0 < number < 65536:
                     self.receipt["failure"]["errno"] = number
         finally:
-            if (self.phase == "package-install" and self.mount_known and not self.mount_detached
-                    and not self.installer_entered and self.package_settled()):
+            if (self.phase in ("package-install",) + FINAL_IMAGE_PHASES and self.mount_known and not self.mount_detached
+                    and not self.installer_entered and self.package_settled()
+                    and (self.phase not in FINAL_IMAGE_PHASES or self.final_image_known())):
                 try:
                     self.detach_package_mount()  # Pure pre-Installer refusal only, original attach/close/clock known.
                 except BaseException as error:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
-        roles = (PYTHON_ROLES if self.phase in PYTHON_PHASES else
+        roles = (FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
+                 FINAL_PACKAGE_ROLES if self.phase in FINAL_PACKAGE_PHASES else
+                 NOTARY_ROLES if self.phase in NOTARY_PHASES else
+                 PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
                  PREPARE_ROLES if self.phase == "prepare" else
                  (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES else (self.phase, self.phase + "-resident-image"))
@@ -2269,9 +3984,21 @@ class Operation:
                                        and (call["returncode"] == 0 or self.phase == "package-install"
                                        and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1) for call in self.calls)
                                   and self.sha256 is not None
+                                  and (self.phase not in FINAL_PACKAGE_PHASES or self.final_package_complete and self.notary_known()
+                                       and self.notary_key is None and tuple(row["role"] for row in self.credential_calls) == INSTALLER_CREDENTIAL_ROSTER
+                                       and len(self.credential_contexts) == 1 and self.credential_contexts[0]["purpose"] == "installer"
+                                       and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
+                                   and (self.phase not in FINAL_IMAGE_PHASES or self.final_image_complete and self.final_image_known()
+                                        and self.final_image_mount_verified and self.mount_detached and not self.installer_entered
+                                        and self.notary_key is None
+                                        and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
+                                    and (self.phase not in NOTARY_PHASES or self.notary_complete and self.notary_known()
+                                        and self.notary_result is not None and self.notary_key is None
+                                        and not self.credential_calls and not self.credential_contexts
+                                        and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
                                   and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase not in PYTHON_PHASES
-                                            and (self.phase == "package-install" or self.resident_image_sha256 is not None
+                                            and (self.phase == "package-install" or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
@@ -2287,7 +4014,11 @@ class Operation:
                 self.python_publish_final("python3", self.python_signed, 0o555)
                 capsule = (json.dumps(self.python_capsule(), sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
                 self.python_publish_final("python-signed-receipt.json", capsule, 0o444)
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+            self.notary_clock(work=False)
         self.publish_receipt()
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+            self.notary_clock(work=False)
         if self.phase in PYTHON_PHASES and self.receipt["passed"]:
             self.python_clock(work=False)
         if self.phase == "package-install" and self.receipt["passed"]:
@@ -2333,6 +4064,8 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    if phase in FINAL_IMAGE_PHASES:
+        need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
     python_phase = phase in PYTHON_PHASES
     if python_phase:
         need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
@@ -2371,7 +4104,9 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "python-shipping") + SIGNING_PHASES)
+                                     allow_unconfigured=phase not in ("package-install", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
+        if phase in FINAL_PACKAGE_PHASES:
+            need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
         operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target)
@@ -2382,6 +4117,12 @@ def main():
             print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
             print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
             print("image-release-id=" + operation.image_release, flush=True)
+        if phase in NOTARY_PHASES:
+            operation.notary_clock(work=False)
+            body = operation.notary_result.decode("ascii")
+            need(sys.stdout.write(body) == len(body), "notary-final-stdout-short-write")
+            sys.stdout.flush()
+            operation.notary_clock(work=False)
         return 0
     except BaseException:
         # Native/owner messages can contain local paths. Exact bounded command

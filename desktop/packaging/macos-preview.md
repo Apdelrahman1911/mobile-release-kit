@@ -20,8 +20,16 @@ Rust, Node.js or the CLI to try the application.
   are currently unconfigured, so no qualified ordinary installed preview is
   available from them. Credential-free engineering fixtures do **not** satisfy
   this requirement; an unsigned/ad-hoc fixture is not an ordinary V2 package.
-- Notarization and Gatekeeper qualification are separate, still-required
-  distribution evidence; a producer signature alone does not establish them.
+- This delivery route additionally requires the separate SOURCE-selected
+  Developer ID Installer identity and Apple notary authentication. It admits
+  only the finalized payload, Installer package and user DMG after their own
+  actual signing/notary/stapler checks; unavailable credentials mean no preview.
+  The original user DMG is retained unchanged. Only a separate finalized copy
+  whose read-only mount contains the exact `Install.pkg`, `producer.json` and
+  `producer.sig` can be exported; there is no fallback to the unstapled image.
+- Downloaded-image/Installer interaction and Gatekeeper qualification remain
+  separate, required distribution evidence; an Accepted notary result alone
+  does not prove those checks or application/worker lifecycle completion.
   Do not disable Gatekeeper, strip quarantine or change security settings to
   force installation/open. Report a refusal rather than treating it as a pass.
 - Installer requires normal macOS administrator approval to place protected
@@ -36,7 +44,10 @@ The adjacent **PREVIEW.json** identifies the exact source commit/tree,
 GitHub workflow/run/attempt, DMG/package/producer-sidecar SHA-256 values,
 request-correlated installed inventory and runtime SHA-256. Its results
 distinguish normal build, original Installer status and V2 readback from UI,
-signing-account, notarization or distribution acceptance.
+signing-account or complete distribution acceptance. Its final-carrier fields
+bind the raw preceding receipt, original/final image hashes, original0 and
+scoped native verification/mount observations. They do not turn synthetic DATA
+checks into native notarization, downloaded-install or Gatekeeper evidence.
 
 ## Install and open without a terminal
 

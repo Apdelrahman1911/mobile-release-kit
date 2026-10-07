@@ -8052,7 +8052,11 @@ def phase_mac_compile(name: str, context: dict) -> None:
         clean_compile(context)
         return
     started = time.monotonic()
-    deadline = started + (900 if name == "acquire" else 1500)
+    # Intel cold compilation measured 1120s for the first release graph.
+    # Preserve all three profiles/jobs1; only its aggregate scheduling
+    # budget differs. Every original cap and the 30s reserve stay fixed.
+    deadline = started + (900 if name == "acquire" else
+                          2700 if context["macCompile"]["target"] == "x86_64-apple-darwin" else 1500)
     previous = started
     def remaining(cap: int) -> int:
         nonlocal previous

@@ -162,8 +162,43 @@ class ShellCompileContractTests(unittest.TestCase):
             with self.assertRaises(helper.CheckFailure):
                 helper.mac_compile_release(b'{"schemaVersion":1,"schemaVersion":1}', target, cargo, tauri)
         workflow = (HELPER.parents[2] / helper.MAC_COMPILE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertIn("os: macos-26\n", workflow)
-        self.assertIn("os: macos-26-intel\n", workflow)
+        # Exact closed Actions expression, not an evaluator or a free-form matrix.
+        arm_row = '{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin"}'
+        intel_row = '{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin"}'
+        matrix = ("        include: ${{ fromJSON(inputs.target == 'arm' && '[" + arm_row + "]' || "
+                  "inputs.target == 'intel' && '[" + intel_row + "]' || '[" + arm_row + ',' + intel_row + "]') }}\n")
+        self.assertEqual(workflow.count(matrix), 1)
+        self.assertIn("      target:\n"
+                      "        description: Fixed compiler target (both by default)\n"
+                      "        required: false\n"
+                      "        type: choice\n"
+                      "        default: both\n"
+                      "        options: [both, arm, intel]\n", workflow)
+        self.assertIn("      MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}\n", workflow)
+        admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(
+            "      - name: Check out exact source without persisted credentials\n", 1)[0]
+        self.assertIn('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then\n'
+                      '            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]\n'
+                      '            case "$MRK_COMPILE_SELECTION" in\n'
+                      '              both) ;;\n'
+                      '              arm) [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;\n'
+                      '              intel) [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin ]] ;;\n'
+                      '              *) exit 1 ;;\n'
+                      '            esac\n'
+                      '          else\n'
+                      '            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both ]]\n'
+                      '          fi\n', admission)
+        self.assertIn('[[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]', admission)
+        self.assertIn('[[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-normal-compile ]]', admission)
+        self.assertIn('[[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-normal-compile.yml@$GITHUB_REF" ]]', admission)
+        self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', admission)
+        header = workflow.split('    steps:\n', 1)[0]
+        self.assertIn("    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 65 || 45 }}\n", header)
+        self.assertIn('      fail-fast: false\n      max-parallel: 2\n', header)
+        acquire = workflow.split('      - name: Acquire locked active-platform inputs without npm scripts\n', 1)[1].split('      - name:', 1)[0]
+        compile_step = workflow.split('      - name: Compile actual frontend and native shell without launching them\n', 1)[1].split('      - name:', 1)[0]
+        self.assertIn('        timeout-minutes: 15\n', acquire)
+        self.assertIn("        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 47 || 25 }}\n", compile_step)
         self.assertIn("desktop-macos-normal-compile-${{ matrix.target }}-", workflow)
         self.assertNotIn("ubuntu-", workflow)
         self.assertNotIn("windows-2025", workflow)
@@ -370,6 +405,7 @@ class ShellCompileContractTests(unittest.TestCase):
             helper.phase_mac_compile("compile", bound)
             builds = [(argv, kw) for argv, kw in calls if kw["check"] in {row[0] for row in helper.MAC_COMPILE_GRAPHS}]
             self.assertEqual(len(builds), 3)
+            self.assertEqual([kw["timeout"] for _, kw in builds], [1470, 1470, 1470])
             self.assertEqual([argv[1] for argv, _ in builds], ["build", "test", "build"])
             self.assertEqual([argv[argv.index("--target-dir") + 1] for argv, _ in builds], [bound["root"] + "/target"] * 3)
             self.assertEqual(builds[0][0][-5:], ["--release", "--features", "desktop-shell,custom-protocol", "--bin", "mobile-release-kit-desktop"])
@@ -391,6 +427,7 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.phase_mac_compile("compile", intel)
             intel_builds = [(argv, kw) for argv, kw in calls if kw["check"] in {row[0] for row in helper.MAC_COMPILE_GRAPHS}]
             self.assertEqual(len(intel_builds), 3)
+            self.assertEqual([kw["timeout"] for _, kw in intel_builds], [1500, 1500, 1500])
             for argv, kw in intel_builds:
                 self.assertEqual(argv[argv.index("--target") + 1], "x86_64-apple-darwin")
                 self.assertEqual(kw["env"]["MRK_IMAGE_RELEASE_ID"], intel["macCompile"]["release"])
@@ -423,6 +460,56 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.phase_mac_compile("compile", bound)
             # Retained bytes are diagnostic only without this original phase0.
             self.assertEqual(len(receipts), 1)
+
+            # Synthetic scheduling DATA only, not measured Intel completion.
+            # Each original retains its1500s cap and all share the same endpoint.
+            calls.clear(); receipts.clear(); clock[0] = 100.0
+            elapsed = {"mac-normal-bin-compile-only": 1120.0,
+                       "mac-observer-compile-only": 555.0,
+                       "mac-image-compile-only": 515.0}
+            def elapsed_original(argv, **kw):
+                result = invoke(argv, **kw)
+                clock[0] += elapsed.get(kw["check"], 0.0)
+                return result
+            with patch.object(helper, "mac_compile_inputs", return_value=intel["macCompile"]), \
+                    patch.object(helper, "run", side_effect=elapsed_original):
+                helper.phase_mac_compile("compile", intel)
+            progressed = [(argv, kw) for argv, kw in calls if kw["check"] in elapsed]
+            self.assertEqual([kw["check"] for _, kw in progressed], list(elapsed))
+            self.assertEqual([kw["timeout"] for _, kw in progressed], [1500, 1500, 995])
+            self.assertEqual([argv for argv, _ in progressed], [argv for argv, _ in intel_builds])
+            self.assertEqual(clock[0], 2290.0)
+            self.assertEqual(len(receipts), 1)
+
+            for selected, budget in ((bound, 1500), (intel, 2700)):
+                with self.subTest(target=selected["macCompile"]["target"]), \
+                        patch.object(helper, "mac_compile_inputs", return_value=selected["macCompile"]):
+                    calls.clear(); receipts.clear(); clock[0] = 100.0
+                    with patch.object(helper, "run", side_effect=failed), self.assertRaisesRegex(helper.CheckFailure, "original compiler failed"):
+                        helper.phase_mac_compile("compile", selected)
+                    self.assertFalse(receipts)
+                    self.assertFalse(any(kw["check"] in ("mac-observer-compile-only", "mac-image-compile-only") for _, kw in calls))
+                    for returned_clock in (100.0 + budget - 30, 99.0):
+                        calls.clear(); receipts.clear(); clock[0] = 100.0
+                        def expired_original(argv, **kw):
+                            result = invoke(argv, **kw)
+                            if kw["check"] == "mac-normal-bin-compile-only":
+                                clock[0] = returned_clock
+                            return result
+                        with patch.object(helper, "run", side_effect=expired_original), self.assertRaisesRegex(
+                                helper.CheckFailure, "endpoint expired or clock reversed"):
+                            helper.phase_mac_compile("compile", selected)
+                        self.assertFalse(receipts)
+                        self.assertFalse(any(kw["check"] in ("mac-observer-compile-only", "mac-image-compile-only") for _, kw in calls))
+                    calls.clear(); receipts.clear(); clock[0] = 100.0
+                    def expired_publication(*args, **kw):
+                        receipts.append((args, kw))
+                        clock[0] = 100.0 + budget - 30
+                    with patch.object(helper, "phase_receipt", side_effect=expired_publication), self.assertRaisesRegex(
+                            helper.CheckFailure, "endpoint expired or clock reversed"):
+                        helper.phase_mac_compile("compile", selected)
+                    self.assertEqual(len(receipts), 1)
+                    self.assertEqual(sum(kw["check"] in elapsed for _, kw in calls), 3)
 
 
 if __name__ == "__main__":

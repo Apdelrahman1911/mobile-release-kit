@@ -749,9 +749,116 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
         # All native commands now use the fixed original owner; only the local
         # affected selection adds new helper tests, never the existing native84.
-        self.assertIn('    timeout-minutes: 300\n', workflow)
+        self.assertIn('    timeout-minutes: 350\n', workflow)
         ceilings = [int(value) for value in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
-        self.assertEqual((len(ceilings), sum(ceilings)), (38, 266))
+        self.assertEqual((len(ceilings), sum(ceilings)), (40, 359))
+        # Full fixed step/condition census: an unknown condition cannot silently
+        # disappear from this budget. Cleanup is conservatively in BOTH refs.
+        expected_routes = (('Select the fixed configured signed runtime before any payload download', 1, None),
+         ('Admit the fixed image Rust tools without installing a distribution', 4, None),
+         ('Admit only a fresh independently pinned Python transport destination', 1, None),
+         ('Download the independently accepted fresh Python transport', 3, None),
+         ('Project the pinned fresh Python transport without executing it', 3, None),
+         ('Download only the configured signed Python capsule', 3, None),
+         ('Project the configured capsule as DATA without executing it', 3, None),
+         ('Prepare the current payload from the independently accepted fresh Python supplier', 3, None),
+         ('Build only the external normal-app XCTest runner, not an instrumented app',
+          9,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview'"),
+         ('Fail fast on native Scripts ownership and package format (never Installer)', 2, None),
+         ('Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive',
+          2,
+          "github.ref == 'refs/heads/verify/desktop-macos-installed'"),
+         ('Acquire and verify the two fixed Android support archives as DATA', 4, None),
+         ('Require the fixed SOURCE producer identity and release before ordinary signing', 1, None),
+         ('Build and sign the fixed resident image and C facades', 10, None),
+         ('Build and sign the separate fixed vault helper before binding the app', 8, None),
+         ('Build the ordinary selected-target desktop image and embedded frontend', 24, None),
+         ('Record the effective pinned compiler from the successful build context', 1, None),
+         ('Compile and run only fixed native DATA contracts and exact host-Python regressions',
+          28,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview'"),
+         ('Assemble the ordinary image app and sign code inside-out (never --deep)', 3, None),
+         ('Bind this completed signed app and current-source runtime into fresh Installer DATA', 32, None),
+         ('Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)',
+          12,
+          "github.ref == 'refs/heads/verify/desktop-macos-installed'"),
+         ('Build the separate fixed eight-case Installer package from the same completed input', 8, None),
+         ('Standard Installer runs the one fixed fixture, never root libtest or a scenario selector', 18, None),
+         ('Nonroot fixture readback leaves protected0700 staging closed and unchanged', 3, None),
+         ('Build the fixed one-shot root Installer and scripts-only package', 8, None),
+         ('Sign and notarize the completed scripts-only Installer package before final P', 32, None),
+         ('Standard Installer only is privileged; never execute the app or Python as root', 18, None),
+         ('Notarize, staple and verify only the final user image',
+          32,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview'"),
+         ('Stage only the audited normal early-preview deliverables',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview'"),
+         ('Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally',
+          7,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && "
+          "steps.preview_upload.outcome == 'success'"),
+         ('Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'"),
+         ('Exercise normal project edits, images and four draft-only Browse fields',
+          16,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"),
+         ('Verify both selected project journeys against their original XCTest result',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'"),
+         ('Exercise synthetic encrypted credentials through the ordinary Mac UI',
+          11,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"),
+         ('Bind the single persistence journey to original XCTest and app-helper evidence',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == "
+          "'success'"),
+         ('Observe one original build-tool diagnostics report through the ordinary Mac UI',
+          11,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == "
+          "'success'"),
+         ('Bind the single diagnostics journey to original XCTest and the same ordinary package',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == "
+          "'success'"),
+         ('Observe saved offline checks and empty build-input inspection through the ordinary Mac UI',
+          17,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == "
+          "'success'"),
+         ('Bind both saved-check journeys to original XCTest and the same ordinary package',
+          3,
+          "github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == "
+          "'success'"),
+         ("Remove only this completed preview build's disposable compiler outputs",
+          3,
+          "always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && "
+          "steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' "
+          "&& steps.normal_diagnostics_ui_result.outcome == 'success' && steps.normal_saved_checks_ui_result.outcome == "
+          "'success' && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'"))
+        actual_routes = []
+        for block in re.findall(r"(?ms)^      - name: .*?(?=^      - name: |\Z)", workflow):
+            caps = re.findall(r"^        timeout-minutes: ([0-9]+)$", block, re.M)
+            if not caps:
+                continue
+            self.assertEqual(len(caps), 1)
+            conditions = re.findall(r"^        if: (.+)$", block, re.M)
+            self.assertLessEqual(len(conditions), 1)
+            actual_routes.append((block.splitlines()[0][len("      - name: "):], int(caps[0]), conditions[0] if conditions else None))
+        self.assertEqual(tuple(actual_routes), expected_routes)
+        preview_ref = "github.ref == 'refs/heads/verify/desktop-macos-preview'"
+        installed_ref = "github.ref == 'refs/heads/verify/desktop-macos-installed'"
+        cleanup_name = "Remove only this completed preview build's disposable compiler outputs"
+        preview_minutes = sum(minutes for name, minutes, condition in actual_routes if condition != installed_ref)
+        installed_minutes = sum(minutes for name, minutes, condition in actual_routes
+                                if name == cleanup_name or condition is None or condition == installed_ref)
+        self.assertTrue(all(name == cleanup_name or condition is None or condition == installed_ref
+                            or condition == preview_ref or condition.startswith(preview_ref + " && steps.")
+                            for name, minutes, condition in actual_routes))
+        self.assertEqual((preview_minutes, installed_minutes), (345, 210))
+        self.assertEqual(max(preview_minutes, installed_minutes) + 5, 350)
+        self.assertLessEqual(350, 360)
         self.assertEqual(workflow.count('desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary '), 5)
         build = blocks['normal_ui_build']
         self.assertIn('timeout-minutes: 9', build)

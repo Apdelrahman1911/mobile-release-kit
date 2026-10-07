@@ -1548,6 +1548,101 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
             "instrumented": True, "qualification": "observer-executable-data-not-image-or-launched"}
 
 
+def final_image_receipt_data(body, *, selection, binding, request, package, descriptor, signed,
+                             original_image, package_owner, final_package, release_body, profiles):
+    """Correspondence with original0/status inputs, not new native authority.
+
+    The fixed phase consumed the actual S3 parser/signing chain and final P.
+    Preserve its raw receipt hash here; never hash a reserialized substitute.
+    Existing preview checks still bind Installer/readback/current producer DATA.
+    """
+    selection = selected_build(selection)
+    release = build_release_data(release_body, target=selection.target)
+    need((release["packageVersion"], release["release"]) == (selection.package_version, selection.release)
+         and type(profiles) is tuple and len(profiles) == 3
+         and all(type(item) is bytes and 0 < len(item) <= 1024 for item in profiles), "final-image-source-inputs")
+    source = packaging_signing_data(profiles[0], profiles[1])
+    need(source is not None, "final-image-source-signing")
+    value = maintenance_json(body, 16384)
+    maintenance_map(value, ("schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
+        "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
+        "originalClosesKnown", "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified",
+        "androidBuildQualified", "developerIdOrNotarizationQualified", "distributionQualified", "productReady", "notaryAuthentication",
+        "notarySubmission", "finalImage", "finalImageMount", "finalPackageReceiptSha256", "directStagerIOPending", "cleanupErrors",
+        "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "final-image-receipt-fields")
+    workflow = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview"
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "finalize-image"
+         and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
+         and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
+         and value["runId"] == binding["runId"] and value["runAttempt"] == binding["runAttempt"]
+         and all(type(value[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "runAttempt"))
+         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == value["source"]
+         and value["imageReleaseId"] == selection.release and value["imageReleaseSourceSha256"] == digest(release_body)
+         and value["toolchain"] is None and value["helperIdentifier"] is None, "final-image-receipt-source")
+    need(all(value[key] is True for key in ("targetRetired", "originalClosesKnown", "passed", "outerFinalityRequired"))
+         and all(value[key] is False for key in ("androidServiceAuthenticated", "androidRegisteredCopyQualified", "androidBuildQualified",
+                                                "developerIdOrNotarizationQualified", "distributionQualified", "productReady"))
+         and value["credentialOriginals"] == [] and value["credentialContexts"] == [] and value["cleanupErrors"] == []
+         and value["directStagerIOPending"] is None, "final-image-receipt-finality")
+    auth = maintenance_map(value["notaryAuthentication"], ("created", "closed", "retired"), "final-image-key-finality")
+    need(all(item is True for item in auth.values()), "final-image-key-finality")
+    mount = maintenance_map(value["finalImageMount"], ("attachEntered", "originalKnown", "detached", "retained", "installerEntered",
+                                                     "systemServiceExitClaimed"), "final-image-mount-fields")
+    need(all(mount[key] is True for key in ("attachEntered", "originalKnown", "detached"))
+         and all(mount[key] is False for key in ("retained", "installerEntered", "systemServiceExitClaimed")), "final-image-mount-finality")
+    roles = ("resolve-notarytool", "resolve-stapler", "signature-before", "submit", "log", "staple", "validate", "signature-after",
+             "verify", "attach", "detach")
+    calls = value["originalCalls"]
+    need(type(calls) is list and len(calls) == len(roles), "final-image-original-count")
+    for row, role in zip(calls, roles):
+        maintenance_map(row, ("role", "entered", "returned", "capturesSettled", "returncode", "stdoutSha256", "stderrSha256"),
+                        "final-image-original-fields")
+        need(row["role"] == "final-image-" + role and all(row[key] is True for key in ("entered", "returned", "capturesSettled"))
+             and type(row["returncode"]) is int and row["returncode"] == 0
+             and maintenance_hex(row["stdoutSha256"], 64) and maintenance_hex(row["stderrSha256"], 64), "final-image-original-result")
+    final = maintenance_map(value["finalImage"], ("schemaVersion", "kind", "target", "release", "packageVersion", "requestId",
+        "packageInstallReceiptSha256", "finalPackageReceiptSha256", "packageBytes", "packageSha256", "descriptorBytes", "descriptorSha256",
+        "signatureBytes", "signatureSha256", "producerProfileSha256", "serviceProfileSha256", "originalImageBytes", "originalImageSha256",
+        "submittedSha256", "imageBytes", "imageSha256", "imageMode", "notaryProfileSha256", "submissionId", "status", "sha256Compared",
+        "errorCount", "warningCount", "ticketRowCount", "logSha256", "strictSignatureBeforeAndAfter", "actualStaplerValidation",
+        "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached", "assurance"), "final-image-fields")
+    need(type(final["schemaVersion"]) is int and final["schemaVersion"] == 1 and final["kind"] == "mrk-final-user-image"
+         and (final["target"], final["release"], final["packageVersion"]) == (selection.target, selection.release, selection.package_version)
+         and maintenance_hex(request, 32) and final["requestId"] == request, "final-image-current-binding")
+    for label, contents, maximum in (("package", package, MAX_BYTES), ("descriptor", descriptor, PRODUCER_DESCRIPTOR_BYTES),
+                                    ("signature", signed, PRODUCER_SIGNATURE_BYTES)):
+        need(type(contents) is bytes and 0 < len(contents) <= maximum
+             and type(final[label + "Bytes"]) is int and final[label + "Bytes"] == len(contents)
+             and final[label + "Sha256"] == digest(contents), "final-image-current-bytes")
+    old = maintenance_map(original_image, ("file", "bytes", "sha256"), "final-image-original-shape")
+    need(old["file"] == "MobileReleaseKit.dmg" and type(old["bytes"]) is int and 0 < old["bytes"] <= MAX_BYTES
+         and maintenance_hex(old["sha256"], 64) and type(final["originalImageBytes"]) is int
+         and final["originalImageBytes"] == old["bytes"] and final["originalImageSha256"] == final["submittedSha256"] == old["sha256"]
+         and type(final["imageBytes"]) is int and 0 < final["imageBytes"] <= MAX_BYTES
+         and abs(final["imageBytes"] - old["bytes"]) <= 1024 * 1024
+         and type(final["imageMode"]) is int and final["imageMode"] == 0o444
+         and maintenance_hex(final["imageSha256"], 64), "final-image-carrier-binding")
+    need(type(package_owner) is bytes and 0 < len(package_owner) <= 16384
+         and type(final_package) is bytes and 0 < len(final_package) <= 16384
+         and final["packageInstallReceiptSha256"] == digest(package_owner)
+         and final["finalPackageReceiptSha256"] == value["finalPackageReceiptSha256"] == digest(final_package)
+         and final["producerProfileSha256"] == source.producer_sha256 and final["serviceProfileSha256"] == source.service_sha256
+         and final["notaryProfileSha256"] == digest(profiles[2]), "final-image-raw-predecessors")
+    preceding = maintenance_json(package_owner, 16384)
+    need(preceding.get("finalPackageReceiptSha256") == value["finalPackageReceiptSha256"], "final-image-package-predecessor")
+    need(final["status"] == "Accepted" and type(final["submissionId"]) is str
+         and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", final["submissionId"])
+         and final["submissionId"] != "00000000-0000-0000-0000-000000000000"
+         and type(final["sha256Compared"]) is bool and type(final["errorCount"]) is int and final["errorCount"] == 0
+         and all(type(final[key]) is int and 0 <= final[key] <= 2048 for key in ("warningCount", "ticketRowCount"))
+         and maintenance_hex(final["logSha256"], 64)
+         and value["notarySubmission"] == {"id": final["submissionId"], "status": "Accepted"}, "final-image-notary-observation")
+    need(all(final[key] is True for key in ("strictSignatureBeforeAndAfter", "actualStaplerValidation", "actualImageVerification",
+                                          "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached"))
+         and final["assurance"] == "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority", "final-image-scoped-observation")
+    return final
+
+
 def preview_command(args):
     """Copy only an audited, normally built and read-back package to fresh output."""
     selection = source_build_selection(command_target(args))
@@ -1586,7 +1681,8 @@ def preview_command(args):
          and app.get("entryBundleIdentifier") == ENTRY_BUNDLE_ID
          and app.get("payloadBundleIdentifier") == BUNDLE_ID, "preview-normal-app-binding")
     observed = decode(read(work / "installation-observation.json", INSTALLER_RESULT_BYTES))
-    owner = decode(read(work / "android-helper-package-install.json", 16384))
+    owner_body = read(work / "android-helper-package-install.json", 16384)
+    owner = decode(owner_body)
     need(type(owner) is dict and owner.get("phase") == "package-install" and owner.get("target") == selection.target
          and owner.get("source") == args.expected_source and owner.get("passed") is True
          and owner.get("targetRetired") is True and owner.get("originalClosesKnown") is True
@@ -1655,6 +1751,20 @@ def preview_command(args):
     image = read(work / "distribution/MobileReleaseKit.dmg")
     need(distribution.get("userImage") == {"file": "MobileReleaseKit.dmg", "bytes": len(image), "sha256": digest(image)},
          "preview-original-distribution-image")
+    original_image = dict(distribution["userImage"])
+    del image  # Never retain a second whole DMG buffer or rewrite the recorded original.
+    need(read(work / "image-finalization.status", 4) == b"0\n"
+         and read(work / "package-finalization.status", 4) == b"0\n", "preview-finalization-original-statuses")
+    receipt_body = read(work / "android-helper-finalize-image.json", 16384)
+    final_package_body = read(work / "android-helper-finalize-package.json", 16384)
+    release_path = (BUILD_RELEASE_INPUT if selection.target == ARM_TARGET else
+                    DESKTOP / "macos-installed-inputs/build-release-intel.json")
+    final = final_image_receipt_data(receipt_body, selection=selection, binding=binding, request=request_id,
+        package=package, descriptor=descriptor, signed=signed, original_image=original_image,
+        package_owner=owner_body, final_package=final_package_body, release_body=read(release_path, BUILD_RELEASE_LIMIT),
+        profiles=(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 1024), read(DESKTOP / "packaging/macos-notary-service.json", 1024)))
+    image = read(work / "distribution-final/MobileReleaseKit.dmg")
+    need(len(image) == final["imageBytes"] and digest(image) == final["imageSha256"], "preview-finalized-image-bytes")
     summary = {"schemaVersion": 2, "scope": "normal-macos-early-preview", "sourceCommit": args.expected_source,
         "sourceTree": source["tree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
         "runId": binding["runId"], "runAttempt": binding["runAttempt"], "platform": "macOS26-arm64" if selection.target == ARM_TARGET else "macOS26-x86_64",
@@ -1662,6 +1772,9 @@ def preview_command(args):
         "distributionSha256": digest(image), "distributionBytes": len(image), "descriptorSha256": emitted["descriptorSha256"],
         "signatureSha256": emitted["signatureSha256"], "requestId": request_id, "originalInstallerReturnedZero": True,
         "originalPackageGroupReturnedZero": True, "originalObservationMountDetached": True,
+        "originalImageFinalizationReturnedZero": True, "originalFinalImageMountDetached": True,
+        "finalImageReceiptSha256": digest(receipt_body), "originalDistributionSha256": original_image["sha256"],
+        "finalImageScopedNotarizationObserved": True,
         "installerInventorySha256": observed["inventorySha256"],
         "packageRole": "ordinary-image", "normalBinaryBeforeSigningSha256": app["appBinarySha256BeforeSigning"],
         "desktopImageBeforeSigningSha256": normal["binarySha256"],

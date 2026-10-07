@@ -970,3 +970,159 @@ and compiler-runtime/component correspondence, thirteen notice sufficiency,
 Developer ID/notarization/quarantine, upgrades, Intel and older macOS remain
 separate, unresolved delivery obligations. No legal/distribution clearance is
 implied by adding notices or by an engineering package.
+
+## S2: notarize the completed payload before fixing Installer inventory
+
+The ordinary Installer and packaging Aqua routes now call the existing
+`macos_android_helper_package.py notarize-payload --target <fixed-target>`
+phase instead of calling the stager's `input` CLI directly. This is a
+**configured shipping prerequisite**, not an engineering/ad-hoc success path.
+The public `desktop/packaging/macos-notary-service.json` deliberately starts
+as `{"schemaVersion":1,"mode":"unconfigured"}`. Configuring it requires the
+reviewed Developer ID Application team plus a public App Store Connect team
+API `keyId` and canonical `issuerId`; it never contains a private key. The
+only configured shape has the five fields `schemaVersion`, `mode`
+(`app-store-connect-team-key`), `teamId`, `keyId`, and `issuerId`.
+
+The existing protected job environment supplies the separate
+`MRK_MACOS_NOTARY_API_KEY_BASE64` secret only on the input-binding step. Shell
+tracing and allexport are disabled and the variable is unexported before any
+child; only the one helper invocation receives it. No Developer ID P12 is
+present in this phase, and its preceding signing keychain context has already
+restored and closed. No `store-credentials`, persistent notary keychain
+profile, Apple-ID password, custom JWT, or private key in a command argument
+is used. The helper writes bounded PKCS#8 PEM-shape bytes to its exclusive
+0700 private directory/0400 original file, passes only that pathname and
+SOURCE public key identifiers to Apple's tools, and closes/removes the same
+original key before any staple call. The shape check is not cryptographic
+validation; real authentication belongs to Apple. Unknown writes, returns,
+closes, restoration, or cleanup forbid success and preserve uncertain state.
+
+The fixed phase first checks the selected configured signed-runtime
+nomination/capsule, current S/M, both signed app identities, and complete
+current stager input. It creates only a disposable private input copy; during
+its same-parent app rename only that copy's parent is temporarily writable,
+and it is restored to 0555 before any native child. Signed original code,
+source/runtime bytes, and the readonly child keep their original modes.
+Only the private submission copy is named `MobileReleaseKit.app`; the original
+and installed `Mobile Release Kit.app`, signed contents and identifiers are
+unchanged. This filename is not notarization evidence; genuine acceptance and
+the original validation gates below remain required.
+One bounded ZIP carries the copied whole outer app (including its nested
+payload app) and separate runtime. The fixed original Xcode toolchain is
+independently bound; `xcrun --find` cannot select another tool or location.
+
+The successful original role sequence is exactly thirteen: resolve
+notarytool, resolve stapler, verify inner, verify outer, create ZIP, submit
+with `--wait --output-format json`, retrieve the same-ID log, staple inner,
+validate inner, staple outer, validate outer, verify inner again, verify
+outer again. A zero-return terminal `Invalid` retrieves one bounded same-ID
+log only for diagnosis and remains a refusal. Nonzero, malformed, unknown,
+or late originals do not enter that diagnostic branch. Only terminal
+`Accepted` plus a bound error-free log may proceed to stapling.
+
+After each staple the same original tree may have only its one named ticket
+addition: `Contents/CodeResources`, or
+`Contents/Helpers/MobileReleaseKitPayload.app/Contents/CodeResources`.
+All other file hashes/identities/modes and directory identity/rosters must
+match. Each ticket is nonexecuting and at most 1 MiB, and the actual original
+`stapler validate` and strict code verification must return zero. These paths
+are a strict, authoritative-source-informed nomination, **not evidence of a
+native output shape until actually observed**; different real output is a
+refusal, not silently accepted. The unchanged S1 DATA API receives that exact
+observed pair and builds the final input and complete inventory only then.
+M still names the already-signed runtime; inventory I now includes the ticket
+bytes before compiling the one-shot Installer. Neither is a final-package
+signature, notarization, DMG carrier, registration, or installed-app claim.
+
+One nonrenewed 1800-second endpoint contains 1740 seconds of work and a
+60-second finality reserve. The fixed thirteen role ceilings total 1710
+seconds and are clipped against the remaining endpoint, including capture
+and POST work. The existing input step has a 32-minute outer ceiling; the
+Installer job remains 300 minutes with the exact 38 step ceilings now
+summing to 295. Aqua uses 180 minutes for doctor, 105 for the other
+packaging scopes, and retains 75 for nonpackaging scopes. This does not renew
+or extend the existing package990/Installer120/private-keychain240 budgets.
+The existing 512 MiB/2048-file input bound remains; ZIP is at most 576 MiB and
+a 2 GiB reservation is required above a conservative 3 GiB free-space floor.
+
+Raw notary responses, upload ZIP, key, private input copy, and native capture
+files are not added to artifact upload globs. Only the finite, bounded
+`android-helper-notarize-payload.json` receipt is explicitly published. Its
+`passed` field is provisional until the original Python caller exits zero
+with every original/capture/POST/close and known-only retirement complete;
+`productReady` and installed/native qualification flags stay false. The
+stdout contract remains the final stager input JSON (at most 2048 bytes).
+
+The smallest real proof is one configured ordinary ARM payload phase after
+SOURCE review and the focused inert tests, using actual authorized signing
+and App Store Connect credentials. Without those external credentials only
+fail-closed/local contract evidence exists. A successful payload phase still
+requires later final PKG signing/notarization/stapling before P/producer
+signature, and separate final DMG carrier work; it is not a deliverable by
+itself and does not waive those remaining phases.
+
+### Final Installer package signing and notarization (S3)
+
+The `finalize-package` phase uses the existing fixed `Operation` / `run_owned`
+originals after `pkgbuild` and the complete root-owned Scripts XAR reconstruction.
+That reconstruction now produces `package-unsigned/MobileReleaseKit.pkg`, not P.
+The separate public `macos-installer-signing.json` profile is intentionally
+`unconfigured`; a real later SOURCE nomination must supply the team, exact
+Developer ID Installer common name, leaf SHA1 and distinct leaf/issuer/root
+SHA256 values, plus the three public DER originals under
+`macos-installer-certificates/`. These must match the Application team, but the
+Installer leaf must be different. No sample certificates, key or future pins
+are provided. The protected `macos-developer-id` environment supplies the
+separate `MRK_MACOS_INSTALLER_P12_BASE64` / `MRK_MACOS_INSTALLER_P12_PASSWORD`
+pair and the existing team P8 API-key secret only to this fixed helper call.
+The Application P12 is not supplied to this phase or substituted for it.
+
+An exclusive task-private keychain admits only the fixed `productsign` and
+Security clients, the single selected private-key identity and exact public
+chain. The local `verify-cert -r` check deliberately selects a SOURCE anchor;
+it does not establish system trust or change trust settings. Independent
+`pkgutil --check-signature` must report a system-trusted signature and trusted
+timestamp with the complete exact SOURCE chain, both before and after stapling.
+The Installer scope retires before the potentially long P8 submission. The P8
+original retires before stapling. No secret is passed to build/Installer/image
+children, printed, hashed into evidence or uploaded.
+
+Nine fixed primary roles and twenty successful Security auxiliary calls share
+one1800s deadline (1740s work,60s finality); submit is capped1200s, signing60s,
+and other calls30s. There is no polling/retry or nonzero/unknown acceptance.
+Only terminal Accepted plus its same-job bounded log, actual stapler validation
+and complete PackageInfo/uid0:gid0 Scripts audit permit publication. Optional
+container ticket-row metadata is a finite nonauthority annotation, never a
+signature or native-code grant. Stapling must append at most1MiB to the SAME
+held signed original, with every preexisting byte matching the retained PRE
+SHA256 and all other identity/mode/owner/parent rules preserved. Replacement,
+unexpected metadata, unknown close or late completion retains/refuses instead
+of inventing a compatible writer. Two additional worst-case package copies
+are reserved inside a2GiB storage allowance above the existing3GiB free floor.
+
+Only the complete validated package is sealed0444 and published under a fresh
+`package-final/`. The following `package-install` requires the actual prior
+helper0, held `package-finalization.status`, the closed <=16KiB
+`android-helper-finalize-package.json` receipt, current SOURCE/profile/role/target
+and full immutable package hash, then repeats the original Scripts audit before
+computing P or invoking the producer. `producer.json` / `producer.sig` remain
+sidecars outside P. No later signing/stapling of that package is allowed.
+Receipts remain scoped observations with product/developer-ID-qualified flags
+false; they do not substitute for the original caller status or final delivery.
+
+Within the unchanged990s package-install group, each existing distribution and
+observation DMG sign/strict-verify pair now has its own short Application
+credential scope; neither relies on the already-retired producer keychain or
+an ambient key. The successful aggregate is22 producer auxiliary calls plus
+19+19 image calls =60 under the same global64 limit, not64 per scope. Native
+image creation/verification and Installer stay outside these private scopes.
+This signs the original images but does not claim final carrier notarization;
+the separate S4 successor must preserve these originals and their receipt.
+
+The ordinary workflow budgets one added32-minute step (39steps/sum327/job332);
+Aqua packaging branches become doctor212/other137 minutes, with nonpackaging75
+unchanged. Only the closed final-P receipt and original status join the existing
+explicit artifact list. Actual Developer ID keys, Apple submission results,
+writer compatibility and native installed validation remain external/runtime
+obligations; local DATA tests do not supply them.
