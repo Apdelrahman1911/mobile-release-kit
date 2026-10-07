@@ -851,9 +851,9 @@ final class NormalAppUITests: XCTestCase {
             }
         }
         // WebKit exposes aria-pressed buttons as Cocoa checkboxes, retaining toggle state.
-        _ = try unique(controls(guide, [.checkBox], label: "Android upload keystore", prefix: true),
+        _ = try unique(guide.descendants(matching: .checkBox).matching(NSPredicate(format: "title BEGINSWITH %@", "Android upload keystore")),
                        "actual core Android guide is missing or repeated")
-        let apple = try unique(controls(guide, [.checkBox], label: "Apple Distribution identity", prefix: true),
+        let apple = try unique(guide.descendants(matching: .checkBox).matching(NSPredicate(format: "title BEGINSWITH %@", "Apple Distribution identity")),
                                "actual core Apple guide is missing or repeated")
         try reveal(apple, in: renderer)
         try require(apple.isEnabled && apple.isHittable, "actual core guide selection unavailable")

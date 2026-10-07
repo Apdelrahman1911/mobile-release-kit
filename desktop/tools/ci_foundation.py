@@ -2696,7 +2696,7 @@ TOOL_CHECKS = frozenset({
     "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
-    "mac-source-slots-locked-metadata", "mac-source-slots-data-test",
+    "mac-source-slots-locked-metadata", "mac-source-slots-data-test", "source-slots-diagnostic-source",
     "node-version", "npm-locked-no-scripts", "headless-test-compile-only",
     "typescript-no-emit", "vite-assets", "tauri-debug-compile-only", "passive-native-contract",
     "config-core-ordinary", "config-core-committed-fsync", "config-core-committed-close",
@@ -3163,7 +3163,12 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     except subprocess.CalledProcessError as error:
         # Do not interpolate exception text: it includes argv and may contain
         # local paths or captured output. These labels come only from fixed code.
-        raise CheckFailure(f"Fixed check {check} exited {error.returncode}") from None
+        failure = CheckFailure(f"Fixed check {check} exited {error.returncode}")
+        # Private acknowledgement of this subprocess.run return, not a native
+        # finality/cleanup grant. Unknown, timeout and signal returns lack it.
+        if type(error.returncode) is int and 0 < error.returncode <= 255:
+            failure._returned_command = (check, error.returncode)
+        raise failure from None
     except subprocess.TimeoutExpired:
         raise CheckFailure(f"Fixed check {check} exceeded its deadline") from None
     except OSError:
@@ -8529,13 +8534,15 @@ def source_slots_writer(path: Path, stream: TextIO) -> tuple:
     return source_slots_identity(observed)
 
 
-def source_slots_read(path: Path, expected: tuple) -> bytes:
+def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> bytes:
     # Only the fixed stdout/stderr originals just returned by run() are read.
     # This is bounded post-original admission, not a new streaming IO owner.
     limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
               "source-slots-compile.stdout": 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
               "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
-    require(path.name in limits and type(expected) is tuple and len(expected) == 9,
+    require(path.name in limits and type(expected) is tuple and len(expected) == 9
+            and type(retain) is bool and (not retain or path.name in {
+                "source-slots-compile.stdout", "source-slots-compile.stderr"}),
             "Unexpected SourceSlots private output")
     original = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
     try:
@@ -8552,7 +8559,7 @@ def source_slots_read(path: Path, expected: tuple) -> bytes:
             block = os.read(original, min(65536, remaining))
             require(bool(block), "SourceSlots private output ended early")
             remaining -= len(block)
-            if path.name == "source-slots-test.stdout":
+            if retain or path.name == "source-slots-test.stdout":
                 chunks.append(block)
         require(os.read(original, 1) == b"" and source_slots_identity(os.fstat(original)) == expected
                 and source_slots_identity(path.lstat()) == expected, "SourceSlots private output POST changed")
@@ -8561,6 +8568,165 @@ def source_slots_read(path: Path, expected: tuple) -> bytes:
         os.close(original)
 
 
+def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
+    require(reason in {"original-unavailable", "capture-unavailable", "cargo-json-unavailable",
+                       "no-error-records", "source-unavailable", "deadline-unavailable", "output-bound"},
+            "Unknown SourceSlots diagnostic state")
+    return {"state": "unavailable", "reason": reason,
+            "returnCode": code if type(code) is int and 0 < code <= 255 else None,
+            "errors": [], "sources": []}
+
+
+def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> list[dict]:
+    """Only bounded Cargo error DATA; no raw message or foreign path escapes."""
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024
+            and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
+            "SourceSlots diagnostic captures exceed their unchanged bounds")
+    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+                ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            require(key not in result, "Duplicate Cargo diagnostic field")
+            result[key] = value
+        return result
+    def nonfinite(_):
+        raise CheckFailure("Nonfinite Cargo diagnostic field")
+    def finite_float(raw):
+        value = float(raw)
+        require(float("-inf") < value < float("inf"), "Nonfinite Cargo diagnostic field")
+        return value
+    def path_for(name, package):
+        if type(name) is not str or len(name) > 4096 or package is None:
+            return None
+        if name.startswith(source + "/"):
+            relative = name[len(source) + 1:]
+        elif name.startswith("desktop/"):
+            relative = name
+        elif name == "build.rs" or name.startswith("src/"):
+            relative = package[2] + "/" + name
+        else:
+            return None
+        parts = relative.split("/")
+        if (len(relative) > 512 or not relative.endswith(".rs")
+                or any(part in {"", ".", ".."} or re.fullmatch(r"[A-Za-z0-9._+-]+", part) is None for part in parts)
+                or not any(relative.startswith(row[2] + "/") for row in packages)):
+            return None
+        return relative
+    try:
+        text, diagnostic_text = raw.decode("utf-8"), stderr.decode("utf-8")
+        require(text.endswith("\n"), "Partial Cargo diagnostic frame")
+        lines = text.split("\n")[:-1]
+        require(0 < len(lines) <= 4096, "Too many Cargo diagnostic frames")
+        errors, paths, primary_count, terminal = [], set(), 0, False
+        for line in lines:
+            require(not terminal and bool(line), "Trailing or empty Cargo diagnostic frame")
+            value = json.loads(line, object_pairs_hook=pairs, parse_constant=nonfinite, parse_float=finite_float)
+            require(type(value) is dict and value.get("reason") in {
+                "compiler-message", "compiler-artifact", "build-script-executed", "build-finished"},
+                "Unexpected Cargo diagnostic frame")
+            if value["reason"] == "build-finished":
+                require(value.get("success") is False, "Cargo failure has no failed terminal record")
+                terminal = True
+                continue
+            if value["reason"] != "compiler-message":
+                continue
+            message = value.get("message")
+            require(type(message) is dict and type(message.get("level")) is str,
+                    "Malformed Cargo compiler diagnostic")
+            if message["level"] != "error":
+                continue
+            code = message.get("code")
+            require("code" in message and (code is None or (type(code) is dict and type(code.get("code")) is str
+                    and re.fullmatch(r"E[0-9]{4}", code["code"]) is not None)), "Malformed Rust error code")
+            code = None if code is None else code["code"]
+            wording, spans = message.get("message"), message.get("spans")
+            require(type(wording) is str and type(spans) is list, "Malformed Rust error fields")
+            package = next((row for row in packages if value.get("manifest_path") == source + "/" + row[2] + "/Cargo.toml"), None)
+            category = "compiler-error" if code is not None else "compiler-error-without-code"
+            if code is None and re.match(r"linking with `[^`\r\n]{1,256}` failed: ", wording):
+                category = "linker-error"
+            row = {"category": category, "code": code, "package": package[0] if package else "unknown",
+                   "spans": [], "unboundSpans": 0}
+            for span in spans:
+                require(type(span) is dict and type(span.get("is_primary")) is bool, "Malformed Rust source span")
+                if not span["is_primary"]:
+                    continue
+                primary_count += 1
+                require(primary_count <= 32, "Too many Rust primary spans")
+                line_number, column = span.get("line_start"), span.get("column_start")
+                require(type(line_number) is int and 0 < line_number <= 1048576
+                        and type(column) is int and 0 < column <= 1048576, "Malformed Rust source location")
+                relative = path_for(span.get("file_name"), package)
+                if relative is None:
+                    row["unboundSpans"] += 1
+                else:
+                    paths.add(relative)
+                    require(len(paths) <= 8, "Too many Rust source files")
+                    row["spans"].append({"path": relative, "line": line_number, "column": column})
+            errors.append(row)
+            require(len(errors) <= 16, "Too many Rust error records")
+        require(terminal, "Missing Cargo failed terminal record")
+        prefix = "error: failed to run custom build command for `"
+        for line in diagnostic_text.splitlines():
+            if line.startswith(prefix):
+                package = next((row[0] for row in packages if line.startswith(prefix + row[0] + " v" + row[1] + " (")
+                                or line == prefix + row[0] + " v" + row[1] + "`"), "unknown")
+                errors.append({"category": "build-script-failure", "code": None, "package": package,
+                               "spans": [], "unboundSpans": 0})
+                require(len(errors) <= 16, "Too many Rust error records")
+        return errors
+    except (ValueError, UnicodeError, RecursionError, TypeError) as error:
+        if isinstance(error, CheckFailure):
+            raise
+        raise CheckFailure("Malformed bounded Cargo diagnostics") from None
+
+
+def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, code: int, *, timeout_for) -> dict:
+    """A failed original's optional explanation, never a success/cleanup gate."""
+    try:
+        timeout_for(15)
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "deadline-unavailable")
+    try:
+        errors = source_slots_diagnostic_records(raw, stderr, context["source"])
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "cargo-json-unavailable")
+    if not errors:
+        return source_slots_diagnostic_unavailable(code, "no-error-records")
+    try:
+        source_unchanged(context, timeout_for=timeout_for)
+        paths = sorted({span["path"] for row in errors for span in row["spans"]})
+        sources = []
+        if paths:
+            observed = run([context["git"], "ls-tree", "-z", "--full-tree", context["sourceSha"], "--", *paths],
+                           check="source-slots-diagnostic-source", cwd=Path(context["source"]),
+                           env=clean_environment(Path(context["root"])), timeout=timeout_for(15), capture=True)
+            require(type(observed) is str and len(observed.encode("utf-8")) <= 8192
+                    and (not observed or observed.endswith("\0")), "Malformed diagnostic SOURCE metadata")
+            for item in observed.split("\0")[:-1]:
+                matched = re.fullmatch(r"(100644|100755) blob ([0-9a-f]{40})\t([^\0\r\n]+)", item)
+                require(matched is not None and matched[3] in paths
+                        and matched[3] not in {row["path"] for row in sources}, "Unbound diagnostic SOURCE metadata")
+                sources.append({"path": matched[3], "gitBlob": matched[2]})
+        sources.sort(key=lambda row: row["path"])
+        indices = {row["path"]: index for index, row in enumerate(sources)}
+        for row in errors:
+            bound = []
+            for span in row["spans"]:
+                if span["path"] in indices:
+                    bound.append({"source": indices[span["path"]], "line": span["line"], "column": span["column"]})
+                else:
+                    row["unboundSpans"] += 1
+            row["spans"] = bound
+        timeout_for(15)
+        result = {"state": "complete", "reason": None, "returnCode": code, "errors": errors, "sources": sources}
+        require(type(code) is int and 0 < code <= 255
+                and len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode()) <= 12288,
+                "Compiler diagnostic exceeds its closed output bound")
+        return result
+    except Exception:
+        return source_slots_diagnostic_unavailable(code, "source-unavailable")
 def source_slots_source_guard(source: Path, root: Path) -> None:
     mac_compile_source_guard(source, root)
     no_cargo_configuration((root / "home", root / "cargo"))
@@ -8587,6 +8753,7 @@ def phase_source_slots(name: str, context: dict) -> None:
     started = time.monotonic()
     deadline, previous = started + 900, started
     last_check = "source-pre"
+    compiler_diagnostic = None
     def remaining(cap: int) -> int:
         nonlocal previous
         now = time.monotonic()
@@ -8617,7 +8784,7 @@ def phase_source_slots(name: str, context: dict) -> None:
         else:
             # Reuse one Cargo-fingerprinted compile; only the literal exact case
             # follows it. No ignored filter, arbitrary selector or other graph.
-            commands = (("headless-test-compile-only", [cargo, "test", *common, "--no-run"],
+            commands = (("headless-test-compile-only", [cargo, "test", *common, "--message-format=json", "--no-run"],
                          root / "target/source-slots-compile.stdout", root / "target/source-slots-compile.stderr", 600),
                         ("mac-source-slots-data-test", [cargo, "test", *common, SOURCE_SLOTS_TEST,
                                                        "--", "--exact", "--test-threads=1"],
@@ -8626,18 +8793,44 @@ def phase_source_slots(name: str, context: dict) -> None:
         for check, argv, output_path, stderr_path, cap in commands:
             last_check = check
             remaining(30)
-            with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
-                before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
-                require(all(row[6] == 0 for row in before), "SourceSlots private output was not fresh")
-                run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
-                output.flush()
-                diagnostics.flush()
-                originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
-                require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "SourceSlots output identity changed")
-            remaining(30)
-            raw = source_slots_read(output_path, originals[0])
-            source_slots_read(stderr_path, originals[1])
-            remaining(30)
+            command_failure = None
+            try:
+                with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+                    before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                    require(all(row[6] == 0 for row in before), "SourceSlots private output was not fresh")
+                    try:
+                        run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                    except CheckFailure as error:
+                        command_failure = error
+                        witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                        if not (check == "headless-test-compile-only" and type(witness) is tuple and len(witness) == 2
+                                and type(witness[0]) is str and witness[0] == check
+                                and type(witness[1]) is int and 0 < witness[1] <= 255):
+                            raise
+                        compiler_diagnostic = source_slots_diagnostic_unavailable(witness[1], "capture-unavailable")
+                    output.flush()
+                    diagnostics.flush()
+                    originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                    require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "SourceSlots output identity changed")
+                # Both original writers have consuming-closed before any new
+                # diagnostic reader; an uncertain close keeps only the failure.
+                remaining(30)
+                if command_failure is not None:
+                    raw = source_slots_read(output_path, originals[0], retain=True)
+                    stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    remaining(30)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(
+                        context, raw, stderr, witness[1], timeout_for=remaining)
+                    raise command_failure
+                raw = source_slots_read(output_path, originals[0])
+                source_slots_read(stderr_path, originals[1])
+                remaining(30)
+            except BaseException:
+                if command_failure is not None:
+                    # A later flush/read/close/diagnostic failure cannot replace
+                    # the first returned/unknown command outcome or start a test.
+                    raise command_failure from None
+                raise
             if check == "mac-source-slots-data-test":
                 result = source_slots_test_result(raw)
         last_check = "source-post"
@@ -8654,7 +8847,21 @@ def phase_source_slots(name: str, context: dict) -> None:
                    "status": "failed-or-unknown", "lastFixedStage": last_check,
                    **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
                                                    "workflowRef", "workflowSha256", "runId", "attempt")}}
+        if name == "compile" and last_check == "headless-test-compile-only":
+            if compiler_diagnostic is None:
+                compiler_diagnostic = source_slots_diagnostic_unavailable(None, "original-unavailable")
+            if compiler_diagnostic["state"] == "complete":
+                try:
+                    remaining(30)
+                except Exception:
+                    compiler_diagnostic = source_slots_diagnostic_unavailable(
+                        compiler_diagnostic["returnCode"], "deadline-unavailable")
+            failure["compilerDiagnostic"] = compiler_diagnostic
         try:
+            if (len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384
+                    and "compilerDiagnostic" in failure):
+                failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(
+                    failure["compilerDiagnostic"]["returnCode"], "output-bound")
             require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
                     "SourceSlots failure summary exceeds its bound")
             write_json(root / "source-slots-failure.json", failure)

@@ -1599,8 +1599,9 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
                 self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
                 if kw["check"] == "headless-test-compile-only":
-                    self.assertEqual(argv[-1], "--no-run")
+                    self.assertEqual(argv[-2:], ["--message-format=json", "--no-run"])
                 else:
+                    self.assertNotIn("--message-format=json", argv)
                     self.assertNotIn("--no-run", argv)
                     self.assertEqual(argv[-4:], [SOURCE_SLOTS_CASE, "--", "--exact", "--test-threads=1"])
             passed = [value for path, value in publications if path.endswith("/compile-checks.json")]
@@ -1608,8 +1609,13 @@ class ShellCompileContractTests(unittest.TestCase):
             self.assertEqual(passed, [source_slots_receipt("compile")] if fault in (None, "late-receipt") else [])
             self.assertEqual(len(failures), 0 if fault in (None, "publication-failure") else 1)
             for failure in failures:
-                self.assertEqual(set(failure), {"schemaVersion", "scope", "phase", "status", "lastFixedStage",
-                    "sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt"})
+                expected_fields = {"schemaVersion", "scope", "phase", "status", "lastFixedStage",
+                    "sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt"}
+                if failure["lastFixedStage"] == "headless-test-compile-only":
+                    expected_fields.add("compilerDiagnostic")
+                    self.assertEqual(failure["compilerDiagnostic"], {"state": "unavailable", "reason": "original-unavailable",
+                                     "returnCode": None, "errors": [], "sources": []})
+                self.assertEqual(set(failure), expected_fields)
                 self.assertEqual(failure["status"], "failed-or-unknown")
                 self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
                 self.assertNotIn("synthetic-not-forwarded", json.dumps(failure))
@@ -1639,9 +1645,15 @@ class ShellCompileContractTests(unittest.TestCase):
             for error in (helper.subprocess.CalledProcessError(101, ["/fixed/cargo"]),
                           helper.subprocess.TimeoutExpired(["/fixed/cargo"], 150), OSError("inert")):
                 original_run.side_effect = error
-                with self.assertRaises(helper.CheckFailure):
+                with self.assertRaises(helper.CheckFailure) as failure:
                     helper.run(["/fixed/cargo"], check="mac-source-slots-data-test", cwd=PurePosixPath("/inert"), env={},
                                timeout=150, output=output, diagnostics=diagnostics)
+                self.assertEqual(type(failure.exception), helper.CheckFailure)
+                if isinstance(error, helper.subprocess.CalledProcessError):
+                    self.assertEqual(str(failure.exception), "Fixed check mac-source-slots-data-test exited 101")
+                    self.assertEqual(failure.exception.__dict__["_returned_command"], ("mac-source-slots-data-test", 101))
+                else:
+                    self.assertNotIn("_returned_command", failure.exception.__dict__)
 
         # Exercise the actual no-follow bounded original reader with inert FD
         # bindings, not a mock return from the parser. No host open/read/close.
@@ -1723,6 +1735,267 @@ class ShellCompileContractTests(unittest.TestCase):
                     with self.assertRaises(helper.CheckFailure):
                         helper.source_slots_writer(ReadPath("/inert/source-slots-test.stdout"), Writer())
             self.assertFalse(original.closes)  # The surrounding original stream owns close, not this check.
+
+        # Failed Cargo JSON is optional DATA, not a new success/cleanup path.
+        # All path names below are inert; only a fixed Git metadata double is
+        # consulted, never a SOURCE body, compiler, dependency or native API.
+        source = bound["source"]
+        app = "desktop/src-tauri"
+        native = "desktop/native/macos-installed-native"
+        private = "synthetic-private-diagnostic-must-not-escape"
+        def primary(name, line=19, column=7):
+            return {"file_name": name, "line_start": line, "column_start": column, "is_primary": True}
+        def message(code="E0433", spans=None, wording=private, package=app):
+            return {"reason": "compiler-message", "manifest_path": source + "/" + package + "/Cargo.toml",
+                    "message": {"level": "error", "code": None if code is None else {"code": code, "explanation": private},
+                                "message": wording, "spans": [primary("src/lib.rs")] if spans is None else spans,
+                                "rendered": private}}
+        terminal = {"reason": "build-finished", "success": False}
+        def cargo_bytes(rows):
+            return b"".join((json.dumps(row, separators=(",", ":")) + "\n").encode() for row in rows)
+        blob = "a" * 40
+        simple_raw = cargo_bytes([message(), terminal])
+        metadata = "100644 blob " + blob + "\t" + app + "/src/lib.rs\0"
+        calls, source_checks = [], []
+        def metadata_original(argv, **kw):
+            calls.append((argv, kw))
+            self.assertEqual(source_checks, ["post"])
+            return metadata
+        with patch.object(helper, "source_unchanged", side_effect=lambda *a, **kw: source_checks.append("post")), \
+                patch.object(helper, "run", side_effect=metadata_original), patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True):
+            diagnostic = helper.source_slots_compiler_diagnostic(bound, simple_raw, b"", 101, timeout_for=lambda cap: cap)
+        self.assertEqual(diagnostic, {"state": "complete", "reason": None, "returnCode": 101,
+            "errors": [{"category": "compiler-error", "code": "E0433", "package": "mobile-release-kit-desktop",
+                        "spans": [{"source": 0, "line": 19, "column": 7}], "unboundSpans": 0}],
+            "sources": [{"path": app + "/src/lib.rs", "gitBlob": blob}]})
+        self.assertEqual(len(calls), 1)
+        argv, fields = calls[0]
+        self.assertEqual(argv, [bound["git"], "ls-tree", "-z", "--full-tree", bound["sourceSha"], "--", app + "/src/lib.rs"])
+        self.assertEqual(fields["check"], "source-slots-diagnostic-source")
+        self.assertEqual(str(fields["cwd"]), source)
+        self.assertEqual(fields["timeout"], 15)
+        self.assertTrue(fields["capture"])
+        self.assertEqual(fields["env"]["HOME"], bound["root"] + "/home")
+        self.assertNotIn(private, json.dumps(diagnostic))
+        self.assertNotIn(source, json.dumps(diagnostic))
+
+        kinds = [message("E0599", [primary(source + "/" + app + "/src/lib.rs")]),
+                 message(None, [primary("src/lib.rs")]),
+                 message(None, [], "linking with `cc` failed: exit status: 1 " + private),
+                 message("E0308", [primary("build.rs")], package=native),
+                 message("E0001", [primary("/foreign/" + private + ".rs")], package="foreign")]
+        stderr = ("error: failed to run custom build command for `mrk-macos-installed-native v0.1.0 (" + private + ")`\n"
+                  "error: failed to run custom build command for `foreign-package v9.9.9`\n").encode()
+        records = helper.source_slots_diagnostic_records(cargo_bytes(kinds + [terminal]), stderr, source)
+        self.assertEqual([row["category"] for row in records], ["compiler-error", "compiler-error-without-code", "linker-error",
+                         "compiler-error", "compiler-error", "build-script-failure", "build-script-failure"])
+        self.assertEqual([row["code"] for row in records], ["E0599", None, None, "E0308", "E0001", None, None])
+        self.assertEqual(records[3]["spans"][0]["path"], native + "/build.rs")
+        self.assertEqual(records[4]["unboundSpans"], 1)
+        self.assertEqual(records[5]["package"], "mrk-macos-installed-native")
+        self.assertEqual(records[6]["package"], "unknown")
+        self.assertNotIn(private, json.dumps(records))
+        for bad_path in ("../src/lib.rs", "src/../lib.rs", "src//lib.rs", "src/./lib.rs", "src/*.rs", "src/a\0.rs",
+                         "/foreign/src/lib.rs", source + "-other/" + app + "/src/lib.rs", "file:///src/lib.rs",
+                         "lib.rs", "desktop/not-a-package/lib.rs", "desktop/src-tauri-other/lib.rs", "src/lib.txt"):
+            with self.subTest(unbound_path=bad_path):
+                row = helper.source_slots_diagnostic_records(cargo_bytes([message(spans=[primary(bad_path)]), terminal]), b"", source)[0]
+                self.assertEqual(row["spans"], [])
+                self.assertEqual(row["unboundSpans"], 1)
+        for good_path in ("src/lib.rs", app + "/src/lib.rs", source + "/" + app + "/src/lib.rs"):
+            row = helper.source_slots_diagnostic_records(cargo_bytes([message(spans=[primary(good_path)]), terminal]), b"", source)[0]
+            self.assertEqual(row["spans"], [{"path": app + "/src/lib.rs", "line": 19, "column": 7}])
+        malformed = [b"", simple_raw[:-1], simple_raw + b"\n", simple_raw + cargo_bytes([terminal]), b"\xff\n",
+                     simple_raw.replace(b'"level":"error"', b'"level":"error","level":"error"'),
+                     simple_raw.replace(b'"line_start":19', b'"line_start":NaN'),
+                     cargo_bytes([message()]), cargo_bytes([message(), {"reason": "build-finished", "success": True}]),
+                     cargo_bytes([message("E12345"), terminal]), cargo_bytes([message(spans=[primary("src/lib.rs", True)]), terminal]),
+                     cargo_bytes([message(spans=[primary("src/lib.rs", 0)]), terminal]),
+                     cargo_bytes([message(spans=[primary("src/lib.rs", column=1048577)]), terminal]),
+                     cargo_bytes([message()] * 17 + [terminal]), cargo_bytes([message(spans=[primary("src/lib.rs")] * 33), terminal]),
+                     cargo_bytes([message(spans=[primary("src/" + str(n) + ".rs") for n in range(9)]), terminal]),
+                     cargo_bytes([{"reason": "compiler-artifact"}] * 4096 + [terminal]), b"x" * (1024 * 1024 + 1)]
+        for overflow in (b"1e9999", b"-1e9999"):
+            malformed.append(b'{"reason":"compiler-artifact","ignored":{"nested":' + overflow + b'}}\n' + simple_raw)
+            malformed.append(simple_raw.replace(b'"reason":"compiler-message"',
+                             b'"reason":"compiler-message","ignored":{"nested":' + overflow + b'}'))
+        finite = b'{"reason":"compiler-artifact","ignored":{"nested":[1.25,-1e300]}}\n' + simple_raw
+        self.assertEqual(helper.source_slots_diagnostic_records(finite, b"", source),
+                         helper.source_slots_diagnostic_records(simple_raw, b"", source))
+        for raw in malformed:
+            with self.subTest(malformed_bytes=len(raw)), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_diagnostic_records(raw, b"", source)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(simple_raw, b"x" * (1024 * 1024 + 1), source)
+        for fault in ("missing", "bad-mode", "duplicate", "extra-path", "partial", "large", "source", "clock"):
+            returned = {"missing": "", "bad-mode": metadata.replace("100644", "120000"), "duplicate": metadata * 2,
+                        "extra-path": metadata.replace(app + "/src/lib.rs", native + "/src/lib.rs"),
+                        "partial": metadata[:-1], "large": metadata * 200}.get(fault, metadata)
+            with self.subTest(metadata_fault=fault), patch.object(helper, "run", return_value=returned) as metadata_run, \
+                    patch.object(helper, "source_unchanged", side_effect=helper.CheckFailure("inert source") if fault == "source" else None), \
+                    patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True):
+                def remaining(cap):
+                    if fault == "clock": raise helper.CheckFailure("inert late")
+                    return cap
+                observed = helper.source_slots_compiler_diagnostic(bound, simple_raw, b"", 101, timeout_for=remaining)
+            if fault == "missing":
+                self.assertEqual(observed["state"], "complete")
+                self.assertEqual(observed["sources"], [])
+                self.assertEqual(observed["errors"][0]["spans"], [])
+                self.assertEqual(observed["errors"][0]["unboundSpans"], 1)
+            else:
+                self.assertEqual(observed["state"], "unavailable")
+                self.assertEqual(observed["errors"], [])
+                self.assertEqual(observed["sources"], [])
+            if fault in ("source", "clock"):
+                self.assertEqual(metadata_run.call_count, 0)
+        with patch.object(helper, "source_unchanged", side_effect=AssertionError("not reached")), \
+                patch.object(helper, "run", side_effect=AssertionError("not reached")):
+            self.assertEqual(helper.source_slots_compiler_diagnostic(bound, b"partial", b"", 101, timeout_for=lambda cap: cap)["reason"], "cargo-json-unavailable")
+            self.assertEqual(helper.source_slots_compiler_diagnostic(bound, cargo_bytes([terminal]), b"", 101, timeout_for=lambda cap: cap)["reason"], "no-error-records")
+
+        # Retaining the compile originals adds no weak reader: full identity,
+        # byte cap, EOF, post-stat and consuming close are still mandatory.
+        for name in ("source-slots-compile.stdout", "source-slots-compile.stderr"):
+            for fault in (None, "named", "mode", "link", "uid", "post", "tail", "early", "oversize"):
+                original = OriginalOS(simple_raw, fault)
+                expected = helper.source_slots_identity(original.info)
+                with self.subTest(retained_name=name, fault=fault), patch.object(helper, "os", original):
+                    if fault is None:
+                        self.assertEqual(helper.source_slots_read(ReadPath("/inert") / name, expected, retain=True), simple_raw)
+                    else:
+                        with self.assertRaises(helper.CheckFailure):
+                            helper.source_slots_read(ReadPath("/inert") / name, expected, retain=True)
+                self.assertEqual(original.closes, [77])
+        original = OriginalOS(b"x" * (1024 * 1024), None)
+        with patch.object(helper, "os", original):
+            self.assertEqual(len(helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"),
+                             helper.source_slots_identity(original.info), retain=True)), 1024 * 1024)
+        self.assertEqual(original.closes, [77])
+        for name, retain in (("source-slots-test.stdout", True), ("metadata.json", True), ("source-slots-compile.stdout", 1)):
+            original = OriginalOS(b"x", None)
+            with patch.object(helper, "os", original), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_read(ReadPath("/inert") / name, helper.source_slots_identity(original.info), retain=retain)
+            self.assertFalse(original.opened)
+        class CloseFailureOS(OriginalOS):
+            def close(self, fd):
+                super().close(fd)
+                raise OSError("inert consuming close uncertainty")
+        original = CloseFailureOS(simple_raw, None)
+        with patch.object(helper, "os", original), self.assertRaises(OSError):
+            helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"), helper.source_slots_identity(original.info), retain=True)
+        self.assertEqual(original.closes, [77])
+
+        # The actual run() manufactures the private returned-original witness.
+        # Only subprocess.run is doubled. No fake success/unknown witness may
+        # unlock capture parsing, and later faults cannot replace that error.
+        actual_run = helper.run
+        for fault in (None, "signal", "timeout", "start", "unknown", "witness-bool", "flush", "writer-post", "close",
+                      "read", "source", "metadata", "deadline", "late-metadata", "malformed", "publication"):
+            events, captures, streams, publications, originals, raised, reads, clock, source_checks = [], {}, [], [], [], [], [], [100.0], []
+            BasePath, writer, _ = source_slots_paths(events, captures)
+            class FailureCapture(io.StringIO):
+                def __init__(self, path):
+                    super().__init__(); self.path = str(path); streams.append(self)
+                def flush(self):
+                    if fault == "flush" and self.path.endswith(".stdout") and self.getvalue():
+                        raise OSError("inert flush failure")
+                    return super().flush()
+                def __exit__(self, *args):
+                    captures[self.path] = self.getvalue().encode()
+                    events.append(("closed", self.path))
+                    try:
+                        return super().__exit__(*args)
+                    finally:
+                        if fault == "close" and self.path.endswith(".stderr"):
+                            raise OSError("inert writer close uncertainty")
+            class FailurePath(BasePath):
+                def open(self, *args, **kw):
+                    self_outer.assertEqual(args, ("x",))
+                    return FailureCapture(self)
+            def subprocess_original(argv, **kw):
+                originals.append((list(map(str, argv)), dict(kw)))
+                if argv[0] == "/fixed/cargo":
+                    self.assertIn("--message-format=json", argv)
+                    self.assertEqual(argv[-1], "--no-run")
+                    self.assertEqual(kw["timeout"], 600)
+                    self.assertTrue(kw["check"])
+                    kw["stdout"].write((b"partial" if fault == "malformed" else simple_raw).decode())
+                    kw["stderr"].write(private)
+                    if fault == "deadline": clock[0] = 970.0
+                    if fault == "timeout": raise helper.subprocess.TimeoutExpired(argv, 600)
+                    if fault == "start": raise OSError("inert startup")
+                    raise helper.subprocess.CalledProcessError(-9 if fault == "signal" else 101, argv)
+                self.assertEqual(argv, [bound["git"], "ls-tree", "-z", "--full-tree", bound["sourceSha"], "--", app + "/src/lib.rs"])
+                self.assertTrue(all(stream.closed for stream in streams))
+                self.assertEqual(len(reads), 2)
+                if fault == "metadata": raise OSError("inert Git error")
+                if fault == "late-metadata": clock[0] = 970.0
+                class Returned:
+                    stdout = metadata
+                return Returned()
+            def observe_run(argv, **kw):
+                try:
+                    return actual_run(argv, **kw)
+                except helper.CheckFailure as error:
+                    if kw["check"] == "headless-test-compile-only":
+                        raised.append(error)
+                        if fault == "unknown": error.__dict__.pop("_returned_command", None)
+                        if fault == "witness-bool": error._returned_command = (kw["check"], True)
+                    raise
+            def writer_post(path, stream):
+                if fault == "writer-post" and stream.getvalue():
+                    raise helper.CheckFailure("inert original writer changed")
+                return writer(path, stream)
+            def read_returned(path, expected, *, retain=False):
+                self.assertTrue(retain)
+                self.assertEqual(len(streams), 2)
+                self.assertTrue(all(stream.closed for stream in streams))
+                reads.append(path.name)
+                if fault == "read": raise helper.CheckFailure("inert original capture changed")
+                self.assertEqual(expected[6], len(captures[str(path)]))
+                return captures[str(path)]
+            def source_post(*args, **kw):
+                source_checks.append("checked")
+                if len(source_checks) == 2:
+                    self.assertTrue(all(stream.closed for stream in streams))
+                    self.assertEqual(len(reads), 2)
+                    if fault == "source": raise helper.CheckFailure("inert changed source")
+            def failure_publication(path, value):
+                self.assertEqual(path.name, "source-slots-failure.json")
+                if fault == "publication": raise OSError("inert publication")
+                publications.append(deepcopy(value))
+            with self.subTest(returned_original_fault=fault), contextlib.redirect_stdout(io.StringIO()), \
+                    patch.object(helper, "Path", FailurePath), patch.object(helper, "tools", return_value=("/fixed/cargo", None)), \
+                    patch.object(helper, "source_unchanged", side_effect=source_post), patch.object(helper, "source_slots_source_guard"), \
+                    patch.object(helper.subprocess, "run", side_effect=subprocess_original), patch.object(helper, "run", side_effect=observe_run), \
+                    patch.object(helper, "source_slots_writer", side_effect=writer_post), patch.object(helper, "source_slots_read", side_effect=read_returned), \
+                    patch.object(helper, "write_json", side_effect=failure_publication), patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True), self.assertRaises(helper.CheckFailure) as failure:
+                helper.phase_source_slots("compile", bound)
+            self.assertEqual(len(raised), 1)
+            self.assertIs(failure.exception, raised[0])
+            self.assertEqual(type(failure.exception), helper.CheckFailure)
+            self.assertEqual(len(streams), 2)
+            self.assertTrue(all(stream.closed for stream in streams))
+            self.assertEqual(len([argv for argv, _ in originals if argv[0] == "/fixed/cargo"]), 1)
+            self.assertEqual(len(publications), 0 if fault == "publication" else 1)
+            for value in publications:
+                self.assertEqual(value["status"], "failed-or-unknown")
+                self.assertEqual(value["lastFixedStage"], "headless-test-compile-only")
+                observed = value["compilerDiagnostic"]
+                self.assertEqual(observed["state"], "complete" if fault is None else "unavailable")
+                self.assertEqual(observed["returnCode"], None if fault in ("signal", "timeout", "start", "unknown", "witness-bool") else 101)
+                self.assertNotIn(private, json.dumps(value))
+                self.assertNotIn(source + "/", json.dumps(value))
+                self.assertLessEqual(len(json.dumps(value).encode()), 16384)
+                if fault is None:
+                    self.assertEqual(observed, diagnostic)
+            if fault in ("signal", "timeout", "start", "unknown", "witness-bool", "flush", "writer-post", "close", "deadline"):
+                self.assertFalse(reads)
+                self.assertEqual(len(originals), 1)
+            if fault in ("read", "source", "malformed"):
+                self.assertEqual(len(originals), 1)
 
 
 if __name__ == "__main__":
