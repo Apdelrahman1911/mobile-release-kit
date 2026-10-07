@@ -119,7 +119,7 @@ def memory_os(book, *, alias=None):
         return state.link
 
     def write(fd, body):
-        assert fd == 1 and type(body) is bytes
+        assert fd in (1, 2) and type(body) is bytes
         state.writes.append(body)
         return len(body)
 
@@ -213,6 +213,7 @@ class IntelOSProviderData(unittest.TestCase):
         for mode in ("observed", "missing-first", "unparsed-first", "resolver-foreign", "wrong-original", "unknown", "late"):
             with self.subTest(mode=mode):
                 book, calls, tools, dispatched = MemoryBook(), [], {}, []
+                progress = {"stage": "host-admission", "role": None, "sourceSlot": None}
                 fake_os, state = memory_os(book)
                 clock = SimpleNamespace(CLOCK_MONOTONIC=1, now=0)
                 clock.clock_gettime_ns = lambda which: clock.now
@@ -249,16 +250,21 @@ class IntelOSProviderData(unittest.TestCase):
                     if mode in ("resolver-foreign", "wrong-original", "unknown", "late"):
                         with self.assertRaises(RuntimeError):
                             PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=run), deadline,
-                                                    Path("/private/test"), calls, tools)
+                                                    Path("/private/test"), calls, tools, progress)
                         self.assertEqual(len(dispatched), 1 if mode == "resolver-foreign" else 2)
+                        self.assertEqual(progress["stage"], {"resolver-foreign": "selected-tool-path",
+                                                           "wrong-original": "call-return", "unknown": "call",
+                                                           "late": "call-post"}[mode])
+                        self.assertEqual(progress["role"], PROBE.ROLES[len(dispatched) - 1])
                         if mode in ("wrong-original", "unknown"):
                             self.assertIs(calls[-1]["originalReturned"], False)
                         if mode == "late":
                             self.assertIs(calls[-1]["originalReturned"], True)
                     else:
                         observations = PROBE.observe_providers(fixture, book, SimpleNamespace(run_owned=run), deadline,
-                                                               Path("/private/test"), calls, tools)
+                                                               Path("/private/test"), calls, tools, progress)
                         self.assertEqual(len(dispatched), 4)
+                        self.assertEqual(progress, {"stage": "observations-post", "role": None, "sourceSlot": None})
                         self.assertEqual([x["role"] for x in calls], list(PROBE.ROLES))
                         self.assertTrue(all(x["originalReturned"] for x in calls))
                         self.assertEqual(dispatched[0][0], ["/usr/bin/xcrun", "--find", "dyld_info"])
@@ -345,6 +351,87 @@ class IntelOSProviderData(unittest.TestCase):
                 PROBE.publish_record(fixture, publication_root, identities, dict(record), 120_000_000_000,
                                      source_post_known=True, source_closed=True, bootstrap_closed=True)
 
+        # Refusal DATA is independent of result publication and never serializes
+        # arbitrary error text, paths, captures, objects or untyped flags.
+        stderr = []
+        def stderr_write(fd, body):
+            self.assertEqual(fd, 2)
+            self.assertIs(type(body), bytes)
+            stderr.append(body)
+            return len(body)
+        diagnostic_os = SimpleNamespace(write=stderr_write)
+        flags = dict(record_prepared=False, source_post_known=False, source_closed=False,
+                     bootstrap_closed=False, post_failed=True, close_failed=True)
+        fixed = {"stage": "selected-tool-admission", "role": PROBE.ROLES[0], "sourceSlot": None}
+        originals = [{"role": role, "originalReturned": index == 0,
+                      "dispatched": index > 0, "contained": None, "cleanupComplete": False}
+                     for index, role in enumerate(PROBE.ROLES)]
+        secret = "NEVER-PRINT-secret/path/raw-output/exception"
+        with mock.patch.object(PROBE, "os", diagnostic_os):
+            for reason in PROBE.DIAGNOSTIC_REASONS:
+                PROBE.emit_refusal(RuntimeError(reason), "fixed-observations", fixed, originals, {"xcrun": {}}, **flags)
+                value = json.loads(stderr[-1])
+                self.assertEqual(value["reason"], reason)
+                self.assertEqual(value["stage"], "selected-tool-admission")
+                self.assertIs(value["postFailureSeen"], True)
+                self.assertIs(value["closeFailureSeen"], True)
+                self.assertIs(value["resolverAdmitted"], True)
+                self.assertIs(value["selectedToolAdmitted"], False)
+                self.assertEqual([row["returned"] for row in value["originalCalls"]], [True, False, False, False])
+            for error in (RuntimeError(secret), RuntimeError("source-pin", secret),
+                          ValueError({secret: secret}), OSError(PROBE.errno.EACCES, secret, secret), None):
+                PROBE.emit_refusal(error, secret, {"stage": secret, "role": secret, "sourceSlot": True},
+                                   [{"role": PROBE.ROLES[0], "originalReturned": 1, "dispatched": secret}], {}, **flags)
+                value = json.loads(stderr[-1])
+                self.assertEqual(value["reason"], "unclassified")
+                self.assertEqual(value["phase"], "unknown")
+                self.assertEqual(value["stage"], "unknown")
+                self.assertIsNone(value["role"])
+                self.assertIsNone(value["sourceSlot"])
+                self.assertFalse(any(row["returned"] for row in value["originalCalls"]))
+                self.assertTrue(all(row["dispatched"] is None for row in value["originalCalls"]))
+                if isinstance(error, OSError):
+                    self.assertEqual(value["errnoName"], "EACCES")
+            for source_slot in (-1, 0, len(PROBE.SOURCE_PINS) + 1, len(PROBE.SOURCE_PINS) + 2, secret):
+                PROBE.emit_refusal(RuntimeError("source-pin"), "source-admission",
+                                   dict(fixed, sourceSlot=source_slot), [], {}, **flags)
+                value = json.loads(stderr[-1])
+                self.assertEqual(value["sourceSlot"], source_slot if type(source_slot) is int
+                                 and 0 <= source_slot < len(PROBE.SOURCE_PINS) + 2 else None)
+            # Actual main exits before any filesystem or loader call. This is
+            # an inert local module binding, not a patch to shared sys/os/time.
+            fake_sys = SimpleNamespace(version_info=(0, 0, 0))
+            clock = SimpleNamespace(CLOCK_MONOTONIC=1, clock_gettime_ns=lambda which: 0)
+            before = len(stderr)
+            with mock.patch.object(PROBE, "sys", fake_sys), mock.patch.object(PROBE, "time", clock):
+                self.assertEqual(PROBE.main(), 1)
+            self.assertEqual(len(stderr), before + 1)
+            value = json.loads(stderr[-1])
+            self.assertEqual((value["phase"], value["stage"], value["reason"]),
+                             ("host-admission", "host-admission", "python-route"))
+            self.assertFalse(any(row["attempted"] for row in value["originalCalls"]))
+            self.assertTrue(all(value[name] is False for name in
+                                ("recordPrepared", "sourcePostKnown", "sourceClosesKnown", "bootstrapCloseKnown")))
+        for body in stderr:
+            self.assertLessEqual(len(body), PROBE.DIAGNOSTIC_LIMIT)
+            self.assertEqual(body.count(b"\n"), 1)
+            self.assertNotIn(secret.encode(), body)
+            value = json.loads(body)
+            self.assertIs(value["diagnosticOnly"], True)
+            self.assertIs(value["completeEvidence"], False)
+            self.assertIs(value["supplierAuthority"], False)
+            self.assertEqual(len(value["originalCalls"]), 4)
+        # A partial/failed stderr write is not retried and cannot raise a raw
+        # diagnostic error or turn the original refusal into success.
+        write_calls = []
+        def failed_write(fd, body):
+            write_calls.append((fd, len(body)))
+            raise OSError(secret)
+        with mock.patch.object(PROBE, "os", SimpleNamespace(write=failed_write)):
+            self.assertIsNone(PROBE.emit_refusal(RuntimeError("python-route"), "host-admission",
+                                                fixed, [], {}, **flags))
+        self.assertEqual(len(write_calls), 1)
+
     def test_tiny_intel_workflow_binds_exact_source_without_build_or_authority(self):
         helper = (ROOT / "desktop/tools/macos_intel_os_providers.py").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/desktop-macos-intel-os-providers.yml").read_text(encoding="utf-8")
@@ -357,6 +444,15 @@ class IntelOSProviderData(unittest.TestCase):
         self.assertEqual(PROBE.OPTIONS, ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths"))
         self.assertEqual(PROBE.CAPTURE_LIMIT, 65536)
         self.assertEqual(PROBE.RECORD_LIMIT, 524288)
+        self.assertEqual(PROBE.DIAGNOSTIC_LIMIT, 1536)
+        self.assertEqual(functions["main"].count("emit_refusal("), 2)
+        self.assertIn("failure_phase, failure_progress = phase, dict(progress)", functions["main"])
+        self.assertEqual(functions["main"].count("if failure is None:"), 3)
+        self.assertIn("failure if failure is not None else error", functions["main"])
+        self.assertNotIn("str(error)", functions["emit_refusal"])
+        self.assertNotIn("repr(error)", functions["emit_refusal"])
+        self.assertIn("os.write(2, body)", functions["emit_refusal"])
+        self.assertIn("len(body) <= DIAGNOSTIC_LIMIT", functions["emit_refusal"])
         self.assertIn('deadline = started + 120 * 1_000_000_000', functions["main"])
         self.assertLess(functions["main"].index('source_closed = book.finish()'), functions["main"].index('passed = publish_record('))
         self.assertIn('head == (commit + "\\n").encode("ascii")', functions["main"])

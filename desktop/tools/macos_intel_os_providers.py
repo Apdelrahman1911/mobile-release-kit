@@ -7,6 +7,7 @@ installed or qualified. A missing selected image is an ordinary negative result.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import importlib.util
 import json
@@ -60,6 +61,93 @@ PROVIDERS = (
 ROLES = ("resolve-dyld-info", "provider-javavm", "provider-libgcc", "provider-ncurses")
 OPTIONS = ("-arch", "x86_64", "-arch", "x86_64h", "-platform", "-uuid", "-linked_dylibs", "-rpaths")
 ATTRIBUTES = ("upward", "delay-init", "weak-link", "re-export")
+DIAGNOSTIC_LIMIT = 1536
+DIAGNOSTIC_PHASES = ("host-admission", "source-admission", "host-system-version", "private-work",
+                     "fixed-observations", "source-post", "publication")
+DIAGNOSTIC_STAGES = ("host-admission", "bootstrap-open", "bootstrap-read", "bootstrap-load",
+                     "source-pins", "source-entry", "source-git-head", "owner-load", "source-summary",
+                     "bootstrap-close", "system-admission", "work-create", "resolver-admission",
+                     "call-pre", "call", "call-return", "call-post", "resolver-return",
+                     "selected-tool-path", "selected-tool-admission", "provider-decode",
+                     "observations-post", "source-post", "source-close", "publication")
+DIAGNOSTIC_REASONS = (
+    'closed-record-bound',
+    'context-deadline',
+    'created-directory-original',
+    'descriptor-capacity',
+    'detached-source',
+    'directory-owner-mode',
+    'directory-spelling',
+    'file-limit-capacity',
+    'file-original-policy',
+    'final-summary-write',
+    'fixed-entry',
+    'fixed-original-order',
+    'fixture-original',
+    'fixture-pin',
+    'fixture-post',
+    'host-route',
+    'host-system-version',
+    'hosted-route',
+    'image-complete-output',
+    'image-exact-header',
+    'image-load-row',
+    'image-output-text',
+    'image-path-text',
+    'image-platform-row',
+    'image-platform-spelling',
+    'image-platform-value',
+    'image-return-contract',
+    'image-rpath-count',
+    'image-section',
+    'missing-image-original',
+    'observation-original',
+    'original-call-roster',
+    'original-changed',
+    'original-grew',
+    'original-handle-bound',
+    'original-owner-return',
+    'original-short-read',
+    'original-unbound',
+    'output-bound',
+    'output-close-unknown',
+    'output-readback',
+    'output-short-write',
+    'owner-already-imported',
+    'owner-source-pin',
+    'owner-source-route',
+    'publication-close',
+    'publication-original-directories',
+    'publication-original-finality',
+    'python-route',
+    'resolver-return-contract',
+    'selected-alias-changed',
+    'selected-alias-post',
+    'selected-alias-target',
+    'selected-alias-text',
+    'selected-applications-root',
+    'selected-bundle-alias',
+    'selected-bundle-original',
+    'selected-tool-admission',
+    'selected-tool-output-bound',
+    'selected-tool-path',
+    'selected-tool-spelling',
+    'source-complete-post',
+    'source-module-collision',
+    'source-module-loader',
+    'source-pin',
+    'source-run-binding',
+    'system-tool-evidence-depth',
+    'system-tool-original',
+    'system-tool-post',
+    'system-tool-root-ancestor',
+    'system-version-complete-post',
+    'system-version-post',
+)
+DIAGNOSTIC_ERRNOS = {errno.EACCES: "EACCES", errno.EPERM: "EPERM", errno.ENOENT: "ENOENT",
+                     errno.ELOOP: "ELOOP", errno.ENOTDIR: "ENOTDIR", errno.EIO: "EIO",
+                     errno.EBADF: "EBADF", errno.EMFILE: "EMFILE", errno.ENFILE: "ENFILE",
+                     errno.ENOSPC: "ENOSPC", errno.EROFS: "EROFS"}
 
 
 def need(value, label):
@@ -266,7 +354,46 @@ def failure_kind(error):
                  if type(error) is kind), "other")
 
 
-def observe_providers(fixture, book, owner, deadline, work, calls, tools):
+def emit_refusal(error, phase, progress, calls, tools, *, record_prepared,
+                 source_post_known, source_closed, bootstrap_closed, post_failed, close_failed):
+    """Best-effort fixed stderr DATA, never a result or permission to clean/publish."""
+    try:
+        args = error.args if isinstance(error, BaseException) else ()
+        reason = (args[0] if type(args) is tuple and len(args) == 1 and type(args[0]) is str
+                  and args[0] in DIAGNOSTIC_REASONS else "unclassified")
+        original_rows = []
+        for index, role in enumerate(ROLES):
+            row = calls[index] if index < len(calls) and type(calls[index]) is dict else None
+            row = row if row is not None and row.get("role") == role else None
+            original_rows.append({"role": role, "attempted": row is not None,
+                                  "returned": row is not None and row.get("originalReturned") is True,
+                                  **{name: row.get(name) if row is not None and type(row.get(name)) is bool else None
+                                     for name in ("dispatched", "contained", "cleanupComplete")}})
+        slot = progress.get("sourceSlot")
+        number = error.errno if isinstance(error, OSError) else None
+        data = {"type": "mrk-intel-os-provider-refusal-v1", "diagnosticOnly": True,
+                "completeEvidence": False, "supplierAuthority": False,
+                "phase": phase if phase in DIAGNOSTIC_PHASES else "unknown",
+                "stage": progress.get("stage") if progress.get("stage") in DIAGNOSTIC_STAGES else "unknown",
+                "role": progress.get("role") if progress.get("role") in ROLES else None,
+                "sourceSlot": slot if type(slot) is int and 0 <= slot < len(SOURCE_PINS) + 2 else None,
+                "reason": reason, "errorKind": failure_kind(error) if error is not None else "none",
+                "errnoName": DIAGNOSTIC_ERRNOS.get(number, "other") if type(number) is int else None,
+                "recordPrepared": record_prepared is True, "resolverAdmitted": "xcrun" in tools,
+                "selectedToolAdmitted": "dyld_info" in tools,
+                "sourcePostKnown": source_post_known is True, "sourceClosesKnown": source_closed is True,
+                "bootstrapCloseKnown": bootstrap_closed is True,
+                "postFailureSeen": post_failed is True, "closeFailureSeen": close_failed is True,
+                "originalCalls": original_rows}
+        body = (json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                           allow_nan=False) + "\n").encode("ascii")
+        if len(body) <= DIAGNOSTIC_LIMIT:
+            os.write(2, body)  # Single best-effort bounded write; never retry an uncertain write.
+    except BaseException:
+        pass  # A diagnostic failure cannot convert refusal to success or expose raw exceptions.
+
+
+def observe_providers(fixture, book, owner, deadline, work, calls, tools, progress):
     """One fixed resolver and three independent queries through the existing owner."""
     environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(work / "home"),
                    "TMPDIR": str(work / "tmp"), "LANG": "C", "LC_ALL": "C", "TZ": "UTC"}
@@ -279,11 +406,13 @@ def observe_providers(fixture, book, owner, deadline, work, calls, tools):
 
     def command(role, argv):
         need(len(calls) < len(ROLES) and role == ROLES[len(calls)], "fixed-original-order")
+        progress.update(stage="call-pre", role=role, sourceSlot=None)
         checkpoint()
         timeout = fixture.context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 30)
         row = {"role": role, "argv": argv, "originalReturned": False, "returncode": None,
                "timeoutSeconds": timeout, "captureLimitBytes": CAPTURE_LIMIT}
         calls.append(row)
+        progress["stage"] = "call"
         try:
             result = owner.run_owned(argv, environ=environment, cwd=work, timeout=timeout,
                                      capture=True, text=False, output_limit=CAPTURE_LIMIT)
@@ -295,6 +424,7 @@ def observe_providers(fixture, book, owner, deadline, work, calls, tools):
                 value = getattr(error, attribute, None)
                 row[field] = value if type(value) is bool else None
             raise
+        progress["stage"] = "call-return"
         fixture.completed(result, argv, CAPTURE_LIMIT)
         row.update(originalReturned=True, returncode=result.returncode,
                    stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr),
@@ -302,23 +432,31 @@ def observe_providers(fixture, book, owner, deadline, work, calls, tools):
                    stderrSha256=hashlib.sha256(result.stderr).hexdigest(),
                    stdoutBase64=base64.b64encode(result.stdout).decode("ascii"),
                    stderrBase64=base64.b64encode(result.stderr).decode("ascii"))
+        progress["stage"] = "call-post"
         checkpoint()
         return result
 
+    progress.update(stage="resolver-admission", role=ROLES[0], sourceSlot=None)
     tools["xcrun"] = system_tool(book, XCRUN)
     result = command(ROLES[0], [str(XCRUN), "--find", "dyld_info"])
+    progress["stage"] = "resolver-return"
     need(result.returncode == 0 and result.stderr == b"", "resolver-return-contract")
-    tools["dyld_info"] = selected_tool(book, selected_tool_path(result.stdout))
+    progress["stage"] = "selected-tool-path"
+    selected = selected_tool_path(result.stdout)
+    progress["stage"] = "selected-tool-admission"
+    tools["dyld_info"] = selected_tool(book, selected)
     checkpoint()
     observations = []
     for role, path in zip(ROLES[1:], PROVIDERS):
         result = command(role, [str(tools["dyld_info"]["path"]), *OPTIONS, path])
+        progress["stage"] = "provider-decode"
         try:
             value = observation(path, result.returncode, result.stdout, result.stderr)
         except (RuntimeError, UnicodeDecodeError) as error:
             value = {"path": path, "state": "unresolved", "selectedIntelImageObserved": None,
                      "reason": "unrecognized-tool-result", "decoderFailureKind": failure_kind(error), "images": []}
         observations.append(value)
+    progress.update(stage="observations-post", role=None, sourceSlot=None)
     checkpoint()
     need([row["role"] for row in calls] == list(ROLES)
          and all(row["originalReturned"] is True for row in calls), "original-call-roster")
@@ -360,6 +498,9 @@ def main():
     bootstrap = None
     book = None
     failure = None
+    failure_phase, failure_progress = None, None
+    post_failed = close_failed = False
+    progress = {"stage": "host-admission", "role": None, "sourceSlot": None}
     calls, tools = [], {}
     source_post_known = source_closed = bootstrap_closed = False
     record = publication_root = publication_directories = None
@@ -388,7 +529,9 @@ def main():
         resource.setrlimit(resource.RLIMIT_FSIZE, (FILE_LIMIT, FILE_LIMIT))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         phase = "source-admission"
+        progress["stage"] = "bootstrap-open"
         bootstrap = os.open(CHECKOUT / FIXTURE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        progress["stage"] = "bootstrap-read"
         before = os.fstat(bootstrap)
         size, sha = SOURCE_PINS[FIXTURE]
         need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid()
@@ -396,30 +539,38 @@ def main():
         body = os.pread(bootstrap, size + 1, 0)
         need(len(body) == size and hashlib.sha256(body).hexdigest() == sha
              and os.pread(bootstrap, 1, size) == b"", "fixture-pin")
+        progress["stage"] = "bootstrap-load"
         fixture = load(CHECKOUT / FIXTURE, "_mrk_intel_os_provider_fixture")
         need(identity(os.fstat(bootstrap)) == identity(before)
              == identity(os.stat(CHECKOUT / FIXTURE, follow_symlinks=False)), "fixture-post")
         book = fixture.Originals()
-        for name, (size, sha) in SOURCE_PINS.items():
+        for slot, (name, (size, sha)) in enumerate(SOURCE_PINS.items()):
+            progress.update(stage="source-pins", sourceSlot=slot)
             entry, body = book.file(CHECKOUT / name, 1024 * 1024, modes=(0o600, 0o644))
             need(len(body) == size and hashlib.sha256(body).hexdigest() == sha, "source-pin")
             held[name] = entry
-        for name in (SELF, WORKFLOW_PATH):
+        for slot, name in enumerate((SELF, WORKFLOW_PATH), len(SOURCE_PINS)):
+            progress.update(stage="source-entry", sourceSlot=slot)
             entry, body = book.file(CHECKOUT / name, 65536, modes=(0o600, 0o644))
             held[name] = entry
+        progress.update(stage="source-git-head", sourceSlot=None)
         _head, head = book.file(CHECKOUT / ".git/HEAD", 64, modes=(0o600, 0o644))
         need(head == (commit + "\n").encode("ascii"), "detached-source")
         book.check()
+        progress["stage"] = "owner-load"
         qualification = load(CHECKOUT / QUALIFICATION, "_mrk_intel_os_provider_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
         book.check()
+        progress["stage"] = "source-summary"
         source_rows = {n: {"bytes": e["identity"][6], "sha256": hashlib.sha256(book.read(e)).hexdigest()}
                        for n, e in held.items()}
+        progress["stage"] = "bootstrap-close"
         fd, bootstrap = bootstrap, None
         os.close(fd)
         bootstrap_closed = True
         fixture.context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), 30)
         phase = "host-system-version"
+        progress["stage"] = "system-admission"
         system_entry, system_body = book.file(SYSTEM_PLIST, 65536, uid=0, modes=(0o444, 0o644))
         root_ancestors(book, system_entry)
         system = plistlib.loads(system_body)
@@ -437,6 +588,7 @@ def main():
             book.check_one(entry)
 
         phase = "private-work"
+        progress["stage"] = "work-create"
         work = WORK_PARENT / ("mrk-intel-os-providers-" + run_id + "-" + attempt)
         mkdir(work)
         for name in ("home", "tmp", "report"):
@@ -456,7 +608,7 @@ def main():
                   "runtimeQualified": False, "supplierAuthority": False, "privateScratchRetired": False,
                   "clock": "CLOCK_MONOTONIC", "deadlineBudgetSeconds": 120}
         phase = "fixed-observations"
-        observations = observe_providers(fixture, book, owner, deadline, work, calls, tools)
+        observations = observe_providers(fixture, book, owner, deadline, work, calls, tools, progress)
         record["observations"] = observations
         record["diagnosticCompleted"] = True
         record["questionsSettled"] = all(row["state"] in ("observed", "not-observed") for row in observations)
@@ -464,38 +616,54 @@ def main():
         phase = "source-post"
     except BaseException as error:
         failure = error
+        failure_phase, failure_progress = phase, dict(progress)
     finally:
         if bootstrap is not None:
+            progress.update(stage="bootstrap-close", role=None, sourceSlot=None)
             fd, bootstrap = bootstrap, None
             try:
                 os.close(fd)
                 bootstrap_closed = True
             except BaseException as error:
+                close_failed = True
                 if failure is None:
                     failure = error
+                    failure_phase, failure_progress = phase, dict(progress)
         if book is not None:
+            progress.update(stage="source-post", role=None, sourceSlot=None)
             try:
                 book.check()
-                for name, entry in held.items():
+                for slot, (name, entry) in enumerate(held.items()):
+                    progress["sourceSlot"] = slot
                     body = book.read(entry)
                     need(len(body) == source_rows[name]["bytes"]
                          and hashlib.sha256(body).hexdigest() == source_rows[name]["sha256"], "source-complete-post")
+                progress["sourceSlot"] = None
                 for tool in tools.values():
                     tool_post(book, tool)
                 if system_entry is not None:
                     need(book.read(system_entry) == system_body, "system-version-complete-post")
                 source_post_known = True
             except BaseException as error:
+                post_failed = True
                 if failure is None:
                     failure = error
+                    failure_phase, failure_progress = phase, dict(progress)
+            progress.update(stage="source-close", role=None, sourceSlot=None)
             try:
                 source_closed = book.finish()
+                close_failed = close_failed or source_closed is not True
             except BaseException as error:
+                close_failed = True
                 if failure is None:
                     failure = error
+                    failure_phase, failure_progress = phase, dict(progress)
     if (record is None or not source_post_known or not source_closed or not bootstrap_closed
             or not all(row["originalReturned"] is True for row in calls)):
-        print("Intel OS observation refused before known original finality; no complete evidence.", file=sys.stderr)
+        emit_refusal(failure, failure_phase or phase, failure_progress or progress, calls, tools,
+                     record_prepared=record is not None, source_post_known=source_post_known,
+                     source_closed=source_closed, bootstrap_closed=bootstrap_closed,
+                     post_failed=post_failed, close_failed=close_failed)
         return 1
     record["tools"] = {name: tool_evidence(tool) for name, tool in tools.items()}
     record["captureElapsedNs"] = str(time.clock_gettime_ns(time.CLOCK_MONOTONIC) - started)
@@ -503,12 +671,16 @@ def main():
         record.update(diagnosticCompleted=False, questionsSettled=False,
                       failure={"phase": phase, "kind": failure_kind(failure)})
     try:
+        progress.update(stage="publication", role=None, sourceSlot=None)
         passed = publish_record(fixture, publication_root, publication_directories, record, deadline,
                                 source_post_known=source_post_known, source_closed=source_closed,
                                 bootstrap_closed=bootstrap_closed)
         return 0 if passed else 1
-    except BaseException:
-        print("Intel OS metadata publication refused; retained files are provisional, not qualification.", file=sys.stderr)
+    except BaseException as error:
+        emit_refusal(failure if failure is not None else error, failure_phase or "publication",
+                     failure_progress or progress, calls, tools, record_prepared=record is not None,
+                     source_post_known=source_post_known, source_closed=source_closed,
+                     bootstrap_closed=bootstrap_closed, post_failed=post_failed, close_failed=close_failed)
         return 1
 
 
