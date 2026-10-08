@@ -35,6 +35,7 @@ policy_names = (
     "wrapping_keychain::policy_contract_tests::cleanup_bridge_does_not_reenter_or_drop_poisoned_forward_callback",
     "wrapping_keychain::policy_contract_tests::application_entries_do_not_invoke_provider_or_admission",
 )
+role_names = ("qualification_libtest_role::refuses_process_role",)
 artifact_roles = ("codec-binary", "normal-archive", "normal-binary", "observer-archive",
                   "observer-binary", "qualification-archive", "qualification-binary",
                   "reader-compiler-original", "reader-binary", "cohort-compiler-original", "cohort-binary")
@@ -98,6 +99,8 @@ codec = {"compilerAdmitted": False, "testsPassed": False, "artifactHashRechecked
 receipt["policyData"] = {"selectedTests": 4,
     "selectionSha256": hashlib.sha256(("\n".join(policy_names) + "\n").encode("ascii")).hexdigest(),
     "testsPassed": False, "artifactHashRechecked": False, "syntheticDirectoriesRetired": False}
+receipt["libtestRoleData"] = {"testsPassed": False, "artifactHashRechecked": False,
+    "syntheticDirectoriesRetired": False}
 stage = "source-owner"
 def pairs(items):
     value = {}
@@ -225,7 +228,7 @@ def admit_codec_compiler(result):
         raise ValueError("wrapping-codec-exact-artifact-location")
     return binary
 def admit_fixed_data_results(result, names, count):
-    # Both callers supply source-fixed exact DATA selections. No CLI
+    # Every caller supplies source-fixed exact DATA selections. No CLI
     # filter or generic/native fixture roster is admitted here.
     if (type(result) is not subprocess.CompletedProcess or type(result.returncode) is not int
             or type(result.stdout) is not bytes or type(result.stderr) is not bytes
@@ -235,7 +238,7 @@ def admit_fixed_data_results(result, names, count):
     lines = [line for line in result.stdout.decode("utf-8", "strict").splitlines() if line]
     expected_rows = {"test " + name + " ... ok" for name in names}
     if (len(names) != count or len(expected_rows) != count or len(lines) != count + 2
-            or lines[0] != f"running {count} tests" or len(set(lines[1:-1])) != count
+            or lines[0] != f"running {count} test" + ("" if count == 1 else "s") or len(set(lines[1:-1])) != count
             or set(lines[1:-1]) != expected_rows):
         raise ValueError("wrapping-fixed-data-exact-named-results")
     summary = re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; ([0-9]+) filtered out; finished in [0-9]+\.[0-9]+s", lines[-1])
@@ -273,6 +276,7 @@ def codec_originals_succeeded(calls):
 def private_batch_finality(receipt, codec, files, errors, close_errors):
     roles = [cell.get("role") for cell in files]
     policy = receipt.get("policyData", {})
+    refusal = receipt.get("libtestRoleData", {})
     return (not errors and not close_errors and len(roles) == len(artifact_roles) == 11
             and len(set(roles)) == 11 and set(roles) == set(artifact_roles)
             and all(cell.get("unchanged") is True and cell.get("closed") is True for cell in files)
@@ -282,6 +286,9 @@ def private_batch_finality(receipt, codec, files, errors, close_errors):
             and policy.get("testsPassed") is True and policy.get("artifactHashRechecked") is True
             and policy.get("syntheticDirectoriesRetired") is True
             and originals_succeeded(receipt["calls"], ("normal-build", "normal-list", "normal-policy-tests"))
+            and refusal.get("testsPassed") is True and refusal.get("artifactHashRechecked") is True
+            and refusal.get("syntheticDirectoriesRetired") is True
+            and originals_succeeded(receipt["calls"], ("qualification-build", "qualification-list", "qualification-role-tests"))
             and receipt["nativeOriginalReturned"] is True and receipt["nativeReportAdmitted"] is True
             and receipt.get("pair", {}).get("passed") is True and receipt.get("pairNativeObservationsAdmitted") is True)
 def public_codec_receipt(receipt, codec, files, errors, close_errors):
@@ -1535,7 +1542,10 @@ try:
             if ((role != "qualification" and observed) or
                     (cell["role"] == "qualification-archive" and observed != fixture_symbols)):
                 raise ValueError("wrapping-native-cfg-exclusion")
-            if "_mrk_wrapping_private_process_role" in symbols: raise ValueError("wrapping-libtest-cannot-activate-policy")
+            # Constant refusal is defined only by qualification libtest. The
+            # native archive/ordinary profiles still cannot supply an active role.
+            if ("_mrk_wrapping_private_process_role" in symbols) != (cell["role"] == "qualification-binary"):
+                raise ValueError("wrapping-libtest-role-definition-profile")
             # Get/Set must be absent from ordinary/observer link inputs.
             result, imports_row = invoke(cell["role"] + "-policy-imports", ["/usr/bin/nm", "-u", str(cell["path"])],
                 environ=native_env, cwd=work, timeout=30, limit=2 * 1024 * 1024)
@@ -1588,6 +1598,24 @@ try:
             stage = "normal-policy-exact-four-result"
             policy.update(admit_policy_results(result))
         if role == "qualification":
+            stage = "qualification-role-data-directory-preparation"
+            role_home, role_tmp = work / "wrapping-role-home", work / "wrapping-role-tmp"
+            role_home.mkdir(mode=0o700)
+            role_tmp.mkdir(mode=0o700)
+            refusal = receipt["libtestRoleData"]
+            if file_digest(cells[1]) != cells[1]["sha256"]: raise ValueError("wrapping-role-pre-test-artifact-changed")
+            result, row = invoke("qualification-role-tests", [str(binary), "--exact", "--test-threads=1", "--color=never", "--format=pretty", *role_names],
+                environ={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(role_home), "TMPDIR": str(role_tmp),
+                         "LANG": "C", "LC_ALL": "C", "TZ": "UTC"},
+                cwd=work, timeout=30, limit=64 * 1024)
+            if file_digest(cells[1]) != cells[1]["sha256"]: raise ValueError("wrapping-role-returned-artifact-changed")
+            refusal["artifactHashRechecked"] = True
+            stage = "qualification-role-empty-directory-retirement"
+            role_home.rmdir()
+            role_tmp.rmdir()
+            refusal["syntheticDirectoriesRetired"] = True
+            stage = "qualification-role-exact-one-result"
+            refusal.update(admit_fixed_data_results(result, role_names, 1))
             qualification_binary = cells[1]
             reader_binary = admit_file(reader_path, "reader-binary", executable=True)
             cohort_binary = admit_file(cohort_path, "cohort-binary", executable=True)
@@ -1641,6 +1669,9 @@ finally:
             continue
         if cell["role"] == "normal-binary" and not policy_original_settled(receipt["calls"]):
             close_errors.append({"role": cell["role"], "retainedForUnsettledPolicyOriginal": True})
+            continue
+        if cell["role"] == "qualification-binary" and not fixed_test_original_settled(receipt["calls"], "qualification-role-tests"):
+            close_errors.append({"role": cell["role"], "retainedForUnsettledRoleOriginal": True})
             continue
         if receipt.get("pair", {}).get("startAttempted") and not receipt["pair"]["joined"]:
             close_errors.append({"role": cell["role"], "retainedForUnjoinedOriginal": True})

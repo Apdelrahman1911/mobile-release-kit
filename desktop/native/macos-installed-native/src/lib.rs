@@ -3,6 +3,21 @@
 #![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+// Qualification libtest must link without granting a private process role.
+// Only the two fixed example mains can return active roles 1/2. Dependencies
+// of those examples compile without cfg(test), so this definition is absent.
+#[cfg(all(test, feature = "installed-observation", mrk_wrapping_keychain_qualification,
+    mrk_wrapping_keychain_qualification_native, debug_assertions))]
+mod qualification_libtest_role {
+    #[unsafe(no_mangle)]
+    pub extern "C" fn mrk_wrapping_private_process_role() -> u32 { 0 }
+
+    #[test]
+    fn refuses_process_role() {
+        assert_eq!(mrk_wrapping_private_process_role(), 0);
+    }
+}
+
 // The fixture requires its paired native build and one isolated image graph.
 // A Cargo feature or synthetic receipt alone never qualifies fixture identity.
 #[cfg(any(

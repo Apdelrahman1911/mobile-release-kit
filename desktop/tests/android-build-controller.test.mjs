@@ -341,6 +341,69 @@ test('one Start is consumed before handoff, and a lost reply never permits repla
   h.emit(status(3, terminal(op))); await h.controller.checkStatus();
   assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.consent, null);
   await h.controller.start(OP, OWNER); assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+
+  // Native terminal A does not let its delayed Cancel reply act on new B.
+  for (const late of ['reject', 'malformed']) {
+    const h = harness(t), first = await reviewed(h), initial = start(h, first);
+    h.reply(initial.call, status(2, running(first))); await initial.done;
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    assert.deepEqual(cancel.input, { operationId: first.operationId, ownerGeneration: first.ownerGeneration });
+    // Terminal must preserve the last observed running stage, not regress to consent's null stage.
+    const settled = terminal(running(first));
+    h.emit(status(3, settled)); await flush();
+    assert.deepEqual(clone(h.state.status.operation), settled);
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    assert.equal(h.controller.prepareReason(), null);
+    const next = await reviewed(h, { operationId: OTHER, ownerGeneration: '1'.repeat(32) });
+    const sent = start(h, next);
+    h.reply(sent.call, status(5, running(next))); await sent.done;
+    assert.equal(h.state.historical, false);
+    assert.equal(h.state.error, null);
+    const current = clone(h.state);
+    if (late === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE OLD CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1,
+      'A stale Cancel completion must not dispatch Cancel for B');
+    assert.deepEqual(clone(h.state), current);
+    assert.deepEqual(h.calls.filter((call) => call.kind === 'cancel').map((call) => call.input),
+      [{ operationId: first.operationId, ownerGeneration: first.ownerGeneration }]);
+    assert.equal(h.state.status.operation.operationId, next.operationId);
+    assert.equal(h.state.status.operation.ownerGeneration, next.ownerGeneration);
+    assert.equal(h.state.status.operation.phase, 'running');
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    h.emit(status(6, completed(next))); await flush();
+    assert.equal(h.state.status.operation.phase, 'terminal');
+  }
+
+  // The still-current claim keeps its ordinary settlement/refusal behavior.
+  for (const completion of ['valid', 'reject', 'malformed']) {
+    const h = harness(t), original = await reviewed(h);
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    if (completion === 'valid') h.reply(cancel, status(2, terminal(original)));
+    else if (completion === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE CURRENT CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.state.consent, null);
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1);
+    if (completion === 'valid') {
+      assert.equal(h.state.status.operation.phase, 'terminal');
+      assert.equal(h.state.error, null);
+      assert.equal(h.state.integrityFailed, false);
+    } else {
+      assert.equal(h.state.observationIssue, completion === 'reject' ? 'bridge' : 'protocol');
+      assert.equal(h.state.integrityFailed, completion === 'malformed');
+      assert.equal(h.state.nativeBlocked, completion === 'malformed');
+      assert.ok(!JSON.stringify(h.state).includes('PRIVATE'));
+      h.emit(status(2, terminal(original))); await flush();
+    }
+  }
 });
 
 test('synchronous saved-pair replacement vetoes unsent Prepare/consumed Start before their backend calls', async (t) => {

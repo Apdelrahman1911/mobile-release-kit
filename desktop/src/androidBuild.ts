@@ -1635,15 +1635,19 @@ export class AndroidBuildController {
   }
   private stop(observer: Observer, identity: AndroidBuildIdentity): boolean {
     if (!observer.active || sameAndroidBuildIdentity(this.cancelClaim, identity)) return false;
-    this.cancelClaim = id(identity); this.update({ cancelClaimed: id(identity), consent: null });
+    const claim = id(identity);
+    this.cancelClaim = claim; this.update({ cancelClaimed: id(identity), consent: null });
+    // A later Prepare replaces this completion's routing token. Native terminal
+    // settlement may permit new work, but an old Cancel reply cannot retire it.
+    const current = () => observer.active && this.observer === observer && this.cancelClaim === claim;
     void (async () => {
       try {
         const value = await observer.api.cancelAndroidBuild(identity.operationId, identity.ownerGeneration);
-        if (!observer.active) return;
+        if (!current()) return;
         const status = parseAndroidBuildStatus(value);
         if (!status?.operation || !sameAndroidBuildIdentity(status.operation, identity)) { this.fail({ code: 'android_build_protocol' }, true); return; }
         this.receive(observer, status);
-      } catch (error) { if (observer.active) this.fail(error); }
+      } catch (error) { if (current()) this.fail(error); }
     })();
     return true;
   }

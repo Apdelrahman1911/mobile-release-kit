@@ -364,6 +364,69 @@ test('lost Start reply cannot rearm or retry; exact terminal status can settle o
   h.emit(status(3, terminal('cancelled', { context: op.context }))); await h.controller.checkStatus();
   assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.consent, null);
   assert.equal(h.calls.filter((x) => x.kind === 'prepare').length, 1);
+
+  // A settled original cannot donate late Cancel failure to new explicit work.
+  for (const late of ['reject', 'malformed']) {
+    const h = harness(t), first = await reviewed(h), initial = start(h, first);
+    h.reply(initial, status(2, operation({ ...first, phase: 'running', intentUsable: false }))); await flush();
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    assert.deepEqual(cancel.input, { operationId: first.operationId, ownerGeneration: first.ownerGeneration });
+    const settled = terminal('cancelled', { operationId: first.operationId, ownerGeneration: first.ownerGeneration, context: first.context });
+    h.emit(status(3, settled)); await flush();
+    assert.deepEqual(clone(h.state.status.operation), settled);
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    assert.equal(h.controller.prepareReason(), null);
+    const next = await reviewed(h, { operationId: OTHER, ownerGeneration: '1'.repeat(32) });
+    const sent = start(h, next);
+    h.reply(sent, status(5, operation({ ...next, phase: 'running', intentUsable: false }))); await flush();
+    assert.equal(h.state.historical, false);
+    assert.equal(h.state.error, null);
+    const current = clone(h.state);
+    if (late === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE OLD CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1,
+      'A stale Cancel completion must not dispatch Cancel for B');
+    assert.deepEqual(clone(h.state), current);
+    assert.deepEqual(h.calls.filter((call) => call.kind === 'cancel').map((call) => call.input),
+      [{ operationId: first.operationId, ownerGeneration: first.ownerGeneration }]);
+    assert.equal(h.state.status.operation.operationId, next.operationId);
+    assert.equal(h.state.status.operation.ownerGeneration, next.ownerGeneration);
+    assert.equal(h.state.status.operation.phase, 'running');
+    assert.equal(h.state.integrityFailed, false);
+    assert.equal(h.state.nativeBlocked, false);
+    h.emit(status(6, terminal('complete', { operationId: next.operationId, ownerGeneration: next.ownerGeneration, context: next.context }))); await flush();
+    assert.equal(h.state.status.operation.phase, 'terminal');
+  }
+
+  // A current Cancel still accepts its original terminal or fails closed.
+  for (const completion of ['valid', 'reject', 'malformed']) {
+    const h = harness(t), original = await reviewed(h);
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1);
+    assert.equal(cancel.kind, 'cancel');
+    const settled = terminal('cancelled', { operationId: original.operationId, ownerGeneration: original.ownerGeneration, context: original.context });
+    if (completion === 'valid') h.reply(cancel, status(2, settled));
+    else if (completion === 'reject') cancel.reject({ code: 'bridge-reply-lost', message: 'PRIVATE CURRENT CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.state.consent, null);
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1);
+    if (completion === 'valid') {
+      assert.equal(h.state.status.operation.phase, 'terminal');
+      assert.equal(h.state.error, null);
+      assert.equal(h.state.integrityFailed, false);
+    } else {
+      assert.equal(h.state.observationIssue, completion === 'reject' ? 'bridge' : 'protocol');
+      assert.equal(h.state.integrityFailed, completion === 'malformed');
+      assert.equal(h.state.nativeBlocked, completion === 'malformed');
+      assert.ok(!JSON.stringify(h.state).includes('PRIVATE'));
+      h.emit(status(2, settled)); await flush();
+    }
+  }
 });
 
 test('Prepare preallocation refusals release no assumed owner, but a contradictory admission fails closed', async (t) => {

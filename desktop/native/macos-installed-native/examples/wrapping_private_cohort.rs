@@ -6,7 +6,7 @@
 compile_error!("private helper requires the exact nonshipping native qualification handshake");
 use std::sync::atomic::{AtomicBool, Ordering};
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-// The library/observer/libtest has no definition and cannot activate this role.
+// The library/observer has no definition; qualification libtest defines only refusal 0.
 // This exported function reads only the one-shot state privately held by main.
 #[unsafe(no_mangle)]
 pub extern "C" fn mrk_wrapping_private_process_role() -> u32 {

@@ -7754,7 +7754,20 @@ class BeforeItemStopWorkflowTests(unittest.TestCase):
         self.assertIn('private = [line for line in lines if "wrapping_keychain::private_fixture::" in line]', private)
         self.assertIn('if private:\n                      raise ValueError("wrapping-rust-cfg-exclusion")', private)
         self.assertIn('cell["role"] == "qualification-archive" and observed != fixture_symbols', private)
-        self.assertIn('if "_mrk_wrapping_private_process_role" in symbols:', private)
+        self.assertIn('if ("_mrk_wrapping_private_process_role" in symbols) != (cell["role"] == "qualification-binary"):', private)
+        root = PATH.parents[2]
+        library = (root / "desktop/native/macos-installed-native/src/lib.rs").read_text()
+        refusal = library.split("mod qualification_libtest_role {", 1)[1].split("// The fixture requires", 1)[0]
+        self.assertIn('#[cfg(all(test, feature = "installed-observation", mrk_wrapping_keychain_qualification,\n    mrk_wrapping_keychain_qualification_native, debug_assertions))]\nmod qualification_libtest_role {', library)
+        self.assertIn('pub extern "C" fn mrk_wrapping_private_process_role() -> u32 { 0 }', refusal)
+        self.assertIn('assert_eq!(mrk_wrapping_private_process_role(), 0);', refusal)
+        self.assertIn('role_names = ("qualification_libtest_role::refuses_process_role",)', private)
+        self.assertIn('refusal.update(admit_fixed_data_results(result, role_names, 1))', private)
+        self.assertLess(private.index('invoke("qualification-role-tests"'), private.index('refusal.update(admit_fixed_data_results(result, role_names, 1))'))
+        self.assertIn('if cell["role"] == "qualification-binary" and not fixed_test_original_settled(receipt["calls"], "qualification-role-tests"):', private)
+        for example, role in (("wrapping_private_cohort.rs", 1), ("wrapping_peer_reader.rs", 2)):
+            main = (root / "desktop/native/macos-installed-native/examples" / example).read_text()
+            self.assertIn("if ACTIVE.load(Ordering::Acquire) { " + str(role) + " } else { 0 }", main)
         self.assertIn('receipt["nativeReportAdmitted"] = all(row["reportAdmitted"] for row in receipt["nativeCohorts"])', private)
         self.assertLess(private.index('admit_native_report(result, entry)'), private.index('cohort["reportAdmitted"] = True'))
         upload = workflow.split("      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n", 1)[1]
@@ -9343,7 +9356,7 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         names = {"pairs", "parse", "admit_codec_compiler", "admit_fixed_data_results", "admit_codec_results",
                  "admit_policy_results", "fixed_test_original_settled", "codec_original_settled", "policy_original_settled",
                  "originals_succeeded", "codec_originals_succeeded", "private_batch_finality", "public_codec_receipt"}
-        bindings = {"codec_names", "policy_names", "artifact_roles"}
+        bindings = {"codec_names", "policy_names", "role_names", "artifact_roles"}
         nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
         if len(nodes) != len(names): raise AssertionError("fixed codec DATA functions missing or duplicated")
         namespace = {"json": json, "hashlib": hashlib, "pathlib": pathlib, "re": re,
@@ -9381,6 +9394,17 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
                    CompletedProcess([], 0, b"x" * (64 * 1024 + 1), b"")]
         for index, result in enumerate(invalid):
             with self.subTest(mutation=index), self.assertRaises(ValueError): check(result)
+        # Rust pretty output uses singular for the exact one-test refusal gate.
+        role_names = f["role_names"]
+        self.assertEqual(role_names, ("qualification_libtest_role::refuses_process_role",))
+        one = ["running 1 test", "test " + role_names[0] + " ... ok",
+               "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.01s"]
+        admit_one = lambda result: f["admit_fixed_data_results"](result, role_names, 1)
+        self.assertEqual(admit_one(original(one))["tests"], 1)
+        for bad in (original(["running 1 tests", *one[1:]]), original(one, 101),
+                    original([one[0], "test another_role ... ok", one[2]]),
+                    original(one[:-1] + [one[-1].replace("0 ignored", "1 ignored")])):
+            with self.assertRaises(ValueError): admit_one(bad)
 
     def test_codec_compiler_requires_exact_app_empty_features_debug_libtest_and_one_artifact(self):
         f = self.functions(); app, work = f["app"], f["work"]
@@ -9417,10 +9441,12 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
     def test_codec_failure_unknown_original_and_each_of_eleven_closes_gate_batch_finality(self):
         f = self.functions()
         receipt = {"calls": [{"role": role, "returned": True, "returncode": 0}
-                             for role in ("codec-build", "codec-tests", "normal-build", "normal-list", "normal-policy-tests")],
+                             for role in ("codec-build", "codec-tests", "normal-build", "normal-list", "normal-policy-tests",
+                                          "qualification-build", "qualification-list", "qualification-role-tests")],
                    "nativeOriginalReturned": True, "nativeReportAdmitted": True,
                    "pair": {"passed": True}, "pairNativeObservationsAdmitted": True,
-                   "policyData": {"testsPassed": True, "artifactHashRechecked": True, "syntheticDirectoriesRetired": True}}
+                   "policyData": {"testsPassed": True, "artifactHashRechecked": True, "syntheticDirectoriesRetired": True},
+                   "libtestRoleData": {"testsPassed": True, "artifactHashRechecked": True, "syntheticDirectoriesRetired": True}}
         codec = {"compilerAdmitted": True, "testsPassed": True, "artifactHashRechecked": True, "syntheticDirectoriesRetired": True}
         self.assertEqual(len(f["artifact_roles"]), 11)
         cells = [{"role": role, "unchanged": True, "closed": True} for role in f["artifact_roles"]]
@@ -9432,6 +9458,12 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
             changed = deepcopy(receipt); changed["policyData"][key] = False
             with self.subTest(policy=key): self.assertFalse(check(changed, codec, cells, [], []))
         self.assertFalse(check(dict(receipt, policyData={}), codec, cells, [], []))
+        for key in receipt["libtestRoleData"]:
+            changed = deepcopy(receipt); changed["libtestRoleData"][key] = False
+            with self.subTest(roleRefusal=key): self.assertFalse(check(changed, codec, cells, [], []))
+        self.assertFalse(check(dict(receipt, libtestRoleData={}), codec, cells, [], []))
+        for row in ({"returned": False}, {"returned": True}, {"contained": True, "cleanupComplete": False}):
+            self.assertFalse(f["fixed_test_original_settled"]([dict(row, role="qualification-role-tests")], "qualification-role-tests"))
         for index, cell in enumerate(cells):
             for key in ("unchanged", "closed"):
                 changed = deepcopy(cells); changed[index][key] = False
@@ -9454,7 +9486,8 @@ class PrivateCodecWorkflowDataTests(unittest.TestCase):
         self.assertFalse(settled(receipt["calls"] * 2))
         for calls in ([], receipt["calls"][:1], receipt["calls"][1:], receipt["calls"] * 2,
                       *([row for row in receipt["calls"] if row["role"] != role]
-                        for role in ("normal-build", "normal-list", "normal-policy-tests"))):
+                        for role in ("normal-build", "normal-list", "normal-policy-tests",
+                                     "qualification-build", "qualification-list", "qualification-role-tests"))):
             self.assertFalse(check(dict(receipt, calls=calls), codec, cells, [], []))
         for index in range(len(receipt["calls"])):
             for replacement in ({"returned": True, "returncode": False}, {"returned": True, "returncode": 101},

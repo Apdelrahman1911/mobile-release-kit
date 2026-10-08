@@ -208,8 +208,9 @@ typedef struct MRKInteractionGuard {
 #if defined(MRK_WRAPPING_VAULT_HELPER)
 extern uint32_t mrk_wrapping_vault_helper_role(void) __attribute__((weak_import));
 #else
-// Only the two fixed executable mains define this read-only symbol. Library,
-// libtest, observer and shipping application builds cannot activate a role.
+// Only the two fixed executable mains can return active roles 1/2. The
+// qualification libtest defines constant refusal 0; other libraries, observer
+// and shipping application builds cannot activate a role.
 extern uint32_t mrk_wrapping_private_process_role(void) __attribute__((weak_import));
 #endif
 // ONE process state in this translation unit (fixture.m is included below).
