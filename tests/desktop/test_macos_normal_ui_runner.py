@@ -2194,7 +2194,9 @@ class NormalPhaseDataTests(unittest.TestCase):
         request = dict(target=MODULE.ARM_TARGET, methods=(MODULE.OUTPUT_DATA_METHOD,), allowance=60,
             timeout=120, phaseSeconds=345, derived=Path("/inert/normal-ui/DerivedData"),
             result=Path("/inert/normal-ui/output-data-test.xcresult"))
-        def exercise(held, named, *, query_kind="summary", nonzero=False, annotation_fault=False, close_fault=False):
+        mutable = base[:5] + tuple(value + 1 for value in base[5:])
+        def exercise(held, named, *, query_kind="summary", nonzero=False, annotation_fault=False,
+                     close_fault=False, clock_fault=False, first_query_metadata=False):
             events, records, published = [], [], []
             guard_error = MODULE.Refused("output-data-result-post")
             original = subprocess.CompletedProcess(["inert-xctest"], 0, b"inert-original", b"")
@@ -2204,7 +2206,8 @@ class NormalPhaseDataTests(unittest.TestCase):
                 return real_need(condition, reason)
             def current(values):
                 changed_at = 1 if query_kind == "summary" else 2
-                return values if len(records) >= changed_at else base
+                if len(records) >= changed_at: return values
+                return mutable if first_query_metadata and len(records) == 1 else base
             def fd_stat(fd):
                 self.assertEqual(fd, 77); events.append("fstat")
                 return SimpleNamespace(**dict(zip(names, current(held))))
@@ -2216,6 +2219,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                 if close_fault: raise OSError("inert-consuming-close")
             def clock_check():
                 events.append("clock")
+                if clock_fault: raise TimeoutError("inert-result-deadline")
             def source_state(*args): events.append("source"); return ()
             def query(role, argv, cap, limit):
                 self.assertEqual((cap, limit), (30, 262144)); events.append(role)
@@ -2246,9 +2250,9 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual(events.count("clock"), 2 if caught is None and returned.returncode == 0 else 1)
             return returned, caught, guard_error, records, events, published
 
-        # Every full9 field remains mandatory, even when held and named agree
-        # with each other at a different value. Such two-change masks are valid.
-        for index in range(9):
+        # Original object/type/permissions stay fixed across both queries.
+        # Layout metadata is allowed to change only with a matching live name.
+        for index in range(5):
             altered = tuple(value + (slot == index) for slot, value in enumerate(base))
             with self.subTest(result_post_component=index):
                 returned, caught, expected, records, events, published = exercise(altered, altered)
@@ -2265,6 +2269,35 @@ class NormalPhaseDataTests(unittest.TestCase):
                 self.assertEqual(projected["status"], "observed-exception-only")
                 self.assertFalse(projected["nativeSuccessInferred"])
                 self.assertLessEqual(len(MODULE.encoded(projected)) + 1, 4096)
+        # Reproduce all four observed mutable fields, independently and together,
+        # at either query. Both queries, semantic parsing and SOURCE POST still run.
+        for index in (5, 6, 7, 8, None):
+            altered = mutable if index is None else tuple(value + (slot == index) for slot, value in enumerate(base))
+            for kind in ("summary", "tests"):
+                with self.subTest(mutable_component=index, query=kind):
+                    returned, caught, _, observed_records, events, published = exercise(altered, altered, query_kind=kind)
+                    self.assertIsNone(caught); self.assertEqual(returned.returncode, 0)
+                    self.assertEqual([row["role"] for row in observed_records], ["normal-ui-summary", "normal-ui-test-tree"])
+                    self.assertEqual(events.count("source"), 2); self.assertEqual(events.count("parse"), 1)
+                    self.assertEqual(len(published), 1)
+            # Mutable is not an exemption for disagreement between the held
+            # original and its name: even timestamp-only disagreement refuses.
+            returned, caught, expected, _, events, published = exercise(base, altered)
+            self.assertIsNone(returned); self.assertIs(caught, expected)
+            self.assertNotIn("parse", events); self.assertEqual(published, [])
+        # A successful mutable first query never adopts a new identity baseline.
+        changed_owner = mutable[:4] + (base[4] + 1,) + mutable[5:]
+        for held, named in ((changed_owner, changed_owner), (mutable, changed_owner)):
+            returned, caught, expected, observed_records, events, published = exercise(
+                held, named, query_kind="tests", first_query_metadata=True)
+            self.assertIsNone(returned); self.assertIs(caught, expected)
+            self.assertEqual(len(observed_records), 2); self.assertNotIn("parse", events)
+            self.assertEqual(events.count("source"), 1); self.assertEqual(published, [])
+        # Successful queries cannot outrun a consuming close or phase deadline.
+        for flags, error_type in (({"close_fault": True}, OSError), ({"clock_fault": True}, TimeoutError)):
+            returned, caught, _, _, events, published = exercise(mutable, mutable, **flags)
+            self.assertIsNone(returned); self.assertIsInstance(caught, error_type)
+            self.assertNotIn("parse", events); self.assertEqual(published, [])
         replacement = tuple(value + (index == 1) for index, value in enumerate(base))
         returned, caught, expected, records, events, published = exercise(base, replacement, query_kind="tests")
         self.assertIs(caught, expected); self.assertIsNone(returned); self.assertEqual(published, [])

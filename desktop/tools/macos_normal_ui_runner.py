@@ -1801,7 +1801,11 @@ def execute_output_data_phase(phase, request, source, file_limit):
             held_after = full9(os.fstat(result_fd))
             named_after = full9(os.stat(result, follow_symlinks=False))
             try:
-                need(held_after == named_after == result_facts, "output-data-result-post")
+                # This newly generated result is mutable OUTPUT, not immutable
+                # SOURCE: a query may change its layout metadata. Keep the
+                # original object/type/permissions and live name binding exact.
+                need(held_after == named_after and held_after[:5] == result_facts[:5],
+                     "output-data-result-post")
             except Refused as error:
                 try:
                     error._output_data_result_post = output_data_result_post_masks(
