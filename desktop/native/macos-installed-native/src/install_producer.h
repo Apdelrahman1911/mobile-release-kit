@@ -16,7 +16,8 @@ enum { MRK_INSTALL_PRODUCER_SLOTS=26, MRK_INSTALL_PRODUCER_STEPS=29,
     MRK_INSTALL_PRODUCER_PATH_MAX=1024, MRK_INSTALL_PRODUCER_CODE_STEPS=8,
     MRK_INSTALL_PRODUCER_CODE_SLOTS=6, MRK_INSTALL_PRODUCER_CODE_STACK_MAX=8192,
     MRK_INSTALL_PRODUCER_SIGN_STEPS=12, MRK_INSTALL_PRODUCER_SIGN_SLOTS=14,
-    MRK_REMOVE_PRODUCER_DESCRIPTOR_MAX=16384 };
+    MRK_REMOVE_PRODUCER_DESCRIPTOR_MAX=16384,
+    MRK_REMOVE_RECOVERY_CODE_STEPS=13, MRK_REMOVE_RECOVERY_CODE_SLOTS=9 };
 typedef struct {
     uint32_t version,phase,calls,returned,matched,failed,unknown,reserved;
     uint32_t states[MRK_INSTALL_PRODUCER_SLOTS];
@@ -40,6 +41,9 @@ void *mrk_install_producer_code_new(uint32_t role,int outer,int code,
 void *mrk_remove_producer_new(const uint8_t *descriptor,size_t size,const uint8_t *signature,size_t signature_size);
 // Borrowed source-owned directory and regular mrk-macos-remove, not App roles.
 void *mrk_remove_producer_code_new(int directory,int program,const uint8_t *path,size_t size);
+// Distinct root recovery SELF operation7, never the emitter static operation5.
+// Borrows the same directory/program originals; acquires no FD or path fallback.
+void *mrk_remove_recovery_code_new(int directory,int program,const uint8_t *path,size_t size);
 int mrk_install_producer_step(void *raw,uint32_t phase,mrk_install_producer_report *out);
 int mrk_install_producer_release(void *raw,uint32_t slot,mrk_install_producer_report *out);
 int mrk_install_producer_retire(void *raw);

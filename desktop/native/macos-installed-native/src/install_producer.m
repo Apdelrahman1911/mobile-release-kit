@@ -34,6 +34,7 @@
 _Static_assert(sizeof(void *)==8,"supported LP64 adapter only");
 _Static_assert(sizeof(mrk_install_producer_report)==136,"fixed Rust/C custody ABI");
 _Static_assert(sizeof(mrk_install_producer_signer)==104,"fixed Rust/C SOURCE ABI");
+_Static_assert(MRK_REMOVE_RECOVERY_CODE_SLOTS<=MRK_INSTALL_PRODUCER_SLOTS,"recovery uses same fixed cell slots");
 
 #if MRK_INSTALL_PRODUCER_CONFIGURED
 _Static_assert(MRK_INSTALL_PRODUCER_RSA_BITS==2048 || MRK_INSTALL_PRODUCER_RSA_BITS==3072
@@ -127,18 +128,19 @@ static int key_attributes(producer_cell *cell) {
         && SecKeyIsAlgorithmSupported((SecKeyRef)cell->values[6],kSecKeyOperationTypeVerify,
             kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256);
 }
-static int code_role(uint32_t role) { return role==1 || role==2 || role==5; }
+static int remove_code_role(uint32_t role) { return role==5 || role==7; }
+static int code_role(uint32_t role) { return role==1 || role==2 || remove_code_role(role); }
 #if MRK_INSTALL_PRODUCER_SIGNING
 static int sign_role(uint32_t role) { return role==3 || role==6; }
 #endif
 static const char *code_suffix(uint32_t role) {
-    return role==5 ? "/mrk-macos-remove" : role==1 ? "" : "/Contents/Helpers/MobileReleaseKitPayload.app";
+    return remove_code_role(role) ? "/mrk-macos-remove" : role==1 ? "" : "/Contents/Helpers/MobileReleaseKitPayload.app";
 }
 static const char *code_main(uint32_t role) {
-    return role==5 ? "" : role==1 ? "/Contents/MacOS/mrk-macos-entry" : "/Contents/MacOS/mobile-release-kit-desktop";
+    return remove_code_role(role) ? "" : role==1 ? "/Contents/MacOS/mrk-macos-entry" : "/Contents/MacOS/mobile-release-kit-desktop";
 }
 static const char *code_identifier(uint32_t role) {
-    return role==5 ? "dev.mobile-release-kit.desktop.remove" : role==1 ? "dev.mobile-release-kit.desktop.entry" : "dev.mobile-release-kit.desktop";
+    return remove_code_role(role) ? "dev.mobile-release-kit.desktop.remove" : role==1 ? "dev.mobile-release-kit.desktop.entry" : "dev.mobile-release-kit.desktop";
 }
 static int canonical_path(const uint8_t *path,size_t size,uint32_t role) {
     if(!code_role(role) || !path || size<=1 || size>=MRK_INSTALL_PRODUCER_PATH_MAX
@@ -182,12 +184,13 @@ static int borrowed_remove(int fd,const char *path,const struct stat *expected,i
     return fcntl(fd,F_GETPATH,actual)==0 && memchr(actual,0,sizeof(actual)) && strcmp(actual,path)==0;
 }
 static int code_originals(producer_cell *cell) {
-    if(cell->report.reserved==5) return borrowed_remove(cell->outer_fd,cell->outer_path,&cell->outer_identity,1)
+    if(remove_code_role(cell->report.reserved)) return borrowed_remove(cell->outer_fd,cell->outer_path,&cell->outer_identity,1)
         && borrowed_remove(cell->code_fd,cell->code_path,&cell->code_identity,0);
     return borrowed_directory(cell->outer_fd,cell->outer_path,&cell->outer_identity)
         && borrowed_directory(cell->code_fd,cell->code_path,&cell->code_identity);
 }
-static unsigned code_slot(uint32_t phase) {
+static unsigned code_slot(uint32_t phase,uint32_t role) {
+    if(role==7) switch(phase) {case 9:return 6;case 11:return 7;case 12:return 8;default:break;}
     switch(phase) {
         case 1:return 0;case 2:return 1;case 3:return 2;case 4:return 3;case 6:return 4;case 7:return 5;
         default:return MRK_INSTALL_PRODUCER_SLOTS;
@@ -212,7 +215,7 @@ static int code_facts(producer_cell *cell) {
     if(!code_hardened(info)) return 0;
     CFTypeRef identifier=CFDictionaryGetValue(info,kSecCodeInfoIdentifier);
     CFTypeRef executable=CFDictionaryGetValue(info,kSecCodeInfoMainExecutable);
-    CFStringRef required=cell->report.reserved==5 ? CFSTR("dev.mobile-release-kit.desktop.remove")
+    CFStringRef required=remove_code_role(cell->report.reserved) ? CFSTR("dev.mobile-release-kit.desktop.remove")
         : cell->report.reserved==1 ? CFSTR("dev.mobile-release-kit.desktop.entry") : CFSTR("dev.mobile-release-kit.desktop");
     char expected[MRK_INSTALL_PRODUCER_PATH_MAX]={0},actual[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
     int size=snprintf(expected,sizeof(expected),"%s%s",cell->code_path,code_main(cell->report.reserved));
@@ -224,10 +227,35 @@ static int code_facts(producer_cell *cell) {
         && data_equal(der,mrk_install_producer_leaf_der,sizeof(mrk_install_producer_leaf_der))
         && sha256_matches(CFDataGetBytePtr((CFDataRef)der),sizeof(mrk_install_producer_leaf_der),mrk_install_producer_leaf_sha256);
 }
+// No acquisition here: every actual returned object is already in this SAME
+// original cell. Static purpose alone never sets operation7's matched result.
+static int recovery_facts(producer_cell *cell) {
+    if(cell->report.reserved!=7 || !code_facts(cell)) return 0;
+    CFDictionaryRef info=(CFDictionaryRef)cell->values[7],disk=(CFDictionaryRef)cell->values[4];
+    if(!code_hardened(info)) return 0;
+    CFTypeRef status=CFDictionaryGetValue(info,kSecCodeInfoStatus);
+    int64_t number=0;
+    if(!status || CFGetTypeID(status)!=CFNumberGetTypeID() || CFNumberIsFloatType((CFNumberRef)status)
+        || !CFNumberGetValue((CFNumberRef)status,kCFNumberSInt64Type,&number) || number<0 || number>UINT32_MAX
+        || !((uint32_t)number&kSecCodeStatusValid) || ((uint32_t)number&kSecCodeStatusDebugged)) return 0;
+    CFTypeRef identifier=CFDictionaryGetValue(info,kSecCodeInfoIdentifier);
+    CFTypeRef executable=CFDictionaryGetValue(info,kSecCodeInfoMainExecutable),der=cell->values[8];
+    CFTypeRef unique=CFDictionaryGetValue(info,kSecCodeInfoUnique),same=CFDictionaryGetValue(disk,kSecCodeInfoUnique);
+    char actual[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
+    return identifier && CFGetTypeID(identifier)==CFStringGetTypeID() && CFEqual(identifier,CFSTR("dev.mobile-release-kit.desktop.remove"))
+        && executable && CFGetTypeID(executable)==CFURLGetTypeID()
+        && CFURLGetFileSystemRepresentation((CFURLRef)executable,false,(UInt8 *)actual,sizeof(actual))
+        && memchr(actual,0,sizeof(actual)) && strcmp(actual,cell->code_path)==0
+        && data_equal(der,mrk_install_producer_leaf_der,sizeof(mrk_install_producer_leaf_der))
+        && sha256_matches(CFDataGetBytePtr((CFDataRef)der),sizeof(mrk_install_producer_leaf_der),mrk_install_producer_leaf_sha256)
+        && unique && CFGetTypeID(unique)==CFDataGetTypeID() && CFDataGetLength((CFDataRef)unique)==20
+        && same && CFGetTypeID(same)==CFDataGetTypeID() && CFDataGetLength((CFDataRef)same)==20 && CFEqual(unique,same);
+}
 static int code_step(producer_cell *cell,uint32_t phase,mrk_install_producer_report *out) {
+    const uint32_t last=cell->report.reserved==7 ? MRK_REMOVE_RECOVERY_CODE_STEPS : MRK_INSTALL_PRODUCER_CODE_STEPS;
     if(!code_role(cell->report.reserved) || cell->report.failed || cell->report.unknown || phase<1
-        || phase>MRK_INSTALL_PRODUCER_CODE_STEPS || phase!=cell->report.phase+1) return 0;
-    unsigned slot=code_slot(phase);
+        || phase>last || phase!=cell->report.phase+1) return 0;
+    unsigned slot=code_slot(phase,cell->report.reserved);
     if(slot<MRK_INSTALL_PRODUCER_SLOTS && (cell->values[slot] || cell->report.states[slot])) return 0;
     cell->report.phase=phase;cell->report.calls++;
     if(slot<MRK_INSTALL_PRODUCER_SLOTS) cell->report.states[slot]=1;
@@ -236,7 +264,7 @@ static int code_step(producer_cell *cell,uint32_t phase,mrk_install_producer_rep
         if(!code_originals(cell)) failed(cell);
         if(!cell->report.failed) switch(phase) {
             case 1:
-                cell->values[0]=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)cell->code_path,strlen(cell->code_path),cell->report.reserved!=5);break;
+                cell->values[0]=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)cell->code_path,strlen(cell->code_path),!remove_code_role(cell->report.reserved));break;
             case 2: {
                 SecStaticCodeRef code=NULL;
                 status=SecStaticCodeCreateWithPath((CFURLRef)cell->values[0],kSecCSDefaultFlags,&code);
@@ -277,6 +305,30 @@ static int code_step(producer_cell *cell,uint32_t phase,mrk_install_producer_rep
                 cell->values[5]=SecCertificateCopyData((SecCertificateRef)certificate);break;
             }
             case 8:if(!code_facts(cell)) failed(cell);break;
+            case 9: {
+                SecCodeRef executing=NULL;
+                status=SecCodeCopySelf(kSecCSDefaultFlags,&executing);
+                cell->values[6]=executing;break;
+            }
+            case 10:
+                status=SecCodeCheckValidity((SecCodeRef)cell->values[6],kSecCSStrictValidate|kSecCSNoNetworkAccess,
+                    (SecRequirementRef)cell->values[3]);break;
+            case 11: {
+                CFDictionaryRef info=NULL;
+                status=SecCodeCopySigningInformation((SecStaticCodeRef)cell->values[6],kSecCSSigningInformation|kSecCSDynamicInformation,&info);
+                cell->values[7]=info;break;
+            }
+            case 12: {
+                CFDictionaryRef info=(CFDictionaryRef)cell->values[7];
+                if(!code_info_shape(info)) {failed(cell);break;}
+                CFTypeRef chain=CFDictionaryGetValue(info,kSecCodeInfoCertificates);
+                if(!chain || CFGetTypeID(chain)!=CFArrayGetTypeID() || CFArrayGetCount((CFArrayRef)chain)<1
+                    || CFArrayGetCount((CFArrayRef)chain)>8) {failed(cell);break;}
+                CFTypeRef certificate=CFArrayGetValueAtIndex((CFArrayRef)chain,0);
+                if(!certificate || CFGetTypeID(certificate)!=SecCertificateGetTypeID()) {failed(cell);break;}
+                cell->values[8]=SecCertificateCopyData((SecCertificateRef)certificate);break;
+            }
+            case 13:if(!recovery_facts(cell)) failed(cell);break;
             default:failed(cell);break;
         }
         // A known PRE refusal never dispatched the API: armed empty slot is
@@ -285,7 +337,7 @@ static int code_step(producer_cell *cell,uint32_t phase,mrk_install_producer_rep
         if(status!=errSecSuccess) failed(cell);
         if(!code_originals(cell)) failed(cell);
         cell->report.returned++;
-        if(phase==MRK_INSTALL_PRODUCER_CODE_STEPS && !cell->report.failed) cell->report.matched=1;
+        if(phase==last && !cell->report.failed) cell->report.matched=1;
     } @catch (...) {unknown(cell);}
     *out=cell->report;return 1;
 }
@@ -506,6 +558,25 @@ void *mrk_remove_producer_code_new(int directory,int program,const uint8_t *path
     producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
     cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
     cell->report.version=1;cell->report.reserved=5;cell->outer_fd=directory;cell->code_fd=program;
+    cell->outer_identity=outer_identity;cell->code_identity=code_identity;
+    memcpy(cell->outer_path,outer_path,sizeof(outer_path));memcpy(cell->code_path,code_path,sizeof(code_path));
+    if(!code_originals(cell)){cell->magic=0;free(cell);return NULL;}return cell;
+#else
+    (void)directory;(void)program;(void)path;(void)size;return NULL;
+#endif
+}
+void *mrk_remove_recovery_code_new(int directory,int program,const uint8_t *path,size_t size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    if(!source_selected() || !canonical_path(path,size,7) || directory<0 || program<0
+        || getuid()!=0 || geteuid()!=0 || getgid()!=0 || getegid()!=0) return NULL;
+    char outer_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0},code_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
+    memcpy(outer_path,path,size);int length=snprintf(code_path,sizeof(code_path),"%s/mrk-macos-remove",outer_path);
+    struct stat outer_identity={0},code_identity={0};
+    if(length<=0 || (size_t)length>=sizeof(code_path) || fstat(directory,&outer_identity)!=0 || fstat(program,&code_identity)!=0
+        || !borrowed_remove(directory,outer_path,&outer_identity,1) || !borrowed_remove(program,code_path,&code_identity,0)) return NULL;
+    producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
+    cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
+    cell->report.version=1;cell->report.reserved=7;cell->outer_fd=directory;cell->code_fd=program;
     cell->outer_identity=outer_identity;cell->code_identity=code_identity;
     memcpy(cell->outer_path,outer_path,sizeof(outer_path));memcpy(cell->code_path,code_path,sizeof(code_path));
     if(!code_originals(cell)){cell->magic=0;free(cell);return NULL;}return cell;

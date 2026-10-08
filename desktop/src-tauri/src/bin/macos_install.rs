@@ -1233,12 +1233,14 @@ mod installer {
         // Removal-only preserved prefixes. These rows describe actual current
         // originals; no old inode/hash/0600 body grants a successful admission.
         const REMOVAL_ARCHIVE_COUNT:usize=64;
-        const REMOVAL_ARCHIVE_TABLE:usize=64*1024;
+        const REMOVAL_ARCHIVE_TABLE:usize=128*1024;
         // Same2MiB reservation: one65KiB stream block (including return/move
         // overlap), bounded selected-release strict DATA/serde backing, two
         // previous names,64 prior references and the bounded root roster.
-        const REMOVAL_ARCHIVE_PARSER:usize=512*1024;
-        const REMOVAL_ARCHIVE_NAMES:[&str;2]=["snapshot-v1","admission.json"];
+        const REMOVAL_ARCHIVE_PARSER:usize=1024*1024;
+        const REMOVAL_HISTORY_SPANS:usize=256*1024;
+        const REMOVAL_ARCHIVE_NAMES:[&str;6]=["snapshot-v2","admission.json","app-withdrawn.json",
+            "payload-roster-removal.json","payload-absent-observed.json","first-failure.json"];
         #[derive(Clone,Copy,PartialEq,Eq)]
         enum RemovalArchiveShape { WritingPrefix, SealedBody }
         #[derive(PartialEq,Eq)]
@@ -1255,7 +1257,8 @@ mod installer {
         }
         #[derive(PartialEq,Eq)]
         pub(super) struct RemovalArchiveReference {
-            name:String,identity:Identity,flags:u32,files:[Option<RemovalArchiveFileReference>;2],
+            name:String,identity:Identity,flags:u32,files:[Option<RemovalArchiveFileReference>;6],
+            app:Option<(Identity,u32)>,snapshot:Option<RemovalGenesisSummaryData>,attempt:Option<RemovalAttemptData>,
             // Only a completely observed header can supply an old request ID.
             // No unknown field is invented for an interrupted prefix.
             request:Option<[u8;16]>,
@@ -1264,12 +1267,17 @@ mod installer {
             pub(super) fn name(&self)->&str { &self.name }
             pub(super) fn identity(&self)->Identity { self.identity }
             pub(super) fn flags(&self)->u32 { self.flags }
-            pub(super) fn files(&self)->&[Option<RemovalArchiveFileReference>;2] { &self.files }
+            pub(super) fn files(&self)->&[Option<RemovalArchiveFileReference>;6] { &self.files }
+            pub(super) fn app_data(&self)->Option<(Identity,u32)> {self.app}
+            pub(super) fn attempt_data(&self)->Option<&RemovalAttemptData> {self.attempt.as_ref()}
         }
         #[derive(PartialEq,Eq)]
         pub(super) struct RemovalArchiveCensus { rows:Vec<RemovalArchiveReference>,storage_bytes:u64,root:usize }
         impl RemovalArchiveCensus {
             fn empty(root:usize)->Result<Self> {
+                check(std::mem::size_of::<RemovalArchiveReference>().checked_mul(REMOVAL_ARCHIVE_COUNT)
+                    .and_then(|n|n.checked_add(std::mem::size_of::<Self>())).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),
+                    "removal-prior-memory")?;
                 let mut rows=Vec::new();rows.try_reserve_exact(REMOVAL_ARCHIVE_COUNT).map_err(|_|"removal-prior-allocation")?;
                 let value=Self {rows,storage_bytes:0,root};value.owned_bytes()?;Ok(value)
             }
@@ -1288,9 +1296,10 @@ mod installer {
                     && self.rows.last().is_none_or(|old|old.name<row.name),"removal-prior-count-order")?;
                 let mut total=self.storage_bytes;
                 for file in row.files.iter().flatten() { total=removal_archive_storage_sum_data(total,file.len)?; }
+                check(self.owned_bytes()?.checked_add(row.name.capacity()).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),"removal-prior-memory")?;
                 self.rows.push(row);self.storage_bytes=total;self.owned_bytes()?;Ok(())
             }
-            fn fresh(&self,request:&str,nonce:&str)->Result<()> {
+            pub(super) fn fresh(&self,request:&str,nonce:&str)->Result<()> {
                 let request=archive_hex_data::<16>(request)?;
                 check(worker::invocation_valid(nonce) && self.rows.iter().all(|row|
                     &row.name[8..]!=nonce && row.request!=Some(request)),"removal-prior-reused-request")
@@ -1334,6 +1343,16 @@ mod installer {
                         self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");} };
                 Ok(())
             }
+            fn begin_post(&mut self,root:usize,initial:bool)->Result<()> {
+                let expected=if initial {RemovalArchivePhase::Taken}else{RemovalArchivePhase::PostComplete};
+                if self.root!=root || self.phase!=expected {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
+                self.phase=RemovalArchivePhase::PostReading;Ok(())
+            }
+            fn complete_post(&mut self,result:Result<()>)->Result<()> {
+                if let Err(why)=result {self.phase=RemovalArchivePhase::Refused;return Err(why);}
+                if self.phase!=RemovalArchivePhase::PostReading {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
+                self.phase=RemovalArchivePhase::PostComplete;Ok(())
+            }
             fn take(&mut self)->Result<RemovalArchiveCensus> {
                 if self.phase!=RemovalArchivePhase::SecondComplete || self.first.is_none() || self.current.is_none() {
                     self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");
@@ -1360,7 +1379,7 @@ mod installer {
                 && id.links>0 && id.size>=0 && flags==0
         }
         fn archive_file_data(id:Identity,flags:u32,slot:usize)->bool {
-            slot<2 && id.ino!=0 && id.uid==0 && id.gid==0 && id.links==1 && flags==0
+            slot<6 && id.ino!=0 && id.uid==0 && id.gid==0 && id.links==1 && flags==0
                 && matches!(id.mode,0o100600|0o100444) && id.size>=0
                 && (id.size as u64)<=(if slot==0 {REMOVAL_SNAPSHOT_LIMIT}else{mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64})
                 && (id.mode==0o100600 || id.size>0)
@@ -1371,6 +1390,336 @@ mod installer {
                 (Some((0o100444,true)),None|Some(0o100600))=>true,_=>false,
             }
         }
+        // Fixed linked-history comparison DATA. No shape, digest, index or
+        // record returned here is a signature, EX, peer, or payload authority.
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) struct RemovalHistoryBindingData {
+            target:mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData,
+            source:[u8;20],digests:[[u8;32];5],
+        }
+        impl RemovalHistoryBindingData {
+            fn from_record_binding(value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<Self> {
+                Ok(Self {target:value.target,source:archive_hex_data(value.source_commit)?,digests:[
+                    archive_hex_data(value.removal_descriptor_sha256)?,archive_hex_data(value.installed_producer_sha256)?,
+                    archive_hex_data(value.installed_inventory_sha256)?,archive_hex_data(value.installation_state_sha256)?,
+                    archive_hex_data(value.payload_roster_sha256)?]})
+            }
+            pub(super) fn target_data(&self)->mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData {self.target}
+            pub(super) fn source_data(&self)->&[u8;20] {&self.source}
+            pub(super) fn digests_data(&self)->&[[u8;32];5] {&self.digests}
+            pub(super) fn matches_data(&self,value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->bool {
+                Self::from_record_binding(value).is_ok_and(|other|other==*self)
+            }
+            pub(super) fn with_binding<T>(&self,call:impl FnOnce(mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<T>)->Result<T> {
+                let source=archive_hex_text_data(&self.source);let digests=self.digests.map(|sha|archive_hex_text_data(&sha));
+                call(mobile_release_desktop::macos_remove_record::RemovalBindingData {target:self.target,source_commit:&source,
+                    removal_descriptor_sha256:&digests[0],installed_producer_sha256:&digests[1],installed_inventory_sha256:&digests[2],
+                    installation_state_sha256:&digests[3],payload_roster_sha256:&digests[4]})
+            }
+        }
+        fn archive_hex_text_data(bytes:&[u8])->String {
+            let mut out=String::with_capacity(bytes.len()*2);for byte in bytes {use std::fmt::Write;let _=write!(&mut out,"{byte:02x}");}out
+        }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        struct RemovalPreviousData {request:[u8;16],nonce:[u8;16],tip:[u8;32]}
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) struct RemovalAttemptData {
+            request:[u8;16],nonce:[u8;16],binding:RemovalHistoryBindingData,previous:Option<RemovalPreviousData>,
+            tip:[u8;32],slot:usize,prefix:mobile_release_desktop::macos_remove_record::PrefixData,
+            failure:Option<mobile_release_desktop::macos_remove_record::FirstFailureData>,genesis:Option<usize>,
+        }
+        impl RemovalAttemptData {
+            fn from_record(value:&mobile_release_desktop::macos_remove_record::RemovalRecordData,slot:usize)->Result<Self> {
+                check((1..6).contains(&slot),"removal-history-record-slot")?;
+                let previous=value.previous_attempt_data().map(|(request,nonce,tip)|->Result<RemovalPreviousData>{Ok(RemovalPreviousData {
+                    request:archive_hex_data(request)?,nonce:archive_hex_data(nonce)?,tip:archive_hex_data(tip)?})}).transpose()?;
+                Ok(Self {request:archive_hex_data(value.request_id_data())?,nonce:archive_hex_data(value.root_nonce_data())?,
+                    binding:RemovalHistoryBindingData::from_record_binding(value.binding_data())?,previous,
+                    tip:archive_hex_data(value.digest_data())?,slot,prefix:value.prefix_data(),failure:value.first_failure_data(),genesis:None})
+            }
+            pub(super) fn request_id_data(&self)->&[u8;16] {&self.request}
+            pub(super) fn root_nonce_data(&self)->&[u8;16] {&self.nonce}
+            pub(super) fn binding_data(&self)->&RemovalHistoryBindingData {&self.binding}
+            pub(super) fn raw_tip_sha256_data(&self)->&[u8;32] {&self.tip}
+            pub(super) fn tip_slot_data(&self)->usize {self.slot}
+            pub(super) fn prefix_data(&self)->mobile_release_desktop::macos_remove_record::PrefixData {self.prefix}
+            pub(super) fn first_failure_data(&self)->Option<mobile_release_desktop::macos_remove_record::FirstFailureData> {self.failure}
+            pub(super) fn previous_attempt_data(&self)->Option<(&[u8;16],&[u8;16],&[u8;32])> {
+                self.previous.as_ref().map(|p|(&p.request,&p.nonce,&p.tip))
+            }
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        struct RemovalGenesisSummaryData {request:[u8;16],nonce:[u8;16],binding:RemovalHistoryBindingData}
+        fn removal_history_same_record_data(before:&mobile_release_desktop::macos_remove_record::RemovalRecordData,
+            after:&mobile_release_desktop::macos_remove_record::RemovalRecordData)->Result<()> {
+            check(before.request_id_data()==after.request_id_data() && before.root_nonce_data()==after.root_nonce_data()
+                && before.previous_attempt_data()==after.previous_attempt_data()
+                && RemovalHistoryBindingData::from_record_binding(before.binding_data())?
+                    ==RemovalHistoryBindingData::from_record_binding(after.binding_data())?,"removal-history-record-binding")
+        }
+        fn removal_history_prefix_data(slot:usize)->Result<mobile_release_desktop::macos_remove_record::PrefixData> {
+            use mobile_release_desktop::macos_remove_record::PrefixData as P;
+            match slot {1=>Ok(P::AdmissionRecorded),2=>Ok(P::AppWithdrawn),3=>Ok(P::PayloadRosterRemoval),
+                4=>Ok(P::PayloadAbsentObserved),_=>Err("removal-history-prefix-slot")}
+        }
+        const REMOVAL_FAILURE_KINDS:[mobile_release_desktop::macos_remove_record::FailureKindData;6]=[
+            mobile_release_desktop::macos_remove_record::FailureKindData::OriginalFailed,
+            mobile_release_desktop::macos_remove_record::FailureKindData::OriginalUnknown,
+            mobile_release_desktop::macos_remove_record::FailureKindData::PostMismatch,
+            mobile_release_desktop::macos_remove_record::FailureKindData::Deadline,
+            mobile_release_desktop::macos_remove_record::FailureKindData::Persistence,
+            mobile_release_desktop::macos_remove_record::FailureKindData::CloseUnknown];
+        fn removal_history_writer_prefix_data(before:&mobile_release_desktop::macos_remove_record::RemovalRecordData,
+            slot:usize,bytes:&[u8])->Result<()> {
+            let binding=before.binding_data();
+            if slot==5 {
+                for kind in REMOVAL_FAILURE_KINDS {let next=before.first_failure_latched_data(kind,binding).map_err(|_|"removal-history-prefix")?;
+                    if archive_admission_chunk_data(next.bytes_data(),0,bytes){return Ok(());}}
+                Err("removal-history-prefix")
+            }else{
+                let next=before.next_prefix_data(removal_history_prefix_data(slot)?,binding).map_err(|_|"removal-history-prefix")?;
+                check(archive_admission_chunk_data(next.bytes_data(),0,bytes),"removal-history-prefix")
+            }
+        }
+        // Comparison-only template: canonical admission_data supplies all bytes
+        // except the one SOURCE-fixed previousAttempt:null value. Only fixed
+        // hex arrays from an already parsed tip supply that closed tuple. This
+        // is never an encoder for publication; a writer must reread the actual
+        // tip and call new_attempt_data. No historical raw hash is re-encoded.
+        fn removal_linked_template_data(before:&RemovalAttemptData,nonce:&str,count:usize)->Result<Vec<u8>> {
+            use mobile_release_desktop::macos_remove_record::RemovalRecordData;
+            check(worker::invocation_valid(nonce) && (2..=64).contains(&count)
+                && archive_hex_data::<16>(nonce)?!=before.nonce,"removal-history-prefix-bound")?;
+            let dummy=if before.request==[0x11;16] {"22222222222222222222222222222222"}
+                else {"11111111111111111111111111111111"};
+            let made=before.binding.with_binding(|binding|RemovalRecordData::admission_data(dummy,nonce,binding)
+                .map_err(|_|"removal-history-prefix-template"))?;
+            let canonical=made.bytes_data();let key=b"\"previousAttempt\":null";
+            let mut matches=canonical.windows(key.len()).enumerate().filter_map(|(at,part)|(part==key).then_some(at));
+            let at=matches.next().ok_or("removal-history-prefix-template")?;
+            check(matches.next().is_none(),"removal-history-prefix-template")?;
+            let prior=format!("\"previousAttempt\":{{\"requestId\":\"{}\",\"rootNonce\":\"{}\",\"recordSha256\":\"{}\"}}",
+                archive_hex_text_data(&before.request),archive_hex_text_data(&before.nonce),archive_hex_text_data(&before.tip));
+            let length=canonical.len().checked_sub(key.len()).and_then(|n|n.checked_add(prior.len()))
+                .filter(|n|*n<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT).ok_or("removal-history-prefix-template")?;
+            let mut out=Vec::new();out.try_reserve_exact(length).map_err(|_|"removal-history-prefix-allocation")?;
+            check(out.capacity()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT,"removal-history-prefix-memory")?;
+            out.extend_from_slice(&canonical[..at]);out.extend_from_slice(prior.as_bytes());out.extend_from_slice(&canonical[at+key.len()..]);
+            check(out.len()==length && made.owned_bytes_data().and_then(|n|n.checked_add(out.capacity()))
+                .and_then(|n|n.checked_add(prior.capacity()+1024)).is_some_and(|n|n<=REMOVAL_ARCHIVE_PARSER),
+                "removal-history-prefix-memory")?;
+            Ok(out)
+        }
+        fn removal_linked_admission_prefix_data(before:&RemovalAttemptData,
+            nonce:&str,count:usize,bytes:&[u8])->Result<Option<[u8;16]>> {
+            check(bytes.len()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT,"removal-history-prefix-bound")?;
+            let canonical=removal_linked_template_data(before,nonce,count)?;let key=b"\"requestId\":\"";
+            // First occurrence is the fresh top-level field; the second is the
+            // fixed previous tuple, which never varies. Exact codec-byte tests
+            // below bind this SOURCE ordering rather than accepting JSON edits.
+            let start=canonical.windows(key.len()).position(|w|w==key).ok_or("removal-history-prefix-template")?+key.len();
+            check(bytes.len()<=canonical.len(),"removal-history-prefix-template")?;
+            for (at,byte) in bytes.iter().enumerate(){
+                if (start..start+32).contains(&at) {
+                    check(byte.is_ascii_digit() || (b'a'..=b'f').contains(byte),"removal-history-prefix-request")?;
+                }else{check(Some(byte)==canonical.get(at),"removal-history-prefix")?;}
+            }
+            if bytes.len()<start+32 {return Ok(None);}
+            let text=std::str::from_utf8(&bytes[start..start+32]).map_err(|_|"removal-history-prefix-request")?;
+            let request=archive_hex_data::<16>(text)?;
+            check(request!=before.request,"removal-history-prefix-request")?;
+            // Revalidate the fully observed current identity through the SAME
+            // admission codec. Historical binding remains comparison DATA.
+            before.binding.with_binding(|binding| {
+                let actual=mobile_release_desktop::macos_remove_record::RemovalRecordData::admission_data(text,nonce,binding)
+                    .map_err(|_|"removal-history-prefix-request")?;
+                removal_history_record_memory_data(Some(&actual),None,canonical.capacity()+bytes.len())
+            })?;Ok(Some(request))
+        }
+        fn removal_history_record_memory_data(current:Option<&mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            next:Option<&mobile_release_desktop::macos_remove_record::RemovalRecordData>,raw:usize)->Result<()> {
+            let a=current.map(|r|r.owned_bytes_data().ok_or("removal-history-record-memory")).transpose()?.unwrap_or(0);
+            let b=next.map(|r|r.owned_bytes_data().ok_or("removal-history-record-memory")).transpose()?.unwrap_or(0);
+            // Fixed stream/serde/encoder/allocator temporary allowance plus all
+            // retained raw capacities; reserved before the corresponding read.
+            check(a.checked_add(b).and_then(|n|n.checked_add(raw)).and_then(|n|n.checked_add(256*1024))
+                .is_some_and(|n|n<=REMOVAL_ARCHIVE_PARSER),"removal-history-record-memory")
+        }
+        fn removal_archive_record_data(slot:usize,mode:u32,bytes:&[u8],nonce:&str,
+            snapshot:Option<(&ArchiveHeader,[u8;32])>,last:&mut Option<(mobile_release_desktop::macos_remove_record::RemovalRecordData,usize)>,
+            request:&mut Option<[u8;16]>)->Result<()> {
+            use mobile_release_desktop::macos_remove_record::RemovalRecordData;
+            check((1..6).contains(&slot) && matches!(mode,0o100600|0o100444)
+                && bytes.len()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT,"removal-history-record-shape")?;
+            removal_history_record_memory_data(last.as_ref().map(|r|&r.0),None,bytes.len())?;
+            if mode==0o100600 {
+                if slot==1 {
+                    check(last.is_none(),"removal-history-admission-order")?;
+                    if let Some((header,sha))=snapshot {
+                        let expected=header.admission(sha)?;
+                        check(archive_admission_chunk_data(expected.bytes_data(),0,bytes),"removal-history-admission-prefix")?;
+                    } // Snapshot-less linked prefixes are checked after all
+                      // closed rows/real raw tip summaries have been collected.
+                    return Ok(());
+                }
+                let old=&last.as_ref().ok_or("removal-history-progress-before-admission")?.0;
+                return removal_history_writer_prefix_data(old,slot,bytes);
+            }
+            let parsed=RemovalRecordData::parse_shape_data(bytes).map_err(|_|"removal-history-record-parse")?;
+            removal_history_record_memory_data(last.as_ref().map(|r|&r.0),Some(&parsed),bytes.len())?;
+            check(parsed.root_nonce_data()==nonce,"removal-history-nonce-location")?;
+            if slot==1 {
+                check(last.is_none() && parsed.prefix_data()==removal_history_prefix_data(1)? && parsed.first_failure_data().is_none(),
+                    "removal-history-admission-order")?;
+                match snapshot {
+                    Some((header,sha))=>{let genesis=header.summary(sha)?;
+                        check(parsed.previous_attempt_data().is_none() && genesis.request==archive_hex_data(parsed.request_id_data())?
+                            && genesis.nonce==archive_hex_data(nonce)?
+                            && genesis.binding==RemovalHistoryBindingData::from_record_binding(parsed.binding_data())?,
+                            "removal-history-genesis-binding")?;},
+                    None=>check(parsed.previous_attempt_data().is_some(),"removal-history-genesis-missing")?,
+                }
+            }else{
+                let old=&last.as_ref().ok_or("removal-history-progress-before-admission")?.0;
+                removal_history_same_record_data(old,&parsed)?;
+                check(old.first_failure_data().is_none(),"removal-history-after-failure")?;
+                if slot==5 {
+                    check(parsed.prefix_data()==old.prefix_data() && parsed.first_failure_data().is_some_and(|f|f.phase==old.prefix_data()),
+                        "removal-history-failure-phase")?;
+                }else{
+                    check(old.prefix_data()==removal_history_prefix_data(slot-1)? && parsed.prefix_data()==removal_history_prefix_data(slot)?
+                        && parsed.first_failure_data().is_none(),"removal-history-progress-order")?;
+                }
+            }
+            *request=Some(archive_hex_data(parsed.request_id_data())?);*last=Some((parsed,slot));Ok(())
+        }
+        fn removal_archive_reference_shape_data(modes:[Option<u32>;6],app:bool)->bool {
+            let snapshot=modes[0];let admission=modes[1];
+            if modes.iter().flatten().any(|mode|!matches!(*mode,0o100600|0o100444)){return false;}
+            if snapshot==Some(0o100600){return !app && modes[1..].iter().all(Option::is_none);}
+            if admission.is_none(){return !app && modes[2..].iter().all(Option::is_none);}
+            if admission==Some(0o100600){return !app && modes[2..].iter().all(Option::is_none);}
+            if app && (snapshot!=Some(0o100444) || modes[4]==Some(0o100444)){return false;}
+            let mut closed=true;
+            for mode in &modes[2..5]{match mode{Some(0o100444) if closed=>{},Some(0o100600) if closed=>closed=false,
+                None=>closed=false,_=>return false}}
+            true
+        }
+        fn removal_archive_app_data(id:Identity,flags:u32)->bool {
+            id.mode==0o040555 && id.uid==0 && id.gid==0 && id.ino!=0 && id.links>0 && id.size>=0 && flags==0
+        }
+        impl RemovalArchiveCensus {
+            fn resolve_history_data(&mut self)->Result<()> {
+                let count=self.rows.len();check(count<=64,"removal-history-count")?;
+                let mut parents=[None;64];let mut children=[0u8;64];
+                for index in 0..count {
+                    if let Some(request)=self.rows[index].request {
+                        check(self.rows[..index].iter().all(|old|old.request!=Some(request)),"removal-history-request-reuse")?;
+                    }
+                    let Some(node)=self.rows[index].attempt else {continue;};
+                    check(node.nonce==archive_hex_data::<16>(&self.rows[index].name[8..])?,"removal-history-nonce-location")?;
+                    if let Some(previous)=node.previous {
+                        check(self.rows[index].snapshot.is_none() && self.rows[index].files[0].is_none()
+                            && self.rows[index].app.is_none(),"removal-history-linked-shape")?;
+                        let mut found=None;
+                        for candidate in 0..count {
+                            if let Some(old)=self.rows[candidate].attempt {
+                                if old.request==previous.request && old.nonce==previous.nonce {
+                                    check(found.is_none() && candidate!=index && old.tip==previous.tip && old.binding==node.binding,
+                                        "removal-history-previous-tip")?;found=Some(candidate);
+                                }
+                            }
+                        }
+                        let parent=found.ok_or("removal-history-dangling")?;
+                        children[parent]=children[parent].checked_add(1).ok_or("removal-history-fork")?;
+                        check(children[parent]==1,"removal-history-fork")?;parents[index]=Some(parent);
+                    }else{
+                        let snapshot=self.rows[index].snapshot.ok_or("removal-history-genesis-missing")?;
+                        check(snapshot.request==node.request && snapshot.nonce==node.nonce && snapshot.binding==node.binding
+                            && self.rows[index].files[0].as_ref().is_some_and(|f|f.shape==RemovalArchiveShape::SealedBody),
+                            "removal-history-genesis-binding")?;
+                    }
+                }
+                for index in 0..count {
+                    if self.rows[index].attempt.is_none(){continue;}
+                    let mut at=index;let mut seen=0u64;
+                    loop {check(at<count && seen&(1u64<<at)==0,"removal-history-cycle")?;seen|=1u64<<at;
+                        match parents[at] {Some(parent)=>at=parent,None=>break}}
+                    check(self.rows[at].snapshot.is_some(),"removal-history-genesis-missing")?;
+                    self.rows[index].attempt.as_mut().ok_or("removal-history-node")?.genesis=Some(at);
+                }
+                self.owned_bytes()?;Ok(())
+            }
+            pub(super) fn genesis_index_data(&self,index:usize)->Option<usize> {
+                self.rows.get(index)?.attempt.as_ref()?.genesis
+            }
+            pub(super) fn is_tip_data(&self,index:usize)->bool {
+                let Some(Some(node))=self.rows.get(index).map(|row|row.attempt) else{return false;};
+                node.genesis.is_some() && !self.rows.iter().filter_map(|row|row.attempt).any(|other|
+                    other.previous.is_some_and(|p|p.request==node.request && p.nonce==node.nonce && p.tip==node.tip))
+            }
+            pub(super) fn has_admitted_history_data(&self)->bool {self.rows.iter().any(|row|row.attempt.is_some())}
+        }
+        // Semantic offsets describe bytes of ONE same original snapshot. They
+        // are not paths to open, signature admission or payload permissions.
+        pub(super) struct RemovalControlSpanData {
+            kind:u8,path:String,identity:Identity,flags:u32,offset:u64,len:u64,digest:[u8;32],
+        }
+        impl RemovalControlSpanData {
+            pub(super) fn kind_data(&self)->u8 {self.kind}
+            pub(super) fn path_data(&self)->&str {&self.path}
+            pub(super) fn identity_data(&self)->Identity {self.identity}
+            pub(super) fn flags_data(&self)->u32 {self.flags}
+            pub(super) fn offset_data(&self)->u64 {self.offset}
+            pub(super) fn len_data(&self)->u64 {self.len}
+            pub(super) fn digest_data(&self)->&[u8;32] {&self.digest}
+        }
+        struct RemovalSemanticSpans {selected:Vec<u8>,controls:Vec<RemovalControlSpanData>}
+        impl RemovalSemanticSpans {
+            fn new()->Self {Self {selected:Vec::new(),controls:Vec::new()}}
+            fn memory(&self,extra:usize)->Result<usize> {
+                let mut bytes=std::mem::size_of::<Self>().checked_add(self.selected.capacity())
+                    .and_then(|n|n.checked_add(self.controls.capacity().checked_mul(std::mem::size_of::<RemovalControlSpanData>())?))
+                    .and_then(|n|n.checked_add(extra)).ok_or("removal-history-span-memory")?;
+                for row in &self.controls {bytes=bytes.checked_add(row.path.capacity()).ok_or("removal-history-span-memory")?;}
+                check(bytes<=REMOVAL_HISTORY_SPANS,"removal-history-span-memory")?;Ok(bytes)
+            }
+            fn reserve(&mut self,count:usize)->Result<()> {
+                check(count>0 && count<=SNAPSHOT_CONTROLS && self.controls.is_empty() && self.controls.capacity()==0,
+                    "removal-history-span-count")?;
+                self.memory(count.checked_mul(std::mem::size_of::<RemovalControlSpanData>()).ok_or("removal-history-span-memory")?)?;
+                self.controls.try_reserve_exact(count).map_err(|_|"removal-history-span-allocation")?;self.memory(0)?;Ok(())
+            }
+            fn push(&mut self,row:RemovalControlSpanData)->Result<()> {
+                check(self.controls.len()<self.controls.capacity(),"removal-history-span-count")?;
+                self.memory(row.path.capacity())?;self.controls.push(row);self.memory(0)?;Ok(())
+            }
+        }
+        pub(super) struct RemovalGenesisData {header:ArchiveHeader,spans:RemovalSemanticSpans,digest:[u8;32]}
+        impl RemovalGenesisData {
+            pub(super) fn request_id_data(&self)->&str {&self.header.values[0]}
+            pub(super) fn root_nonce_data(&self)->&str {&self.header.values[1]}
+            pub(super) fn binding_data(&self)->Result<RemovalHistoryBindingData> {Ok(self.header.summary(self.digest)?.binding)}
+            pub(super) fn selected_bytes_data(&self)->&[u8] {&self.spans.selected}
+            pub(super) fn controls_data(&self)->&[RemovalControlSpanData] {&self.spans.controls}
+            pub(super) fn whole_sha256_data(&self)->&[u8;32] {&self.digest}
+            pub(super) fn owned_bytes_data(&self)->Result<usize> {
+                let extra=self.header.values.iter().try_fold(std::mem::size_of::<Self>(),|n,s|
+                    n.checked_add(s.capacity()).ok_or("removal-history-span-memory"))?;
+                // Includes inline storage conservatively twice rather than
+                // taking a false credit for a move or an allocator capacity.
+                self.spans.memory(extra)
+            }
+        }
+        pub(super) fn parse_removal_genesis_data<F:FnMut(u64,&mut [u8])->Result<usize>>(size:u64,nonce:&str,read:F)
+            ->Result<RemovalGenesisData> {
+            let mut spans=RemovalSemanticSpans::new();
+            let (complete,header,digest)=parse_removal_snapshot_with_spans_data(size,true,nonce,read,Some(&mut spans))?;
+            check(complete,"removal-history-genesis-incomplete")?;
+            let value=RemovalGenesisData {header:header.ok_or("removal-history-genesis-header")?,spans,digest};
+            value.owned_bytes_data()?;Ok(value)
+        }
+
         // Closed streaming DATA grammar: fixed SOURCE layout, never opens an
         // encoded path. It keeps one65KiB block, not a16MiB snapshot copy.
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -1453,6 +1802,11 @@ mod installer {
             values:[String;7],
         }
         impl ArchiveHeader {
+            fn summary(&self,digest:[u8;32])->Result<RemovalGenesisSummaryData> {
+                let record=self.admission(digest)?;
+                Ok(RemovalGenesisSummaryData {request:archive_hex_data(record.request_id_data())?,
+                    nonce:archive_hex_data(record.root_nonce_data())?,binding:RemovalHistoryBindingData::from_record_binding(record.binding_data())?})
+            }
             fn admission(&self,snapshot_sha:[u8;32])->Result<mobile_release_desktop::macos_remove_record::RemovalRecordData> {
                 use mobile_release_desktop::macos_remove_record::{RemovalBindingData,RemovalRecordData};
                 let digest=snapshot_sha.iter().map(|b|format!("{b:02x}")).collect::<String>();
@@ -1473,8 +1827,8 @@ mod installer {
                 2=>path=="@remove/producer.sig",3=>path==paths::REGISTRATION_GATE_NAME,
                 4=>path==paths::MAINTENANCE_GATE_NAME,_=>false}
         }
-        fn archive_snapshot_grammar<F:FnMut(u64,&mut [u8])->Result<usize>>(cursor:&mut ArchiveCursor<F>,header:&mut Option<ArchiveHeader>,nonce:&str)
-            ->ArchiveParse<()> {
+        fn archive_snapshot_grammar<F:FnMut(u64,&mut [u8])->Result<usize>>(cursor:&mut ArchiveCursor<F>,header:&mut Option<ArchiveHeader>,nonce:&str,
+            mut spans:Option<&mut RemovalSemanticSpans>)->ArchiveParse<()> {
             for expected in REMOVAL_SNAPSHOT_MAGIC {archive_require(cursor.byte()?==*expected,"removal-prior-magic")?;}
             use mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData;
             let target=match cursor.byte()? {1=>MaintenanceTargetData::Arm64,2=>MaintenanceTargetData::Intel,
@@ -1492,7 +1846,8 @@ mod installer {
             // Target-specific closed release DATA. No source signer or current
             // authority is inferred from the old header or this parse.
             let selected=ReleaseSetData::parse_for_target_data(&selection,target).map_err(|_|"removal-prior-selection")?;
-            drop(selected);drop(selection);
+            drop(selected);
+            if let Some(spans)=spans.as_deref_mut(){spans.memory(selection.capacity())?;spans.selected=selection;}else{drop(selection);}
             let directories=cursor.u16()?;archive_require((1..=SNAPSHOT_DIRECTORIES).contains(&directories),"removal-prior-directories")?;
             let mut previous:Option<String>=None;let mut total_children=0usize;
             let mut root_prior:Vec<(String,u64)>=Vec::new();
@@ -1525,22 +1880,25 @@ mod installer {
                     && &name[8..]!=header.as_ref().ok_or("removal-prior-header")?.values[1].as_str(),"removal-prior-reference-order")?;
                 let (identity,flags)=cursor.identity(&[0o040700])?;
                 archive_require(archive_directory_data(identity,flags,true) && identity.ino==expected.1,"removal-prior-reference-identity")?;
-                let mut snapshot=None;let mut admission=None;
-                for slot in 0..2 {
+                let mut modes=[None;6];
+                for slot in 0..6 {
                     match cursor.byte()? {0=>{},1=>{
-                        if slot==1 {archive_require(snapshot==Some((0o100444,true)),"removal-prior-reference-shape")?;}
-                        let (id,flags)=cursor.identity(if slot==0 {&[0o100600,0o100444]}else{&[0o100600]})?;
+                        let (id,flags)=cursor.identity(&[0o100600,0o100444])?;
                         archive_require(archive_file_data(id,flags,slot),"removal-prior-reference-file")?;
                         let len=cursor.u64()?;archive_require(len==id.size as u64,"removal-prior-reference-file")?;
                         prior_bytes=removal_archive_storage_sum_data(prior_bytes,len)?;
                         let _digest=cursor.array::<32>()?;let tag=cursor.byte()?;
                         archive_require(tag==(if id.mode==0o100600 {1}else{2}),"removal-prior-reference-file")?;
-                        if slot==0 {snapshot=Some((id.mode,tag==2));}else{admission=Some(id.mode);}
+                        modes[slot]=Some(id.mode);
                     },_=>return Err(ArchiveParseError::Refused("removal-prior-reference-tag"))}
                 }
-                archive_require(archive_preadmission_shape_data(snapshot,admission),"removal-prior-reference-shape")?;
+                let app=match cursor.byte()? {0=>false,1=>{let (id,flags)=cursor.identity(&[0o040555])?;
+                    archive_require(removal_archive_app_data(id,flags),"removal-history-app-marker")?;true},
+                    _=>return Err(ArchiveParseError::Refused("removal-history-app-marker"))};
+                archive_require(removal_archive_reference_shape_data(modes,app),"removal-prior-reference-shape")?;
             }
-            let controls=cursor.u16()?;archive_require((1..=SNAPSHOT_CONTROLS).contains(&controls),"removal-prior-control-count")?;
+            let controls=cursor.u16()?;archive_require(cursor.consumed<=SNAPSHOT_HEADER as u64,"removal-prior-header-bound")?;archive_require((1..=SNAPSHOT_CONTROLS).contains(&controls),"removal-prior-control-count")?;
+            if let Some(spans)=spans.as_deref_mut(){spans.reserve(controls)?;}
             let mut last:Option<String>=None;
             for _ in 0..controls {
                 let kind=cursor.byte()?;archive_require(kind<=4,"removal-prior-control-kind")?;
@@ -1550,22 +1908,28 @@ mod installer {
                 archive_require(id.size>0 && id.size as u64<=installation_record::INVENTORY_LIMIT as u64 && flags==0,"removal-prior-control-identity")?;
                 let length=cursor.u64()?;archive_require(length==id.size as u64,"removal-prior-control-identity")?;
                 let expected=cursor.array()?;
-                cursor.body(length,expected)?;last=Some(path);
+                let offset=cursor.consumed;cursor.body(length,expected)?;
+                if let Some(spans)=spans.as_deref_mut(){spans.memory(path.len())?;spans.push(RemovalControlSpanData {kind,path:path.clone(),
+                    identity:id,flags,offset,len:length,digest:expected})?;}
+                last=Some(path);
             }
             Ok(())
         }
         fn parse_removal_snapshot_data<F:FnMut(u64,&mut [u8])->Result<usize>>(size:u64,sealed:bool,nonce:&str,read:F)
             ->Result<(bool,Option<ArchiveHeader>,[u8;32])> {
+            parse_removal_snapshot_with_spans_data(size,sealed,nonce,read,None)
+        }
+        fn parse_removal_snapshot_with_spans_data<F:FnMut(u64,&mut [u8])->Result<usize>>(size:u64,sealed:bool,nonce:&str,read:F,
+            spans:Option<&mut RemovalSemanticSpans>)->Result<(bool,Option<ArchiveHeader>,[u8;32])> {
             check(size<=REMOVAL_SNAPSHOT_LIMIT && (!sealed || size>0) && worker::invocation_valid(nonce),"removal-prior-snapshot-size")?;
             let mut cursor=ArchiveCursor::new(size,read);let mut header=None;
-            let complete=match archive_snapshot_grammar(&mut cursor,&mut header,nonce) {
+            let complete=match archive_snapshot_grammar(&mut cursor,&mut header,nonce,spans) {
                 Ok(())=>true,Err(ArchiveParseError::Prefix) if !sealed=>false,
                 Err(ArchiveParseError::Prefix)=>return Err("removal-prior-truncated-sealed"),
                 Err(ArchiveParseError::Refused(why))=>return Err(why),
             };
             let digest=cursor.eof()?;Ok((complete,header,digest))
         }
-
         // All readers use the original Book. The boundary closes EVERY newly
         // adopted original even on partial open/read/POST failure, preserves the
         // first error, and never calls a consuming close twice on a live FD.
@@ -1598,15 +1962,30 @@ mod installer {
                 "removal-prior-memory")?;}
             Ok(())
         }
-        fn removal_archive_roster(book:&mut Install,directory:usize,private:bool,limit:usize)->Result<BTreeMap<String,u64>> {
-            check(limit<=350,"removal-prior-roster-bound")?;
-            removal_archive_memory(book,128*1024)?;
+        // Fixed shallow census only, not the general Install roster. Vec
+        // capacities are observable; no guessed private BTree-node allocation.
+        fn removal_archive_roster_quote_data(private:bool,capacity:usize,names:usize,prospective:usize)->Result<usize> {
+            check(capacity<=if private{7}else{350},"removal-prior-roster-bound")?;
+            let total=std::mem::size_of::<Vec<(String,u64)>>().checked_add(capacity.checked_mul(std::mem::size_of::<(String,u64)>())
+                .ok_or("removal-prior-roster-memory")?).and_then(|n|n.checked_add(names))
+                .and_then(|n|n.checked_add(prospective)).and_then(|n|n.checked_add(65536+8192)).ok_or("removal-prior-roster-memory")?;
+            check(total<=if private{128*1024}else{256*1024},"removal-prior-roster-memory")?;Ok(total)
+        }
+        fn removal_archive_inode(rows:&[(String,u64)],name:&str)->Option<u64> {
+            rows.binary_search_by(|row|row.0.as_str().cmp(name)).ok().map(|at|rows[at].1)
+        }
+        fn removal_archive_roster(book:&mut Install,directory:usize,private:bool,limit:usize)->Result<Vec<(String,u64)>> {
+            removal_archive_roster_quote_data(private,limit,0,0)?;
+            removal_archive_memory(book,if private{128*1024}else{256*1024})?;
             let held=removal_archive_stat(book,directory,true,if private{0o700}else{0o755})?;
             let parent=book.originals[directory].parent;let name=book.originals[directory].name.clone();
             let result=removal_archive_scope(book,|book| {
                 let reader=book.open(parent,&name,true)?;
                 check(removal_archive_stat(book,reader,true,if private{0o700}else{0o755})?==held,"removal-prior-roster-original")?;
-                let mut found=BTreeMap::new();let mut block=[0u8;65536];
+                let mut found:Vec<(String,u64)>=Vec::new();found.try_reserve_exact(limit).map_err(|_|"removal-prior-roster-allocation")?;
+                check(found.capacity()<=limit,"removal-prior-roster-memory")?;
+                removal_archive_roster_quote_data(private,found.capacity(),0,0)?;
+                let mut names=0usize;let mut block=[0u8;65536];
                 loop {
                     book.clock()?;let used=native::directory_block(book.fd(reader)?.as_fd(),&mut block).map_err(|_|"removal-prior-roster")?;
                     book.clock()?;check(used<=block.len(),"removal-prior-roster")?;if used==0{break;}
@@ -1621,12 +2000,20 @@ mod installer {
                         let root_alias=if !private && child==paths::APP_NAME {book.installed_root_roster_alias(reader)?}else{false};
                         check(installed_root_roster_child_data(child,root_alias) && inode!=0
                             && matches!(kind,nix::libc::DT_DIR|nix::libc::DT_REG) && found.len()<limit
-                            && !found.contains_key(child),"removal-prior-roster-bound")?;
-                        // <=350 source-bounded component strings + conservative
-                        // BTree backing fit the charged parser/roster reserve.
-                        found.insert(child.to_owned(),inode);
+                            && found.len()<found.capacity(),"removal-prior-roster-bound")?;
+                        // Quote the largest allowed returned String capacity
+                        // BEFORE allocation; then account its actual capacity.
+                        removal_archive_roster_quote_data(private,found.capacity(),names,255)?;
+                        let mut owned=String::new();owned.try_reserve_exact(child.len()).map_err(|_|"removal-prior-roster-allocation")?;
+                        check(owned.capacity()<=255,"removal-prior-roster-memory")?;owned.push_str(child);
+                        names=names.checked_add(owned.capacity()).ok_or("removal-prior-roster-memory")?;
+                        removal_archive_roster_quote_data(private,found.capacity(),names,0)?;found.push((owned,inode));
                     }
                 }
+                // In-place sort has no sorting allocation. Strict order then
+                // rejects duplicated actual records; lookup never hides one.
+                found.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+                check(found.windows(2).all(|pair|pair[0].0<pair[1].0),"removal-prior-roster-duplicate")?;
                 check(removal_archive_stat(book,reader,true,if private{0o700}else{0o755})?==held,"removal-prior-roster-post")?;
                 Ok(found)
             });
@@ -1647,68 +2034,132 @@ mod installer {
             }
             check(read(size,&mut block[..1])?==0,"removal-prior-eof")?;Ok(digest.finalize().into())
         }
-        fn removal_archive_file(book:&mut Install,directory:usize,slot:usize,inode:u64,
-            snapshot:Option<(&ArchiveHeader,[u8;32])>,budget_left:u64,nonce:&str)->Result<(RemovalArchiveFileReference,bool,Option<ArchiveHeader>)> {
-            check(slot<2,"removal-prior-slot")?;removal_archive_memory(book,REMOVAL_ARCHIVE_PARSER)?;
+        struct RemovalArchiveRead {
+            file:RemovalArchiveFileReference,complete:bool,header:Option<ArchiveHeader>,raw:Option<Vec<u8>>,
+        }
+        fn removal_archive_file(book:&mut Install,directory:usize,slot:usize,inode:u64,budget_left:u64,nonce:&str)
+            ->Result<RemovalArchiveRead> {
+            check(slot<6,"removal-prior-slot")?;removal_archive_memory(book,REMOVAL_ARCHIVE_PARSER)?;
             removal_archive_scope(book,|book| {
                 let index=book.open(Some(directory),REMOVAL_ARCHIVE_NAMES[slot],false)?;
                 let id=book.identity(index)?;
-                check(archive_file_data(id,0,slot) && id.ino==inode && id.size as u64<=budget_left,"removal-prior-file-shape")?;
+                check(archive_file_data(id,0,slot) && id.ino==inode && id.dev==book.identity(directory)?.dev
+                    && id.size as u64<=budget_left,"removal-prior-file-shape")?;
                 let (identity,flags)=removal_archive_stat(book,index,false,id.mode&0o7777)?;
-                // A sealed admission is OUTSIDE this initial-only slice, even
-                // if it might parse. No completed-history authority is guessed.
-                check(slot==0 || id.mode==0o100600,"removal-prior-admitted-history-unsupported")?;
-                let (complete,header,digest)=if slot==0 {
-                    parse_removal_snapshot_data(id.size as u64,id.mode==0o100444,nonce,|at,buf|removal_archive_read_at(book,index,at,buf))?
+                let (complete,header,digest,raw)=if slot==0 {
+                    let (complete,header,digest)=parse_removal_snapshot_data(id.size as u64,id.mode==0o100444,nonce,
+                        |at,buf|removal_archive_read_at(book,index,at,buf))?;
+                    (complete,header,digest,None)
                 }else{
-                    let (header,sha)=snapshot.ok_or("removal-prior-admission-before-snapshot")?;
-                    let expected=header.admission(sha)?;
-                    check(id.size as usize<=expected.bytes_data().len(),"removal-prior-admission-prefix")?;
-                    let mut digest=Sha256::new();let mut block=[0;1024];let mut at=0usize;
-                    while at<id.size as usize {
-                        let length=(id.size as usize-at).min(block.len());
-                        let count=removal_archive_read_at(book,index,at as u64,&mut block[..length])?;
-                        check(count>0 && count<=length && archive_admission_chunk_data(expected.bytes_data(),at,&block[..count]),"removal-prior-admission-prefix")?;
-                        digest.update(&block[..count]);at+=count;
-                    }
-                    check(removal_archive_read_at(book,index,id.size as u64,&mut block[..1])?==0,"removal-prior-eof")?;
-                    (false,None,digest.finalize().into())
+                    // Never retain a snapshot body. At most one <=16KiB record
+                    // read joins its predecessor and the bounded codec scratch.
+                    let size=usize::try_from(id.size).map_err(|_|"removal-history-record-bound")?;
+                    check(size<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT,"removal-history-record-bound")?;
+                    let mut raw=Vec::new();raw.try_reserve_exact(size).map_err(|_|"removal-history-record-allocation")?;
+                    check(raw.capacity()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT,"removal-history-record-memory")?;
+                    raw.resize(size,0);let mut at=0;
+                    while at<size {let count=removal_archive_read_at(book,index,at as u64,&mut raw[at..])?;
+                        check(count>0 && count<=size-at,"removal-prior-short-read")?;at+=count;}
+                    let mut eof=[0];check(removal_archive_read_at(book,index,size as u64,&mut eof)?==0,"removal-prior-eof")?;
+                    (false,None,Sha256::digest(&raw).into(),Some(raw))
                 };
                 check(removal_archive_stat(book,index,false,id.mode&0o7777)?==(identity,flags),"removal-prior-file-post")?;
-                Ok((RemovalArchiveFileReference {identity,flags,len:id.size as u64,digest,
-                    shape:if id.mode==0o100444 {RemovalArchiveShape::SealedBody}else{RemovalArchiveShape::WritingPrefix}},complete,header))
+                Ok(RemovalArchiveRead {file:RemovalArchiveFileReference {identity,flags,len:id.size as u64,digest,
+                    shape:if id.mode==0o100444 {RemovalArchiveShape::SealedBody}else{RemovalArchiveShape::WritingPrefix}},complete,header,raw})
             })
+        }
+        fn removal_archive_app_stat(book:&Install,directory:usize,inode:u64)->Result<(Identity,u32)> {
+            book.clock()?;let actual=book.named(Some(directory),"app").map_err(|_|"removal-history-app-name")?;
+            let id=Identity::of(&actual);
+            check(removal_archive_app_data(id,actual.st_flags) && id.ino==inode && id.dev==book.identity(directory)?.dev,
+                "removal-history-app-shape")?;book.clock()?;Ok((id,actual.st_flags))
         }
         fn removal_archive_row(book:&mut Install,root:usize,name:&str,inode:u64,budget_left:u64)->Result<RemovalArchiveReference> {
             check(worker::removal_archive_name_data(name),"removal-prior-name")?;
             removal_archive_scope(book,|book| {
                 let directory=book.open(Some(root),name,true)?;
                 let (identity,flags)=removal_archive_stat(book,directory,true,0o700)?;
-                check(archive_directory_data(identity,flags,true) && identity.ino==inode,"removal-prior-directory")?;
-                let roster=removal_archive_roster(book,directory,true,2)?;
-                check(roster.keys().all(|key|REMOVAL_ARCHIVE_NAMES.contains(&key.as_str()))
-                    && (!roster.contains_key("admission.json") || roster.contains_key("snapshot-v1")),"removal-prior-children")?;
-                let mut files:[Option<RemovalArchiveFileReference>;2]=[None,None];let mut header=None;let mut complete=false;
-                if let Some(inode)=roster.get("snapshot-v1") {
-                    let (file,finished,parsed)=removal_archive_file(book,directory,0,*inode,None,budget_left,&name[8..])?;
-                    if let Some(parsed)=&parsed {check(parsed.values[1]==name[8..],"removal-prior-nonce-location")?;}
-                    files[0]=Some(file);header=parsed;complete=finished;
+                check(archive_directory_data(identity,flags,true) && identity.ino==inode && identity.dev==book.identity(root)?.dev,
+                    "removal-prior-directory")?;
+                let roster=removal_archive_roster(book,directory,true,7)?;
+                check(roster.iter().all(|(key,_)|key=="app" || REMOVAL_ARCHIVE_NAMES.contains(&key.as_str())),"removal-prior-children")?;
+                let app=removal_archive_inode(&roster,"app").map(|inode|removal_archive_app_stat(book,directory,inode)).transpose()?;
+                let mut files:[Option<RemovalArchiveFileReference>;6]=std::array::from_fn(|_|None);
+                let mut header=None;let mut complete=false;let mut remaining=budget_left;let mut last=None;let mut request=None;
+                for slot in 0..6 {
+                    if let Some(inode)=removal_archive_inode(&roster,REMOVAL_ARCHIVE_NAMES[slot]) {
+                        let read=removal_archive_file(book,directory,slot,inode,remaining,&name[8..])?;
+                        remaining=remaining.checked_sub(read.file.len).ok_or("removal-prior-storage")?;
+                        if slot==0 {
+                            header=read.header;complete=read.complete;
+                            if let Some(parsed)=&header {check(parsed.values[1]==name[8..],"removal-prior-nonce-location")?;
+                                request=Some(archive_hex_data::<16>(&parsed.values[0])?);}
+                        }else{
+                            let snapshot=files[0].as_ref().filter(|f|f.shape==RemovalArchiveShape::SealedBody && complete)
+                                .and_then(|f|header.as_ref().map(|h|(h,f.digest)));
+                            let raw=read.raw.as_ref().ok_or("removal-history-record-missing")?;
+                            removal_history_record_memory_data(last.as_ref().map(|r:&(mobile_release_desktop::macos_remove_record::RemovalRecordData,usize)|&r.0),
+                                None,raw.capacity())?;
+                            removal_archive_record_data(slot,read.file.identity.mode,raw,&name[8..],snapshot,&mut last,&mut request)?;
+                        }
+                        files[slot]=Some(read.file);
+                    }
                 }
-                if let Some(inode)=roster.get("admission.json") {
-                    check(files[0].as_ref().is_some_and(|file|file.shape==RemovalArchiveShape::SealedBody) && complete,
-                        "removal-prior-admission-before-snapshot")?;
-                    let snapshot=files[0].as_ref().ok_or("removal-prior-snapshot-missing")?;
-                    let (file,_,_)=removal_archive_file(book,directory,1,*inode,
-                        Some((header.as_ref().ok_or("removal-prior-header")?,snapshot.digest)),
-                        budget_left.checked_sub(snapshot.len).ok_or("removal-prior-storage")?,&name[8..])?;
-                    files[1]=Some(file);
-                }
-                check(archive_preadmission_shape_data(files[0].as_ref().map(|f|(f.identity.mode,complete)),
-                    files[1].as_ref().map(|f|f.identity.mode)),"removal-prior-shape")?;
+                check(removal_archive_reference_shape_data(std::array::from_fn(|i|files[i].as_ref().map(|f|f.identity.mode)),app.is_some()),
+                    "removal-prior-shape")?;
+                let snapshot=if files[0].as_ref().is_some_and(|f|f.shape==RemovalArchiveShape::SealedBody) {
+                    check(complete,"removal-history-genesis-incomplete")?;
+                    Some(header.as_ref().ok_or("removal-prior-header")?.summary(files[0].as_ref().ok_or("removal-prior-header")?.digest)?)
+                }else{None};
+                let attempt=last.as_ref().map(|(record,slot)|RemovalAttemptData::from_record(record,*slot)).transpose()?;
+                if let Some(before)=app {check(removal_archive_app_stat(book,directory,before.0.ino)?==before,"removal-history-app-post")?;}
                 check(removal_archive_stat(book,directory,true,0o700)?==(identity,flags),"removal-prior-directory-post")?;
-                let request=header.as_ref().map(|h|archive_hex_data::<16>(&h.values[0])).transpose()?;
-                Ok(RemovalArchiveReference {name:name.to_owned(),identity,flags,files,request})
+                Ok(RemovalArchiveReference {name:name.to_owned(),identity,flags,files,app,snapshot,attempt,request})
             })
+        }
+        fn removal_archive_original_quote_data(rows:usize,pending:usize)->Result<usize> {
+            check(rows<=64 && pending<=rows,"removal-history-original-bound")?;
+            rows.checked_mul(8).and_then(|n|n.checked_add(pending.checked_mul(2)?)).ok_or("removal-history-original-bound")
+        }
+        fn removal_archive_pending_admissions(book:&mut Install,table:&mut RemovalArchiveCensus)->Result<()> {
+            let pending=table.rows.iter().filter(|row|row.files[0].is_none() && row.files[1].as_ref()
+                .is_some_and(|file|file.shape==RemovalArchiveShape::WritingPrefix)).count();
+            let additional=pending.checked_mul(2).ok_or("removal-history-original-bound")?;
+            check(book.originals.len().checked_add(additional).is_some_and(|n|n<=24576),"removal-history-original-bound")?;
+            for index in 0..table.rows.len() {
+                let row=&table.rows[index];
+                if row.files[0].is_some() || !row.files[1].as_ref().is_some_and(|file|file.shape==RemovalArchiveShape::WritingPrefix){continue;}
+                let expected=row.files[1].as_ref().ok_or("removal-history-prefix-missing")?;
+                let request=removal_archive_scope(book,|book| {
+                    let directory=book.open(Some(table.root),row.name(),true)?;
+                    check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-history-prefix-directory")?;
+                    let read=removal_archive_file(book,directory,1,expected.identity.ino,expected.len,&row.name[8..])?;
+                    check(read.file==*expected,"removal-history-prefix-original")?;
+                    let raw=read.raw.as_ref().ok_or("removal-history-prefix-missing")?;
+                    let mut any=false;let mut observed=None;
+                    // Scalar/finite canonical comparisons only. One raw read,
+                    // not64 rereads/parses; no inert prefix becomes a graph node.
+                    for candidate in 0..table.rows.len() {
+                        if !table.is_tip_data(candidate){continue;}
+                        let before=table.rows[candidate].attempt.as_ref().ok_or("removal-history-node")?;
+                        book.clock()?;
+                        match removal_linked_admission_prefix_data(before,&row.name[8..],table.rows.len(),raw) {
+                            Ok(request)=>{if let (Some(a),Some(b))=(observed,request){check(a==b,"removal-history-prefix-ambiguous")?;}
+                                observed=observed.or(request);any=true;},
+                            Err(why @ ("removal-history-prefix-allocation"|"removal-history-prefix-memory"|"removal-history-record-memory"))=>return Err(why),
+                            Err(_)=>{},
+                        }
+                        book.clock()?;
+                    }
+                    check(any,"removal-history-prefix-unlinked")?;
+                    check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-history-prefix-directory-post")?;
+                    Ok(observed)
+                })?;
+                table.rows[index].request=request;
+            }
+            // Complete observed IDs may now expose reuse; this never promotes
+            // any600 writer or changes a predecessor raw tip/phase.
+            table.resolve_history_data()
         }
         fn begin_removal_archive_census(book:&mut Install,root:usize,second:bool)->Result<()> {
             book.clock()?;check(book.gate.parent==Some(root),"removal-prior-root-original")?;
@@ -1722,18 +2173,31 @@ mod installer {
         fn complete_removal_archive_census(book:&mut Install)->Result<()> {
             book.clock()?;book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.complete()
         }
-        fn removal_archive_root_names(book:&mut Install,root:usize,wanted:&mut BTreeSet<String>)->Result<()> {
-            let Some(scan)=book.removal_archive_scan.as_ref() else {return Ok(());};
-            check(scan.root==root && scan.current.is_none() && matches!(scan.phase,
-                RemovalArchivePhase::FirstReading|RemovalArchivePhase::SecondReading),"removal-prior-stage")?;
+        // Actual effectful read/close adapter, not a pure DATA constructor.
+        // The caller separately holds its live-source or recovery-source and R/M
+        // capability. No returned comparison row manufactures that authority.
+        pub(super) fn read_removal_archive_census(book:&mut Install,root:usize,wanted:&BTreeSet<String>)->Result<RemovalArchiveCensus> {
+            book.clock()?;check(book.gate.parent==Some(root) && wanted.len()<=286
+                && wanted.iter().all(|name|!name.starts_with(".remove-")),"removal-prior-root-original")?;
+            reserve_removal_snapshot_work(book)?;
             let actual=removal_archive_roster(book,root,false,350)?;
-            check(wanted.iter().all(|name|actual.contains_key(name)),"removal-prior-current-roster")?;
+            check(wanted.iter().all(|name|removal_archive_inode(&actual,name).is_some()),"removal-prior-current-roster")?;
+            let count=actual.iter().filter(|row|!wanted.contains(row.0.as_str())).count();
+            let quote=removal_archive_original_quote_data(count,count)?;
+            check(book.originals.len().checked_add(quote).is_some_and(|n|n<=24576),"removal-history-original-bound")?;
             let mut table=RemovalArchiveCensus::empty(root)?;
             for (name,inode) in &actual {
                 if wanted.contains(name) {continue;}
                 check(worker::removal_archive_name_data(name) && table.rows.len()<REMOVAL_ARCHIVE_COUNT,"removal-prior-foreign-or-bound")?;
                 let row=removal_archive_row(book,root,name,*inode,installation_record::PAYLOAD_LIMIT-table.storage_bytes)?;table.add(row)?;
             }
+            table.resolve_history_data()?;removal_archive_pending_admissions(book,&mut table)?;book.clock()?;Ok(table)
+        }
+        fn removal_archive_root_names(book:&mut Install,root:usize,wanted:&mut BTreeSet<String>)->Result<()> {
+            let Some(scan)=book.removal_archive_scan.as_ref() else {return Ok(());};
+            check(scan.root==root && scan.current.is_none() && matches!(scan.phase,
+                RemovalArchivePhase::FirstReading|RemovalArchivePhase::SecondReading),"removal-prior-stage")?;
+            let table=read_removal_archive_census(book,root,wanted)?;
             // Only successfully closed, independently checked rows can extend
             // this removal-only expected root; exact_roster still runs next.
             for row in table.rows(){check(wanted.insert(row.name.clone()),"removal-prior-name-collision")?;}
@@ -1751,23 +2215,26 @@ mod installer {
             check(scan.phase==RemovalArchivePhase::FirstComplete,"removal-prior-stage")?;
             scan.current.as_ref().ok_or("removal-prior-stage")?.fresh(request,nonce)
         }
-        pub(super) fn post_removal_archive_census(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
-            book.clock()?;let scan=book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?;
-            check(scan.phase==RemovalArchivePhase::Taken && scan.root==census.root,"removal-prior-stage")?;
-            scan.phase=RemovalArchivePhase::PostReading;
-            // No parser/serde/header in this final read. Its two sequential
-            //64KiB roster/hash blocks fit the capture's existing256KiB fixed
-            //copy cell even after the capture has moved out of Book.
+        // Actual fixed original POST; no recursive/parser/source authority and
+        // no consuming/app-directory FD. Eight records per row at most.
+        pub(super) fn post_removal_archive_references(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
+            book.clock()?;check(book.gate.parent==Some(census.root),"removal-prior-root-original")?;
+            let quote=removal_archive_original_quote_data(census.rows().len(),0)?;
+            check(book.originals.len().checked_add(quote).is_some_and(|n|n<=24576),"removal-history-original-bound")?;
             removal_archive_memory(book,128*1024)?;
             for row in census.rows() {
                 removal_archive_scope(book,|book| {
                     let directory=book.open(Some(census.root),row.name(),true)?;
                     check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-prior-post-directory")?;
-                    let roster=removal_archive_roster(book,directory,true,2)?;
-                    check(roster.len()==row.files.iter().flatten().count(),"removal-prior-post-roster")?;
+                    let roster=removal_archive_roster(book,directory,true,7)?;
+                    check(roster.len()==row.files.iter().flatten().count()+usize::from(row.app.is_some()),"removal-prior-post-roster")?;
+                    if let Some(app)=row.app {
+                        check(removal_archive_inode(&roster,"app")==Some(app.0.ino) && removal_archive_app_stat(book,directory,app.0.ino)?==app,
+                            "removal-history-app-post")?;
+                    }
                     for (slot,file) in row.files.iter().enumerate() {
                         if let Some(file)=file {
-                            check(roster.get(REMOVAL_ARCHIVE_NAMES[slot])==Some(&file.identity.ino),"removal-prior-post-roster")?;
+                            check(removal_archive_inode(&roster,REMOVAL_ARCHIVE_NAMES[slot])==Some(file.identity.ino),"removal-prior-post-roster")?;
                             removal_archive_scope(book,|book| {
                                 let index=book.open(Some(directory),REMOVAL_ARCHIVE_NAMES[slot],false)?;
                                 check(removal_archive_stat(book,index,false,file.identity.mode&0o7777)?==(file.identity,file.flags),"removal-prior-post-file")?;
@@ -1777,19 +2244,495 @@ mod installer {
                             })?;
                         }
                     }
+                    if let Some(app)=row.app {check(removal_archive_app_stat(book,directory,app.0.ino)?==app,"removal-history-app-post")?;}
                     check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-prior-post-directory")?;Ok(())
                 })?;
             }
-            book.clock()?;book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.phase=RemovalArchivePhase::PostComplete;Ok(())
+            book.clock()
+        }
+        fn removal_archive_staged_post(book:&mut Install,census:&RemovalArchiveCensus,initial:bool)->Result<()> {
+            book.clock()?;book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.begin_post(census.root,initial)?;
+            let result=post_removal_archive_references(book,census);
+            book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.complete_post(result)
+        }
+        pub(super) fn post_removal_archive_census(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
+            removal_archive_staged_post(book,census,true)
+        }
+        // The payload continuation already consumed the initial Taken POST.
+        // Require its successful PostComplete, then perform fresh originals;
+        // never reset Taken or skip checks after actual payload effects.
+        pub(super) fn post_removal_archive_after_snapshot(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
+            removal_archive_staged_post(book,census,false)
+        }
+        // Fixed reinstall comparison DATA. None of these constructors reads a
+        // directory, authenticates a signer, acquires R/M, or admits a move.
+        // The new Install owner must supply those actual independent originals.
+        pub(super) const REHOME_CHILD:&str="reinstall-v1";
+        const REHOME_WORK:usize=256*1024;
+        // State + versions + two producers per generation + three records per
+        // invocation (no archived copy of current State) + one phase directory.
+        const REHOME_TOP_LIMIT:usize=2+2*9+3*transaction::INVOCATION_LIMIT-1+transaction::INVOCATION_LIMIT;
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeKindData { Metadata,InstallPhases,RestorePhases,Versions }
+        impl RehomeKindData {
+            fn mode(self)->u32 {match self {Self::Metadata=>0o100444,Self::Versions=>0o040755,
+                Self::InstallPhases|Self::RestorePhases=>0o040700}}
+            fn phases(self)->&'static [&'static str] {match self {
+                Self::InstallPhases=>&["staging-created.json","prepared.json","runtime-publication-confirmed.json","both-publications-confirmed.json"],
+                Self::RestorePhases=>&["staging-created.json","prepared.json","app-publication-confirmed.json"],_=>&[]}}
+        }
+        pub(super) struct RehomeMoveData {name:String,kind:RehomeKindData}
+        impl RehomeMoveData {
+            pub(super) fn name_data(&self)->&str {&self.name}
+            pub(super) fn kind_data(&self)->RehomeKindData {self.kind}
+        }
+        struct RehomeReleaseData {name:String,inventory:[u8;32]}
+        pub(super) struct RehomeMoveSetData<'a> {
+            genesis:&'a RemovalGenesisData,moves:Vec<RehomeMoveData>,releases:Vec<RehomeReleaseData>,files:usize,bytes:u64,
+        }
+        impl<'a> RehomeMoveSetData<'a> {
+            fn memory(&self,extra:usize)->Result<usize> {
+                let mut size=std::mem::size_of::<Self>().checked_add(self.moves.capacity()
+                    .checked_mul(std::mem::size_of::<RehomeMoveData>()).ok_or("rehome-data-memory")?)
+                    .and_then(|n|n.checked_add(self.releases.capacity().checked_mul(std::mem::size_of::<RehomeReleaseData>())?))
+                    .and_then(|n|n.checked_add(extra)).ok_or("rehome-data-memory")?;
+                for name in self.moves.iter().map(|x|&x.name).chain(self.releases.iter().map(|x|&x.name)) {
+                    size=size.checked_add(name.capacity()).ok_or("rehome-data-memory")?;
+                }
+                check(size<=REHOME_WORK,"rehome-data-memory")?;Ok(size)
+            }
+            fn span(&self,path:&str)->Result<&RemovalControlSpanData> {
+                self.genesis.controls_data().iter().find(|row|row.kind_data()==0 && row.path_data()==path)
+                    .ok_or("rehome-data-missing-control")
+            }
+            fn metadata(&mut self,name:String,expected:Option<&str>)->Result<()> {
+                let row=self.span(&name)?;
+                if let Some(expected)=expected {check(*row.digest_data()==archive_hex_data::<32>(expected)?,"rehome-data-control-hash")?;}
+                self.add(name,RehomeKindData::Metadata)
+            }
+            fn add(&mut self,name:String,kind:RehomeKindData)->Result<()> {
+                check(component(&name) && name.len()<=255 && !self.moves.iter().any(|x|x.name==name)
+                    && self.moves.len()<REHOME_TOP_LIMIT && self.moves.len()<self.moves.capacity(),"rehome-data-move-name")?;
+                self.memory(name.capacity())?;self.moves.push(RehomeMoveData{name,kind});self.memory(0)?;Ok(())
+            }
+            fn add_generation(&mut self,selected:&ReleaseSetData,generation:GenerationData,current:bool)->Result<()> {
+                let release=generation.release_data();let binding=release.binding_data();
+                check(selected.contains_data(release) && component(binding.release) && self.releases.len()<9
+                    && !self.releases.iter().any(|old|old.name==binding.release),"rehome-data-generation")?;
+                // Source name constructors have <=255-byte components. Charge
+                // both returned Strings and this bounded generation copy before
+                // requesting either; recheck actual capacities before retention.
+                self.memory(4096+2*255+binding.release.len())?;
+                let pair=control_names(selected,binding.release)?;
+                let genesis=self.genesis;
+                let current_digest=if current {Some(genesis.header.values[4].as_str())}else{None};
+                self.metadata(pair.0,current_digest)?;self.metadata(pair.1,None)?;
+                let name=binding.release.to_owned();self.memory(name.capacity())?;
+                self.releases.push(RehomeReleaseData{name,inventory:archive_hex_data(binding.inventory_sha256)?});self.memory(0)?;Ok(())
+            }
+            // Names originate only in these existing SOURCE constructors and
+            // parsed State evidence. Encoded snapshot paths are compared, never
+            // used to select an extra root leaf or an arbitrary destination.
+            pub(super) fn from_genesis_data(genesis:&'a RemovalGenesisData,selected:&ReleaseSetData,
+                state:&StateData,intents:&[&IntentData])->Result<Self> {
+                check(state.mutation_recorded_data() && state.current_data().release_data()==selected.current_data()
+                    && intents.len()==state.evidence_data().count()+1 && !intents.is_empty()
+                    && intents.len()<=transaction::INVOCATION_LIMIT,"rehome-data-history")?;
+                let selected_raw=data_selection_bytes(selected)?;
+                check(selected_raw==genesis.selected_bytes_data() && selected.target_data()==genesis.header.target
+                    && archive_hex_data::<32>(state.digest_data())?==archive_hex_data::<32>(&genesis.header.values[3])?,"rehome-data-genesis")?;
+                let mut moves=Vec::new();let mut releases=Vec::new();
+                let initial=std::mem::size_of::<Self>()+REHOME_TOP_LIMIT*std::mem::size_of::<RehomeMoveData>()
+                    +9*std::mem::size_of::<RehomeReleaseData>()+selected_raw.capacity()+4096;
+                check(initial<=REHOME_WORK,"rehome-data-memory")?;
+                moves.try_reserve_exact(REHOME_TOP_LIMIT).map_err(|_|"rehome-data-allocation")?;
+                releases.try_reserve_exact(9).map_err(|_|"rehome-data-allocation")?;
+                let mut value=Self{genesis,moves,releases,files:0,bytes:0};value.memory(selected_raw.capacity()+4096)?;
+                drop(selected_raw);
+                value.metadata(transaction::STATE_NAME.to_owned(),Some(state.digest_data()))?;
+                value.add("versions".to_owned(),RehomeKindData::Versions)?;
+                value.add_generation(selected,state.current_data(),true)?;
+                for generation in state.retained_data() {value.add_generation(selected,generation,false)?;}
+                for (index,intent) in intents.iter().enumerate() {
+                    let id=intent.invocation_data();
+                    check(worker::invocation_valid(id) && !intents[..index].iter().any(|old|old.invocation_data()==id)
+                        && selected.contains_data(intent.next_data()),"rehome-data-invocation")?;
+                    let evidence=state.evidence_data().find(|old|old.invocation==id);
+                    check((id==state.invocation_data())!=evidence.is_some(),"rehome-data-invocation")?;
+                    if let Some(evidence)=evidence {check(evidence.intent_sha256==intent.digest_data(),"rehome-data-history-hash")?;}
+                    else {check(intent.action_data()==state.action_data() && intent.request_id_data()==state.request_id_data()
+                        && intent.next_data()==state.current_data().release_data(),"rehome-data-current-intent")?;}
+                    value.memory(4096+3*255)?;
+                    value.metadata(data(transaction::intent_name_data(id))?,Some(intent.digest_data()))?;
+                    value.metadata(data(transaction::capsule_name_data(id))?,evidence.map(|old|old.capsule_sha256))?;
+                    if let Some(evidence)=evidence {
+                        value.metadata(data(transaction::archived_state_name_data(id))?,Some(evidence.state_sha256))?;
+                    }
+                    match intent.action_data() {
+                        ActionData::SamePackageNoop=>{},
+                        ActionData::RestoreFixedApp=>value.add(format!(".install-{id}"),RehomeKindData::RestorePhases)?,
+                        ActionData::FreshInstall|ActionData::Update=>value.add(format!(".install-{id}"),RehomeKindData::InstallPhases)?,
+                        ActionData::Uninstall=>return Err("rehome-data-install-action"),
+                    }
+                }
+                value.moves.sort_unstable_by(|a,b| {
+                    (a.kind==RehomeKindData::Versions).cmp(&(b.kind==RehomeKindData::Versions)).then(a.name.cmp(&b.name))
+                });
+                let expected=value.moves.iter().map(|row|if row.kind==RehomeKindData::Metadata{1}else{row.kind.phases().len()})
+                    .sum::<usize>().checked_add(value.releases.len()*2).ok_or("rehome-data-control-count")?;
+                let mut special=[false;5];
+                for row in genesis.controls_data() {
+                    if row.kind_data()!=0 {
+                        let kind=row.kind_data() as usize;
+                        check((1..=4).contains(&kind) && !special[kind],"rehome-data-source-controls")?;special[kind]=true;continue;
+                    }
+                    check(value.selects_control_data(row),"rehome-data-foreign-control")?;
+                    value.files=value.files.checked_add(1).ok_or("rehome-data-control-count")?;
+                    value.bytes=removal_archive_storage_sum_data(value.bytes,row.len_data())?;
+                }
+                check(value.files==expected && value.files<=SNAPSHOT_CONTROLS-4 && special[1..].iter().all(|x|*x)
+                    && value.directories_data()<=SNAPSHOT_DIRECTORIES,"rehome-data-complete-controls")?;
+                value.memory(0)?;Ok(value)
+            }
+            fn selects_control_data(&self,row:&RemovalControlSpanData)->bool {
+                let path=row.path_data();
+                if row.kind_data()!=0 || row.identity_data().mode!=0o100444 || row.flags_data()!=0
+                    || row.identity_data().links!=1 || row.len_data()==0 {return false;}
+                let mut parts=path.split('/');let Some(top)=parts.next()else{return false;};
+                let Some(spec)=self.moves.iter().find(|x|x.name==top)else{return false;};
+                match spec.kind {
+                    RehomeKindData::Metadata=>parts.next().is_none(),
+                    RehomeKindData::InstallPhases|RehomeKindData::RestorePhases=>parts.next()
+                        .is_some_and(|leaf|spec.kind.phases().contains(&leaf)) && parts.next().is_none(),
+                    RehomeKindData::Versions=>{
+                        let Some(release)=parts.next().and_then(|name|self.releases.iter().find(|r|r.name==name))else{return false;};
+                        let permitted=match parts.next(){Some(installation_record::INVENTORY_NAME)=>*row.digest_data()==release.inventory,
+                            Some(installation_record::RECORD_NAME)=>true,_=>false};permitted && parts.next().is_none()
+                    },
+                }
+            }
+            pub(super) fn moves_data(&self)->&[RehomeMoveData] {&self.moves}
+            pub(super) fn files_data(&self)->usize {self.files}
+            pub(super) fn bytes_data(&self)->u64 {self.bytes}
+            pub(super) fn directories_data(&self)->usize {1+self.releases.len()+self.moves.iter().filter(|x|x.kind!=RehomeKindData::Metadata).count()}
+            pub(super) fn owned_bytes_data(&self)->Result<usize> {self.memory(0)}
+            pub(super) fn prefix_data(&self,sides:&[RehomeSideData])->Result<usize> {
+                rehome_prefix_data(self.moves.len(),sides)
+            }
+            pub(super) fn state_position_data(&self)->Result<usize> {
+                self.moves.iter().position(|x|x.name==transaction::STATE_NAME).ok_or("rehome-data-state-missing")
+            }
+            fn prefix_counts(&self,prefix:usize)->Result<(usize,usize,u64)> {
+                check(prefix<=self.moves.len(),"rehome-data-prefix-count")?;
+                let mut directories=1usize;let mut files=0usize;let mut bytes=0u64;
+                for spec in &self.moves[..prefix] {
+                    directories=directories.checked_add(match spec.kind {RehomeKindData::Metadata=>0,
+                        RehomeKindData::Versions=>1+self.releases.len(),_=>1}).ok_or("rehome-data-audit-count")?;
+                    for row in self.genesis.controls_data().iter().filter(|row|row.kind_data()==0) {
+                        if row.path_data().split('/').next()==Some(spec.name.as_str()) {
+                            files=files.checked_add(1).ok_or("rehome-data-audit-count")?;
+                            bytes=removal_archive_storage_sum_data(bytes,row.len_data())?;
+                        }
+                    }
+                }Ok((directories,files,bytes))
+            }
+        }
+        fn data_selection_bytes(selected:&ReleaseSetData)->Result<Vec<u8>> {
+            selected.encode_data().map_err(|_|"rehome-data-selection")
+        }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeSideData { OldOnly,NewOnly,Both,Neither,Unknown }
+        fn rehome_prefix_data(total:usize,sides:&[RehomeSideData])->Result<usize> {
+            check(total>0 && total<=REHOME_TOP_LIMIT && sides.len()==total,"rehome-data-prefix-count")?;
+            let mut prefix=0;let mut old=false;
+            for side in sides {match side {
+                RehomeSideData::NewOnly if !old=>prefix+=1,RehomeSideData::OldOnly=>old=true,
+                _=>return Err("rehome-data-prefix-shape"),
+            }}Ok(prefix)
+        }
+        // These labels are a future current observer's comparison DATA, not
+        // proof that a filename is old, that State is signed, or that EX exists.
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeStateData { Absent,ExactOld,RecordedNew,PartialNew,Foreign,Unknown }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeFreshData { Absent,RecordedNew,PartialNew,Foreign,Unknown }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeVersionsData { ExactOld,Absent,DistinctFreshEmpty,RecordedNew,PartialNew,Foreign,Unknown }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum RehomeBoundaryData { ContinueOldPrefix,FreshPreparation,ObserveNewInstallation,PreservePartialNew,Refused }
+        pub(super) fn rehome_boundary_data(total:usize,prefix:usize,state_position:usize,state:RehomeStateData,
+            versions:RehomeVersionsData,evidence:RehomeFreshData,payload:RehomeFreshData)->RehomeBoundaryData {
+            use RehomeBoundaryData as B;
+            if total==0 || total>REHOME_TOP_LIMIT || prefix>total || state_position>=total
+                || matches!(state,RehomeStateData::Unknown|RehomeStateData::Foreign)
+                || matches!(versions,RehomeVersionsData::Unknown|RehomeVersionsData::Foreign)
+                || matches!(evidence,RehomeFreshData::Unknown|RehomeFreshData::Foreign)
+                || matches!(payload,RehomeFreshData::Unknown|RehomeFreshData::Foreign) {return B::Refused;}
+            if prefix<total {
+                return if versions==RehomeVersionsData::ExactOld && evidence==RehomeFreshData::Absent
+                    && payload==RehomeFreshData::Absent && state==(if state_position<prefix {RehomeStateData::Absent}else{RehomeStateData::ExactOld})
+                    {B::ContinueOldPrefix}else{B::Refused};
+            }
+            if state==RehomeStateData::Absent && evidence==RehomeFreshData::Absent && payload==RehomeFreshData::Absent
+                && matches!(versions,RehomeVersionsData::Absent|RehomeVersionsData::DistinctFreshEmpty) {return B::FreshPreparation;}
+            if state==RehomeStateData::RecordedNew && versions==RehomeVersionsData::RecordedNew
+                && evidence==RehomeFreshData::RecordedNew && payload==RehomeFreshData::RecordedNew {return B::ObserveNewInstallation;}
+            if state==RehomeStateData::ExactOld || versions==RehomeVersionsData::ExactOld {return B::Refused;}
+            // No mutation authorization from this result. Preserve the exact
+            // partial/foreign new cut; a separately reviewed recovery is needed.
+            B::PreservePartialNew
+        }
+        pub(super) fn rehome_rebind_data(kind:RehomeKindData,before:Identity,before_flags:u32,
+            actual:Identity,actual_flags:u32,named:Identity,named_flags:u32)->bool {
+            before.ino!=0 && before.uid==0 && before.gid==0 && before.mode==kind.mode()
+                && before.links>0 && (kind!=RehomeKindData::Metadata || before.links==1 && before.size>0)
+                && before.size>=0 && before_flags==0 && actual_flags==0 && named_flags==0 && actual==named
+                && (0..1_000_000_000).contains(&actual.ctime_ns)
+                && (Identity {ctime:actual.ctime,ctime_ns:actual.ctime_ns,..before})==actual
+        }
+        pub(super) fn rehome_fresh_versions_data(archived:Identity,current:Identity,flags:u32,children:usize)->bool {
+            archive_directory_data(archived,0,false) && archive_directory_data(current,flags,false)
+                && archived.dev==current.dev && archived.ino!=current.ino && children==0
+        }
+        // Actual callers must record ReturnedData BEFORE any clock, named POST,
+        // sync or close. A newly observed prefix supplies no earlier return.
+        pub(super) struct RehomeProgressData {total:usize,next:usize,pending:bool,returned:Option<ReturnedData>,first:Option<&'static str>}
+        impl RehomeProgressData {
+            pub(super) fn from_observation_data(total:usize,sides:&[RehomeSideData])->Result<Self> {
+                Ok(Self{total,next:rehome_prefix_data(total,sides)?,pending:false,returned:None,first:None})
+            }
+            pub(super) fn begin_data(&mut self,index:usize)->Result<()> {
+                if self.first.is_some() || self.pending || index!=self.next || index>=self.total {
+                    return Err(*self.first.get_or_insert("rehome-data-effect-order"));
+                }
+                self.pending=true;self.returned=None;Ok(())
+            }
+            pub(super) fn returned_data(&mut self,value:ReturnedData)->Result<()> {
+                if !self.pending || self.returned.is_some() {return Err(*self.first.get_or_insert("rehome-data-effect-order"));}
+                self.returned=Some(value);if value!=ReturnedData::KnownSuccess {self.first.get_or_insert("rehome-original-not-successful");}Ok(())
+            }
+            pub(super) fn post_data(&mut self,result:Result<()>)->Result<()> {
+                if let Err(why)=result {self.first.get_or_insert(why);}
+                if !self.pending || self.returned!=Some(ReturnedData::KnownSuccess) {self.first.get_or_insert("rehome-original-not-successful");}
+                if let Some(why)=self.first {return Err(why);}
+                self.pending=false;self.next+=1;Ok(())
+            }
+            pub(super) fn observed_prefix_data(&self)->usize {self.next}
+            pub(super) fn last_return_data(&self)->Option<ReturnedData> {self.returned}
+            pub(super) fn first_failure_data(&self)->Option<&'static str> {self.first}
+        }
+        // Proposed typed optional-child value. This is comparison DATA produced
+        // only AFTER the future caller's complete nested audit; it does not add
+        // a census name allowance or trust a caller's claimed hash/counts.
+        #[derive(PartialEq,Eq)]
+        pub(super) struct RehomeReferenceData {
+            root:Identity,flags:u32,prefix:usize,total:usize,directories:usize,files:usize,bytes:u64,digest:[u8;32],
+        }
+        impl RehomeReferenceData {
+            pub(super) fn observed_data(plan:&RehomeMoveSetData<'_>,root:Identity,flags:u32,prefix:usize,
+                directories:usize,files:usize,bytes:u64,digest:[u8;32])->Result<Self> {
+                check(archive_directory_data(root,flags,true) && digest.iter().any(|byte|*byte!=0)
+                    && plan.prefix_counts(prefix)?==(directories,files,bytes),"rehome-data-child-reference")?;
+                Ok(Self{root,flags,prefix,total:plan.moves.len(),directories,files,bytes,digest})
+            }
+            pub(super) fn matches_data(&self,other:&Self)->bool {self==other}
+            pub(super) fn complete_data(&self)->bool {self.prefix==self.total}
+            pub(super) fn storage_bytes_data(&self)->u64 {self.bytes}
+        }
+        // Exact primitive-count quote for ONE proposed complete nested audit:
+        // one original plus one distinct roster reader per directory, one
+        // sequential original per file. NOT the live authority to start it.
+        // Outer six-slot8P work is separate and cannot replace this addition.
+        pub(super) fn rehome_audit_quote_data(directories:usize,files:usize,passes:usize,
+            existing_records:usize,existing_live:usize,retained_work:usize,plan_work:usize,
+            other_storage:u64,control_storage:u64)->Result<usize> {
+            check((1..=SNAPSHOT_DIRECTORIES).contains(&directories) && files<=SNAPSHOT_CONTROLS-4 && passes>0,
+                "rehome-data-audit-count")?;
+            let records=directories.checked_mul(2).and_then(|n|n.checked_add(files)).and_then(|n|n.checked_mul(passes))
+                .and_then(|n|n.checked_add(existing_records)).ok_or("rehome-data-audit-budget")?;
+            check(records<=24576 && existing_live.checked_add(5).is_some_and(|n|n<=96)
+                && plan_work<=REHOME_WORK && retained_work.checked_add(plan_work)
+                    .and_then(|n|n.checked_add(65536+8192)).is_some_and(|n|n<=REMOVAL_SNAPSHOT_WORK as usize)
+                && other_storage.checked_add(control_storage).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT),
+                "rehome-data-audit-budget")?;Ok(records)
+        }
+
+        #[cfg(test)]
+        fn rehome_test_fixture()->(RemovalGenesisData,ReleaseSetData,StateData,IntentData) {
+            use mobile_release_desktop::macos_remove_protocol::{BindingData,BindingInputData,TargetData};
+            let (seed,_)=removal_archive_test_snapshot(false,0);
+            let seed=parse_removal_genesis_data(seed.len() as u64,&"2".repeat(32),|at,out|{
+                let at=at as usize;let count=out.len().min(seed.len()-at);out[..count].copy_from_slice(&seed[at..at+count]);Ok(count)
+            }).unwrap();
+            let inventory=b"inert public inventory DATA";let producer=b"inert installed producer DATA";
+            let remover=b"inert remove producer DATA";let signature=b"inert signature DATA, NOT verified";
+            let inventory_sha=hash(inventory);let producer_sha=hash(producer);let remover_sha=hash(remover);
+            let mut selection:serde_json::Value=serde_json::from_slice(seed.selected_bytes_data()).unwrap();
+            selection["current"]["inventorySha256"]=serde_json::json!(inventory_sha);
+            let selected_raw=serde_json::to_vec(&selection).unwrap();
+            let selected=ReleaseSetData::parse_for_target_data(&selected_raw,
+                mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64).unwrap();
+            let selected_raw=selected.encode_data().unwrap();
+            let invocation="b".repeat(32);let intent_raw=IntentData::encode_data(&invocation,&"c".repeat(32),
+                ActionData::FreshInstall,None,&selected).unwrap();
+            let intent=IntentData::parse_data(&intent_raw,&selected).unwrap();
+            let generation=GenerationData::from_original_fields_data(&selected,selected.current_data(),&"d".repeat(32),
+                installation_record::DirectoryIdentity{device:1,inode:90,mode:0o040755,uid:0,gid:0,flags:0},
+                AppIdentityData::from_original_fields_data(1,91,0o040555,0,0,0).unwrap()).unwrap();
+            let state_raw=StateData::encode_applied_data(&intent,None,&generation,&selected).unwrap();
+            let state=StateData::parse_data(&state_raw,&selected).unwrap();
+            let release=selected.current_data().binding_data().release;let pair=control_names(&selected,release).unwrap();
+            let mut bodies:Vec<(String,u8,Vec<u8>)>=vec![
+                (transaction::STATE_NAME.into(),0,state_raw),
+                (pair.0,0,producer.to_vec()),(pair.1,0,signature.to_vec()),
+                (format!("versions/{release}/{}",installation_record::INVENTORY_NAME),0,inventory.to_vec()),
+                (format!("versions/{release}/{}",installation_record::RECORD_NAME),0,b"inert record DATA".to_vec()),
+                (transaction::intent_name_data(&invocation).unwrap(),0,intent_raw),
+                (transaction::capsule_name_data(&invocation).unwrap(),0,b"inert capsule DATA, NOT original settlement".to_vec()),
+                ("@remove/producer.json".into(),1,remover.to_vec()),("@remove/producer.sig".into(),2,signature.to_vec()),
+                (paths::REGISTRATION_GATE_NAME.into(),3,paths::REGISTRATION_GATE_BYTES.to_vec()),
+                (paths::MAINTENANCE_GATE_NAME.into(),4,paths::MAINTENANCE_GATE_BYTES.to_vec()),
+            ];
+            for phase in RehomeKindData::InstallPhases.phases() {
+                bodies.push((format!(".install-{invocation}/{phase}"),0,b"inert phase DATA".to_vec()));
+            }
+            bodies.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+            let identity=Identity{dev:1,ino:40,mode:0o040755,uid:0,gid:0,links:2,size:64,
+                mtime:1,mtime_ns:0,ctime:1,ctime_ns:0};
+            let controls=bodies.iter().enumerate().map(|(index,(path,kind,raw))|RemovalSnapshotControl{
+                path:path.clone(),identity:Identity{ino:100+index as u64,mode:0o100444,links:1,size:raw.len() as i64,..identity},
+                flags:0,size:raw.len() as u64,digest:Sha256::digest(raw).into(),kind:*kind,held:None}).collect();
+            // Real fixed snapshot encoder and sole parser, but inert unsigned
+            // bodies/identities. No test claims signature or filesystem proof.
+            let mut capture=RemovalSnapshotCapture{root:0,versions:None,prior_archives:None,controls,
+                directories:vec![RemovalSnapshotDirectory{path:String::new(),identity,flags:0,children:vec![]}],
+                complete:false,quote:Some((0,0)),failed:false};
+            capture.finish(RemovalArchiveCensus::empty(0).unwrap()).unwrap();
+            let binding=selected.current_data().binding_data();
+            let request=BindingData::new_data(BindingInputData{request_id:&"1".repeat(32),root_nonce:&"2".repeat(32),
+                source_commit:binding.source_commit,release,target:TargetData::Arm64,remove_producer_sha256:&remover_sha,
+                installed_producer_sha256:&producer_sha,installed_inventory_sha256:&inventory_sha,protocol_sha256:binding.protocol_sha256,
+                start:10,work:110_000_000_010,hard:120_000_000_010}).unwrap();
+            let mut raw=capture.header(&request,state.digest_data(),&selected_raw,0).unwrap();
+            for (row,(_,_,body)) in capture.controls.iter().zip(&bodies) {
+                raw.extend_from_slice(&removal_snapshot_frame_data(row).unwrap());raw.extend_from_slice(body);
+            }
+            let genesis=parse_removal_genesis_data(raw.len() as u64,&"2".repeat(32),|at,out|{
+                let at=at as usize;let count=out.len().min(raw.len()-at).min(13);out[..count].copy_from_slice(&raw[at..at+count]);Ok(count)
+            }).unwrap();(genesis,selected,state,intent)
+        }
+        #[cfg(test)]
+        pub(super) fn removal_rehome_data_checks() {
+            use {RehomeSideData as Side,RehomeBoundaryData as Boundary,RehomeStateData as S,
+                RehomeFreshData as F,RehomeVersionsData as V};
+            let (genesis,selected,state,intent)=rehome_test_fixture();
+            let plan=RehomeMoveSetData::from_genesis_data(&genesis,&selected,&state,&[&intent]).unwrap();
+            assert_eq!(REHOME_CHILD,"reinstall-v1");assert_eq!(REHOME_TOP_LIMIT,275);
+            let names=plan.moves_data().iter().map(|row|row.name_data()).collect::<Vec<_>>();
+            assert_eq!(names.len(),7);assert_eq!(names.last(),Some(&"versions"));
+            assert!(names[..names.len()-1].windows(2).all(|pair|pair[0]<pair[1]));
+            assert!(!names.contains(&paths::MAINTENANCE_GATE_NAME));assert!(!names.contains(&paths::REGISTRATION_GATE_NAME));
+            assert!(!names.contains(&paths::APP_NAME));assert!(!names.iter().any(|name|name.starts_with(".remove-")));
+            assert_eq!(plan.files_data(),11);assert_eq!(plan.directories_data(),4);assert!(plan.owned_bytes_data().unwrap()<REHOME_WORK);
+            let total=names.len();let state_position=plan.state_position_data().unwrap();
+            for prefix in 0..=total {
+                let sides=(0..total).map(|i|if i<prefix{Side::NewOnly}else{Side::OldOnly}).collect::<Vec<_>>();
+                assert_eq!(plan.prefix_data(&sides).unwrap(),prefix);
+                let observation=RehomeProgressData::from_observation_data(total,&sides).unwrap();
+                assert_eq!(observation.observed_prefix_data(),prefix);assert_eq!(observation.last_return_data(),None);
+                if prefix<total {
+                    assert_eq!(rehome_boundary_data(total,prefix,state_position,
+                        if state_position<prefix{S::Absent}else{S::ExactOld},V::ExactOld,F::Absent,F::Absent),Boundary::ContinueOldPrefix);
+                    assert_eq!(rehome_boundary_data(total,prefix,state_position,S::RecordedNew,V::RecordedNew,F::RecordedNew,F::RecordedNew),Boundary::Refused);
+                }
+                let (directories,files,bytes)=plan.prefix_counts(prefix).unwrap();
+                let root=Identity{dev:1,ino:800,mode:0o040700,uid:0,gid:0,links:2,size:64,
+                    mtime:1,mtime_ns:0,ctime:2,ctime_ns:0};
+                let reference=RehomeReferenceData::observed_data(&plan,root,0,prefix,directories,files,bytes,[8;32]).unwrap();
+                assert_eq!(reference.complete_data(),prefix==total);assert_eq!(reference.storage_bytes_data(),bytes);
+                assert!(reference.matches_data(&reference));
+                let substituted=RehomeReferenceData::observed_data(&plan,Identity{ino:801,..root},0,prefix,directories,files,bytes,[8;32]).unwrap();
+                assert!(!reference.matches_data(&substituted));
+                assert!(RehomeReferenceData::observed_data(&plan,root,1,prefix,directories,files,bytes,[8;32]).is_err());
+                assert!(RehomeReferenceData::observed_data(&plan,root,0,prefix,directories,files+1,bytes,[8;32]).is_err());
+                assert!(RehomeReferenceData::observed_data(&plan,root,0,prefix,directories,files,bytes+1,[8;32]).is_err());
+            }
+            let mut sides=vec![Side::OldOnly;total];sides[total-1]=Side::NewOnly;
+            assert!(plan.prefix_data(&sides).is_err());
+            for bad in [Side::Both,Side::Neither,Side::Unknown] {sides=vec![Side::OldOnly;total];sides[0]=bad;assert!(plan.prefix_data(&sides).is_err());}
+            assert!(plan.prefix_data(&[]).is_err());
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Absent,V::Absent,F::Absent,F::Absent),Boundary::FreshPreparation);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Absent,V::DistinctFreshEmpty,F::Absent,F::Absent),Boundary::FreshPreparation);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::RecordedNew,V::RecordedNew,F::RecordedNew,F::RecordedNew),Boundary::ObserveNewInstallation);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::PartialNew,V::PartialNew,F::PartialNew,F::PartialNew),Boundary::PreservePartialNew);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Absent,V::DistinctFreshEmpty,F::PartialNew,F::Absent),Boundary::PreservePartialNew);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::ExactOld,V::Absent,F::Absent,F::Absent),Boundary::Refused);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Absent,V::ExactOld,F::Absent,F::Absent),Boundary::Refused);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Foreign,V::RecordedNew,F::RecordedNew,F::RecordedNew),Boundary::Refused);
+            assert_eq!(rehome_boundary_data(total,total,state_position,S::Unknown,V::Absent,F::Absent,F::Absent),Boundary::Refused);
+            let id=Identity{dev:1,ino:900,mode:0o040755,uid:0,gid:0,links:2,size:64,mtime:1,mtime_ns:2,ctime:3,ctime_ns:4};
+            for kind in [RehomeKindData::Metadata,RehomeKindData::Versions,RehomeKindData::InstallPhases,RehomeKindData::RestorePhases] {
+                let before=Identity{mode:kind.mode(),links:if kind==RehomeKindData::Metadata{1}else{2},..id};
+                let after=Identity{ctime:4,ctime_ns:5,..before};
+                assert!(rehome_rebind_data(kind,before,0,after,0,after,0));
+                for bad in [Identity{ino:901,..after},Identity{mode:0o040555,..after},Identity{uid:1,..after},
+                    Identity{links:3,..after},Identity{size:65,..after},Identity{mtime:2,..after}] {
+                    assert!(!rehome_rebind_data(kind,before,0,bad,0,bad,0));
+                }
+                assert!(!rehome_rebind_data(kind,before,0,after,0,before,0));
+                assert!(!rehome_rebind_data(kind,before,0,after,1,after,1));
+            }
+            assert!(rehome_fresh_versions_data(id,Identity{ino:901,..id},0,0));
+            assert!(!rehome_fresh_versions_data(id,id,0,0));
+            assert!(!rehome_fresh_versions_data(id,Identity{ino:901,..id},0,1));
+            let mut effects=RehomeProgressData::from_observation_data(2,&[Side::OldOnly;2]).unwrap();
+            effects.begin_data(0).unwrap();effects.returned_data(ReturnedData::KnownSuccess).unwrap();
+            assert_eq!(effects.last_return_data(),Some(ReturnedData::KnownSuccess));
+            assert_eq!(effects.post_data(Err("same-original-post-failed")),Err("same-original-post-failed"));
+            assert_eq!(effects.last_return_data(),Some(ReturnedData::KnownSuccess));assert_eq!(effects.observed_prefix_data(),0);
+            assert!(effects.begin_data(0).is_err());assert_eq!(effects.first_failure_data(),Some("same-original-post-failed"));
+            for returned in [ReturnedData::KnownRefusal,ReturnedData::Unknown] {
+                let mut failed=RehomeProgressData::from_observation_data(2,&[Side::OldOnly;2]).unwrap();
+                failed.begin_data(0).unwrap();failed.returned_data(returned).unwrap();assert!(failed.post_data(Ok(())).is_err());
+                assert_eq!(failed.last_return_data(),Some(returned));assert_eq!(failed.observed_prefix_data(),0);
+                assert!(failed.begin_data(0).is_err());
+            }
+            let mut success=RehomeProgressData::from_observation_data(2,&[Side::NewOnly,Side::OldOnly]).unwrap();
+            assert_eq!(success.last_return_data(),None);success.begin_data(1).unwrap();success.returned_data(ReturnedData::KnownSuccess).unwrap();
+            success.post_data(Ok(())).unwrap();assert_eq!(success.observed_prefix_data(),2);assert!(success.begin_data(1).is_err());
+            let work=plan.owned_bytes_data().unwrap();let count=2*plan.directories_data()+plan.files_data();
+            assert_eq!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,24576-2*count,91,
+                REMOVAL_SNAPSHOT_WORK as usize-work-65536-8192,work,0,plan.bytes_data()).unwrap(),24576);
+            assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),2,24577-2*count,91,0,work,0,plan.bytes_data()).is_err());
+            assert!(rehome_audit_quote_data(plan.directories_data(),plan.files_data(),1,0,92,0,work,0,plan.bytes_data()).is_err());
+            assert!(rehome_audit_quote_data(75,484,usize::MAX,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(76,484,1,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(75,485,1,0,0,0,0,0,0).is_err());
+            assert!(rehome_audit_quote_data(75,484,1,0,0,0,REHOME_WORK+1,0,0).is_err());
+            assert!(rehome_audit_quote_data(75,484,1,0,0,0,0,installation_record::PAYLOAD_LIMIT,1).is_err());
+            drop(plan);
+            // Same real decoded State/Intent and sole parsed snapshot; every
+            // foreign/missing/hash mutation is rejected by the production set.
+            let (mut bad,selected,state,intent)=rehome_test_fixture();
+            bad.spans.controls.iter_mut().find(|row|row.path==transaction::STATE_NAME).unwrap().digest[0]^=1;
+            assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
+            let (mut bad,selected,state,intent)=rehome_test_fixture();
+            bad.spans.controls.iter_mut().find(|row|row.kind==0 && row.path.contains("staging-created")).unwrap().path="private-unknown.json".into();
+            assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
+            let (mut bad,selected,state,intent)=rehome_test_fixture();
+            bad.spans.controls.retain(|row|!row.path.contains("staging-created"));
+            assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
+            assert!(RehomeMoveSetData::from_genesis_data(&genesis,&selected,&state,&[]).is_err());
+            assert!(RehomeMoveSetData::from_genesis_data(&genesis,&selected,&state,&[&intent,&intent]).is_err());
         }
 
         #[cfg(test)]
         fn removal_archive_test_row(number:u64)->RemovalArchiveReference {
             let identity=Identity {dev:1,ino:100+number,mode:0o040700,uid:0,gid:0,links:2,size:64,
                 mtime:1,mtime_ns:2,ctime:3,ctime_ns:4};
-            RemovalArchiveReference {name:format!(".remove-{number:032x}"),identity,flags:0,request:None,
+            RemovalArchiveReference {name:format!(".remove-{number:032x}"),identity,flags:0,request:None,app:None,snapshot:None,attempt:None,
                 files:[Some(RemovalArchiveFileReference {identity:Identity {ino:1000+number,mode:0o100600,links:1,size:0,..identity},
-                    flags:0,len:0,digest:Sha256::digest(b"").into(),shape:RemovalArchiveShape::WritingPrefix}),None]}
+                    flags:0,len:0,digest:Sha256::digest(b"").into(),shape:RemovalArchiveShape::WritingPrefix}),None,None,None,None,None]}
         }
         #[cfg(test)]
         fn removal_archive_test_table(count:usize)->RemovalArchiveCensus {
@@ -1798,6 +2741,10 @@ mod installer {
         }
         #[cfg(test)]
         fn removal_archive_test_snapshot(intel:bool,prior:usize)->(Vec<u8>,usize) {
+            removal_archive_test_snapshot_with_table(intel,removal_archive_test_table(prior))
+        }
+        #[cfg(test)]
+        fn removal_archive_test_snapshot_with_table(intel:bool,table:RemovalArchiveCensus)->(Vec<u8>,usize) {
             use mobile_release_desktop::macos_remove_protocol::{BindingData,BindingInputData,TargetData};
             let release=if intel {"macos26-x86_64-data-3"}else{"macos26-arm64-data-3"};
             let selected=serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"current":{
@@ -1813,7 +2760,6 @@ mod installer {
                 start:10,work:110_000_000_010,hard:120_000_000_010}).unwrap();
             let identity=Identity {dev:1,ino:2,mode:0o040755,uid:0,gid:0,links:2,size:64,
                 mtime:1,mtime_ns:2,ctime:3,ctime_ns:4};
-            let table=removal_archive_test_table(prior);
             let mut children=vec![("control.json".to_owned(),9)];
             for row in table.rows(){children.push((row.name.clone(),row.identity.ino));}
             children.sort_by(|a,b|a.0.cmp(&b.0));
@@ -1839,6 +2785,8 @@ mod installer {
         }
         #[cfg(test)]
         pub(super) fn removal_archive_data_checks() {
+            removal_rehome_data_checks();
+            removal_history_data_checks();
             for (snapshot,admission) in [(None,None),(Some((0o100600,false)),None),
                 (Some((0o100600,true)),None),(Some((0o100444,true)),None),(Some((0o100444,true)),Some(0o100600))] {
                 assert!(archive_preadmission_shape_data(snapshot,admission));
@@ -1930,6 +2878,240 @@ mod installer {
             assert!(removal_archive_raw_hash(1,|_,_|Ok(0)).is_err());
             assert!(removal_archive_raw_hash(0,|_,out|{out[0]=0;Ok(1)}).is_err());
             assert_eq!(removal_archive_raw_hash(1,|_,_|Err("original-read-failed")),Err("original-read-failed"));
+        }
+        #[cfg(test)]
+        fn removal_history_test_file(identity:Identity,slot:usize,bytes:&[u8],mode:u32)->RemovalArchiveFileReference {
+            RemovalArchiveFileReference {identity:Identity {ino:identity.ino+1000+slot as u64,mode,links:1,size:bytes.len() as i64,..identity},
+                flags:0,len:bytes.len() as u64,digest:Sha256::digest(bytes).into(),
+                shape:if mode==0o100444 {RemovalArchiveShape::SealedBody}else{RemovalArchiveShape::WritingPrefix}}
+        }
+        #[cfg(test)]
+        fn removal_history_test_chain(count:usize)->RemovalArchiveCensus {
+            use mobile_release_desktop::macos_remove_record::RemovalRecordData;
+            assert!((1..=64).contains(&count));
+            let (bytes,_)=removal_archive_test_snapshot(false,0);
+            let (_,header,sha)=removal_archive_test_parse(&bytes,true).unwrap();let header=header.unwrap();
+            let mut current=header.admission(sha).unwrap();
+            let mut rows=Vec::new();
+            for index in 0..count {
+                if index>0 {current=current.new_attempt_data(&format!("{:032x}",100+index),&format!("{:032x}",200+index),index,
+                    current.binding_data()).unwrap();}
+                let mut row=removal_archive_test_row(3+index as u64);row.name=format!(".remove-{}",current.root_nonce_data());
+                row.files=std::array::from_fn(|_|None);row.request=Some(archive_hex_data(current.request_id_data()).unwrap());
+                if index==0 {
+                    row.files[0]=Some(removal_history_test_file(row.identity,0,&bytes,0o100444));
+                    row.snapshot=Some(header.summary(sha).unwrap());
+                }
+                row.files[1]=Some(removal_history_test_file(row.identity,1,current.bytes_data(),0o100444));
+                row.attempt=Some(RemovalAttemptData::from_record(&current,1).unwrap());rows.push(row);
+            }
+            // Original scans use sorted actual names; graph resolution must not
+            // depend on generation/time/lexical order. Here genesis sorts LAST.
+            rows.sort_by(|a,b|a.name.cmp(&b.name));let mut table=RemovalArchiveCensus::empty(0).unwrap();
+            for row in rows {table.add(row).unwrap();}table.resolve_history_data().unwrap();
+            assert_eq!(current.bytes_data(),RemovalRecordData::parse_shape_data(current.bytes_data()).unwrap().bytes_data());table
+        }
+        #[cfg(test)]
+        fn removal_history_data_checks() {
+            use mobile_release_desktop::macos_remove_record::{RemovalRecordData,PrefixData as P,FailureKindData as F};
+            assert_eq!(REMOVAL_ARCHIVE_NAMES,["snapshot-v2","admission.json","app-withdrawn.json",
+                "payload-roster-removal.json","payload-absent-observed.json","first-failure.json"]);
+            let (snapshot,_)=removal_archive_test_snapshot(false,0);
+            let (_,header,sha)=removal_archive_test_parse(&snapshot,true).unwrap();let header=header.unwrap();
+            let original=header.admission(sha).unwrap();let nonce=original.root_nonce_data();
+            let spans=parse_removal_genesis_data(snapshot.len() as u64,nonce,|at,out|{
+                let at=at as usize;let n=out.len().min(snapshot.len()-at).min(11);
+                out[..n].copy_from_slice(&snapshot[at..at+n]);Ok(n)
+            }).unwrap();
+            assert_eq!(spans.whole_sha256_data(),&sha);assert_eq!(spans.root_nonce_data(),nonce);
+            assert!(spans.binding_data().unwrap().matches_data(original.binding_data()));
+            assert!(!spans.selected_bytes_data().is_empty());assert_eq!(spans.controls_data().len(),1);
+            let control=&spans.controls_data()[0];assert_eq!(control.path_data(),"control.json");assert_eq!(control.kind_data(),0);
+            let start=control.offset_data() as usize;let end=start+control.len_data() as usize;
+            assert_eq!(&snapshot[start..end],b"raw");assert_eq!(control.digest_data(),&<[u8;32]>::from(Sha256::digest(b"raw")));
+            assert_eq!(control.identity_data().size,3);assert_eq!(control.flags_data(),0);
+            assert!(spans.owned_bytes_data().unwrap()<=REMOVAL_HISTORY_SPANS);
+            let mut v1=snapshot.clone();v1[..REMOVAL_SNAPSHOT_MAGIC.len()].copy_from_slice(b"MRK-REMOVE-SNAPSHOT-V1\0");
+            assert!(removal_archive_test_parse(&v1,false).is_err());
+            assert!(parse_removal_genesis_data(REMOVAL_SNAPSHOT_LIMIT+1,nonce,|_,_|panic!("overbound read")).is_err());
+
+            // Six fixed reference slots and optional named app DATA roundtrip
+            // through the REAL v2 encoder/parser. This is not a historic signer
+            // or recursive admission of any referenced body.
+            for app in [false,true] {
+                let mut row=removal_archive_test_row(3);row.files=std::array::from_fn(|slot|Some(
+                    removal_history_test_file(row.identity,slot,b"{}",0o100444)));
+                if app {row.files[3]=Some(removal_history_test_file(row.identity,3,b"{",0o100600));row.files[4]=None;
+                    row.app=Some((Identity {mode:0o040555,ino:900,..row.identity},0));}
+                assert!(removal_archive_reference_shape_data(std::array::from_fn(|i|row.files[i].as_ref().map(|f|f.identity.mode)),app));
+                let mut table=RemovalArchiveCensus::empty(0).unwrap();table.add(row).unwrap();
+                let (encoded,_)=removal_archive_test_snapshot_with_table(false,table);
+                assert!(removal_archive_test_parse(&encoded,true).unwrap().0);
+            }
+            for bad in [
+                [None,Some(0o100600),Some(0o100444),None,None,None],
+                [Some(0o100600),Some(0o100444),None,None,None,None],
+                [None,Some(0o100444),None,Some(0o100444),None,None],
+                [None,Some(0o100444),Some(0o100600),Some(0o100600),None,None],
+                [None,None,None,None,None,Some(0o100444)],
+            ] {assert!(!removal_archive_reference_shape_data(bad,false));}
+            assert!(!removal_archive_reference_shape_data([None,Some(0o100444),None,None,None,None],true));
+            assert!(!removal_archive_reference_shape_data([Some(0o100444);6],true));
+            let app=Identity {mode:0o040555,..removal_archive_test_row(3).identity};
+            assert!(removal_archive_app_data(app,0));assert!(!removal_archive_app_data(Identity{mode:0o120555,..app},0));
+            assert!(!removal_archive_app_data(Identity{uid:1,..app},0));assert!(!removal_archive_app_data(app,1));
+
+            // Actual closed Record parser + transitions, not a second JSON
+            // implementation. The same-phase failure is based on the highest
+            // observed complete444 body, even if its later fsync failed.
+            let mut last=None;let mut request=None;
+            removal_archive_record_data(1,0o100444,original.bytes_data(),nonce,Some((&header,sha)),&mut last,&mut request).unwrap();
+            let next=original.next_prefix_data(P::AppWithdrawn,original.binding_data()).unwrap();
+            for cut in 0..=next.bytes_data().len() {
+                removal_history_writer_prefix_data(&original,2,&next.bytes_data()[..cut]).unwrap();
+            }
+            removal_archive_record_data(2,0o100600,next.bytes_data(),nonce,None,&mut last,&mut request).unwrap();
+            assert_eq!(last.as_ref().unwrap().0.prefix_data(),P::AdmissionRecorded);
+            let failed=original.first_failure_latched_data(F::Persistence,original.binding_data()).unwrap();
+            removal_archive_record_data(5,0o100444,failed.bytes_data(),nonce,None,&mut last,&mut request).unwrap();
+            assert_eq!(last.as_ref().unwrap().0.first_failure_data().unwrap().phase,P::AdmissionRecorded);
+            assert!(removal_archive_record_data(2,0o100444,next.bytes_data(),nonce,None,&mut last,&mut request).is_err());
+            last=None;
+            removal_archive_record_data(1,0o100444,original.bytes_data(),nonce,Some((&header,sha)),&mut last,&mut request).unwrap();
+            removal_archive_record_data(2,0o100444,next.bytes_data(),nonce,None,&mut last,&mut request).unwrap();
+            assert!(removal_archive_record_data(5,0o100444,failed.bytes_data(),nonce,None,&mut last,&mut request).is_err());
+            let current_failure=next.first_failure_latched_data(F::Persistence,next.binding_data()).unwrap();
+            removal_archive_record_data(5,0o100444,current_failure.bytes_data(),nonce,None,&mut last,&mut request).unwrap();
+            assert_eq!(last.as_ref().unwrap().0.digest_data(),current_failure.digest_data());
+            let skip=next.next_prefix_data(P::PayloadRosterRemoval,next.binding_data()).unwrap();
+            let mut no_admission=None;let mut unknown=None;
+            assert!(removal_archive_record_data(3,0o100444,skip.bytes_data(),nonce,None,&mut no_admission,&mut unknown).is_err());
+            assert!(removal_archive_record_data(1,0o100444,original.bytes_data(),nonce,None,&mut no_admission,&mut unknown).is_err());
+            assert!(removal_archive_record_data(1,0o100444,original.bytes_data(),nonce,Some((&header,[9;32])),
+                &mut no_admission,&mut unknown).is_err());
+
+            // Preserve a noncanonical REAL raw tip SHA. The private comparison
+            // template must equal shared new_attempt_data byte for byte; its
+            // closed tuple never hashes a reconstructed canonical predecessor.
+            let mut raw=failed.bytes_data().to_vec();raw.extend_from_slice(b" \n");
+            let old=RemovalRecordData::parse_shape_data(&raw).unwrap();assert_ne!(old.digest_data(),failed.digest_data());
+            let before=RemovalAttemptData::from_record(&old,5).unwrap();
+            let new_nonce="33333333333333333333333333333333";let dummy="22222222222222222222222222222222";
+            for count in [2,64] {
+                let actual=old.new_attempt_data(dummy,new_nonce,count-1,old.binding_data()).unwrap();
+                assert_eq!(removal_linked_template_data(&before,new_nonce,count).unwrap(),actual.bytes_data());
+                assert_eq!(actual.previous_attempt_data().unwrap().2,old.digest_data());
+                assert_eq!(actual.binding_data().payload_roster_sha256,original.binding_data().payload_roster_sha256);
+                assert!(actual.first_failure_data().is_none());assert!(old.first_failure_data().is_some());
+                let fresh=old.new_attempt_data("44444444444444444444444444444444",new_nonce,count-1,old.binding_data()).unwrap();
+                for cut in 0..=fresh.bytes_data().len() {
+                    let seen=removal_linked_admission_prefix_data(&before,new_nonce,count,&fresh.bytes_data()[..cut]).unwrap();
+                    if let Some(seen)=seen {assert_eq!(seen,[0x44;16]);}
+                }
+                assert_eq!(removal_linked_admission_prefix_data(&before,new_nonce,count,fresh.bytes_data()).unwrap(),Some([0x44;16]));
+                let mut prior_mismatch=before;prior_mismatch.tip[0]^=1;
+                assert!(removal_linked_admission_prefix_data(&prior_mismatch,new_nonce,count,fresh.bytes_data()).is_err());
+                let text=std::str::from_utf8(fresh.bytes_data()).unwrap();
+                for bad in [text.replace("\"previousAttempt\":","\"previousAttempts\":"),
+                    text.replace("\"recordSha256\":","\"recordSha25\":"),text.replace(dummy,"22"),
+                    text.replace("44444444444444444444444444444444","00000000000000000000000000000000")] {
+                    assert!(removal_linked_admission_prefix_data(&before,new_nonce,count,bad.as_bytes()).is_err());
+                }
+                assert!(removal_linked_admission_prefix_data(&before,nonce,count,fresh.bytes_data()).is_err());
+            }
+            for count in [0,1,65,usize::MAX] {assert!(removal_linked_template_data(&before,new_nonce,count).is_err());}
+            assert!(removal_linked_admission_prefix_data(&before,new_nonce,2,b"private unrelated text").is_err());
+
+            for count in [1,2,64] {
+                let table=removal_history_test_chain(count);assert!(table.has_admitted_history_data());
+                assert_eq!(table.rows.iter().filter(|row|row.snapshot.is_some()).count(),1);
+                assert_eq!((0..count).filter(|i|table.is_tip_data(*i)).count(),1);
+                let root=table.rows.iter().position(|row|row.snapshot.is_some()).unwrap();
+                assert!((0..count).all(|i|table.genesis_index_data(i)==Some(root)));
+                for row in &table.rows {if row.attempt.unwrap().previous.is_some(){assert!(row.files[0].is_none() && row.app.is_none());}}
+                assert!(table.owned_bytes().unwrap()<=REMOVAL_ARCHIVE_TABLE);
+            }
+            let mut full=removal_history_test_chain(64);assert!(full.add(removal_archive_test_row(u64::MAX)).is_err());
+            // Fresh exact tables per mutation avoid Clone/DTO authority and
+            // deliberately exercise the ACTUAL production graph reducer.
+            for change in 0..9 {
+                let mut table=removal_history_test_chain(3);
+                let child=table.rows.iter().position(|row|row.attempt.unwrap().previous.is_some()).unwrap();
+                let root=table.genesis_index_data(child).unwrap();
+                match change {
+                    0=>table.rows[child].attempt.as_mut().unwrap().previous.as_mut().unwrap().tip[0]^=1,
+                    1=>table.rows[child].attempt.as_mut().unwrap().previous.as_mut().unwrap().request=[0x77;16],
+                    2=>table.rows[root].snapshot.as_mut().unwrap().binding.digests[4][0]^=1,
+                    3=>table.rows[root].snapshot.as_mut().unwrap().nonce[0]^=1,
+                    4=>table.rows[child].attempt.as_mut().unwrap().binding.digests[0][0]^=1,
+                    5=>table.rows[child].request=table.rows[root].request,
+                    6=>{table.rows[child].files[0]=Some(removal_history_test_file(table.rows[child].identity,0,b"x",0o100444));},
+                    7=>table.rows[child].app=Some((Identity{mode:0o040555,..table.rows[child].identity},0)),
+                    _=>table.rows[child].attempt.as_mut().unwrap().nonce=[0x99;16],
+                }
+                assert!(table.resolve_history_data().is_err(),"graph mutation {change}");
+            }
+            let mut fork=removal_history_test_chain(3);let root=fork.rows.iter().position(|row|row.snapshot.is_some()).unwrap();
+            let parent=fork.rows[root].attempt.unwrap();
+            for (index,row) in fork.rows.iter_mut().enumerate(){if index!=root {row.attempt.as_mut().unwrap().previous=Some(
+                RemovalPreviousData {request:parent.request,nonce:parent.nonce,tip:parent.tip});}}
+            assert!(fork.resolve_history_data().is_err());
+            let mut cycle=removal_history_test_chain(2);
+            let a=cycle.rows[0].attempt.unwrap();let b=cycle.rows[1].attempt.unwrap();
+            for row in &mut cycle.rows {row.snapshot=None;row.files[0]=None;}
+            cycle.rows[0].attempt.as_mut().unwrap().previous=Some(RemovalPreviousData{request:b.request,nonce:b.nonce,tip:b.tip});
+            cycle.rows[1].attempt.as_mut().unwrap().previous=Some(RemovalPreviousData{request:a.request,nonce:a.nonce,tip:a.tip});
+            assert!(cycle.resolve_history_data().is_err());
+
+            for slot in 0..6 {
+                for field in 0..5 {
+                    let mut scan=RemovalArchiveScan::first(0);let mut first=removal_archive_test_table(1);
+                    first.rows[0].files[slot]=Some(removal_history_test_file(first.rows[0].identity,slot,b"x",0o100444));
+                    scan.install(first).unwrap();scan.complete().unwrap();scan.second().unwrap();
+                    let mut changed=removal_archive_test_table(1);
+                    changed.rows[0].files[slot]=Some(removal_history_test_file(changed.rows[0].identity,slot,b"x",0o100444));
+                    let file=changed.rows[0].files[slot].as_mut().unwrap();
+                    match field {0=>file.digest[0]^=1,1=>file.flags=1,2=>file.identity.ctime+=1,
+                        3=>file.len+=1,_=>file.identity.mode=0o100600}
+                    assert!(scan.install(changed).is_err());assert!(scan.phase==RemovalArchivePhase::Refused);
+                }
+            }
+            let mut scan=RemovalArchiveScan::first(0);let mut first=removal_archive_test_table(1);
+            first.rows[0].app=Some((app,0));scan.install(first).unwrap();scan.complete().unwrap();scan.second().unwrap();
+            let mut changed=removal_archive_test_table(1);changed.rows[0].app=Some((Identity{ctime:app.ctime+1,..app},0));
+            assert!(scan.install(changed).is_err());
+            let spans=RemovalSemanticSpans::new();assert!(spans.memory(REMOVAL_HISTORY_SPANS+1).is_err());
+            let root_quote=std::mem::size_of::<Vec<(String,u64)>>()+350*std::mem::size_of::<(String,u64)>()+350*255+65536+8192;
+            assert_eq!(removal_archive_roster_quote_data(false,350,350*255,0),Ok(root_quote));assert!(root_quote<=256*1024);
+            assert!(removal_archive_roster_quote_data(true,7,7*255,0).unwrap()<=128*1024);
+            assert!(removal_archive_roster_quote_data(false,351,0,0).is_err());assert!(removal_archive_roster_quote_data(true,8,0,0).is_err());
+            assert!(removal_archive_roster_quote_data(false,350,usize::MAX,1).is_err());
+            let mut roster=vec![("b".to_owned(),2),("a".to_owned(),1)];roster.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+            assert!(roster.windows(2).all(|pair|pair[0].0<pair[1].0));
+            assert_eq!(removal_archive_inode(&roster,"a"),Some(1));assert_eq!(removal_archive_inode(&roster,"c"),None);
+            roster.push(("b".to_owned(),3));assert!(!roster.windows(2).all(|pair|pair[0].0<pair[1].0));
+            assert_eq!(removal_archive_original_quote_data(64,0),Ok(512));
+            assert_eq!(removal_archive_original_quote_data(64,64),Ok(640));
+            assert!(removal_archive_original_quote_data(65,0).is_err());assert!(removal_archive_original_quote_data(1,2).is_err());
+            assert_eq!(REMOVAL_ARCHIVE_TABLE*2,256*1024);assert_eq!(REMOVAL_ARCHIVE_PARSER,1024*1024);
+            assert!(REMOVAL_ARCHIVE_TABLE*2+REMOVAL_ARCHIVE_PARSER<REMOVAL_SNAPSHOT_WORK as usize);
+            // Initial snapshot POST is once Taken, final payload POST is a NEW
+            // same-original read only after successful PostComplete. There is
+            // no reset to Taken and no error/unfinished-read success credit.
+            let mut scan=RemovalArchiveScan::first(0);scan.install(removal_archive_test_table(0)).unwrap();scan.complete().unwrap();
+            scan.second().unwrap();scan.install(removal_archive_test_table(0)).unwrap();scan.complete().unwrap();let _same=scan.take().unwrap();
+            scan.begin_post(0,true).unwrap();scan.complete_post(Ok(())).unwrap();
+            scan.begin_post(0,false).unwrap();scan.complete_post(Ok(())).unwrap();
+            assert!(scan.phase==RemovalArchivePhase::PostComplete);
+            assert!(scan.begin_post(0,true).is_err());assert!(scan.phase==RemovalArchivePhase::Refused);
+            for phase in [RemovalArchivePhase::FirstReading,RemovalArchivePhase::FirstComplete,RemovalArchivePhase::SecondReading,
+                RemovalArchivePhase::SecondComplete,RemovalArchivePhase::Taken,RemovalArchivePhase::PostReading,RemovalArchivePhase::Refused] {
+                let mut wrong=RemovalArchiveScan::first(0);wrong.phase=phase;
+                assert!(wrong.begin_post(0,false).is_err());assert!(wrong.phase==RemovalArchivePhase::Refused);
+            }
+            let mut failed=RemovalArchiveScan::first(0);failed.phase=RemovalArchivePhase::PostComplete;
+            failed.begin_post(0,false).unwrap();assert_eq!(failed.complete_post(Err("actual-first")),Err("actual-first"));
+            assert!(failed.phase==RemovalArchivePhase::Refused);assert!(failed.complete_post(Ok(())).is_err());
         }
 
         // Removal-only plan captured by the SAME fully admitted second walker.
@@ -2084,7 +3266,7 @@ mod installer {
         const SNAPSHOT_CHILDREN: usize = 642;
         const SNAPSHOT_HEADER: usize = 1024 * 1024;
         pub(super) const REMOVAL_SNAPSHOT_LIMIT: u64 = 16 * 1024 * 1024;
-        pub(super) const REMOVAL_SNAPSHOT_MAGIC: &[u8] = b"MRK-REMOVE-SNAPSHOT-V1\0";
+        pub(super) const REMOVAL_SNAPSHOT_MAGIC: &[u8] = b"MRK-REMOVE-SNAPSHOT-V2\0";
         pub(super) struct RemovalSnapshotControl {
             pub(super) path: String, pub(super) identity: Identity, pub(super) flags: u32,
             pub(super) size: u64, pub(super) digest: [u8;32], pub(super) kind: u8,
@@ -2092,6 +3274,147 @@ mod installer {
         }
         struct RemovalSnapshotDirectory {
             path: String, identity: Identity, flags: u32, children: Vec<(String,u64)>,
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        enum RemovalRemainingPresence {
+            Present {identity:Identity,flags:u32},
+            // The parent was freshly held/named and THIS child had actual
+            // nofollow ENOENT. For a directory this covers its signed subtree;
+            // it does not fabricate descendant FDs or old inode authority.
+            Absent {parent:Identity},
+        }
+        struct RemovalRemainingNode {
+            generation:usize,path:String,parent:Option<usize>,directory:bool,
+            size:u64,digest:[u8;32],executable:bool,presence:RemovalRemainingPresence,
+        }
+        struct RemovalRemainingGeneration {release:String,inventory:String,app_name:String,current:bool}
+        pub(super) struct RemovalRemainingPlan {
+            nodes:Vec<RemovalRemainingNode>,generations:Vec<RemovalRemainingGeneration>,
+            stack:[Option<usize>;17],active:Option<usize>,base:u64,transient:usize,
+            expected_files:u64,present_files:u64,present_bytes:u64,expected_directories:u64,
+            current_app:Option<Identity>,complete:bool,
+        }
+        impl RemovalRemainingPlan {
+            fn new(book:&Install,source:&worker::RemovalResumeSource,base:u64)->Result<Self> {
+                source.authenticated_selection(book)?;
+                check(base>=book.removal_control_reserved && base<=16*1024*1024,"removal-resume-plan-budget")?;
+                let plan=Self {nodes:Vec::new(),generations:Vec::new(),stack:[None;17],active:None,base,transient:0,
+                    expected_files:0,present_files:0,present_bytes:0,expected_directories:0,current_app:None,complete:false};plan.memory(0)?;Ok(plan)
+            }
+            fn begin_generation(&mut self,generation:&GenerationData,index:&installation_record::InventoryIndex<'_>)->Result<()> {
+                check(!self.complete && self.active.is_none() && self.stack.iter().all(Option::is_none)
+                    && self.generations.len()<9,"removal-resume-generation-once")?;
+                let binding=generation.release_data().binding_data();
+                let current=generation.retained_invocation_data().is_none();
+                check(current==self.generations.is_empty() && !self.generations.iter().any(|g|g.release==binding.release),
+                    "removal-resume-generation-order")?;
+                let app_name=if current{"app".to_owned()}else{data(transaction::retained_app_name_data(
+                    generation.retained_invocation_data().ok_or("removal-resume-generation-retained")?))?};
+                self.memory(9*std::mem::size_of::<RemovalRemainingGeneration>()+binding.release.len()+64+app_name.capacity())?;
+                if self.generations.capacity()==0{self.generations.try_reserve_exact(9).map_err(|_|"removal-resume-plan-allocation")?;}
+                check(self.generations.capacity()<=9,"removal-resume-plan-allocation")?;
+                self.active=Some(self.generations.len());self.generations.push(RemovalRemainingGeneration {
+                    release:binding.release.into(),inventory:binding.inventory_sha256.into(),app_name,current});
+                self.expected_files=self.expected_files.checked_add(index.files.len() as u64).ok_or("removal-resume-plan-count")?;
+                self.expected_directories=self.expected_directories.checked_add(index.directories.len() as u64).ok_or("removal-resume-plan-count")?;
+                self.memory(0)
+            }
+            fn end_generation(&mut self)->Result<()> {
+                check(self.active.take().is_some() && self.stack.iter().all(Option::is_none),"removal-resume-generation-incomplete")
+            }
+            pub(super) fn payload_all_absent_data(&self)->bool {
+                self.complete && self.current_app.is_none() && self.nodes.iter().all(|row|matches!(row.presence,RemovalRemainingPresence::Absent{..}))
+            }
+            pub(super) fn payload_presence_data(&self)->mobile_release_desktop::macos_remove_record::PayloadPresenceData {
+                use mobile_release_desktop::macos_remove_record::PayloadPresenceData as P;
+                if !self.complete {P::Unknown}else if self.payload_all_absent_data(){P::AllAbsent}
+                else if self.present_files==self.expected_files && self.nodes.iter().all(|row|matches!(row.presence,RemovalRemainingPresence::Present{..}))
+                    {P::AllPresentMatching}else{P::PartialInRosterMatching}
+            }
+            pub(super) fn app_slots_data(&self)->mobile_release_desktop::macos_remove_record::AppSlotsData {
+                use mobile_release_desktop::macos_remove_record::AppSlotsData as A;
+                if !self.complete{A::Unknown}else if self.current_app.is_some(){A::NewOnly}else{A::Neither}
+            }
+            pub(super) fn fingerprint_data(&self)->Result<[u8;32]>{self.fingerprint()}
+            fn owned_bytes(&self,extra:usize)->Result<usize> {
+                let bytes=self.nodes.capacity().checked_mul(std::mem::size_of::<RemovalRemainingNode>())
+                    .and_then(|n|n.checked_add(self.generations.capacity().checked_mul(std::mem::size_of::<RemovalRemainingGeneration>())?))
+                    .and_then(|n|n.checked_add(std::mem::size_of::<Self>()+self.transient))
+                    .and_then(|n|n.checked_add(extra)).ok_or("removal-resume-plan-memory")?;
+                let mut bytes=bytes;
+                for row in &self.nodes{bytes=bytes.checked_add(row.path.capacity()).ok_or("removal-resume-plan-memory")?;}
+                for row in &self.generations{bytes=bytes.checked_add(row.release.capacity()+row.inventory.capacity()+row.app_name.capacity())
+                    .ok_or("removal-resume-plan-memory")?;}
+                Ok(bytes)
+            }
+            fn memory(&self,extra:usize)->Result<()> {
+                check(self.base.checked_add(self.owned_bytes(extra)? as u64).is_some_and(|n|n<=16*1024*1024),"removal-resume-plan-memory")
+            }
+            fn push(&mut self,path:&str,directory:bool,size:u64,digest:[u8;32],executable:bool,
+                presence:RemovalRemainingPresence,depth:usize)->Result<usize> {
+                check(!self.complete && self.active.is_some() && depth<=17 && path.len()<=1024
+                    && self.nodes.len()<REMOVAL_PLAN_NODES,"removal-resume-plan-shape")?;
+                if self.nodes.len()==self.nodes.capacity(){
+                    let old=self.nodes.capacity();let next=old.max(16).checked_mul(2).ok_or("removal-resume-plan-count")?.min(REMOVAL_PLAN_NODES);
+                    // Count both old/new allocations during reserve, then the
+                    // actual retained capacity. No capacity or original reset.
+                    self.memory(next*std::mem::size_of::<RemovalRemainingNode>()+path.len())?;
+                    self.nodes.try_reserve_exact(next-self.nodes.len()).map_err(|_|"removal-resume-plan-allocation")?;
+                    check(self.nodes.capacity()<=next,"removal-resume-plan-allocation")?;
+                }
+                self.memory(path.len())?;let path=path.to_owned();
+                check(path.capacity()<=1024,"removal-resume-plan-allocation")?;
+                let parent=if depth==0{None}else{self.stack[depth-1]};
+                check(depth==0 || parent.is_some(),"removal-resume-plan-parent")?;
+                let index=self.nodes.len();self.nodes.push(RemovalRemainingNode {generation:self.active.ok_or("removal-resume-plan-generation")?,
+                    path,parent,directory,size,digest,executable,presence});self.memory(0)?;Ok(index)
+            }
+            fn enter(&mut self,book:&Install,root:usize,path:&str,depth:usize)->Result<()> {
+                check(depth<17 && self.stack[depth].is_none(),"removal-resume-plan-depth")?;
+                let actual=stat::fstat(book.fd(root)?).map_err(|_|"removal-resume-plan-stat")?;
+                check(Identity::of(&actual)==book.identity(root)? && actual.st_flags==0,"removal-resume-plan-original")?;
+                let index=self.push(path,true,0,[0;32],false,RemovalRemainingPresence::Present{identity:Identity::of(&actual),flags:0},depth)?;
+                self.stack[depth]=Some(index);Ok(())
+            }
+            fn leave(&mut self,depth:usize)->Result<()> {
+                check(depth<17 && self.stack[depth].take().is_some() && self.stack[depth+1..].iter().all(Option::is_none),
+                    "removal-resume-plan-depth")
+            }
+            fn file(&mut self,book:&Install,n:usize,path:&str,entry:&installation_record::Entry,depth:usize)->Result<()> {
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-resume-plan-stat")?;
+                check(Identity::of(&actual)==book.identity(n)? && actual.st_flags==0,"removal-resume-plan-original")?;
+                self.push(path,false,entry.size,worker::removal_hex_data::<32>(&entry.sha256)?,entry.executable,
+                    RemovalRemainingPresence::Present{identity:Identity::of(&actual),flags:0},depth)?;
+                self.present_files=self.present_files.checked_add(1).ok_or("removal-resume-plan-count")?;
+                self.present_bytes=self.present_bytes.checked_add(entry.size).ok_or("removal-resume-plan-count")?;Ok(())
+            }
+            fn absent(&mut self,book:&Install,parent:usize,name:&str,path:&str,directory:bool,
+                entry:Option<&installation_record::Entry>,depth:usize)->Result<()> {
+                book.check_name(parent,true)?;book.absent(parent,name)?;book.check_name(parent,true)?;
+                let (size,digest,executable)=if let Some(entry)=entry{(entry.size,worker::removal_hex_data::<32>(&entry.sha256)?,entry.executable)}
+                    else{(0,[0;32],false)};
+                self.push(path,directory,size,digest,executable,RemovalRemainingPresence::Absent{parent:book.identity(parent)?},depth)?;Ok(())
+            }
+            fn fingerprint(&self)->Result<[u8;32]> {
+                check(self.complete && self.active.is_none() && self.stack.iter().all(Option::is_none),"removal-resume-plan-incomplete")?;
+                let mut out=Sha256::new();out.update(b"MRK-REMOVAL-FRESH-OBSERVATION-V1\0");
+                fn identity(out:&mut Sha256,id:Identity){
+                    out.update(id.dev.to_le_bytes());out.update(id.ino.to_le_bytes());out.update(id.mode.to_le_bytes());
+                    out.update(id.uid.to_le_bytes());out.update(id.gid.to_le_bytes());out.update(id.links.to_le_bytes());
+                    out.update(id.size.to_le_bytes());out.update(id.mtime.to_le_bytes());out.update(id.mtime_ns.to_le_bytes());
+                    out.update(id.ctime.to_le_bytes());out.update(id.ctime_ns.to_le_bytes());
+                }
+                for row in &self.generations {for text in [&row.release,&row.inventory,&row.app_name]{out.update((text.len() as u64).to_le_bytes());out.update(text.as_bytes());}
+                    out.update([u8::from(row.current)]);}
+                for row in &self.nodes {out.update((row.generation as u64).to_le_bytes());out.update((row.path.len() as u64).to_le_bytes());
+                    out.update(row.path.as_bytes());out.update((row.parent.map(|n|n as u64).unwrap_or(u64::MAX)).to_le_bytes());
+                    out.update([u8::from(row.directory),u8::from(row.executable)]);out.update(row.size.to_le_bytes());out.update(row.digest);
+                    match row.presence {RemovalRemainingPresence::Present{identity:id,flags}=>{out.update([1]);identity(&mut out,id);out.update(flags.to_le_bytes());},
+                        RemovalRemainingPresence::Absent{parent}=>{out.update([2]);identity(&mut out,parent);}}
+                }
+                out.update(self.expected_files.to_le_bytes());out.update(self.present_files.to_le_bytes());
+                out.update(self.expected_directories.to_le_bytes());out.update(self.present_bytes.to_le_bytes());Ok(out.finalize().into())
+            }
         }
         pub(super) struct RemovalSnapshotCapture {
             pub(super) root: usize, versions: Option<usize>, prior_archives:Option<RemovalArchiveCensus>, pub(super) controls: Vec<RemovalSnapshotControl>,
@@ -2153,7 +3476,7 @@ mod installer {
                 // The separately bounded first/second shallow census tables
                 // can overlap during this same second observation. Their old
                 // table is dropped before finish moves the completed second.
-                if !self.complete { total=total.checked_add(128*1024).ok_or("removal-snapshot-memory")?; }
+                if !self.complete { total=total.checked_add(256*1024).ok_or("removal-snapshot-memory")?; }
                 if let Some(prior)=&self.prior_archives {
                     total=total.checked_add(prior.owned_bytes().map_err(|_|"removal-snapshot-memory")?).ok_or("removal-snapshot-memory")?;
                 }
@@ -2238,6 +3561,10 @@ mod installer {
                             out.put(&file.len().to_be_bytes())?;out.put(file.digest())?;out.put(&[file.shape_tag_data()])?;
                         } else { out.put(&[0])?; }
                     }
+                    // Named nofollow comparison only; no recursive body or
+                    // old app-original authority is carried by this marker.
+                    if let Some((identity,flags))=row.app_data() {out.put(&[1])?;out.identity(identity,flags)?;}
+                    else {out.put(&[0])?;}
                 }
                 check(prior_bytes==prior.storage_bytes(),"removal-snapshot-prior-bound")?;
                 out.u16(self.controls.len())?;
@@ -2376,7 +3703,7 @@ mod installer {
 
         // Each additional observation acquires and accounts its own descriptor;
         // it is not adoption of a failed or retired descriptor, nor an offset reset.
-        fn roster_now(book: &mut Install, directory: usize) -> Result<BTreeMap<String, u64>> {
+        pub(super) fn roster_now(book: &mut Install, directory: usize) -> Result<BTreeMap<String, u64>> {
             book.check_name(directory, false)?;
             let parent = book.originals[directory].parent;
             let name = book.originals[directory].name.clone();
@@ -2524,6 +3851,10 @@ mod installer {
                 u32::from(stat.st_mode), stat.st_uid, stat.st_gid, stat.st_flags))
         }
         fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
+            audit_tree_mode(book,root,prefix,index,depth,None)
+        }
+        fn audit_tree_mode(book:&mut Install,root:usize,prefix:&str,index:&installation_record::InventoryIndex<'_>,depth:usize,
+            mut resume:Option<&mut RemovalRemainingPlan>)->Result<()> {
             check(depth <= 16, "maintenance-tree-depth")?;
             book.protected(root, true, Some(0o555))?;
             native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?;
@@ -2532,10 +3863,19 @@ mod installer {
             let wanted: BTreeSet<String> = index.files.keys().chain(index.directories.iter()).filter_map(|name|
                 name.rsplit_once('/').filter(|(parent,_)| *parent == prefix).map(|(_,leaf)| leaf.to_owned())).collect();
             let actual = roster_now(book, root)?;
-            check(actual.keys().cloned().collect::<BTreeSet<_>>() == wanted, "maintenance-payload-roster")?;
-            payload_directory_enter(book,root,prefix,depth,actual.len())?;
+            if let Some(plan)=resume.as_deref_mut() {
+                check(removal_resume_children_data(&wanted,&actual),"removal-resume-foreign-payload")?;
+                plan.enter(book,root,prefix,depth)?;
+            }else{
+                check(actual.keys().cloned().collect::<BTreeSet<_>>() == wanted, "maintenance-payload-roster")?;
+                payload_directory_enter(book,root,prefix,depth,actual.len())?;
+            }
             for name in wanted {
                 let path = format!("{prefix}/{name}");
+                if let Some(plan)=resume.as_deref_mut(){if !actual.contains_key(&name){
+                    let entry=index.files.get(&path).copied();
+                    plan.absent(book,root,&name,&path,entry.is_none(),entry,depth+1)?;continue;
+                }}
                 if let Some(entry) = index.files.get(&path) {
                     let reader = book.open(Some(root), &name, false)?;
                     book.protected(reader, false, Some(if entry.executable { 0o555 } else { 0o444 }))?;
@@ -2544,24 +3884,51 @@ mod installer {
                         && stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                         "maintenance-payload-original")?;
                     check(book.read(reader, entry.size, false)?.0 == entry.sha256, "maintenance-payload-hash")?;
-                    payload_file_observed(book,reader,entry,depth)?;
+                    if let Some(plan)=resume.as_deref_mut(){plan.file(book,reader,&path,entry,depth+1)?;}
+                    else{payload_file_observed(book,reader,entry,depth)?;}
                     book.forward_close(reader, "maintenance-payload-close")?;
                 } else {
                     let reader = book.open(Some(root), &name, true)?;
                     check(book.identity(reader)?.ino == actual[&name], "maintenance-payload-original")?;
-                    audit_tree(book, reader, &path, index, depth + 1)?;
+                    audit_tree_mode(book,reader,&path,index,depth+1,resume.as_deref_mut())?;
                     book.forward_close(reader, "maintenance-payload-close")?;
                 }
             }
-            book.check_name(root,true)?;payload_directory_leave(book,depth)
+            book.check_name(root,true)?;
+            if let Some(plan)=resume {plan.leave(depth)}else{payload_directory_leave(book,depth)}
         }
         fn audit_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
             allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
+            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None)
+        }
+        fn audit_generation_mode(book:&mut Install,destination:usize,versions:usize,generation:&GenerationData,
+            allow_missing_app:bool,keep:bool,mut resume:Option<(&worker::RemovalResumeSource,&mut RemovalRemainingPlan)>)
+            ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
             let binding = generation.release_data().binding_data();
             let release = book.open(Some(versions), binding.release, true)?;
             check(book.recorded_directory(release)? == generation.release_directory_data(), "maintenance-release-original")?;
-            let raw = metadata_bytes(book, release, installation_record::INVENTORY_NAME, installation_record::INVENTORY_LIMIT)?;
-            let descriptor = metadata_bytes(book, release, installation_record::RECORD_NAME, installation_record::RECORD_LIMIT)?;
+            let (raw,descriptor)=if let Some((source,_))=resume.as_ref() {
+                // Bound the actual read by the already authenticated span,
+                // BEFORE allocation; a replaced oversized control cannot spend
+                // an inventory-limit allocation against a smaller quote.
+                let inventory_path=format!("versions/{}/{}",binding.release,installation_record::INVENTORY_NAME);
+                let record_path=format!("versions/{}/{}",binding.release,installation_record::RECORD_NAME);
+                let inventory_span=source.genesis_control_data(book,&inventory_path)?;
+                let record_span=source.genesis_control_data(book,&record_path)?;
+                let inventory_limit=usize::try_from(inventory_span.len_data()).map_err(|_|"removal-resume-control-size")?;
+                let record_limit=usize::try_from(record_span.len_data()).map_err(|_|"removal-resume-control-size")?;
+                check(inventory_limit<=installation_record::INVENTORY_LIMIT && record_limit<=installation_record::RECORD_LIMIT,
+                    "removal-resume-control-size")?;
+                let raw=metadata_bytes(book,release,installation_record::INVENTORY_NAME,inventory_limit)?;
+                let descriptor=metadata_bytes(book,release,installation_record::RECORD_NAME,record_limit)?;
+                check(raw.len()==inventory_limit && descriptor.len()==record_limit
+                    && <[u8;32]>::from(Sha256::digest(&raw))==*inventory_span.digest_data()
+                    && <[u8;32]>::from(Sha256::digest(&descriptor))==*record_span.digest_data(),"removal-resume-control-changed")?;
+                (raw,descriptor)
+            }else{
+                (metadata_bytes(book, release, installation_record::INVENTORY_NAME, installation_record::INVENTORY_LIMIT)?,
+                    metadata_bytes(book, release, installation_record::RECORD_NAME, installation_record::RECORD_LIMIT)?)
+            };
             let expected = installation_record::Expected { kind:installation_record::Kind::Ordinary,
                 source_commit:binding.source_commit, runtime_manifest:binding.runtime_manifest_sha256,
                 install_root:book.recorded_directory(destination)?, release_directory:generation.release_directory_data() };
@@ -2569,36 +3936,333 @@ mod installer {
             check(record.instance() == generation.instance_data(), "maintenance-generation-instance")?;
             let inventory = Inventory::parse_for_release(&raw, binding.runtime_manifest_sha256, binding.release)?;
             let index = inventory.index()?;
-            payload_generation_begin(book,generation)?;
-            exact_roster(book, release, &["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
-                .into_iter().map(str::to_owned).collect())?;
-            let runtime = book.open(Some(release), "runtime", true)?;
-            audit_tree(book, runtime, "runtime", &index, 0)?;
-            book.forward_close(runtime, "maintenance-runtime-close")?;
+            let mut before_present=(0,0);
+            if let Some((source,plan))=resume.as_mut(){
+                source.authenticated_selection(book)?;before_present=(plan.present_files,plan.present_bytes);
+                plan.begin_generation(generation,&index)?;
+                let present=match book.named(Some(release),"runtime"){Ok(_)=>true,Err(Errno::ENOENT)=>false,
+                    Err(_)=>return Err("removal-resume-runtime-name")};
+                let mut wanted:BTreeSet<String>=[installation_record::INVENTORY_NAME,installation_record::RECORD_NAME]
+                    .into_iter().map(str::to_owned).collect();
+                if present{wanted.insert("runtime".into());}
+                exact_roster(book,release,&wanted)?;
+                if present{let runtime=book.open(Some(release),"runtime",true)?;
+                    audit_tree_mode(book,runtime,"runtime",&index,0,Some(&mut **plan))?;
+                    book.forward_close(runtime,"maintenance-runtime-close")?;
+                }else{plan.absent(book,release,"runtime","runtime",true,None,0)?;}
+            }else{
+                payload_generation_begin(book,generation)?;
+                exact_roster(book, release, &["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
+                    .into_iter().map(str::to_owned).collect())?;
+                let runtime = book.open(Some(release), "runtime", true)?;
+                audit_tree(book, runtime, "runtime", &index, 0)?;
+                book.forward_close(runtime, "maintenance-runtime-close")?;
+            }
             let app_name = match generation.retained_invocation_data() {
                 None => paths::APP_NAME.to_owned(), Some(invocation) => data(transaction::retained_app_name_data(invocation))?,
             };
-            let app = match book.named(Some(destination), &app_name) {
+            let (app_parent,app_leaf)=if let Some((source,_))=resume.as_ref(){
+                if generation.retained_invocation_data().is_none(){(source.genesis_archive(book)?,"app")}
+                else{(destination,app_name.as_str())}
+            }else{(destination,app_name.as_str())};
+            let app = match book.named(Some(app_parent), app_leaf) {
+                Err(Errno::ENOENT) if resume.is_some()=>{
+                    resume.as_mut().ok_or("removal-resume-mode")?.1.absent(book,app_parent,app_leaf,"app",true,None,0)?;None
+                },
                 Err(Errno::ENOENT) if allow_missing_app && generation.retained_invocation_data().is_none() => None,
                 Err(_) => return Err("maintenance-app-missing-or-refused"),
                 Ok(_) => {
-                    let original = book.open(Some(destination), &app_name, true)?;
+                    let original = book.open(Some(app_parent), app_leaf, true)?;
                     check(app_identity(book, original)? == generation.app_identity_data(), "maintenance-app-original")?;
-                    audit_tree(book, original, "app", &index, 0)?; Some(original)
+                    if let Some((_,plan))=resume.as_mut(){
+                        if generation.retained_invocation_data().is_none(){plan.current_app=Some(book.identity(original)?);}
+                        audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan))?;
+                    }else{audit_tree(book, original, "app", &index, 0)?;} Some(original)
                 },
             };
             let mut cost = GenerationCostData { files:2, bytes:(raw.len() + descriptor.len()) as u64 };
-            for (path, entry) in &index.files {
+            if let Some((_,plan))=resume.as_ref(){
+                cost.files=cost.files.checked_add(plan.present_files.checked_sub(before_present.0).ok_or("removal-resume-plan-count")?)
+                    .ok_or("removal-resume-plan-count")?;
+                cost.bytes=cost.bytes.checked_add(plan.present_bytes.checked_sub(before_present.1).ok_or("removal-resume-plan-count")?)
+                    .ok_or("removal-resume-plan-count")?;
+            }else{for (path, entry) in &index.files {
                 if app.is_some() || !path.starts_with("app/") {
                     cost.files += 1; cost.bytes = cost.bytes.checked_add(entry.size).ok_or("maintenance-payload-bound")?;
                 }
-            }
+            }}
             if !keep {
                 if let Some(app) = app { book.forward_close(app, "maintenance-retained-app-close")?; }
                 book.forward_close(release, "maintenance-retained-release-close")?;
             }
-            payload_generation_end(book)?;
+            if let Some((_,plan))=resume{plan.end_generation()?;}else{payload_generation_end(book)?;}
             Ok((app, release, cost, (raw.len() + descriptor.len()) as u64))
+        }
+        // Strict known-control prelude, still DATA. It may not select a payload
+        // opener or enter M. Reuses read_history and the sole archive reader.
+        // A SOURCE-named scalar size census precedes retained History parsing;
+        // this is a memory quote, not another metadata/payload walker.
+        fn removal_resume_history_quote(book:&mut Install,root:usize,selected:&ReleaseSetData)->Result<u64> {
+            let (original,raw)=metadata_original(book,root,transaction::STATE_NAME,transaction::STATE_LIMIT)?;
+            let state=data(StateData::parse_data(&raw,selected))?;
+            check(state.mutation_recorded_data(),"removal-resume-current-state")?;
+            let mut bytes=raw.len() as u64;let mut names=BTreeSet::new();
+            let mut add=|name:String,limit:usize|->Result<()> {
+                check(names.insert(name.clone()) && names.len()<=192,"removal-resume-history-count")?;
+                book.clock()?;let actual=book.named(Some(root),&name).map_err(|_|"removal-resume-history-name")?;
+                check(actual.st_mode&0o170000==0o100000 && actual.st_mode&0o7777==0o444
+                    && actual.st_uid==0 && actual.st_gid==0 && actual.st_nlink==1 && actual.st_flags==0
+                    && actual.st_size>0 && actual.st_size as u64<=limit as u64,"removal-resume-history-shape")?;
+                bytes=bytes.checked_add(actual.st_size as u64).ok_or("removal-resume-history-bound")?;Ok(())
+            };
+            add(data(transaction::intent_name_data(state.invocation_data()))?,transaction::INTENT_LIMIT)?;
+            add(data(transaction::capsule_name_data(state.invocation_data()))?,transaction::CAPSULE_LIMIT)?;
+            for row in state.evidence_data() {
+                add(data(transaction::intent_name_data(row.invocation))?,transaction::INTENT_LIMIT)?;
+                add(data(transaction::archived_state_name_data(row.invocation))?,transaction::STATE_LIMIT)?;
+                add(data(transaction::capsule_name_data(row.invocation))?,transaction::CAPSULE_LIMIT)?;
+            }
+            drop(add);
+            // Includes the live raw+serde/typed representations, bounded name
+            // indices, current scalar-read overlap and the caller's source cells.
+            let quote=bytes.checked_mul(3).and_then(|n|n.checked_add(256*1024))
+                .and_then(|n|n.checked_add(book.removal_control_reserved))
+                .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-history-bound")?;
+            held_bytes(book,original,&raw)?;book.forward_close(original,"removal-resume-history-quote-close")?;Ok(quote)
+        }
+        fn removal_resume_known_root_names(book:&Install,history:&History,selected:&ReleaseSetData,root:usize)->Result<BTreeSet<String>> {
+            check(history.current.state.current_data().release_data()==selected.current_data(),"removal-resume-current-release")?;
+            let mut names:BTreeSet<String>=["versions",paths::MAINTENANCE_GATE_NAME,paths::REGISTRATION_GATE_NAME,
+                transaction::STATE_NAME].into_iter().map(str::to_owned).collect();
+            for generation in std::iter::once(history.current.state.current_data()).chain(history.current.state.retained_data()) {
+                let pair=control_names(selected,generation.release_data().binding_data().release)?;
+                names.insert(pair.0);names.insert(pair.1);
+                if let Some(invocation)=generation.retained_invocation_data() {
+                    let name=data(transaction::retained_app_name_data(invocation))?;
+                    match book.named(Some(root),&name) {Ok(_)=>{names.insert(name);},Err(Errno::ENOENT)=>{},
+                        Err(_)=>return Err("removal-resume-retained-app-name")}
+                }
+            }
+            for record in history.originals.values().chain(std::iter::once(&history.current)) {
+                let invocation=record.intent.invocation_data();
+                names.insert(data(transaction::intent_name_data(invocation))?);
+                names.insert(data(transaction::capsule_name_data(invocation))?);
+                if invocation!=history.current.state.invocation_data(){names.insert(data(transaction::archived_state_name_data(invocation))?);}
+                if record.intent.action_data()!=ActionData::SamePackageNoop {names.insert(format!(".install-{invocation}"));}
+            }
+            check(names.len()<=286,"removal-resume-root-count")?;Ok(names)
+        }
+        pub(super) fn removal_resume_prelude(book:&mut Install,source:&worker::RemovalResumeSource)
+            ->Result<(RemovalArchiveCensus,[u8;32])> {
+            let selected=source.prelude_selection_data(book)?;
+            reserve_removal_snapshot_work(book)?;
+            let root=source.root_original();let quote=removal_resume_history_quote(book,root,selected)?;
+            let history=read_history(book,root,selected)?;
+            check(history.bytes.checked_mul(3).and_then(|n|n.checked_add(256*1024))
+                .and_then(|n|n.checked_add(book.removal_control_reserved)).is_some_and(|n|n<=quote),
+                "removal-resume-history-quote-changed")?;
+            let wanted=removal_resume_known_root_names(book,&history,selected,root)?;
+            let state_sha=Sha256::digest(&history.state_bytes).into();
+            let state_original=history.state_original;
+            held_bytes(book,state_original,&history.state_bytes)?;
+            // No retained History overlaps the bounded semantic archive parser.
+            drop(history);book.forward_close(state_original,"removal-resume-prelude-close")?;
+            source.prelude_selection_data(book)?;
+            let census=read_removal_archive_census(book,root,&wanted)?;
+            source.prelude_selection_data(book)?;
+            Ok((census,state_sha))
+        }
+        fn removal_resume_children_data(wanted:&BTreeSet<String>,actual:&BTreeMap<String,u64>)->bool {
+            actual.iter().all(|(name,inode)|*inode!=0 && wanted.contains(name))
+        }
+        #[derive(Clone,Copy)]
+        struct RemovalResumeForecast {files:u64,directories:u64,controls:u64,prior:u64}
+        fn removal_resume_original_quote_data(used:usize,files:u64,directories:u64,controls:u64,prior:u64,walks:u64)->Option<u64> {
+            // Every walk: one original per present file, directory+independent
+            // roster per directory, <=2C metadata/history readers, 10P census (includes pending-prefix rereads)
+            // plus 8P physical final POST, <=256 fixed generation/stage anchors.
+            // Missing nodes cost no original. Forecast charges all signed nodes.
+            let one=files.checked_add(directories.checked_mul(2)?)?.checked_add(controls.checked_mul(2)?)?
+                .checked_add(prior.checked_mul(18)?)?.checked_add(256)?;
+            (used as u64).checked_add(one.checked_mul(walks)?).filter(|n|*n<=24576)
+        }
+        fn removal_resume_inventory_quote_data(size:u64)->Option<usize> {
+            // Original raw JSON, strict Value/typed/index/path overlap and the
+            // maximum two simultaneously allocated directory-key sets. This is
+            // a restrictive preallocation quote, not new available memory.
+            usize::try_from(size).ok()?.checked_mul(8)?.checked_add(2*installation_record::FILE_LIMIT*1280)?.checked_add(256*1024)
+        }
+        fn removal_resume_forecast(book:&Install,source:&worker::RemovalResumeSource,history:&History,base:u64)->Result<RemovalResumeForecast> {
+            let mut out=RemovalResumeForecast {files:0,directories:0,
+                controls:source.genesis_data(book)?.controls_data().len() as u64,prior:source.history_rows_data()? as u64};
+            check(out.controls<=SNAPSHOT_CONTROLS as u64 && out.prior<=64,"removal-resume-forecast-bound")?;
+            for generation in std::iter::once(history.current.state.current_data()).chain(history.current.state.retained_data()) {
+                source.authenticated_selection(book)?;
+                let binding=generation.release_data().binding_data();
+                let path=format!("versions/{}/{}",binding.release,installation_record::INVENTORY_NAME);
+                let span=source.genesis_control_data(book,&path)?;
+                check(*span.digest_data()==worker::removal_hex_data::<32>(binding.inventory_sha256)?,"removal-resume-generation-inventory")?;
+                let extra=removal_resume_inventory_quote_data(span.len_data()).ok_or("removal-resume-inventory-memory")?;
+                check(base.checked_add(extra as u64).is_some_and(|n|n<=16*1024*1024),"removal-resume-inventory-memory")?;
+                let raw=source.read_genesis_control(book,&path)?;
+                let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
+                let index=inventory.index()?;
+                out.files=out.files.checked_add(index.files.len() as u64).ok_or("removal-resume-count")?;
+                out.directories=out.directories.checked_add(index.directories.len() as u64).ok_or("removal-resume-count")?;
+                book.clock()?;
+            }
+            check(removal_resume_original_quote_data(book.originals.len(),out.files,out.directories,out.controls,out.prior,2).is_some(),
+                "removal-resume-original-reservation")?;
+            // Hold the SOURCE/bootstrap/genesis originals throughout; depth16
+            // needs at most17 tree FDs plus one file/roster, release+versions,
+            // State, and two overlapping shallow history readers.
+            let live=book.originals.iter().filter(|n|n.fd.is_some()).count();
+            check(live.checked_add(24).and_then(|n|n.checked_add(book.removal_live_reserved)).and_then(|n|n.checked_add(if book.worker_deadline.is_some(){worker::EXTRA_LIVE}else{0}))
+                .is_some_and(|n|n<=96),"removal-resume-live-reservation")?;Ok(out)
+        }
+        pub(super) struct RemovalResumeFirst {pub(super) fingerprint:[u8;32],forecast:RemovalResumeForecast}
+        pub(super) struct RemovalResumeObservation {
+            pub(super) plan:RemovalRemainingPlan,forecast:RemovalResumeForecast,
+            storage:u64,control:u64,
+        }
+        impl RemovalResumeObservation {
+            pub(super) fn fingerprint_data(&self)->Result<[u8;32]>{self.plan.fingerprint()}
+            pub(super) fn into_first(self)->Result<RemovalResumeFirst> {
+                Ok(RemovalResumeFirst {fingerprint:self.plan.fingerprint()?,forecast:self.forecast})
+            }
+            pub(super) fn charge_retained(&self,book:&mut Install)->Result<()> {
+                self.plan.memory(0)?;
+                check(self.plan.complete && self.plan.transient==0,"removal-resume-plan-incomplete")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(self.plan.owned_bytes(0)? as u64)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-control-bound")?;Ok(())
+            }
+            pub(super) fn continuation_budget(&self,book:&Install)->Result<()> {
+                self.plan.memory(0)?;
+                check(book.removal_control_reserved<=16*1024*1024,"removal-resume-control-bound")?;
+                let f=self.forecast;
+                // Source-derived upper bound BEFORE a future irreversible
+                // continuation: no reset/reuse of already issued Book records.
+                let count=f.files.checked_mul(2).and_then(|n|n.checked_add(f.directories.checked_mul(3)?))
+                    .and_then(|n|n.checked_add(f.controls.checked_mul(2)?)).and_then(|n|n.checked_add(f.prior.checked_mul(8)?))
+                    .and_then(|n|n.checked_add(64)).and_then(|n|n.checked_add(book.originals.len() as u64));
+                check(count.is_some_and(|n|n<=24576) && self.control<=16*1024*1024 && self.storage<=installation_record::PAYLOAD_LIMIT,
+                    "removal-resume-continuation-budget")
+            }
+        }
+        fn removal_resume_compare_capture(book:&Install,source:&worker::RemovalResumeSource)->Result<()> {
+            let capture=book.removal_snapshot_capture.as_ref().ok_or("removal-resume-capture-missing")?;
+            check(!capture.failed && !capture.complete && capture.root==source.root_original(),"removal-resume-capture-state")?;
+            let expected=source.genesis_data(book)?;
+            let wanted=expected.controls_data().iter().filter(|span|span.kind_data()==0).count();
+            check(capture.controls.len()==wanted,"removal-resume-control-census")?;
+            for actual in &capture.controls {
+                let old=source.genesis_control_data(book,&actual.path)?;
+                check(actual.kind==0 && actual.identity==old.identity_data() && actual.flags==old.flags_data()
+                    && actual.size==old.len_data() && actual.digest==*old.digest_data(),"removal-resume-control-changed")?;
+            }
+            for (kind,n,raw) in [(3,book.registration.participant,paths::REGISTRATION_GATE_BYTES),
+                (4,book.gate.participant,paths::MAINTENANCE_GATE_BYTES)] {
+                let n=n.ok_or("removal-resume-gate-missing")?;
+                let path=&book.originals[n].name;
+                let mut old=expected.controls_data().iter().filter(|span|span.kind_data()==kind && span.path_data()==path.as_str());
+                let span=old.next().ok_or("removal-resume-gate-span")?;
+                check(old.next().is_none() && span.identity_data()==book.identity(n)? && span.flags_data()==0
+                    && span.len_data()==raw.len() as u64 && *span.digest_data()==<[u8;32]>::from(Sha256::digest(raw)),
+                    "removal-resume-gate-changed")?;held_bytes(book,n,raw)?;
+            }capture.memory(0)?;Ok(())
+        }
+        pub(super) fn observe_removal_resume(book:&mut Install,source:&worker::RemovalResumeSource,
+            prior:Option<&RemovalResumeFirst>)->Result<RemovalResumeObservation> {
+            let selected=source.authenticated_selection(book)?;let root=source.root_original();
+            check(book.removal_payload_plan.is_none() && book.removal_snapshot_capture.is_none(),"removal-resume-walk-once")?;
+            // Reuse only the existing metadata capture hooks. This transient
+            // census never finishes, emits a snapshot or gains writer authority.
+            RemovalSnapshotCapture::begin(book,root)?;
+            let base=removal_resume_history_quote(book,root,selected)?;
+            let history=read_history(book,root,selected)?;
+            check(history.bytes.checked_mul(3).and_then(|n|n.checked_add(256*1024))
+                .and_then(|n|n.checked_add(book.removal_control_reserved)).is_some_and(|n|n<=base),"removal-resume-history-quote-changed")?;
+            let genesis=source.genesis_data(book)?.binding_data()?;
+            check(<[u8;32]>::from(Sha256::digest(&history.state_bytes))==genesis.digests_data()[3],"removal-resume-current-state-changed")?;
+            let forecast=if let Some(prior)=prior {
+                check(removal_resume_original_quote_data(book.originals.len(),prior.forecast.files,prior.forecast.directories,
+                    prior.forecast.controls,prior.forecast.prior,1).is_some(),"removal-resume-original-reservation")?;prior.forecast
+            }else{removal_resume_forecast(book,source,&history,base)?};
+            let mut plan=RemovalRemainingPlan::new(book,source,base)?;
+            let versions=book.open(Some(root),"versions",true)?;book.recorded_directory(versions)?;
+            let mut versions_wanted=BTreeSet::new();let mut controls_wanted=BTreeSet::new();
+            let mut payload=0u64;let mut evidence=history.bytes;
+            for generation in std::iter::once(history.current.state.current_data()).chain(history.current.state.retained_data()) {
+                let binding=generation.release_data().binding_data();
+                let path=format!("versions/{}/{}",binding.release,installation_record::INVENTORY_NAME);
+                plan.transient=removal_resume_inventory_quote_data(source.genesis_control_data(book,&path)?.len_data())
+                    .ok_or("removal-resume-inventory-memory")?;plan.memory(0)?;
+                let (_,_,cost,_)=audit_generation_mode(book,root,versions,&generation,false,false,Some((source,&mut plan)))?;
+                plan.transient=0;plan.memory(0)?;
+                payload=payload.checked_add(cost.bytes).ok_or("removal-resume-storage")?;
+                let (_,bytes)=generation_controls(book,root,&generation,selected,&mut controls_wanted,false)?;
+                payload=payload.checked_add(bytes).ok_or("removal-resume-storage")?;
+                check(versions_wanted.insert(binding.release.to_owned()),"removal-resume-generation-duplicate")?;
+            }
+            for record in history.originals.values().chain(std::iter::once(&history.current)) {stage_roster(book,root,record,&mut evidence)?;}
+            let wanted=removal_resume_known_root_names(book,&history,selected,root)?;
+            exact_roster(book,versions,&versions_wanted)?;book.forward_close(versions,"removal-resume-versions-close")?;
+            // The one sole linked parser/classifier, with all six actual slots;
+            // captures raw facts only, never SOURCE or R/M authority.
+            let census=read_removal_archive_census(book,root,&wanted)?;
+            source.history_matches(book,&census)?;
+            let mut full=wanted;
+            for row in census.rows(){check(full.insert(row.name().to_owned()),"removal-resume-root-collision")?;}
+            exact_roster(book,root,&full)?;
+            removal_resume_compare_capture(book,source)?;
+            check(plan.expected_files==forecast.files && plan.expected_directories==forecast.directories,"removal-resume-forecast-changed")?;
+            let storage=payload.checked_add(evidence).and_then(|n|n.checked_add(source.history_storage_data().ok()?))
+                .and_then(|n|n.checked_add((paths::MAINTENANCE_GATE_BYTES.len()+paths::REGISTRATION_GATE_BYTES.len()) as u64))
+                .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-resume-storage")?;
+            held_bytes(book,history.state_original,&history.state_bytes)?;
+            book.forward_close(history.state_original,"removal-resume-state-close")?;
+            drop(history);drop(census);
+            // Drop the transient capture/History before retaining the plan for
+            // the second observation. No original ID or work quote is reset.
+            let capture=book.removal_snapshot_capture.take().ok_or("removal-resume-capture-missing")?;
+            check(!capture.failed && !capture.complete,"removal-resume-capture-state")?;drop(capture);
+            plan.complete=true;plan.memory(0)?;
+            source.final_original_post(book)?;
+            Ok(RemovalResumeObservation {plan,forecast,storage,control:base})
+        }
+        #[cfg(test)]
+        pub(super) fn removal_resume_observation_data_checks() {
+            let wanted:BTreeSet<String>=["a","b"].into_iter().map(str::to_owned).collect();
+            assert!(removal_resume_children_data(&wanted,&BTreeMap::new()));
+            assert!(removal_resume_children_data(&wanted,&BTreeMap::from([("a".into(),1)])));
+            assert!(!removal_resume_children_data(&wanted,&BTreeMap::from([("foreign".into(),1)])));
+            assert!(!removal_resume_children_data(&wanted,&BTreeMap::from([("a".into(),0)])));
+            let one=3+2*4+2*5+18*6+256;
+            assert_eq!(removal_resume_original_quote_data(11,3,4,5,6,2),Some(11+2*one));
+            assert_eq!(removal_resume_original_quote_data((24576-2*one) as usize,3,4,5,6,2),Some(24576));
+            assert!(removal_resume_original_quote_data((24577-2*one) as usize,3,4,5,6,2).is_none());
+            for values in [(u64::MAX,0,0,0),(0,u64::MAX,0,0),(0,0,u64::MAX,0),(0,0,0,u64::MAX)] {
+                assert!(removal_resume_original_quote_data(0,values.0,values.1,values.2,values.3,2).is_none());
+            }
+            assert!(removal_resume_inventory_quote_data(u64::MAX).is_none());
+            use mobile_release_desktop::macos_remove_record::{PayloadPresenceData as P,AppSlotsData as A};
+            let id=Identity {dev:1,ino:2,mode:0o40555,uid:0,gid:0,links:2,size:0,mtime:0,mtime_ns:0,ctime:0,ctime_ns:0};
+            let mut plan=RemovalRemainingPlan {nodes:Vec::new(),generations:Vec::new(),stack:[None;17],active:None,
+                base:0,transient:0,expected_files:1,present_files:0,present_bytes:0,expected_directories:2,current_app:None,complete:false};
+            assert_eq!(plan.payload_presence_data(),P::Unknown);assert_eq!(plan.app_slots_data(),A::Unknown);
+            plan.nodes.push(RemovalRemainingNode {generation:0,path:"app".into(),parent:None,directory:true,size:0,digest:[0;32],
+                executable:false,presence:RemovalRemainingPresence::Absent {parent:id}});
+            plan.complete=true;assert!(plan.payload_all_absent_data());assert_eq!(plan.payload_presence_data(),P::AllAbsent);
+            assert_eq!(plan.app_slots_data(),A::Neither);
+            // An actual remaining EMPTY app directory is not total absence.
+            // No missing-directory witness is represented as an all-zero inode.
+            plan.current_app=Some(id);plan.nodes[0].presence=RemovalRemainingPresence::Present {identity:id,flags:0};
+            assert!(!plan.payload_all_absent_data());assert_eq!(plan.payload_presence_data(),P::PartialInRosterMatching);
+            assert_eq!(plan.app_slots_data(),A::NewOnly);
+            plan.present_files=1;assert_eq!(plan.payload_presence_data(),P::AllPresentMatching);
+            let first=plan.fingerprint().unwrap();
+            plan.nodes[0].presence=RemovalRemainingPresence::Present {identity:Identity{ino:3,..id},flags:0};
+            assert_ne!(first,plan.fingerprint().unwrap());
         }
         fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64) -> Result<()> {
             if record.intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
@@ -3474,6 +5138,14 @@ mod installer {
             pub(super) fn removal_signed_originals_data(&self)->Result<[usize;2]> {
                 check(matches!(self.purpose,InputPurpose::Remove),"removal-snapshot-input-purpose")?;
                 Ok([self.descriptor,self.signature])
+            }
+            pub(super) fn retained_bytes_data(&self)->Result<usize> {
+                let mut count=std::mem::size_of::<Self>().checked_add(self.held.capacity().checked_mul(std::mem::size_of::<Held>()).ok_or("producer-source-memory")?)
+                    .and_then(|n|n.checked_add(self.package_sha256.capacity()+self.descriptor_sha256.capacity()+self.signature_sha256.capacity()))
+                    .and_then(|n|n.checked_add(self.descriptor_body.capacity()+self.signature_body.capacity()))
+                    .and_then(|n|n.checked_add(self.requested_id.as_ref().map_or(0,String::capacity))).ok_or("producer-source-memory")?;
+                for held in &self.held{count=count.checked_add(held.mount.kind.capacity()).ok_or("producer-source-memory")?;}
+                Ok(count)
             }
             pub(super) fn descriptor_data(&self) -> &[u8] { &self.descriptor_body }
             pub(super) fn signature_data(&self) -> &[u8] { &self.signature_body }
@@ -5451,7 +7123,7 @@ mod installer {
             controls:usize,directories:usize,prior:usize,live:usize,external:usize)->Result<(usize,u64)> {
             check(controls<=488 && directories<=75 && prior<64 && snapshot>0
                 && snapshot<=maintenance::REMOVAL_SNAPSHOT_LIMIT,"removal-snapshot-budget")?;
-            let future=controls.checked_mul(3).and_then(|n|n.checked_add(directories*2+prior*4+16)).ok_or("removal-snapshot-budget")?;
+            let future=controls.checked_mul(3).and_then(|n|n.checked_add(directories*2+prior*8+16)).ok_or("removal-snapshot-budget")?;
             let end=originals.checked_add(future).filter(|n|*n<=24576).ok_or("removal-snapshot-budget")?;
             let table=if end>capacity { end.checked_mul(std::mem::size_of::<Original>()).ok_or("removal-snapshot-budget")? } else { 0 };
             let extra=table.checked_add(future.checked_mul(255).ok_or("removal-snapshot-budget")?).ok_or("removal-snapshot-budget")?;
@@ -5582,7 +7254,7 @@ mod installer {
                 check(stat::fstat(book.fd(directory)?).map_err(|_|"removal-snapshot-archive-stat")?.st_flags==0,
                     "removal-snapshot-archive-flags")?;
                 let roster=book.roster(directory)?;
-                check(roster.len()==2 && roster.get("snapshot-v1")==Some(&book.identity(self.files[0].reader.ok_or("removal-snapshot-reader")?)?.ino)
+                check(roster.len()==2 && roster.get("snapshot-v2")==Some(&book.identity(self.files[0].reader.ok_or("removal-snapshot-reader")?)?.ino)
                     && roster.get("admission.json")==Some(&book.identity(self.files[1].reader.ok_or("removal-snapshot-reader")?)?.ino),
                     "removal-snapshot-archive-roster")?;
                 book.check_name(directory,true)?;book.forward_close(directory,"removal-snapshot-census-close")?;
@@ -5742,7 +7414,7 @@ mod installer {
             if files>9*installation_record::FILE_LIMIT || directories>9*installation_record::FILE_LIMIT
                 || controls>75 || prior>=64 {return None;}
             files.checked_mul(2)?.checked_add(directories.checked_mul(3)?)?
-                .checked_add(controls.checked_mul(2)?)?.checked_add(prior.checked_mul(4)?)?.checked_add(32)
+                .checked_add(controls.checked_mul(2)?)?.checked_add(prior.checked_mul(8)?)?.checked_add(32)
         }
         fn removal_payload_original_budget_data(used:usize,files:usize,directories:usize,controls:usize,prior:usize)->Option<(usize,usize)> {
             let future=removal_payload_originals_data(files,directories,controls,prior)?;
@@ -5788,7 +7460,7 @@ mod installer {
                 && actual==named && actual.mode&0o170000==0o040000
         }
         fn removal_payload_file_name(slot:usize)->Result<&'static str> {
-            match slot {0=>Ok("snapshot-v1"),1=>Ok("admission.json"),2=>Ok("app-withdrawn.json"),
+            match slot {0=>Ok("snapshot-v2"),1=>Ok("admission.json"),2=>Ok("app-withdrawn.json"),
                 3=>Ok("payload-roster-removal.json"),4=>Ok("payload-absent-observed.json"),5=>Ok("first-failure.json"),
                 _=>Err("removal-payload-record-slot")}
         }
@@ -6188,9 +7860,9 @@ mod installer {
                 }
                 let before=book.originals.len();
                 let prior=self.snapshot.capture.prior_archives()?;
-                let quoted=prior.rows().len().checked_mul(4).ok_or("removal-payload-original-budget")?;
+                let quoted=prior.rows().len().checked_mul(8).ok_or("removal-payload-original-budget")?;
                 check(self.remaining_originals>=quoted,"removal-payload-original-budget")?;
-                maintenance::post_removal_archive_census(book,prior)?;
+                maintenance::post_removal_archive_after_snapshot(book,prior)?;
                 let used=book.originals.len().checked_sub(before).ok_or("removal-payload-original-budget")?;
                 check(used<=quoted,"removal-payload-original-budget")?;self.remaining_originals-=used;
                 self.snapshot.file_post(book,0)?;self.snapshot.file_post(book,1)?;
@@ -6244,6 +7916,506 @@ mod installer {
             }
         }
 
+        // Recovery is an actual executing SOURCE/current-original admission,
+        // not a deserialized live RemovalAdmission or synthetic peer completion.
+        // This private adapter remains unreachable from either entry form.
+        const REMOVAL_RESUME_RAW:usize=1024*1024;
+        fn removal_resume_target()->mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData {
+            if cfg!(target_arch="aarch64"){mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64}
+            else{mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Intel}
+        }
+        fn removal_resume_path_data(path:&str)->bool {
+            path.len()>1 && path.len()<1024 && path.starts_with('/') && path.is_ascii()
+                && !path.as_bytes().contains(&0) && path[1..].split('/').count()<=32
+                && path[1..].split('/').all(|p|!p.is_empty() && p.len()<=255 && p!="." && p!="..")
+                && path.rsplit('/').next()==Some("mrk-macos-remove")
+        }
+        fn removal_resume_stat(book:&Install,n:usize,directory:bool,mode:Option<u32>)->Result<()> {
+            book.clock()?;book.check_name(n,true)?;book.protected(n,directory,mode)?;book.clock()?;
+            native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-resume-attributes")?;book.clock()?;
+            let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-resume-stat")?;
+            check(actual.st_flags==0 && Identity::of(&actual)==book.identity(n)?,"removal-resume-original")?;
+            book.check_name(n,true)
+        }
+        fn removal_resume_read_at(book:&Install,n:usize,offset:u64,buf:&mut[u8])->Result<usize> {
+            book.clock()?;let at=i64::try_from(offset).map_err(|_|"removal-resume-offset")?;
+            let count=nix::sys::uio::pread(book.fd(n)?,buf,at).map_err(|_|"removal-resume-read")?;
+            check(count<=buf.len(),"removal-resume-read-count")?;book.clock()?;Ok(count)
+        }
+        fn removal_resume_hash(book:&Install,n:usize,limit:u64)->Result<[u8;32]> {
+            book.check_name(n,true)?;let size=u64::try_from(book.identity(n)?.size).map_err(|_|"removal-resume-size")?;
+            check(size>0 && size<=limit,"removal-resume-size")?;
+            let mut block=[0u8;65536];let mut digest=Sha256::new();let mut at=0;
+            while at<size {let amount=(size-at).min(block.len() as u64) as usize;
+                let count=removal_resume_read_at(book,n,at,&mut block[..amount])?;
+                check(count>0,"removal-resume-eof")?;digest.update(&block[..count]);at+=count as u64;}
+            check(removal_resume_read_at(book,n,size,&mut block[..1])?==0,"removal-resume-eof")?;
+            book.check_name(n,true)?;Ok(digest.finalize().into())
+        }
+        fn removal_resume_span(book:&Install,n:usize,span:&maintenance::RemovalControlSpanData,limit:usize)->Result<Vec<u8>> {
+            let size=usize::try_from(span.len_data()).map_err(|_|"removal-resume-span-size")?;
+            let total=u64::try_from(book.identity(n)?.size).map_err(|_|"removal-resume-size")?;
+            check(size>0 && size<=limit && limit<=installation_record::INVENTORY_LIMIT
+                && span.offset_data().checked_add(span.len_data()).is_some_and(|end|end<=total),"removal-resume-span-size")?;
+            let mut raw=Vec::new();raw.try_reserve_exact(size).map_err(|_|"removal-resume-allocation")?;
+            check(raw.capacity()<=size,"removal-resume-allocation")?;raw.resize(size,0);
+            let mut at=0;while at<size {
+                let count=removal_resume_read_at(book,n,span.offset_data()+at as u64,&mut raw[at..])?;
+                check(count>0,"removal-resume-span-eof")?;at+=count;
+            }
+            check(<[u8;32]>::from(Sha256::digest(&raw))==*span.digest_data(),"removal-resume-span-hash")?;
+            book.check_name(n,true)?;Ok(raw)
+        }
+        struct RemovalResumeGenesis {
+            archive:usize,snapshot:usize,tip_archive:usize,tip_original:usize,
+            data:maintenance::RemovalGenesisData,tip_raw:Vec<u8>,
+            // Whole genesis bytes are never materialized. Only these four
+            // actual signature operands are retained, inside the prior quote.
+            raw:[Vec<u8>;4],census:maintenance::RemovalArchiveCensus,
+            genesis_index:usize,tip_index:usize,
+        }
+        impl RemovalResumeGenesis {
+            fn span<'a>(data:&'a maintenance::RemovalGenesisData,kind:u8,path:&str)->Result<&'a maintenance::RemovalControlSpanData> {
+                let mut rows=data.controls_data().iter().filter(|r|r.kind_data()==kind && r.path_data()==path);
+                let row=rows.next().ok_or("removal-resume-control-span")?;
+                check(rows.next().is_none(),"removal-resume-control-span")?;Ok(row)
+            }
+            fn post(&self,book:&Install)->Result<()> {
+                let genesis=&self.census.rows()[self.genesis_index];let tip=&self.census.rows()[self.tip_index];
+                for (n,row) in [(self.archive,genesis),(self.tip_archive,tip)] {
+                    removal_resume_stat(book,n,true,Some(0o700))?;
+                    check(book.identity(n)?==row.identity(),"removal-resume-archive-original")?;
+                }
+                for (n,file) in [(self.snapshot,genesis.files()[0].as_ref()),
+                    (self.tip_original,tip.files()[tip.attempt_data().ok_or("removal-resume-tip")?.tip_slot_data()].as_ref())] {
+                    let file=file.ok_or("removal-resume-history-file")?;
+                    removal_resume_stat(book,n,false,Some(0o444))?;
+                    check(book.identity(n)?==file.identity() && file.shape_tag_data()==2,"removal-resume-history-original")?;
+                }
+                maintenance::held_bytes(book,self.tip_original,&self.tip_raw)?;
+                check(*self.data.whole_sha256_data()==*genesis.files()[0].as_ref().ok_or("removal-resume-snapshot")?.digest(),
+                    "removal-resume-genesis-hash")?;book.clock()
+            }
+            fn content_post(&self,book:&Install)->Result<()> {
+                self.post(book)?;
+                check(removal_resume_hash(book,self.snapshot,maintenance::REMOVAL_SNAPSHOT_LIMIT)?==*self.data.whole_sha256_data(),
+                    "removal-resume-genesis-hash")?;self.post(book)
+            }
+        }
+        struct RemovalResumeOriginals {
+            input:completed_package::Input,bootstrap:Vec<usize>,executed:String,parent_path:String,
+            program:usize,script:usize,program_sha:[u8;32],root:usize,root_chain:Vec<usize>,
+            installed_pair:[usize;2],installed_raw:[Vec<u8>;2],genesis:Option<RemovalResumeGenesis>,
+        }
+        impl RemovalResumeOriginals {
+            fn memory(&self)->Result<()> {
+                let mut raw=self.input.retained_bytes_data()?.checked_add(self.bootstrap.capacity()*std::mem::size_of::<usize>())
+                    .and_then(|n|n.checked_add(self.root_chain.capacity()*std::mem::size_of::<usize>()))
+                    .and_then(|n|n.checked_add(self.executed.capacity()+self.parent_path.capacity()))
+                    .ok_or("removal-resume-memory")?;
+                for bytes in &self.installed_raw {raw=raw.checked_add(bytes.capacity()).ok_or("removal-resume-memory")?;}
+                if let Some(genesis)=&self.genesis {
+                    raw=raw.checked_add(genesis.data.owned_bytes_data()?).and_then(|n|n.checked_add(genesis.tip_raw.capacity()))
+                        .ok_or("removal-resume-memory")?;
+                    for bytes in &genesis.raw{raw=raw.checked_add(bytes.capacity()).ok_or("removal-resume-memory")?;}
+                    check(genesis.census.owned_bytes()?<=128*1024,"removal-resume-census-memory")?;
+                }
+                // Census + parser live in the existing once-reserved2MiB.
+                // Typed bounded release/policy objects + stack working blocks
+                // are separately covered by the reserved512KiB allowance.
+                check(raw<=REMOVAL_RESUME_RAW,"removal-resume-memory")
+            }
+            fn post(&self,book:&Install)->Result<()> {
+                self.memory()?;
+                self.input.post(book)?;
+                check(std::env::current_exe().ok().as_deref()==Some(Path::new(&self.executed)),"removal-resume-executed-image")?;
+                for n in self.bootstrap.iter().chain(&self.root_chain) {book.check_name(*n,true)?;}
+                removal_resume_stat(book,self.program,false,Some(0o555))?;
+                maintenance::held_bytes(book,self.script,include_bytes!("../../../macos-installed-inputs/remove-postinstall"))?;
+                for (n,raw) in self.installed_pair.iter().zip(&self.installed_raw){maintenance::held_bytes(book,*n,raw)?;}
+                if let Some(genesis)=&self.genesis{genesis.post(book)?;}
+                book.clock()
+            }
+            fn fixed_absence(&self,book:&Install)->Result<()> {
+                self.post(book)?;removal_resume_stat(book,self.root,true,Some(0o755))?;
+                book.absent(self.root,paths::APP_NAME)?;book.check_name(self.root,true)
+            }
+        }
+        fn removal_resume_point(book:&Install,originals:&RemovalResumeOriginals,first:&mut Option<&'static str>,
+            point:native::install_producer::ProducerCheckpoint)->native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody)=producer_phase(point);
+            if phase.is_cleanup(){return producer_cleanup_point(book,point);}
+            if custody.unknown{first.get_or_insert("removal-resume-native-unknown");return Decision::Unknown;}
+            if first.is_some(){return Decision::Stop;}
+            if let Err(error)=originals.post(book){first.get_or_insert(error);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown){Decision::Unknown}else{Decision::Stop};}
+            Decision::Proceed
+        }
+        pub(super) struct RemovalResumeSource {
+            originals:RemovalResumeOriginals,
+            program:native::install_producer::RemovalRecoveryProgramVerifier,
+            remove:native::install_producer::RemovalProducerVerifier,
+            installed:native::install_producer::ProducerVerifier,
+            self_verified:bool,verified:bool,first:Option<&'static str>,existing_maintenance:Option<usize>,
+            descriptor:mobile_release_desktop::macos_install_producer::ProducerData,
+            removal:mobile_release_desktop::macos_remove_producer::RemovalData,
+        }
+        impl RemovalResumeSource {
+            fn new(book:&mut Install,completed:&str)->Result<Self> {
+                use native::install_producer::{RemovalRecoveryProgramVerifier,RemovalProducerVerifier,ProducerVerifier};
+                check(cfg!(feature="macos-installed-remover") && !cfg!(feature="macos-installed-installer-fixture")
+                    && unistd::getuid().is_root() && unistd::geteuid().is_root() && unistd::getgid().as_raw()==0
+                    && unistd::getegid().as_raw()==0,"removal-resume-fixed-role")?;
+                book.clock()?;native::platform().map_err(|_|"removal-resume-platform")?;book.clock()?;
+                check(book.removal_control_reserved==0 && book.removal_live_reserved==0
+                    && !book.registration.entered && !book.gate.entered,"removal-resume-once")?;
+                let bound=RemovalRecoveryProgramVerifier::project_owned_upper_bound()
+                    .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n|n.checked_add(ProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-resource")?;
+                book.removal_control_reserved=bound as u64;
+                let path=std::env::current_exe().map_err(|_|"removal-resume-executed-image")?;
+                let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-resume-executed-image")?.to_owned();
+                let parent_path=executed.rsplit_once('/').ok_or("removal-resume-executed-image")?.0.to_owned();
+                check(!parent_path.is_empty(),"removal-resume-executed-image")?;
+                let mut bootstrap=Vec::new();bootstrap.try_reserve_exact(32).map_err(|_|"removal-resume-allocation")?;
+                let mut parent=book.open(None,"/",true)?;book.protected_as(parent,true,None,AclRole::SystemRoot)?;bootstrap.push(parent);
+                for part in parent_path[1..].split('/') {
+                    parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;
+                    check(bootstrap.len()<32,"removal-resume-path-bound")?;bootstrap.push(parent);
+                }
+                removal_resume_stat(book,parent,true,None)?;
+                check(book.identity(parent)?.gid==0,"removal-resume-parent-group")?;
+                let roster=maintenance::roster_now(book,parent)?;
+                check(roster.keys().map(String::as_str).eq(["mrk-macos-remove","postinstall"]),"removal-resume-script-roster")?;
+                let program=book.open(Some(parent),"mrk-macos-remove",false)?;
+                removal_resume_stat(book,program,false,Some(0o555))?;
+                let script=book.open(Some(parent),"postinstall",false)?;removal_resume_stat(book,script,false,Some(0o555))?;
+                maintenance::held_bytes(book,script,include_bytes!("../../../macos-installed-inputs/remove-postinstall"))?;
+                let program_sha=removal_resume_hash(book,program,64*1024*1024)?;
+                let input=completed_package::Input::open_removal(book,completed)?;
+                let support=book.support_root()?;let root=book.open(Some(support),"MobileReleaseKit",true)?;
+                removal_resume_stat(book,root,true,Some(0o755))?;book.absent(root,paths::APP_NAME)?;
+                let mut root_chain=Vec::new();let mut at=Some(root);
+                while let Some(n)=at{check(root_chain.len()<4,"removal-resume-root-chain")?;root_chain.push(n);at=book.originals[n].parent;}
+                let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),paths::RELEASE)
+                    .map_err(|_|"removal-resume-control-name")?;
+                let (descriptor_original,raw)=maintenance::metadata_original(book,root,&names.0,mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT)?;
+                let (signature_original,sig)=maintenance::metadata_original(book,root,&names.1,mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?;
+                // Only a bounded comparison prelude. These parser results
+                // select no effects or payload roots until native3 completes.
+                let removal=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(input.descriptor_data(),removal_resume_target())
+                    .map_err(|_|"removal-resume-remove-data")?;
+                let descriptor=removal.installed_data(&raw).map_err(|_|"removal-resume-installed-data")?;
+                let binding=descriptor.release_set_data().current_data().binding_data();
+                check(removal_source_binding_data(&binding,option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
+                    option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),removal.binding_data().package_sha256,input.package_sha256_data()),
+                    "removal-resume-source-data")?;
+                check(removal_hex_data::<32>(removal.binding_data().remover_executable_sha256)?==program_sha,"removal-resume-program-hash")?;
+                let originals=RemovalResumeOriginals{input,bootstrap,executed,parent_path,program,script,program_sha,root,root_chain,
+                    installed_pair:[descriptor_original,signature_original],installed_raw:[raw,sig],genesis:None};
+                originals.fixed_absence(book)?;
+                check(book.originals.iter().filter(|n|n.fd.is_some()).count().checked_add(32+EXTRA_LIVE)
+                    .is_some_and(|n|n<=96),"removal-resume-source-live-reservation")?;
+                Ok(Self {originals,program:RemovalRecoveryProgramVerifier::new(),remove:RemovalProducerVerifier::new(),
+                    installed:ProducerVerifier::new(),self_verified:false,verified:false,first:None,existing_maintenance:None,descriptor,removal})
+            }
+            fn inspect_self(&mut self,book:&Install)->Result<()> {
+                check(!self.self_verified && !self.program.custody().entered,"removal-resume-self-once")?;
+                let result={let Self{originals,program,first,..}=self;
+                    let directory=*originals.bootstrap.last().ok_or("removal-resume-parent")?;
+                    program.verify_and_close(book.fd(directory)?.as_fd(),book.fd(originals.program)?.as_fd(),Path::new(&originals.parent_path),
+                        &mut |point|removal_resume_point(book,originals,first,point))};
+                check(result==native::install_producer::RemovalRecoveryProgramResult::ExecutingSourceVerified && self.program.settled(),
+                    self.first.unwrap_or("removal-resume-self-refused"))?;
+                self.self_verified=true;self.originals.fixed_absence(book)
+            }
+            fn reserve_existing(&mut self,book:&mut Install)->Result<()> {
+                check(self.self_verified && self.program.settled() && self.first.is_none(),"removal-resume-self-required")?;
+                self.originals.fixed_absence(book)?;
+                // Explicitly require the existing name before the ordinary R
+                // original helper: its fresh-install creation branch is never used.
+                check(book.named(Some(self.root_original()),paths::REGISTRATION_GATE_NAME).is_ok(),"removal-resume-existing-r")?;
+                book.registration_before_maintenance(self.root_original())?;self.reservation_post(book)?;
+                check(self.existing_maintenance.is_none() && book.gate.parent.is_none() && book.gate.participant.is_none(),
+                    "removal-resume-existing-m-once")?;
+                book.gate.parent=Some(self.root_original());book.gate.creation="existing-not-modified";
+                let n=book.open_role(Some(self.root_original()),paths::MAINTENANCE_GATE_NAME,false,Role::GateParticipant)?;
+                self.existing_maintenance=Some(n);
+                book.gate_protected(n)?;maintenance::held_bytes(book,n,paths::MAINTENANCE_GATE_BYTES)?;book.gate.verified=true;
+                self.existing_maintenance_post(book)
+            }
+            pub(super) fn root_original(&self)->usize {self.originals.root}
+            pub(super) fn prelude_selection_data(&self,book:&Install)->Result<&ReleaseSetData> {
+                self.reservation_post(book)?;Ok(self.descriptor.release_set_data())
+            }
+            fn reservation_post(&self,book:&Install)->Result<()> {
+                check(self.self_verified && self.program.settled() && self.first.is_none()
+                    && !book.worker_stderr_is_gate && book.registration.entered && book.registration.verified
+                    && book.registration.parent==Some(self.root_original()) && book.registration.creation=="existing-not-modified"
+                    && book.registration.lock_attempted && book.registration.exclusive_acquired && !book.registration.closed_under_maintenance,
+                    "removal-resume-r-original")?;
+                book.registration_protected(book.registration.participant.ok_or("removal-resume-r-original")?)?;
+                self.originals.fixed_absence(book)
+            }
+            fn existing_maintenance_post(&self,book:&Install)->Result<()> {
+                self.reservation_post(book)?;
+                let n=self.existing_maintenance.ok_or("removal-resume-m-original")?;
+                check(book.gate.parent==Some(self.root_original()) && book.gate.participant==Some(n) && book.gate.verified
+                    && book.gate.creation=="existing-not-modified" && book.gate.writer.is_none()
+                    && book.originals[n].state==State::Owned && book.originals[n].role==Role::GateParticipant
+                    && book.originals[n].parent==Some(self.root_original()) && book.originals[n].name==paths::MAINTENANCE_GATE_NAME,
+                    "removal-resume-m-original")?;
+                let flags=fcntl::fcntl(book.fd(n)?,fcntl::FcntlArg::F_GETFL).map_err(|_|"removal-resume-m-flags")?;
+                check(flags&OFlag::O_ACCMODE.bits()==OFlag::O_RDONLY.bits(),"removal-resume-m-readonly")?;
+                book.gate_protected(n)?;maintenance::held_bytes(book,n,paths::MAINTENANCE_GATE_BYTES)
+            }
+            fn native_settled(&self)->bool {self.program.settled()&&self.remove.settled()&&self.installed.settled()}
+            fn settle(&mut self,book:&Install)->bool {
+                let mut gate=|point|producer_cleanup_point(book,point);
+                let installed=self.installed.close(&mut gate);let remove=self.remove.close(&mut gate);let program=self.program.close(&mut gate);
+                installed&&remove&&program&&self.native_settled()
+            }
+        }
+        impl RemovalResumeSource {
+            fn load_genesis(&mut self,book:&mut Install,census:maintenance::RemovalArchiveCensus,state_sha:[u8;32])->Result<()> {
+                self.existing_maintenance_post(book)?;
+                check(self.originals.genesis.is_none() && !self.verified && !book.gate.entered
+                    && !book.gate.lock_attempted && !book.gate.exclusive_acquired,"removal-resume-genesis-once")?;
+                let current=self.removal.binding_data();let expected=[
+                    <[u8;32]>::from(Sha256::digest(self.originals.input.descriptor_data())),
+                    <[u8;32]>::from(Sha256::digest(&self.originals.installed_raw[0])),
+                    removal_hex_data::<32>(current.installed_inventory_sha256)?,state_sha];
+                let source=removal_hex_data::<20>(current.source_commit)?;
+                let mut selected=None;
+                for (index,row) in census.rows().iter().enumerate() {
+                    if !census.is_tip_data(index){continue;}
+                    let Some(attempt)=row.attempt_data() else{continue;};let binding=attempt.binding_data();
+                    if binding.target_data()==removal_resume_target() && binding.source_data()==&source
+                        && binding.digests_data()[..4]==expected {
+                        check(selected.is_none(),"removal-resume-ambiguous-tip")?;selected=Some(index);
+                    }
+                }
+                let tip_index=selected.ok_or("removal-resume-genesis-missing")?;
+                let genesis_index=census.genesis_index_data(tip_index).ok_or("removal-resume-genesis-missing")?;
+                let row=&census.rows()[genesis_index];
+                check(removal_archive_name_data(row.name()),"removal-resume-genesis-name")?;
+                let archive=book.open(Some(self.root_original()),row.name(),true)?;
+                removal_resume_stat(book,archive,true,Some(0o700))?;
+                check(book.identity(archive)?==row.identity(),"removal-resume-genesis-directory")?;
+                let file=row.files()[0].as_ref().ok_or("removal-resume-genesis-file")?;
+                check(file.shape_tag_data()==2,"removal-resume-genesis-unsealed")?;
+                let snapshot=book.open(Some(archive),"snapshot-v2",false)?;
+                removal_resume_stat(book,snapshot,false,Some(0o444))?;
+                check(book.identity(snapshot)?==file.identity(),"removal-resume-genesis-file")?;
+                let data=maintenance::parse_removal_genesis_data(file.len(),&row.name()[8..],
+                    |at,buf|removal_resume_read_at(book,snapshot,at,buf))?;
+                check(data.whole_sha256_data()==file.digest() && data.binding_data()?==*census.rows()[tip_index].attempt_data()
+                    .ok_or("removal-resume-tip")?.binding_data(),"removal-resume-genesis-binding")?;
+                check(data.selected_bytes_data()==self.descriptor.release_set_data().encode_data().map_err(|_|"removal-resume-selected")?,
+                    "removal-resume-selected")?;
+                let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),paths::RELEASE)
+                    .map_err(|_|"removal-resume-control-name")?;
+                let raw=[
+                    removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,1,"@remove/producer.json")?,
+                        mobile_release_desktop::macos_remove_producer::DESCRIPTOR_LIMIT)?,
+                    removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,2,"@remove/producer.sig")?,512)?,
+                    removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,0,&names.0)?,
+                        mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT)?,
+                    removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,0,&names.1)?,
+                        mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?,
+                ];
+                check(raw[0]==self.originals.input.descriptor_data() && raw[1]==self.originals.input.signature_data()
+                    && raw[2]==self.originals.installed_raw[0] && raw[3]==self.originals.installed_raw[1],
+                    "removal-resume-same-artifact-required")?;
+                let tip=&census.rows()[tip_index];let attempt=tip.attempt_data().ok_or("removal-resume-tip")?;
+                let tip_archive=if tip_index==genesis_index{archive}else{
+                    check(removal_archive_name_data(tip.name()),"removal-resume-tip-name")?;
+                    let n=book.open(Some(self.root_original()),tip.name(),true)?;
+                    removal_resume_stat(book,n,true,Some(0o700))?;
+                    check(book.identity(n)?==tip.identity(),"removal-resume-tip-directory")?;n};
+                let tip_file=tip.files()[attempt.tip_slot_data()].as_ref().ok_or("removal-resume-tip-file")?;
+                let tip_original=book.open(Some(tip_archive),removal_payload_file_name(attempt.tip_slot_data())?,false)?;
+                removal_resume_stat(book,tip_original,false,Some(0o444))?;
+                check(book.identity(tip_original)?==tip_file.identity() && tip_file.digest()==attempt.raw_tip_sha256_data(),
+                    "removal-resume-tip-file")?;
+                check(tip_file.len()>0 && tip_file.len()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64,"removal-resume-tip-size")?;
+                let (_,tip_raw)=book.read(tip_original,tip_file.len(),true)?;
+                check(tip_raw.len()<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT
+                    && <[u8;32]>::from(Sha256::digest(&tip_raw))==*attempt.raw_tip_sha256_data(),"removal-resume-tip-hash")?;
+                check(raw.iter().try_fold(data.owned_bytes_data()?,|n,b|n.checked_add(b.capacity()).ok_or("removal-resume-memory"))?
+                    .checked_add(tip_raw.capacity()).is_some_and(|n|n<=REMOVAL_RESUME_RAW),"removal-resume-memory")?;
+                self.originals.genesis=Some(RemovalResumeGenesis{archive,snapshot,tip_archive,tip_original,data,tip_raw,raw,
+                    census,genesis_index,tip_index});
+                self.originals.post(book)
+            }
+            fn inspect_signed_genesis(&mut self,book:&Install)->Result<()> {
+                use native::install_producer::SignatureResult;
+                check(self.self_verified && !self.verified && !self.remove.custody().entered && !self.installed.custody().entered,
+                    "removal-resume-signatures-once")?;
+                self.existing_maintenance_post(book)?;self.originals.genesis.as_ref().ok_or("removal-resume-genesis")?.content_post(book)?;
+                let removed={let Self{originals,remove,first,..}=self;
+                    let genesis=originals.genesis.as_ref().ok_or("removal-resume-genesis")?;
+                    remove.verify_and_close(&genesis.raw[0],&genesis.raw[1],
+                        &mut |point|removal_resume_point(book,originals,first,point))};
+                check(removed==SignatureResult::SignatureVerified && self.remove.settled(),
+                    self.first.unwrap_or("removal-resume-remove-signature"))?;
+                let installed={let Self{originals,installed,first,..}=self;
+                    let genesis=originals.genesis.as_ref().ok_or("removal-resume-genesis")?;
+                    installed.verify_and_close(&genesis.raw[2],&genesis.raw[3],
+                        &mut |point|removal_resume_point(book,originals,first,point))};
+                check(installed==SignatureResult::SignatureVerified && self.installed.settled(),
+                    self.first.unwrap_or("removal-resume-installed-signature"))?;
+                let signer=native::install_producer::source_signer_data().ok_or("removal-resume-signer")?;
+                check(producer_policy_matches_data(self.descriptor.signing_policy_data(),signer.team_data(),signer.leaf_sha1_data(),
+                    signer.leaf_sha256_data()),"removal-resume-signer")?;
+                self.originals.input.content_post(book)?;
+                check(removal_resume_hash(book,self.originals.program,64*1024*1024)?==self.originals.program_sha,
+                    "removal-resume-program-hash")?;
+                self.originals.genesis.as_ref().ok_or("removal-resume-genesis")?.content_post(book)?;
+                self.originals.fixed_absence(book)?;
+                check(self.first.is_none() && self.native_settled(),"removal-resume-native-finality")?;
+                self.verified=true;self.authenticated_selection(book).map(|_|())
+            }
+            pub(super) fn authenticated_selection(&self,book:&Install)->Result<&ReleaseSetData> {
+                check(self.verified && self.self_verified && self.first.is_none() && self.native_settled()
+                    && self.program.custody().operation==native::install_producer::ProducerOperation::RemoveRecoveryProgram
+                    && !self.program.custody().failed && !self.program.custody().unknown
+                    && self.remove.custody().remove_signature_matched && self.installed.custody().signature_matched,
+                    "removal-resume-authenticated-source")?;
+                self.existing_maintenance_post(book)?;
+                Ok(self.descriptor.release_set_data())
+            }
+            pub(super) fn genesis_data(&self,book:&Install)->Result<&maintenance::RemovalGenesisData> {
+                self.authenticated_selection(book)?;
+                self.originals.genesis.as_ref().map(|g|&g.data).ok_or("removal-resume-genesis")
+            }
+            pub(super) fn genesis_original(&self,book:&Install)->Result<usize> {
+                self.authenticated_selection(book)?;
+                self.originals.genesis.as_ref().map(|g|g.snapshot).ok_or("removal-resume-genesis")
+            }
+            pub(super) fn genesis_archive(&self,book:&Install)->Result<usize> {
+                self.authenticated_selection(book)?;
+                self.originals.genesis.as_ref().map(|g|g.archive).ok_or("removal-resume-genesis")
+            }
+        }
+        impl RemovalResumeSource {
+            pub(super) fn genesis_control_data(&self,book:&Install,path:&str)->Result<&maintenance::RemovalControlSpanData> {
+                // Comparison-only label supplied by the same SOURCE generation
+                // walker. This function never opens an encoded path.
+                RemovalResumeGenesis::span(self.genesis_data(book)?,0,path)
+            }
+            pub(super) fn read_genesis_control(&self,book:&Install,path:&str)->Result<Vec<u8>> {
+                let row=self.genesis_control_data(book,path)?;
+                removal_resume_span(book,self.genesis_original(book)?,row,installation_record::INVENTORY_LIMIT)
+            }
+            pub(super) fn history_rows_data(&self)->Result<usize> {
+                Ok(self.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?.census.rows().len())
+            }
+            pub(super) fn history_storage_data(&self)->Result<u64> {
+                Ok(self.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?.census.storage_bytes())
+            }
+            pub(super) fn history_matches(&self,book:&Install,other:&maintenance::RemovalArchiveCensus)->Result<()> {
+                self.authenticated_selection(book)?;
+                let original=&self.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?.census;
+                check(original.rows().len()==other.rows().len() && original.storage_bytes()==other.storage_bytes(),"removal-resume-history-changed")?;
+                for (a,b) in original.rows().iter().zip(other.rows()) {
+                    check(a.name()==b.name() && a.identity()==b.identity() && a.flags()==b.flags() && a.app_data()==b.app_data()
+                        && a.attempt_data()==b.attempt_data(),"removal-resume-history-changed")?;
+                    for (a,b) in a.files().iter().zip(b.files()) {match (a,b) {
+                        (None,None)=>(),(Some(a),Some(b))=>check(a.identity()==b.identity() && a.flags()==b.flags()
+                            && a.len()==b.len() && a.digest()==b.digest() && a.shape_tag_data()==b.shape_tag_data(),"removal-resume-history-changed")?,
+                        _=>return Err("removal-resume-history-changed")}}
+                }Ok(())
+            }
+            pub(super) fn final_original_post(&self,book:&mut Install)->Result<()> {
+                self.authenticated_selection(book)?;
+                let genesis=self.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?;
+                // Physical eight-original-per-row POST, not the one-use fresh
+                // snapshot scan-stage wrapper. No stage reset or body copy.
+                maintenance::post_removal_archive_references(book,&genesis.census)?;
+                genesis.content_post(book)?;self.authenticated_selection(book)?;Ok(())
+            }
+            fn pending_native_data(&self)->bool {
+                [self.program.custody(),self.remove.custody(),self.installed.custody()].iter().any(removal_resume_pending_data)
+            }
+        }
+        fn removal_resume_pending_data(c:&native::install_producer::ProducerCustody)->bool {
+            use native::android_service_management::CellCustody as C;
+            c.unknown || c.in_call || c.gate_entered || matches!(c.cell,C::Entering|C::Owned|C::Unknown)
+        }
+        fn removal_resume_observation_matches_data(first:[u8;32],second:[u8;32])->bool {
+            first.iter().any(|byte|*byte!=0) && first==second
+        }
+        // Not a live-peer proof: this separate capability records actual new
+        // EX under continuous R, after SOURCE/genesis + first full observation.
+        struct RemovalResumeExclusion {reservation:usize,maintenance:usize}
+        impl RemovalResumeExclusion {
+            fn acquire(book:&mut Install,source:&RemovalResumeSource,first:&maintenance::RemovalResumeFirst)->Result<Self> {
+                source.authenticated_selection(book)?;source.existing_maintenance_post(book)?;
+                check(first.fingerprint.iter().any(|byte|*byte!=0) && !book.gate.entered && !book.gate.lock_attempted
+                    && !book.gate.exclusive_acquired,"removal-resume-exclusion-once")?;
+                let reservation=book.registration.participant.ok_or("removal-resume-r-original")?;
+                let maintenance=source.existing_maintenance.ok_or("removal-resume-m-original")?;
+                book.clock()?;book.gate.entered=true;book.gate.lock_attempted=true;
+                #[allow(deprecated)]
+                let result=fcntl::flock(book.fd(maintenance)?.as_raw_fd(),fcntl::FlockArg::LockExclusiveNonblock);
+                result.map_err(|_|"removal-resume-maintenance-busy-or-refused")?;
+                // Known actual return BEFORE clock/source veto; never retry.
+                book.gate.exclusive_acquired=true;
+                let value=Self{reservation,maintenance};value.post(book,source)?;Ok(value)
+            }
+            fn post(&self,book:&Install,source:&RemovalResumeSource)->Result<()> {
+                source.authenticated_selection(book)?;source.existing_maintenance_post(book)?;
+                check(book.registration.participant==Some(self.reservation) && source.existing_maintenance==Some(self.maintenance)
+                    && book.gate.entered && book.gate.lock_attempted && book.gate.exclusive_acquired,
+                    "removal-resume-exclusive-originals")?;book.clock()
+            }
+        }
+        struct RemovalResumeReady {
+            source:RemovalResumeSource,exclusion:RemovalResumeExclusion,observed:maintenance::RemovalResumeObservation,
+            request:String,nonce:String,classification:mobile_release_desktop::macos_remove_record::ClassificationData,
+        }
+        impl RemovalResumeReady {
+            fn post(&self,book:&Install)->Result<()> {
+                self.exclusion.post(book,&self.source)?;
+                check(self.observed.fingerprint_data()?.iter().any(|byte|*byte!=0),"removal-resume-observation-missing")?;
+                self.observed.continuation_budget(book)?;book.clock()
+            }
+            fn payload_all_absent_data(&self)->bool {self.observed.plan.payload_all_absent_data()}
+            fn authenticated_genesis<'a>(&'a self,book:&Install)->Result<(&'a maintenance::RemovalGenesisData,usize)> {
+                self.post(book)?;Ok((self.source.genesis_data(book)?,self.source.genesis_original(book)?))
+            }
+            fn create(source:RemovalResumeSource,exclusion:RemovalResumeExclusion,observed:maintenance::RemovalResumeObservation,
+                book:&Install,request:&str,nonce:&str)->Result<Self> {
+                use mobile_release_desktop::macos_remove_record::{self as record,CheckData as K,ClassificationData as C};
+                removal_hex_data::<16>(request)?;removal_hex_data::<16>(nonce)?;
+                exclusion.post(book,&source)?;observed.continuation_budget(book)?;
+                let genesis=source.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?;
+                // Fresh attempts cannot fill a sixty-fifth slot or recycle IDs
+                // hidden in an observed partial writer. Existing failures stay.
+                check(genesis.census.rows().len()<64,"removal-resume-attempt-bound")?;genesis.census.fresh(request,nonce)?;
+                let binding=genesis.data.binding_data()?;
+                let classification=binding.with_binding(|binding| {
+                    let prior=record::RemovalRecordData::parse_data(&genesis.tip_raw,binding).map_err(|_|"removal-resume-tip-record")?;
+                    check(prior.owned_bytes_data().is_some_and(|n|n<=2*record::RECORD_LIMIT),"removal-resume-record-memory")?;
+                    // These Matches are reached ONLY from actual typed SOURCE,
+                    // full immutable-control/subset observations and same EX;
+                    // no parser/old admission constructed these originals.
+                    let current=record::FreshObservationData {request_id:request,root_nonce:nonce,prior_record_sha256:prior.digest_data(),
+                        source_purpose:K::Matches,exclusive_original:K::Matches,protected_controls:K::Matches,
+                        remaining_roster:K::Matches,complete_namespace:K::Matches,
+                        app_slots:observed.plan.app_slots_data(),payload:observed.plan.payload_presence_data()};
+                    Ok(record::classify_data(&prior,current))
+                })?;
+                check(matches!(classification,C::WithdrawalObservedAfterAdmission|C::RemainingPayloadObserved
+                    |C::PayloadAbsenceObservedAfterInterruptedRemoval|C::PayloadAbsenceReobserved),"removal-resume-prefix-namespace")?;
+                let value=Self{source,exclusion,observed,request:request.into(),nonce:nonce.into(),classification};
+                value.post(book)?;Ok(value)
+            }
+        }
         struct Parent {
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
@@ -6259,6 +8431,7 @@ mod installer {
             removal_exclusive_reobserve_started: bool,
             removal_snapshot: Option<RemovalSnapshot>,
             removal_payload_execution:Option<RemovalPayloadExecution>,
+            removal_resume:Option<RemovalResumeSource>,removal_resume_ready:Option<RemovalResumeReady>,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -6280,6 +8453,7 @@ mod installer {
                     removal_exclusive_reobserve_started:false,
                     removal_snapshot:None,
                     removal_payload_execution:None,
+                    removal_resume:None,removal_resume_ready:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -6326,6 +8500,48 @@ mod installer {
             fn admit_and_go(&mut self, source: &str) -> Result<()> { self.admit_and_go_selected(source,None) }
             // Current-source/R-held inspection only. No entry dispatch, peer,
             // durable admission, writer GO or success receipt is enabled here.
+            // Private, purpose-exclusive preparation only. Neither remove
+            // argv form nor installer entry dispatches here in this slice.
+            fn admit_removal_resume(&mut self,completed:&str,request:&str,nonce:&str)->Result<()> {
+                check(!self.entered && self.producer.is_none() && self.removal.is_none()
+                    && self.removal_resume.is_none() && self.removal_resume_ready.is_none(),"worker-parent-once")?;
+                removal_hex_data::<16>(request)?;removal_hex_data::<16>(nonce)?;
+                self.entered=true;
+                // Constructor contains no retained native verifier call. Store
+                // the SAME raw/control/FD owner BEFORE its first such call.
+                self.removal_resume=Some(RemovalResumeSource::new(&mut self.book,completed)?);
+                let source=self.removal_resume.as_mut().ok_or("removal-resume-source-missing")?;
+                source.inspect_self(&self.book)?;source.reserve_existing(&mut self.book)?;
+                let (census,state)=maintenance::removal_resume_prelude(&mut self.book,source)?;
+                source.load_genesis(&mut self.book,census,state)?;source.inspect_signed_genesis(&self.book)?;
+                let first=maintenance::observe_removal_resume(&mut self.book,source,None)?.into_first()?;
+                // into_first drops the entire first plan before allocating the
+                // second; retains only fixed fingerprint+count comparison DATA.
+                let exclusion=RemovalResumeExclusion::acquire(&mut self.book,source,&first)?;
+                let observed=maintenance::observe_removal_resume(&mut self.book,source,Some(&first))?;
+                check(removal_resume_observation_matches_data(first.fingerprint,observed.fingerprint_data()?),"removal-resume-observation-changed")?;
+                exclusion.post(&self.book,source)?;
+                // All three native cells have known retirement before moving
+                // backing out of Parent's pending holder. Failure does not
+                // turn into peer/drain/unregister or old operation success.
+                check(source.native_settled() && !source.pending_native_data(),"removal-resume-native-finality")?;
+                observed.charge_retained(&mut self.book)?;
+                let source=self.removal_resume.take().ok_or("removal-resume-source-missing")?;
+                self.removal_resume_ready=Some(RemovalResumeReady::create(source,exclusion,observed,&self.book,request,nonce)?);
+                self.removal_resume_ready.as_ref().ok_or("removal-resume-ready-missing")?.post(&self.book)
+            }
+            fn retain_unresolved_removal_resume(&mut self) {
+                if !self.removal_resume.as_ref().is_some_and(RemovalResumeSource::pending_native_data)
+                    && !self.removal_resume_ready.as_ref().is_some_and(|ready|ready.source.pending_native_data()){return;}
+                // Memory-only unwind safety, no native call/close/retry. C may
+                // retain raw4 pointers: retaining ONLY FDs is insufficient.
+                self.book.unknown=true;
+                for original in &mut self.book.originals {if let Some(fd)=original.fd.take(){
+                    std::mem::forget(fd);original.state=State::KernelExitRetained;}}
+                if let Some(source)=self.removal_resume.take(){std::mem::forget(source);}
+                if let Some(ready)=self.removal_resume_ready.take(){std::mem::forget(ready);}
+                self.parent_book_settled=false;
+            }
             fn admit_removal_source(&mut self, completed_path: &str) -> Result<()> {
                 check(!self.entered && self.producer.is_none() && self.removal.is_none(),"worker-parent-once")?;
                 self.entered=true;
@@ -6813,7 +9029,10 @@ mod installer {
                 let producer_settled = self.producer.as_mut().is_none_or(|producer| producer.settle(&self.book));
                 let removal_settled = self.removal.as_mut().is_none_or(|removal| removal.settle(&self.book));
                 let payload_settled=self.removal_payload_execution.as_ref().is_none_or(|owner|owner.source.settled());
-                let native_settled=producer_settled && removal_settled && payload_settled;
+                let resume_settled=self.removal_resume.as_mut().is_none_or(|source|source.settle(&self.book));
+                let resume_ready_settled=self.removal_resume_ready.as_mut().is_none_or(|ready|ready.source.settle(&self.book));
+                let native_settled=producer_settled && removal_settled && payload_settled && resume_settled && resume_ready_settled;
+                if !resume_settled || !resume_ready_settled {self.retain_unresolved_removal_resume();}
                 if native_settled { self.parent_book_settled = self.book.settle_originals(); }
                 else {
                     self.note("producer-native-finality-unknown");
@@ -6840,6 +9059,7 @@ mod installer {
                 // allocations/FDs to actual process exit; it performs no IO,
                 // no close/retire, no retry and cannot report success.
                 self.retain_unresolved_removal_peer();
+                self.retain_unresolved_removal_resume();
             }
         }
         fn gate_bytes(fd: BorrowedFd<'_>, deadline: &Deadline) -> Result<()> {
@@ -7122,11 +9342,29 @@ mod installer {
                 // not a native fsync/close/old-writer success observation.
             }
 
+            fn removal_resume_data_checks() {
+                maintenance::removal_resume_observation_data_checks();
+                assert!(removal_resume_path_data("/private/tmp/extracted/mrk-macos-remove"));
+                for path in ["mrk-macos-remove","/mrk-macos-remove/","/a/../mrk-macos-remove","/a//mrk-macos-remove",
+                    "/a/mrk-macos-install","/a/é/mrk-macos-remove","/a/./mrk-macos-remove"] {assert!(!removal_resume_path_data(path));}
+                assert!(!removal_resume_path_data(&format!("/{}/mrk-macos-remove","a/".repeat(33))));
+                assert!(removal_resume_observation_matches_data([1;32],[1;32]));
+                assert!(!removal_resume_observation_matches_data([1;32],[2;32]));
+                assert!(!removal_resume_observation_matches_data([0;32],[0;32]));
+                let plain=native::install_producer::ProducerVerifier::new().custody();
+                assert!(!removal_resume_pending_data(&plain));
+                use native::android_service_management::CellCustody as C;
+                for cell in [C::Entering,C::Owned,C::Unknown]{let mut value=plain;value.cell=cell;assert!(removal_resume_pending_data(&value));}
+                for field in 0..3 {let mut value=plain;match field{0=>value.unknown=true,1=>value.in_call=true,_=>value.gate_entered=true};
+                    assert!(removal_resume_pending_data(&value));}
+                let mut retired=plain;retired.cell=C::Consumed;assert!(!removal_resume_pending_data(&retired));
+                retired.unknown=true;assert!(removal_resume_pending_data(&retired));
+            }
             fn removal_payload_data_checks() {
                 use mobile_release_desktop::macos_remove_record::FailureKindData;
                 // Actual production reducers only. These do not execute or
                 // stand in for APFS rename/unlink/close/native qualification.
-                assert_eq!(removal_payload_originals_data(3,4,5,6),Some(6+12+10+24+32));
+                assert_eq!(removal_payload_originals_data(3,4,5,6),Some(6+12+10+48+32));
                 assert_eq!(removal_payload_originals_data(0,0,0,0),Some(32));
                 assert!(removal_payload_originals_data(usize::MAX,0,0,0).is_none());
                 assert!(removal_payload_originals_data(0,usize::MAX,0,0).is_none());
@@ -7205,13 +9443,14 @@ mod installer {
                 removal_payload_latch_data(&mut first,"later-close",FailureKindData::CloseUnknown);
                 assert_eq!(first,Some(("actual-first",FailureKindData::Persistence)));
                 assert_eq!((0..6).map(|slot|removal_payload_file_name(slot).unwrap()).collect::<Vec<_>>(),
-                    ["snapshot-v1","admission.json","app-withdrawn.json","payload-roster-removal.json",
+                    ["snapshot-v2","admission.json","app-withdrawn.json","payload-roster-removal.json",
                         "payload-absent-observed.json","first-failure.json"]);
                 assert!(removal_payload_file_name(6).is_err());
             }
 
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                removal_resume_data_checks();
                 removal_payload_data_checks();
                 maintenance::removal_archive_data_checks();
                 removal_snapshot_data_checks();

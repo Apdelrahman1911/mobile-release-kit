@@ -17,6 +17,8 @@ const CELL_LIMIT:usize=131072;
 const PATH_LIMIT:usize=1024;
 const CODE_STEPS:u8=8;
 const CODE_SLOTS:usize=6;
+const RECOVERY_CODE_STEPS:u8=13;
+const RECOVERY_CODE_SLOTS:usize=9;
 // Same 320KiB supplied-resource ceiling; includes bounded C path/stat stack.
 const CODE_STACK_LIMIT:usize=8192;
 const DOMAIN:&[u8]=b"MobileReleaseKit-package-producer-v2\0";
@@ -48,7 +50,7 @@ pub enum CurrentProductResult { PurposeVerified,Unavailable,Refused,Unknown }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum ProducerOperation {
     DetachedSignature,CurrentProduct(CurrentProductRole),
-    RemoveDetachedSignature,RemoveProgram,
+    RemoveDetachedSignature,RemoveProgram,RemoveRecoveryProgram,
     #[cfg(any(test,feature="package-producer-signing"))]
     PackageSigning,
     #[cfg(any(test,feature="package-producer-signing"))]
@@ -58,7 +60,7 @@ impl ProducerOperation {
     fn code(self)->u32 {match self {
         Self::DetachedSignature=>0,Self::CurrentProduct(CurrentProductRole::EntryApp)=>1,
         Self::CurrentProduct(CurrentProductRole::PayloadApp)=>2,
-        Self::RemoveDetachedSignature=>4,Self::RemoveProgram=>5,
+        Self::RemoveDetachedSignature=>4,Self::RemoveProgram=>5,Self::RemoveRecoveryProgram=>7,
         #[cfg(any(test,feature="package-producer-signing"))]
         Self::PackageSigning=>3,
         #[cfg(any(test,feature="package-producer-signing"))]
@@ -69,11 +71,13 @@ impl ProducerOperation {
     fn signing(self)->bool{matches!(self,Self::PackageSigning|Self::RemoveSigning)}
     fn steps(self)->u8 {match self {
         Self::DetachedSignature|Self::RemoveDetachedSignature=>STEPS,Self::CurrentProduct(_)|Self::RemoveProgram=>CODE_STEPS,
+        Self::RemoveRecoveryProgram=>RECOVERY_CODE_STEPS,
         #[cfg(any(test,feature="package-producer-signing"))]
         Self::PackageSigning|Self::RemoveSigning=>SIGN_STEPS,
     }}
     fn slots(self)->usize {match self {
         Self::DetachedSignature|Self::RemoveDetachedSignature=>SLOTS,Self::CurrentProduct(_)|Self::RemoveProgram=>CODE_SLOTS,
+        Self::RemoveRecoveryProgram=>RECOVERY_CODE_SLOTS,
         #[cfg(any(test,feature="package-producer-signing"))]
         Self::PackageSigning|Self::RemoveSigning=>SIGN_SLOTS,
     }}
@@ -85,6 +89,7 @@ enum VerificationInput<'a> {
     Signature {descriptor:&'a [u8],signature:&'a [u8]},
     Current {outer:c_int,code:c_int,outer_path:&'a [u8]},
     RemoveProgram {directory:c_int,program:c_int,directory_path:&'a [u8]},
+    RecoveryProgram {directory:c_int,program:c_int,directory_path:&'a [u8]},
     #[cfg(any(test,feature="package-producer-signing"))]
     Signing {descriptor:&'a [u8]},
 }
@@ -106,6 +111,8 @@ impl VerificationInput<'_> {
         (Self::Signature{descriptor,signature},ProducerOperation::RemoveDetachedSignature)=>
             !descriptor.is_empty()&&descriptor.len()<=REMOVE_DESCRIPTOR_LIMIT&&matches!(signature.len(),256|384|512),
         (Self::RemoveProgram{directory,program,directory_path},ProducerOperation::RemoveProgram)=>
+            directory>=0&&program>=0&&canonical_remove_directory(directory_path),
+        (Self::RecoveryProgram{directory,program,directory_path},ProducerOperation::RemoveRecoveryProgram)=>
             directory>=0&&program>=0&&canonical_remove_directory(directory_path),
         (Self::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(role))=>
             outer>=0&&code>=0&&canonical_outer_path(outer_path,role),
@@ -178,6 +185,7 @@ unsafe extern "C" {
     fn mrk_install_producer_code_new(role:u32,outer:c_int,code:c_int,outer_path:*const u8,path_size:usize)->*mut c_void;
     fn mrk_remove_producer_new(descriptor:*const u8,size:usize,signature:*const u8,signature_size:usize)->*mut c_void;
     fn mrk_remove_producer_code_new(directory:c_int,program:c_int,path:*const u8,size:usize)->*mut c_void;
+    fn mrk_remove_recovery_code_new(directory:c_int,program:c_int,path:*const u8,size:usize)->*mut c_void;
     fn mrk_install_producer_step(cell:*mut c_void,phase:u32,out:*mut Report)->c_int;
     fn mrk_install_producer_release(cell:*mut c_void,slot:u32,out:*mut Report)->c_int;
     fn mrk_install_producer_retire(cell:*mut c_void)->c_int;
@@ -206,6 +214,9 @@ fn phase_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
     #[cfg(any(test,feature="package-producer-signing"))]
     if operation.signing() {return match phase {
         1..=8=>Some(usize::from(phase-1)),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None,
+    };}
+    if operation==ProducerOperation::RemoveRecoveryProgram {return match phase {
+        1..=4=>Some(usize::from(phase-1)),6=>Some(4),7=>Some(5),9=>Some(6),11=>Some(7),12=>Some(8),_=>None,
     };}
     if !operation.detached() {return match phase {
         1..=4=>Some(usize::from(phase-1)),6=>Some(4),7=>Some(5),_=>None,
@@ -287,6 +298,8 @@ impl Native for Calls {
                 unsafe{mrk_remove_producer_new(descriptor.as_ptr(),descriptor.len(),signature.as_ptr(),signature.len())},
             (VerificationInput::RemoveProgram{directory,program,directory_path},ProducerOperation::RemoveProgram)=>
                 unsafe{mrk_remove_producer_code_new(directory,program,directory_path.as_ptr(),directory_path.len())},
+            (VerificationInput::RecoveryProgram{directory,program,directory_path},ProducerOperation::RemoveRecoveryProgram)=>
+                unsafe{mrk_remove_recovery_code_new(directory,program,directory_path.as_ptr(),directory_path.len())},
             (VerificationInput::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(_))=>
                 unsafe{mrk_install_producer_code_new(operation.code(),outer,code,outer_path.as_ptr(),outer_path.len())},
             #[cfg(feature="package-producer-signing")]
@@ -525,6 +538,37 @@ impl RemovalProgramVerifier{
     }
 }
 
+/// Actual current process plus its retained static standalone program. This
+/// cannot substitute for the completed package, same-artifact genesis pair,
+/// fresh absent-app observation or original R/M exclusion owed by the caller.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum RemovalRecoveryProgramResult{ExecutingSourceVerified,Unavailable,Refused,Unknown}
+pub struct RemovalRecoveryProgramVerifier{inner:ProducerVerifier}
+impl Default for RemovalRecoveryProgramVerifier{fn default()->Self{Self::new()}}
+impl RemovalRecoveryProgramVerifier{
+    pub fn new()->Self{Self{inner:ProducerVerifier::new_for(ProducerOperation::RemoveRecoveryProgram)}}
+    pub fn project_owned_upper_bound()->Option<usize>{
+        // Same26-reference native cell and existing stack; additionally reserve
+        // a second bounded chain (at most8 certificates) and copied leaf DER.
+        // Opaque Security framework heap still belongs to the caller's floor.
+        ProducerVerifier::project_owned_upper_bound()?.checked_add(9*CERTIFICATE_LIMIT)?
+            .checked_add(std::mem::size_of::<Self>())
+    }
+    pub fn custody(&self)->ProducerCustody{self.inner.custody()}
+    pub fn settled(&self)->bool{self.inner.settled()}
+    pub fn close(&mut self,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->bool{self.inner.close(gate)}
+    pub fn verify_and_close(&mut self,directory:BorrowedFd<'_>,program:BorrowedFd<'_>,directory_path:&Path,
+        gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->RemovalRecoveryProgramResult{
+        self.verify_with(VerificationInput::RecoveryProgram{directory:directory.as_raw_fd(),program:program.as_raw_fd(),
+            directory_path:directory_path.as_os_str().as_bytes()},gate,&mut Calls)
+    }
+    fn verify_with(&mut self,input:VerificationInput<'_>,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision,native:&mut impl Native)->RemovalRecoveryProgramResult{
+        match self.inner.verify_input(input,gate,native){VerificationResult::Matched=>RemovalRecoveryProgramResult::ExecutingSourceVerified,
+            VerificationResult::Unavailable=>RemovalRecoveryProgramResult::Unavailable,VerificationResult::Refused=>RemovalRecoveryProgramResult::Refused,
+            _=>RemovalRecoveryProgramResult::Unknown}
+    }
+}
+
 /// Public signature bytes only. Creation does not authenticate Developer-ID
 /// purpose, a completed package, or any ReleaseSet authority.
 #[cfg(any(test,feature="package-producer-signing"))]
@@ -629,10 +673,12 @@ mod tests {
         fn step(&mut self,_:*mut c_void,n:u32,out:&mut Report)->c_int{
             self.report.phase=n;self.report.calls+=1;
             // Independently literal fixture layout, not transition() as oracle.
-            let code=matches!(self.report.reserved,1|2|5);
+            let code=matches!(self.report.reserved,1|2|5|7);
+            let recovery=self.report.reserved==7;
             let sign=matches!(self.report.reserved,3|6);
             let slot=if sign {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None}}
-                else if code {match n{1..=4=>Some((n-1)as usize),6=>Some(4),7=>Some(5),_=>None}}
+                else if code {match n{1..=4=>Some((n-1)as usize),6=>Some(4),7=>Some(5),
+                    9 if recovery=>Some(6),11 if recovery=>Some(7),12 if recovery=>Some(8),_=>None}}
                 else {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10..=16=>Some(n as usize),
                     20=>Some(17),22=>Some(18),23..=29=>Some((n-4)as usize),_=>None}};
             if let Some(slot)=slot{assert_eq!(self.report.states[slot],0);self.report.states[slot]=if sign&&n==12 || !sign&&!code&&matches!(n,22|29){4}else{2};}
@@ -641,7 +687,7 @@ mod tests {
             if self.failed_at==Some(n as u8){self.report.failed=1;if !code&&matches!(n,22|29){self.report.states[slot.unwrap()]=2;}}
             if sign&&self.failed_at==Some(n as u8)&&self.failed_without_output {self.report.states[slot.unwrap()]=4;}
             if self.unknown_at==Some(n as u8){self.report.failed=1;self.report.unknown=1;}
-            else{self.report.returned+=1;if n==(if sign{12}else if code{8}else{29})&&self.report.failed==0{self.report.matched=1;}}
+            else{self.report.returned+=1;if n==(if sign{12}else if recovery{13}else if code{8}else{29})&&self.report.failed==0{self.report.matched=1;}}
             *out=self.report;if self.bad_at==Some(n as u8){out.phase+=1;}1
         }
         fn release(&mut self,_:*mut c_void,slot:u32,out:&mut Report)->c_int{
@@ -727,15 +773,19 @@ mod tests {
         assert_eq!(ProducerOperation::CurrentProduct(CurrentProductRole::PayloadApp).code(),2);
         assert_eq!(ProducerOperation::PackageSigning.code(),3);
         for(mode,operation,steps,slots)in [(4,ProducerOperation::RemoveDetachedSignature,29,26),
-            (5,ProducerOperation::RemoveProgram,8,6),(6,ProducerOperation::RemoveSigning,12,14)]{
+            (5,ProducerOperation::RemoveProgram,8,6),(6,ProducerOperation::RemoveSigning,12,14),
+            (7,ProducerOperation::RemoveRecoveryProgram,13,9)]{
             assert_eq!(operation.code(),mode);assert_eq!(operation.steps(),steps);assert_eq!(operation.slots(),slots);
             let mut native=DataCalls::new();native.report.reserved=mode;
             let mut old=Report{version:1,reserved:mode,..Report::default()};
             for n in 1..=steps{
                 native.step(std::ptr::null_mut(),u32::from(n),&mut raw);
                 assert!(transition(raw,old,ProducerPhase::Inspect(n),operation));
-                for foreign in 0..=6{if foreign!=mode{let mut bad=raw;bad.reserved=foreign;
+                for foreign in 0..=7{if foreign!=mode{let mut bad=raw;bad.reserved=foreign;
                     assert!(!transition(bad,old,ProducerPhase::Inspect(n),operation));}}
+                if mode==7{if let Some(slot)=match n{9=>Some(6),11=>Some(7),12=>Some(8),_=>None}{
+                    let mut lost=raw;lost.states[slot]=0;assert!(!transition(lost,old,ProducerPhase::Inspect(n),operation));
+                }}
                 if slots<SLOTS{let mut extra=raw;extra.states[slots]=2;assert!(!transition(extra,old,ProducerPhase::Inspect(n),operation));}
                 if n<steps{let mut early=raw;early.matched=1;assert!(!transition(early,old,ProducerPhase::Inspect(n),operation));}
                 old=raw;
@@ -746,6 +796,8 @@ mod tests {
         assert!(REMOVE_DOMAIN.len()<=DOMAIN.len());
         assert!(RemovalProducerVerifier::project_owned_upper_bound().unwrap()<=320*1024);
         assert!(RemovalProgramVerifier::project_owned_upper_bound().unwrap()<=320*1024);
+        assert!(RemovalRecoveryProgramVerifier::project_owned_upper_bound().unwrap()<=512*1024);
+        assert_eq!(RECOVERY_CODE_STEPS,13);assert_eq!(RECOVERY_CODE_SLOTS,9);
         assert!(RemovalProducerSigner::project_owned_upper_bound().unwrap()<=320*1024);
         assert_eq!(std::mem::size_of::<Report>(),136);assert_eq!(std::mem::size_of::<SourceSigner>(),104);
         assert!(ProducerVerifier::project_owned_upper_bound().unwrap()<=320*1024);
@@ -753,6 +805,40 @@ mod tests {
     }
     #[test]
     fn signature_result_requires_same_owner_finality_and_late_gate_refuses() {
+        // Same original decoder engine, DISTINCT static and executing-self
+        // operation. All calls below are inert return DATA, never signed code.
+        let recovery_input=VerificationInput::RecoveryProgram{directory:11,program:12,directory_path:b"/fixed"};
+        let static_input=VerificationInput::RemoveProgram{directory:11,program:12,directory_path:b"/fixed"};
+        assert!(!recovery_input.valid_for(ProducerOperation::RemoveProgram));
+        assert!(!static_input.valid_for(ProducerOperation::RemoveRecoveryProgram));
+        let mut native=DataCalls::new();let mut recovery=RemovalRecoveryProgramVerifier::new();let mut phases=Vec::new();
+        let result=recovery.verify_with(recovery_input,&mut |point|{
+            if let ProducerCheckpoint::Returned{phase:ProducerPhase::Inspect(n),custody,..}=point{
+                phases.push(n);assert!(!custody.remove_program_matched&&!custody.remove_signature_matched
+                    &&!custody.signature_matched&&custody.purpose_matched.is_none());
+            } Decision::Proceed
+        },&mut native);
+        assert_eq!(result,RemovalRecoveryProgramResult::ExecutingSourceVerified);
+        assert_eq!(phases,(1..=13).collect::<Vec<_>>());assert!(recovery.settled()&&native.retired);
+        assert_eq!(native.releases,vec![8,7,6,5,4,3,2,1,0]);
+        assert_eq!(recovery.custody().operation,ProducerOperation::RemoveRecoveryProgram);
+        for input in [static_input,VerificationInput::Signature{descriptor:b"{}",signature:&[7;256]},
+            VerificationInput::RecoveryProgram{directory:-1,program:12,directory_path:b"/fixed"},
+            VerificationInput::RecoveryProgram{directory:11,program:12,directory_path:b"/fixed/../foreign"}]{
+            let mut native=DataCalls::new();let mut recovery=RemovalRecoveryProgramVerifier::new();
+            assert_eq!(recovery.verify_with(input,&mut |_|Decision::Proceed,&mut native),RemovalRecoveryProgramResult::Refused);
+            assert!(recovery.settled()&&!native.allocated);
+        }
+        for phase in 1..=13{
+            let mut native=DataCalls::new();native.failed_at=Some(phase);let mut recovery=RemovalRecoveryProgramVerifier::new();
+            assert_eq!(recovery.verify_with(recovery_input,&mut |_|Decision::Proceed,&mut native),RemovalRecoveryProgramResult::Refused);
+            assert!(recovery.settled()&&native.retired&&recovery.custody().first_failure.is_some());
+            assert_eq!(native.report.matched,0);
+        }
+        let mut native=DataCalls::new();native.unavailable=true;let mut recovery=RemovalRecoveryProgramVerifier::new();
+        assert_eq!(recovery.verify_with(recovery_input,&mut |_|Decision::Proceed,&mut native),RemovalRecoveryProgramResult::Unavailable);
+        assert!(recovery.settled()&&!native.allocated);
+
         let mut native=DataCalls::new();let mut verifier=ProducerVerifier::new();let mut seen=Vec::new();
         let result=verifier.verify_with(b"{}",&[0;256],&mut |point|{seen.push(point);Decision::Proceed},&mut native);
         assert_eq!(result,SignatureResult::SignatureVerified);assert!(verifier.settled()&&native.retired);
@@ -887,6 +973,31 @@ mod tests {
     }
     #[test]
     fn unknown_native_or_gate_custody_never_releases_or_publishes_success() {
+        let recovery_input=VerificationInput::RecoveryProgram{directory:11,program:12,directory_path:b"/fixed"};
+        for phase in [8,9,10,11,12,13]{for malformed in [false,true]{
+            let mut native=DataCalls::new();if malformed{native.bad_at=Some(phase);}else{native.unknown_at=Some(phase);}
+            let mut recovery=RemovalRecoveryProgramVerifier::new();
+            assert_eq!(recovery.verify_with(recovery_input,&mut |_|Decision::Proceed,&mut native),RemovalRecoveryProgramResult::Unknown);
+            assert!(!recovery.settled()&&!native.retired&&native.releases.is_empty());
+            assert!(!recovery.inner.close_with(&mut |_|Decision::Proceed,&mut native));
+            assert!(!native.retired&&native.releases.is_empty());
+        }}
+        for release_unknown in [false,true]{
+            let mut native=DataCalls::new();native.release_unknown=release_unknown;let mut recovery=RemovalRecoveryProgramVerifier::new();
+            assert_eq!(recovery.verify_with(recovery_input,&mut |point|match point{
+                ProducerCheckpoint::Returned{phase:ProducerPhase::RetireCell,..}=>Decision::Stop,
+                _=>Decision::Proceed},&mut native),RemovalRecoveryProgramResult::Unknown);
+            assert!(!recovery.settled());assert_eq!(native.retired,!release_unknown);
+        }
+        let mut native=DataCalls::new();let mut recovery=RemovalRecoveryProgramVerifier::new();
+        let panic=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+            recovery.verify_with(recovery_input,&mut |point|match point{
+                ProducerCheckpoint::Returned{phase:ProducerPhase::Inspect(11),..}=>panic!("recovery original gate DATA"),
+                _=>Decision::Proceed},&mut native)
+        }));
+        assert!(panic.is_err()&&recovery.custody().gate_entered&&recovery.custody().unknown);
+        assert!(!recovery.inner.close_with(&mut |_|Decision::Proceed,&mut native)&&native.releases.is_empty()&&!native.retired);
+
         let input=VerificationInput::RemoveProgram{directory:11,program:12,directory_path:b"/private/owned-remover"};
         for failure in 0..3{
             let mut native=DataCalls::new();if failure==0{native.bad_at=Some(4);}else if failure==1{native.unknown_at=Some(4);}else{native.release_unknown=true;}

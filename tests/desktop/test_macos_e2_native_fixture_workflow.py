@@ -13,14 +13,14 @@ STEP_NAMES = (
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
     "Prepare only the locked fixture graphs through the original command owner",
-    "Compile and test selected removal DATA groups",
+    "Compile and test Parent2 and NativeRecovery4 DATA groups",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
     "Require closed scoped qualification without full E2 acceptance",
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Four fixed Cargo originals share990s: Parent2/app5/native1/emitter1 DATA only.\n          # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-changes-data\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Two fixed Cargo originals share990s: Parent2/NativeRecovery4 DATA only.\n          # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-recovery-data\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -177,7 +177,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
         self.assertEqual(active(native).count(" --observe-service-layout"), 0)
         self.assertEqual(active(native).count(" --observe-service-cocoa-startup"), 0)
-        self.assertEqual(active(native).count(" --qualify-removal-changes-data"), 1)
+        self.assertEqual(active(native).count(" --qualify-removal-recovery-data"), 1)
         self.assertEqual(active(native).count(" --observe-context-receipts"), 0)
         self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
         self.assertEqual(active(prepare).count("owner.run_owned("), 1)
@@ -234,7 +234,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertLess(ordinary.index('self.observe_installer_context()'), ordinary.index('self.compile_metadata_observer()'))
         self.assertIn(flat('if self.service_layout["selected"]: self.build_images()'), flat(ordinary))
         self.assertIn(flat('if not self.context_receipts_selected: self.observe_btm_logs()'), flat(execute))
-        self.assertIn('sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], [CHANGES_ARGUMENT])', self.owner)
+        self.assertIn('sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], [CHANGES_ARGUMENT], [RECOVERY_ARGUMENT])', self.owner)
         self.assertIn('service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT]', self.owner)
         self.assertIn('context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT]', self.owner)
         receipt_capture = section(self.owner, '    def observe_missing_context_receipt(', '    def context_audit(')
@@ -328,7 +328,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                  "integration_app_rust_test_record", "integration_app_rust_tests_result",
                  "integration_parent_rust_test_record", "integration_parent_rust_tests_result", "removal_integration_data_result",
                  "parent_rust_test_record", "parent_rust_tests_result", "removal_parent_data_result",
-                 "changes_rust_test_record", "changes_rust_tests_result", "removal_changes_data_result"}
+                 "changes_rust_test_record", "changes_rust_tests_result", "removal_changes_data_result",
+                 "recovery_rust_test_record", "recovery_rust_tests_result", "removal_recovery_data_result"}
         available = {node.name: node for node in owner_tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
         # Decode's exact small standard-library helpers are selected from SOURCE, never import main.
         functions = [available[name] for name in names if name in available]
@@ -344,9 +345,11 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     "INSTALLED_READER_RUST_TESTS", "REGISTRATION_APP_RUST_TESTS", "REMOVAL_ROLES", "REMOVAL_SOURCES",
                     "REMOVAL_NATIVE_RUST_TESTS", "REMOVAL_APP_RUST_TESTS", "HELPER", "INTEGRATION_ROLES",
                     "INTEGRATION_NATIVE_RUST_TESTS", "INTEGRATION_APP_RUST_TESTS", "INTEGRATION_PARENT_RUST_TESTS", "INTEGRATION_SOURCES",
-                    "PARENT_ROLES", "PARENT_RUST_TESTS", "CHANGES_ROLES", "CHANGES_RUST_TESTS", "CHANGES_SOURCES"}:
+                    "PARENT_ROLES", "PARENT_RUST_TESTS", "CHANGES_ROLES", "CHANGES_RUST_TESTS", "CHANGES_SOURCES", "RECOVERY_ROLES", "RECOVERY_NATIVE_RUST_TESTS"}:
                     ns[node.targets[0].id] = ast.literal_eval(node.value)
         ns["PARENT_SOURCES"] = ns["INTEGRATION_SOURCES"]
+        ns["RECOVERY_SOURCES"] = ns["CHANGES_SOURCES"]
+        ns["RECOVERY_RUST_TESTS"] = (ns["PARENT_RUST_TESTS"], ns["RECOVERY_NATIVE_RUST_TESTS"])
         ns.update(WORK_SECONDS=990, MAX_RAW=(1 << 61)-1, CHECKOUT=Path("/fixed-source"),
                   WORKFLOW="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-maintenance-fixture.yml@refs/heads/verify/desktop-macos-maintenance-fixture")
         ref = available["Refused"]
@@ -562,8 +565,15 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(ns["CHANGES_ROLES"], ('removal-changes-parent-rust-tests', 'removal-changes-app-rust-tests', 'removal-changes-native-rust-tests', 'removal-changes-emitter-rust-tests'))
         self.assertEqual(ns["CHANGES_RUST_TESTS"], (('installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality', 'installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources'), ('asset_session::macos_removal::tests::fixed_ingress_and_private_completion_never_replace_originals', 'asset_session::macos_maintenance::tests::new_work_closure_is_not_stop_and_preserves_lock_and_quit_routes', 'asset_session::installation_memory::known::tests::fixed_session_partition_and_overflow_refuse_without_credit', 'edit_owner::installed_configuration_data_tests::installed_configuration_owner_contract_is_inert', 'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound', 'macos_remove_record::tests::removal_record_closed_schema_and_bindings_are_data_only', 'macos_remove_record::tests::removal_prefix_failure_and_new_attempt_never_rewrite_history'), ('removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',), ('emitter::tests::fixed_remove_inputs_rosters_and_original_finality_refuse_install_or_partial_routes',)))
         self.assertEqual(ns["CHANGES_RUST_TESTS"][0], ns["PARENT_RUST_TESTS"])
-        for profile in (False, True, "parent", "changes"):
+        self.assertEqual(ns["RECOVERY_ROLES"], ('removal-recovery-parent-rust-tests', 'removal-recovery-native-rust-tests'))
+        self.assertEqual(ns["RECOVERY_NATIVE_RUST_TESTS"], ('install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns', 'install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses', 'install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success', 'removal_coordinator::peer::tests::peer_binding_and_actual_verifier_roles_are_closed_data'))
+        self.assertEqual(ns["RECOVERY_SOURCES"], ns["CHANGES_SOURCES"])
+        self.assertEqual(ns["RECOVERY_RUST_TESTS"][0], ns["PARENT_RUST_TESTS"])
+        for profile in (False, True, "parent", "changes", "recovery"):
             changes = profile == "changes"
+            recovery = profile == "recovery"
+            changed_parser = ns["recovery_rust_tests_result" if recovery else "changes_rust_tests_result"]
+            changed_record = ns["recovery_rust_test_record" if recovery else "changes_rust_test_record"]
             parent_only = profile == "parent"
             integration = profile is True
             roles = ns["INTEGRATION_ROLES" if integration else "REMOVAL_ROLES"]
@@ -586,8 +596,13 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 projection_parser = ns["removal_changes_data_result"]
                 artifact = "removal-changes-data"
                 selected_batches = tuple(zip(("parent", "app", "native", "emitter"), ns["CHANGES_RUST_TESTS"]))
+            if recovery:
+                roles, sources = ns["RECOVERY_ROLES"], ns["RECOVERY_SOURCES"]
+                projection_parser = ns["removal_recovery_data_result"]
+                artifact = "removal-recovery-data"
+                selected_batches = tuple(zip(("parent", "native"), ns["RECOVERY_RUST_TESTS"]))
             for index, (suffix, expected) in enumerate(selected_batches):
-                parser = ((lambda raw, role=roles[index]: ns["changes_rust_tests_result"](raw, role)) if changes
+                parser = ((lambda raw, role=roles[index]: changed_parser(raw, role)) if changes or recovery
                           else ns[parser_prefix + suffix + "_rust_tests_result"])
                 raw = pretty(expected)
                 self.assertEqual(parser(raw)["passed"], len(expected))
@@ -598,8 +613,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             faults = (None, "nonzero", "optional-interrupt", "unknown", "malformed", "source-post", "late-close", "close-throw", "late-publication")
             if integration:
                 faults += ("parent-nonzero", "parent-unknown", "parent-malformed")
-            if changes:
-                faults += tuple("changed-" + str(index) + "-" + kind for index in range(1, 4)
+            if changes or recovery:
+                faults += tuple("changed-" + str(index) + "-" + kind for index in range(1, len(roles))
                                 for kind in ("nonzero", "unknown", "malformed"))
             for fault in faults:
                 changed_fault = fault.split("-") if fault and fault.startswith("changed-") else None
@@ -616,6 +631,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     op.removal_integration_selected = integration
                     op.removal_parent_selected = parent_only
                     op.removal_changes_selected = changes
+                    op.removal_recovery_selected = recovery
                     events = []
                     op.source = SimpleNamespace(read=lambda name: name.encode(),
                         rows={name: {"sha256": hashlib.sha256(name.encode()).hexdigest()} for name in sources})
@@ -639,6 +655,10 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                                      ["--lib"], ["--features", "package-producer-signing", "--lib"],
                                      ["--features", "macos-remove-producer", "--example", "macos_remove_producer"])[index]
                             directory = ns["NATIVE"] if index == 2 else ns["INSTALLER"]
+                        if recovery:
+                            flags = (["--features", "macos-installed-remover", "--bin", "mrk-macos-remove"],
+                                     ["--features", "package-producer-signing", "--lib"])[index]
+                            directory = ns["INSTALLER"] if index == 0 else ns["NATIVE"]
                         self.assertEqual(argv, ["/fixed-cargo", "test", "--manifest-path", str(ns["CHECKOUT"] / directory / "Cargo.toml"),
                             "--locked", "--offline", "--jobs", "1", "--target", ns["TARGET"], "--no-default-features", *flags,
                             "--message-format=short", "--color", "never", "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *expected])
@@ -697,26 +717,31 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     if fault in (None, "late-publication"):
                         self.assertTrue(result["passed"])
                         projection = projection_parser(result, "a" * 40, op.source.rows)
-                        self.assertEqual(projection["scope"], "removal-changes-compiled-data-only" if changes else "removal-parent-compiled-data-only" if parent_only else "removal-integration-compiled-data-only" if integration else "removal-compiled-data-only")
+                        self.assertEqual(projection["scope"], "removal-recovery-compiled-data-only" if recovery else "removal-changes-compiled-data-only" if changes else "removal-parent-compiled-data-only" if parent_only else "removal-integration-compiled-data-only" if integration else "removal-compiled-data-only")
                         opposite = ns["removal_data_result" if integration else "removal_integration_data_result"]
                         with self.assertRaises(ns["Refused"]): opposite(result, "a" * 40, op.source.rows)
                         self.assertFalse(projection["liveRemovalQualified"] or projection["fullE2Qualified"])
-                        if changes:
-                            keys = ("parentRustTests", "appRustTests", "nativeRustTests", "emitterRustTests")
+                        if changes or recovery:
+                            keys = ("parentRustTests", "nativeRustTests") if recovery else ("parentRustTests", "appRustTests", "nativeRustTests", "emitterRustTests")
                             self.assertEqual(set(result["artifacts"][artifact]), {"clock", "sourceHashes", *keys})
-                            self.assertEqual(len(projection["originalCalls"]), 4)
+                            self.assertEqual(len(projection["originalCalls"]), len(roles))
                             for index, key in enumerate(keys):
-                                self.assertEqual(projection[key], ns["changes_rust_test_record"](roles[index]))
+                                self.assertEqual(projection[key], changed_record(roles[index]))
                                 for problem in ("missing", "cross", "ignored", "extra-call", "missing-call"):
                                     altered = json.loads(json.dumps(result))
                                     if problem == "missing": del altered["artifacts"][artifact][key]
-                                    elif problem == "cross": altered["artifacts"][artifact][key] = projection[keys[(index+1)%4]]
+                                    elif problem == "cross": altered["artifacts"][artifact][key] = projection[keys[(index+1)%len(keys)]]
                                     elif problem == "ignored": altered["artifacts"][artifact][key]["ignored"] = 1
                                     elif problem == "extra-call": altered["originalCalls"].append(dict(altered["originalCalls"][-1]))
                                     else: altered["originalCalls"].pop(index)
                                     with self.subTest(changes_record=key, problem=problem), self.assertRaises(ns["Refused"]):
                                         projection_parser(altered, "a" * 40, op.source.rows)
                             with self.assertRaises(ns["Refused"]): ns["removal_parent_data_result"](result, "a" * 40, op.source.rows)
+                            if recovery:
+                                with self.assertRaises(ns["Refused"]): ns["removal_changes_data_result"](result, "a" * 40, op.source.rows)
+                                for extra in ("appRustTests", "emitterRustTests"):
+                                    altered = json.loads(json.dumps(result)); altered["artifacts"][artifact][extra] = None
+                                    with self.assertRaises(ns["Refused"]): projection_parser(altered, "a" * 40, op.source.rows)
                         if parent_only:
                             self.assertEqual(set(result["artifacts"][artifact]), {"clock", "parentRustTests", "sourceHashes"})
                             self.assertEqual(projection["parentRustTests"], ns["parent_rust_test_record"]())
@@ -765,6 +790,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                             expected_reason = {"nonzero": "original-command-failed", "unknown": "removal-original-refused-or-unknown",
                                                "malformed": "removal-changes-rust-test-framing"}[changed_fault[2]]
                         if changes and fault == "malformed": expected_reason = "removal-changes-rust-test-framing"
+                        if recovery and (fault == "malformed" or changed_fault and changed_fault[2] == "malformed"):
+                            expected_reason = "removal-recovery-rust-test-framing"
                         if parent_only and fault == "malformed": expected_reason = "installer-worker-rust-test-framing"
                         self.assertEqual(result["failure"], expected_reason)
                         self.assertFalse(result["artifacts"][artifact]["clock"]["closed"])
@@ -775,6 +802,13 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                         if fault == "parent-unknown":
                             self.assertNotIn("retire:" + roles[2] + "-target", events)
                             self.assertEqual(sum(event.startswith("retire:") for event in events), 2)
+        quartet = ns["recovery_rust_test_record"](ns["RECOVERY_ROLES"][1])
+        self.assertEqual(ns["_rust_tests_data"](quartet, quartet, "removal-recovery-rust-test"), quartet)
+        for size in (3, 5):
+            bad = json.loads(json.dumps(quartet)); bad["passed"] = size
+            bad["tests"] = (bad["tests"] + ["foreign_test"])[:size]
+            with self.assertRaises(ns["Refused"]):
+                ns["_rust_tests_data"](bad, quartet, "removal-recovery-rust-test")
         # Same parser retains current old contract and has no arbitrary test/path expansion.
         rows = {ns["REMOVAL_SOURCES"][-1]: {"sha256": "f" * 64}}
         for role, expected in ((ns["REMOVAL_ROLES"][0], ns["REMOVAL_NATIVE_RUST_TESTS"]),
@@ -784,6 +818,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                                (ns["INTEGRATION_ROLES"][2], ns["INTEGRATION_PARENT_RUST_TESTS"]),
                                (ns["PARENT_ROLES"][0], ns["PARENT_RUST_TESTS"]),
                                *zip(ns["CHANGES_ROLES"], ns["CHANGES_RUST_TESTS"]),
+                               *zip(ns["RECOVERY_ROLES"], ns["RECOVERY_RUST_TESTS"]),
                                (None, ns["INSTALLER_WORKER_RUST_TESTS"])):
             raw = ("test " + expected[-1] + " ... FAILED\nthread '" + expected[-1]
                    + "' panicked at src/macos_remove_protocol.rs:12:3:\nprivate-value-must-not-escape\n").encode()
@@ -1037,7 +1072,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual([line.strip() for line in active(publish).splitlines()
             if 'summary["registrationReservationQualified"] =' in line], ['summary["registrationReservationQualified"] = False'] * 2)
         self.assertIn('b"registration_qualified=true\\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\\n"', publish)
-        self.assertEqual(publish.count('fixture.registration_publication_tick('), 20)
+        self.assertEqual(publish.count('fixture.registration_publication_tick('), 24)
         self.assertGreater(publish.rindex('fixture.registration_publication_tick('), publish.index('os.close(fd)'))
         route = section(publish, '              # This committed workflow selects only fixed registration primitive qualification.',
                         '              known_pass = (')
@@ -1079,21 +1114,29 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('REMOVAL_DATA_SELECTED = False', publish)
         self.assertIn('REMOVAL_INTEGRATION_SELECTED = False', publish)
         self.assertIn('REMOVAL_PARENT_SELECTED = False', publish)
-        self.assertIn('REMOVAL_CHANGES_SELECTED = True', publish)
-        self.assertIn('if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED:', route)
+        self.assertIn('REMOVAL_CHANGES_SELECTED = False', publish)
+        self.assertIn('REMOVAL_RECOVERY_SELECTED = True', publish)
+        self.assertIn('if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:', route)
         self.assertIn('if outcome == "success" and REMOVAL_DATA_SELECTED:', route)
         self.assertIn('removal_data = fixture.removal_data_result(result, source, rows)', route)
         self.assertIn('removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,', publish)
         for field in ("removalData", "removalDataQualified", "removalDataDiagnostic",
                       "removalIntegrationData", "removalIntegrationDataQualified", "removalIntegrationDataDiagnostic",
                       "removalParentData", "removalParentDataQualified", "removalParentDataDiagnostic",
-                      "removalChangesData", "removalChangesDataQualified", "removalChangesDataDiagnostic"):
+                      "removalChangesData", "removalChangesDataQualified", "removalChangesDataDiagnostic",
+                      "removalRecoveryData", "removalRecoveryDataQualified", "removalRecoveryDataDiagnostic"):
             self.assertEqual(sum("summary[" + repr(field) + "] = " in line for line in active(publish).splitlines()), 2)
         self.assertGreater(publish.rindex('fixture.registration_publication_tick(summary["removalData"], removal_last)'), publish.index('os.close(fd)'))
         self.assertNotIn('removal_data', gates)
         self.assertNotIn('integration_data', gates)
         self.assertNotIn('parent_data', gates)
         self.assertNotIn('changes_data', gates)
+        self.assertNotIn('recovery_data', gates)
+        self.assertIn('recovery_data = fixture.removal_recovery_data_result(result, source, rows)', route)
+        self.assertIn('if outcome == "success" and REMOVAL_RECOVERY_SELECTED:', route)
+        self.assertGreater(publish.rindex('fixture.registration_publication_tick(summary["removalRecoveryData"], recovery_last)'), publish.index('os.close(fd)'))
+        self.assertIn('removalRecoveryData=recovery_data, removalRecoveryDataQualified=recovery_qualified, removalRecoveryDataDiagnostic=recovery_diagnostic,', publish)
+        self.assertIn('removal_recovery_data_result(value, os.environ["GITHUB_SHA"], source.rows)', main)
         self.assertIn('changes_data = fixture.removal_changes_data_result(result, source, rows)', route)
         self.assertIn('if outcome == "success" and REMOVAL_CHANGES_SELECTED:', route)
         self.assertGreater(publish.rindex('fixture.registration_publication_tick(summary["removalChangesData"], changes_last)'), publish.index('os.close(fd)'))
@@ -1195,7 +1238,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertLess(publish.index(context), publish.index(units))
         layout = section(publish, "              service_layout = None", "              native_rust_tests = None")
         self.assertEqual(flat(layout), flat("""service_layout = None
-            selected_roles = (fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
+            selected_roles = (fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
                               fixture.PARENT_ROLES if REMOVAL_PARENT_SELECTED else
                               fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
                               fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES)
@@ -1378,8 +1421,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('installerContext=installer_context,', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["installerContext"] =' in line], ['summary["installerContext"] = None'] * 2)
-        for refused in ('except BaseException: summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None',
-                        'if not book.finish(): summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None'):
+        for refused in ('except BaseException: summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary[\'removalRecoveryData\'] = None summary[\'removalRecoveryDataQualified\'] = False summary[\'removalRecoveryDataDiagnostic\'] = None summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None',
+                        'if not book.finish(): summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary[\'removalRecoveryData\'] = None summary[\'removalRecoveryDataQualified\'] = False summary[\'removalRecoveryDataDiagnostic\'] = None summary["nativeRustTests"] = None summary["installerWorkerRustTests"] = None summary["installedReaderRustTests"] = None summary["producerSigningRustTests"] = None summary["packageProducerRustTests"] = None summary["installerContext"] = None'):
             self.assertIn(refused, flat(publish))
         self.assertGreater(publish.index(units), publish.index('"summary-returned-call"'))
         self.assertLess(publish.index(units), publish.index("              known_pass = ("))
@@ -1388,8 +1431,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('nativeRustTests=native_rust_tests,', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines()
                           if 'summary["nativeRustTests"] =' in line], ['summary["nativeRustTests"] = None'] * 2)
-        for refused in ('except BaseException: summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary["nativeRustTests"] = None',
-                        'if not book.finish(): summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary["nativeRustTests"] = None'):
+        for refused in ('except BaseException: summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary[\'removalRecoveryData\'] = None summary[\'removalRecoveryDataQualified\'] = False summary[\'removalRecoveryDataDiagnostic\'] = None summary["nativeRustTests"] = None',
+                        'if not book.finish(): summary["accepted"] = False summary["registrationReservation"] = None summary["registrationReservationQualified"] = False summary["registrationFailure"] = None summary[\'removalData\'] = None summary[\'removalDataQualified\'] = False summary[\'removalDataDiagnostic\'] = None summary[\'removalIntegrationData\'] = None summary[\'removalIntegrationDataQualified\'] = False summary[\'removalIntegrationDataDiagnostic\'] = None summary[\'removalParentData\'] = None summary[\'removalParentDataQualified\'] = False summary[\'removalParentDataDiagnostic\'] = None summary[\'removalChangesData\'] = None summary[\'removalChangesDataQualified\'] = False summary[\'removalChangesDataDiagnostic\'] = None summary[\'removalRecoveryData\'] = None summary[\'removalRecoveryDataQualified\'] = False summary[\'removalRecoveryDataDiagnostic\'] = None summary["nativeRustTests"] = None'):
             self.assertIn(refused, flat(publish))
         report, tables = self.native_owner_diagnostic()
         call = {"role": "initial-receipt-query", "entered": True, "returned": True,
@@ -1472,7 +1515,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     self.assertEqual(node.keywords, [])
                     self.assertIsInstance(node.args[-1], ast.Constant)
                     prefixes.append(node.args[-1].value)
-            self.assertEqual(sorted(prefixes), ["installed-reader-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "native-rust-test", "package-producer-rust-test", "producer-signing-rust-test", "registration-app-rust-test", "registration-rust-test", "removal-app-rust-test", "removal-app-rust-test", "removal-changes-rust-test", "removal-native-rust-test", "removal-native-rust-test"])
+            self.assertEqual(sorted(prefixes), ["installed-reader-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "native-rust-test", "package-producer-rust-test", "producer-signing-rust-test", "registration-app-rust-test", "registration-rust-test", "removal-app-rust-test", "removal-app-rust-test", "removal-changes-rust-test", "removal-native-rust-test", "removal-native-rust-test", "removal-recovery-rust-test"])
             labels.update(prefix + suffix for prefix in prefixes for suffix in actual_suffixes)
         self.assertEqual(labels, set(tables["OWNER_DIAGNOSTIC_REFUSALS"]))
         # Owner output is sanitized before this workflow sees it. A listed
@@ -1517,11 +1560,12 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "REMOVAL_INTEGRATION_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_integration_data_qualified }}",
             "REMOVAL_PARENT_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_parent_data_qualified }}",
             "REMOVAL_CHANGES_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_changes_data_qualified }}",
+            "REMOVAL_RECOVERY_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_recovery_data_qualified }}",
             "PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}",
             "NATIVE_OUTCOME: ${{ steps.native.outcome }}",
             "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
             'set -euo pipefail',
-            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REMOVAL_CHANGES_DATA_QUALIFIED" == true && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == true && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
         ):
             with self.subTest(finality=required):
                 self.assertIn(required, active(final))

@@ -244,6 +244,7 @@ mod peer {
                 ProducerOperation::CurrentProduct(role)=>c.purpose_matched==Some(role),
                 ProducerOperation::RemoveDetachedSignature=>c.remove_signature_matched,
                 ProducerOperation::RemoveProgram=>c.remove_program_matched,
+                ProducerOperation::RemoveRecoveryProgram=>false,
                 #[cfg(any(test,feature="package-producer-signing"))]
                 ProducerOperation::PackageSigning|ProducerOperation::RemoveSigning=>false,
             }
@@ -785,6 +786,16 @@ mod peer {
                 (remove.custody(),ProducerOperation::RemoveDetachedSignature),(program.custody(),ProducerOperation::RemoveProgram)]{
                 assert!(!verified(value,role));
             }
+            // Even a syntactically fully retired recovery result cannot stand
+            // in for ANY current live-peer purpose or make operation7 a role.
+            let recovery=ProducerCustody{operation:ProducerOperation::RemoveRecoveryProgram,phase:None,
+                cell:CellCustody::Consumed,references:[4;26],entered:true,in_call:false,gate_entered:false,
+                signature_matched:true,purpose_matched:Some(CurrentProductRole::EntryApp),
+                remove_signature_matched:true,remove_program_matched:true,failed:false,unknown:false,
+                calls:22,returned:22,first_failure:None};
+            for role in [ProducerOperation::RemoveRecoveryProgram,ProducerOperation::DetachedSignature,
+                ProducerOperation::CurrentProduct(CurrentProductRole::EntryApp),ProducerOperation::CurrentProduct(CurrentProductRole::PayloadApp),
+                ProducerOperation::RemoveDetachedSignature,ProducerOperation::RemoveProgram]{assert!(!verified(recovery,role));}
             assert_eq!((size_of::<Report>(),size_of::<RawInputs>(),size_of::<RemovalOriginalData>()),(360,384,72));
             assert!(size_of::<RemovalPeer<'static>>()<65536); // task handle only
             assert!(RemovalPeer::project_owned_upper_bound().unwrap()<=196608); // native sizeof, no peer entry
