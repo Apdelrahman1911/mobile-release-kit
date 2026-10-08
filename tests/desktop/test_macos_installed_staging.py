@@ -46,7 +46,7 @@ def workflow_step(workflow, name):
 
 # Exact independent shipping-compile job only. All prior installed/source
 # assertions receive their unchanged bytes; a partial or altered job refuses.
-SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 39104, 'e032b135b1928fb0d4ba5d355a95b26d37d7df40db90f76b38745714099ff1eb', ''))
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 40003, 'c6b8290f85b44f87eacc3bf151b5de66acb10be49ae397342927c9d6e88d9461', ''))
 
 
 def without_shipping_compile_workflow(source):
@@ -8057,14 +8057,14 @@ class MacCurrentRuntimeData(unittest.TestCase):
         body = build.split(opening, 1)[1].split("          PY_SHIPPING_IMAGE_COMPILE\n", 1)[0]
         program = ''.join(line[10:] if line.startswith('          ') else line for line in body.splitlines(keepends=True))
         tree = ast.parse(program)
-        pure_names = {"need", "pairs", "finite_float", "document", "identity", "returned_data", "commands_data",
+        pure_names = {"need", "pairs", "finite_float", "document", "identity", "tool_shape_data", "returned_data", "commands_data",
                       "artifact_data", "cleanup_allowed_data", "passed_data"}
         constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT"}
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
                     or isinstance(node, ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants]
         self.assertEqual({node.name for node in selected if isinstance(node, ast.FunctionDef)}, pure_names)
-        ns = {"json": json, "math": math, "Path": Path, "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
+        ns = {"json": json, "math": math, "stat": stat, "Path": Path, "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
         exec(compile(ast.Module(body=selected, type_ignores=[]), "<fixed-shipping-pure-DATA>", "exec"), ns)
         self.assertIn("work_end, hard_end = start + 1320, start + 1440", program)
         self.assertIn("timeout=timeout,", program)
@@ -8078,6 +8078,92 @@ class MacCurrentRuntimeData(unittest.TestCase):
         for variable in ("MRK_MACOS_INSTALL_SOURCE_COMMIT=source", "MRK_IMAGE_RELEASE_ID=release['release']",
                          "npm_config_userconfig=", "npm_config_globalconfig=", "npm_config_registry='https://registry.npmjs.org/'"):
             self.assertIn(variable, program)
+        # Fixed tool shape is a pre-veto observation, never admitted identity.
+        # Execute the actual nested tool/retirement statements on inert ports;
+        # no native tool file is opened, read, hashed, modified or executed here.
+        main_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        tool_node = next(node for node in main_node.body if isinstance(node, ast.FunctionDef) and node.name == 'tool')
+        retire_nodes = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                        for node in parent.finalbody if isinstance(node, ast.If)
+                        and ast.unparse(node.test) == 'not pending and input_originals_known']
+        self.assertEqual(len(retire_nodes), 1)
+        tool_code = compile(ast.Module(body=[tool_node], type_ignores=[]), '<fixed-shipping-tool-DATA>', 'exec')
+        retire_code = compile(ast.Module(body=retire_nodes, type_ignores=[]), '<fixed-shipping-tool-close-DATA>', 'exec')
+        checks = ('regular', 'ownerAllowed', 'writeProtected', 'positiveLinks', 'executableAllowed', 'sizeAllowed')
+        valid_info = dict(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o755, st_uid=501, st_gid=20,
+                          st_nlink=1, st_size=4096, st_mtime_ns=3, st_ctime_ns=4)
+        cases = [('regular', {'st_mode': stat.S_IFDIR | 0o755}), ('ownerAllowed', {'st_uid': 777}),
+                 ('writeProtected', {'st_mode': stat.S_IFREG | 0o775}), ('positiveLinks', {'st_nlink': 0}),
+                 ('executableAllowed', {'st_mode': stat.S_IFREG | 0o644}), ('sizeAllowed', {'st_size': 0}),
+                 ('sizeAllowed', {'st_size': 256 * 1024 * 1024 + 1})]
+        for refused, change in cases:
+            with self.subTest(tool_shape=refused, change=change):
+                info = SimpleNamespace(**dict(valid_info, **change))
+                shape = ns['tool_shape_data'](info, 501, True)
+                self.assertEqual(set(shape), {'mode', 'uid', 'gid', 'nlink', 'size', 'executableRequired', *checks})
+                self.assertIs(shape[refused], False)
+                self.assertTrue(all(type(shape[key]) is bool and shape[key] is (key != refused) for key in checks))
+                self.assertEqual(tuple(shape[key] for key in ('mode', 'uid', 'gid', 'nlink', 'size')),
+                                 tuple(getattr(info, key) for key in ('st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size')))
+                ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(return_value=info),
+                                        getuid=mock.Mock(return_value=501), close=mock.Mock())
+                local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(return_value='unused'),
+                             pending=False, input_originals_known=True, close_ok=True, receipt={})
+                exec(tool_code, local)
+                with self.assertRaisesRegex(ValueError, '^compile-tool-shape$'):
+                    local['tool'](Path('/synthetic-fixed-tool'))
+                ports.open.assert_called_once_with(Path('/synthetic-fixed-tool'), 123)
+                ports.fstat.assert_called_once_with(41)
+                local['tool_hash'].assert_not_called()
+                ports.close.assert_not_called()
+                self.assertEqual(local['tools'], [dict(path=Path('/synthetic-fixed-tool'), fd=41,
+                                                      identity=None, sha256=None, observedShape=shape)])
+                # Existing pending-original barrier retains the very same fd.
+                local['pending'] = True
+                exec(retire_code, local)
+                ports.close.assert_not_called()
+                self.assertEqual(local['tools'][0]['fd'], 41)
+                local['pending'] = False
+                if refused == 'positiveLinks': ports.close.side_effect = OSError('inert close refusal')
+                exec(retire_code, local)
+                ports.close.assert_called_once_with(41)
+                self.assertIsNone(local['tools'][0]['fd'])
+                self.assertIs(local['receipt']['toolOriginalsClosed'], refused != 'positiveLinks')
+                self.assertIsNone(local['tools'][0]['identity'])
+                self.assertEqual(local['tools'][0]['observedShape'], shape)
+        for change, executable in [({}, True), ({'st_uid': 0}, True), ({'st_nlink': 2}, True),
+                                   ({'st_size': 256 * 1024 * 1024}, True),
+                                   ({'st_mode': stat.S_IFREG | 0o644}, False)]:
+            info = SimpleNamespace(**dict(valid_info, **change))
+            shape = ns['tool_shape_data'](info, 501, executable)
+            self.assertTrue(all(shape[key] is True for key in checks))
+            ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(return_value=info),
+                                    getuid=mock.Mock(return_value=501), close=mock.Mock())
+            local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(return_value='a' * 64),
+                         pending=False, input_originals_known=True, close_ok=True, receipt={})
+            exec(tool_code, local)
+            self.assertEqual(local['tool'](Path('/synthetic-fixed-tool'), executable), Path('/synthetic-fixed-tool'))
+            self.assertEqual(local['tools'][0]['identity'], ns['identity'](info))
+            local['tool_hash'].assert_called_once_with(local['tools'][0])
+            self.assertEqual(local['tools'][0]['sha256'], 'a' * 64)
+            exec(retire_code, local)
+            ports.close.assert_called_once_with(41)
+            self.assertIs(local['receipt']['toolOriginalsClosed'], True)
+        # A non-returning fstat supplies no observation and keeps the admitted fd
+        # for the unchanged outer consuming-close path, not a guessed identity.
+        ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(side_effect=OSError('inert fstat')),
+                                getuid=mock.Mock(return_value=501), close=mock.Mock())
+        local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(),
+                     pending=False, input_originals_known=True, close_ok=True, receipt={})
+        exec(tool_code, local)
+        with self.assertRaises(OSError): local['tool'](Path('/synthetic-fixed-tool'))
+        self.assertIsNone(local['tools'][0]['observedShape'])
+        self.assertIsNone(local['tools'][0]['identity'])
+        local['tool_hash'].assert_not_called()
+        exec(retire_code, local)
+        ports.close.assert_called_once_with(41)
+        self.assertIs(local['receipt']['toolOriginalsClosed'], True)
+        self.assertIn("observedShape=row['observedShape']) for row in tools]", program)
         checkout, work = Path("/synthetic-checkout"), Path("/synthetic-work")
         node, npm, rust = Path("/synthetic-node/bin/node"), Path("/synthetic-node/lib/node_modules/npm/bin/npm-cli.js"), Path("/synthetic-rust/bin")
         argv = ns['commands_data'](node, npm, rust, work)

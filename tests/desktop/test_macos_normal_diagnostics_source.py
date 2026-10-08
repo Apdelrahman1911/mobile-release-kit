@@ -181,7 +181,7 @@ REMOVE_PACKAGE_WORKFLOW_INVERSE = ((73519, 1623, '77826b06c51c25de52bc2f44acf448
 
 # Exact independent shipping-compile job only. All prior installed/source
 # assertions receive their unchanged bytes; a partial or altered job refuses.
-SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 39104, 'e032b135b1928fb0d4ba5d355a95b26d37d7df40db90f76b38745714099ff1eb', ''))
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 40003, 'c6b8290f85b44f87eacc3bf151b5de66acb10be49ae397342927c9d6e88d9461', ''))
 
 
 def without_shipping_compile_workflow(source):

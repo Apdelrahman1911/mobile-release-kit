@@ -4588,6 +4588,16 @@ jobs:
                       info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+          def tool_shape_data(info, current_uid, executable):
+              # Observation only: never substitutes for admitted identity or its POST.
+              return dict(mode=info.st_mode, uid=info.st_uid, gid=info.st_gid,
+                          nlink=info.st_nlink, size=info.st_size, executableRequired=executable,
+                          regular=stat.S_ISREG(info.st_mode), ownerAllowed=info.st_uid in (0, current_uid),
+                          writeProtected=not info.st_mode & 0o022, positiveLinks=info.st_nlink > 0,
+                          executableAllowed=not executable or bool(info.st_mode & 0o111),
+                          sizeAllowed=0 < info.st_size <= 256 * 1024 * 1024)
+
+
           def returned_data(result, argv, cap):
               return (type(result) is subprocess.CompletedProcess and type(result.args) is list
                       and result.args == argv and type(result.returncode) is int
@@ -4771,9 +4781,10 @@ jobs:
 
               def tool(path, executable=True):
                   fd = os.open(path, flags)
-                  row = {'path': path, 'fd': fd, 'identity': None, 'sha256': None}
+                  row = {'path': path, 'fd': fd, 'identity': None, 'sha256': None, 'observedShape': None}
                   tools.append(row)
                   info = os.fstat(fd)
+                  row['observedShape'] = tool_shape_data(info, os.getuid(), executable)
                   need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022
                        and info.st_nlink > 0 and (not executable or info.st_mode & 0o111)
                        and 0 < info.st_size <= 256 * 1024 * 1024, 'compile-tool-shape')
@@ -4998,7 +5009,8 @@ jobs:
                           if receipt['failure'] is None: receipt['failure'] = dict(stage='generated-cleanup', kind=type(error).__name__)
                   if not receipt['toolOriginalsClosed'] and receipt['failure'] is None:
                       receipt['failure'] = dict(stage='tool-close', kind='UnknownOriginal')
-                  receipt['toolOriginals'] = [dict(path=str(row['path']), identity=row['identity'], sha256=row['sha256']) for row in tools]
+                  receipt['toolOriginals'] = [dict(path=str(row['path']), identity=row['identity'], sha256=row['sha256'],
+                                                  observedShape=row['observedShape']) for row in tools]
                   receipt['inputOriginalsKnown'] = input_originals_known
                   # Public fixed-source compiler output only; no binary/cache/runtime/signing upload.
                   try:
