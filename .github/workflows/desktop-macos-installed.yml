@@ -4859,6 +4859,9 @@ jobs:
                    'npm-ci', 'frontend-build', 'shipping-image-build')
           CAPTURE = 4 * 1024 * 1024
           SOURCE_LIMIT = 2 * 1024 * 1024
+          ARTIFACT_REASONS = ('cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
+                              'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
+                              'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
 
 
           def need(value, reason):
@@ -5050,7 +5053,8 @@ jobs:
               facade = checkout / 'desktop/helpers/macos-desktop-image'
               output = work / 'cargo-target' / TARGET / 'release/libmrk_desktop_image.dylib'
               selected = [row for row in rows if row['reason'] == 'compiler-artifact'
-                          and row.get('manifest_path') == str(facade / 'Cargo.toml')]
+                          and row.get('manifest_path') == str(facade / 'Cargo.toml')
+                          and type(row.get('target')) is dict and row['target'].get('name') == 'mrk_desktop_image']
               need(len(selected) == 1, 'cargo-facade-count')
               row = selected[0]
               target, profile = row.get('target'), row.get('profile')
@@ -5118,7 +5122,7 @@ jobs:
               receipt = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
                              workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
                              target=TARGET, commands=[], originalPending=False, sourcePost=False, toolsPost=False,
-                             frontendGenerated=False, facadeArtifactVerified=False, inputOriginalsKnown=True, toolOriginalsClosed=False,
+                             frontendGenerated=False, facadeArtifactVerified=False, facadeArtifactObserved=None, inputOriginalsKnown=True, toolOriginalsClosed=False,
                              generatedOutputsRetired=False, shippingGraphCompiled=False, installedQualified=False,
                              runtimeQualified=False, launched=False, signed=False, failure=None,
                              pythonController=None, pythonControllerObserved=None, pythonControllerRuntime=None,
@@ -5303,6 +5307,10 @@ jobs:
                   fd = os.open(path, flags)
                   try:
                       info = os.fstat(fd)
+                      receipt['facadeArtifactObserved'] = dict(mode=info.st_mode, uid=info.st_uid, gid=info.st_gid,
+                          nlink=info.st_nlink, size=info.st_size, regular=stat.S_ISREG(info.st_mode),
+                          ownerAllowed=info.st_uid == os.getuid(), singleLink=info.st_nlink == 1,
+                          sizeAllowed=0 < info.st_size <= 256 * 1024 * 1024)
                       need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
                            and 0 < info.st_size <= 256 * 1024 * 1024, 'compile-artifact-file')
                       digest, offset = hashlib.sha256(), 0
@@ -5446,7 +5454,7 @@ jobs:
                   receipt['release'] = release
               except BaseException as error:
                   receipt['failure'] = dict(stage=stage, kind=type(error).__name__)
-                  if type(error) is ValueError and len(error.args) == 1 and error.args[0] in CONTROLLER_REASONS:
+                  if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in CONTROLLER_REASONS + ARTIFACT_REASONS:
                       receipt['failure']['condition'] = error.args[0]
                   try:
                       receipt['failure']['ownerDiagnostic'] = owner_error_data(error, owner)

@@ -46,7 +46,7 @@ def workflow_step(workflow, name):
 
 # Exact independent shipping-compile job only. All prior installed/source
 # assertions receive their unchanged bytes; a partial or altered job refuses.
-SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 73267, 'c194c396b28813f9875f52e0d85ba13dac29196a289ebefbcc9dbc426b926dfc', ''))
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 74208, '4a74a4d98e113504d89eed6aaf0e979f7d232ef1026c3a8673f1e19c8bb521b0', ''))
 
 
 def without_shipping_compile_workflow(source):
@@ -8060,7 +8060,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         pure_names = {"need", "pairs", "finite_float", "document", "identity", "tool_shape_data", "returned_data", "commands_data",
                       "artifact_data", "cleanup_allowed_data", "passed_data", "controller_config_data",
                       "controller_audit_data", "controller_record_data", "controller_runtime_data", "owner_error_data"}
-        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT",
+        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT", "ARTIFACT_REASONS",
                      "CONTROLLER_BASE", "CONTROLLER_DIRS", "CONTROLLER_EXES", "CONTROLLER_SCRIPTS", "CONTROLLER_FILES", "CONTROLLER_REASONS"}
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
                     or isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -8225,6 +8225,13 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertIn("pending = True; receipt['originalPending'] = True", program)
         self.assertIn("if not pending and input_originals_known:", program)
         _target, output, rows, _macho = normal_cargo_fixture(work / 'cargo-target', checkout=checkout)
+        # Cargo emits a separate custom-build artifact for this SAME manifest.
+        build_script = copy.deepcopy(rows[0])
+        build_script['target'] = dict(name='build-script-build', kind=['custom-build'], crate_types=['bin'],
+                                      src_path=str(checkout / 'desktop/helpers/macos-desktop-image/build.rs'))
+        build_script['filenames'] = [str(work / 'cargo-target/release/build/fixed/build-script-build')]
+        build_script['executable'] = build_script['filenames'][0]
+        rows.append(build_script)
         rows.append({'reason': 'build-finished', 'success': True})
         encoded = lambda value: b''.join(json.dumps(row, separators=(',', ':')).encode() + b'\n' for row in value)
         self.assertEqual(ns['artifact_data'](encoded(rows), checkout, work), output)
@@ -8240,6 +8247,29 @@ class MacCurrentRuntimeData(unittest.TestCase):
         for raw in (b'', encoded(rows).rstrip(b'\n'), b'{"reason":"build-finished","success":true,"success":true}\n',
                     b'{"reason":"build-finished","success":true,"number":1e9999}\n'):
             with self.assertRaises(ValueError): ns['artifact_data'](raw, checkout, work)
+        output_hash_node = next(node for node in ast.walk(main_node) if isinstance(node, ast.FunctionDef) and node.name == 'output_hash')
+        original_body = next(node for node in output_hash_node.body if isinstance(node, ast.Try)).body
+        observed = next(node for node in original_body if isinstance(node, ast.Assign)
+                        and ast.unparse(node.targets[0]) == "receipt['facadeArtifactObserved']")
+        guard = next(node for node in original_body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                     and isinstance(node.value.func, ast.Name) and node.value.func.id == 'need')
+        self.assertLess(original_body.index(observed), original_body.index(guard))
+        artifact_shape_code = compile(ast.Module(body=[observed, guard], type_ignores=[]), '<artifact-original-shape-DATA>', 'exec')
+        info_values = dict(st_mode=stat.S_IFREG | 0o755, st_uid=501, st_gid=20, st_nlink=1, st_size=4096)
+        for mutation in ({}, {'st_nlink': 2}, {'st_nlink': 0}, {'st_uid': 0}, {'st_size': 0}, {'st_size': 256 * 1024 * 1024 + 1}):
+            receipt = {}; info = SimpleNamespace(**dict(info_values, **mutation))
+            env = dict(ns, receipt=receipt, info=info, os=SimpleNamespace(getuid=lambda: 501))
+            if mutation:
+                with self.assertRaisesRegex(ValueError, '^compile-artifact-file$'): exec(artifact_shape_code, env)
+            else: exec(artifact_shape_code, env)
+            shape = receipt['facadeArtifactObserved']
+            self.assertEqual(set(shape), {'mode', 'uid', 'gid', 'nlink', 'size', 'regular', 'ownerAllowed', 'singleLink', 'sizeAllowed'})
+            self.assertEqual(shape['nlink'], info.st_nlink)
+            self.assertEqual(shape['singleLink'], info.st_nlink == 1)
+            self.assertNotIn('sha256', shape)  # A refused original was never hashed/qualified.
+            self.assertNotIn('facadeArtifactVerified', receipt)
+        self.assertIn('compile-artifact-file', ns['ARTIFACT_REASONS'])
+        self.assertNotIn('arbitrary private message', ns['ARTIFACT_REASONS'])
         command_rows = [dict(role=role, returned=True, capturesSettled=True, returncode=0) for role in ns['ROLES']]
         good = dict(commands=command_rows, originalPending=False, sourcePost=True, toolsPost=True, inputOriginalsKnown=True,
                     frontendGenerated=True, facadeArtifactVerified=True, toolOriginalsClosed=True, generatedOutputsRetired=True,
