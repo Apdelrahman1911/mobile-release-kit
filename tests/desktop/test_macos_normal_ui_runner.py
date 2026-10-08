@@ -2186,6 +2186,140 @@ class NormalPhaseDataTests(unittest.TestCase):
         classified = MODULE.classify_normal_admission_failure(errors.getvalue().encode())
         self.assertEqual((classified["stage"], classified["exceptionClass"]), ("loader", "AttributeError"))
         self.assertNotIn(private, errors.getvalue())
+        # Real result-query guard with inert original/FD doubles only. There is
+        # no xcresult bundle, native command, filesystem access or new owner.
+        base = (11, 22, stat.S_IFDIR | 0o700, 1001, 1002, 2, 4096, 700, 800)
+        names = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        mask_keys = ("heldVsPre", "namedVsPre", "heldVsNamed")
+        request = dict(target=MODULE.ARM_TARGET, methods=(MODULE.OUTPUT_DATA_METHOD,), allowance=60,
+            timeout=120, phaseSeconds=345, derived=Path("/inert/normal-ui/DerivedData"),
+            result=Path("/inert/normal-ui/output-data-test.xcresult"))
+        def exercise(held, named, *, query_kind="summary", nonzero=False, annotation_fault=False, close_fault=False):
+            events, records, published = [], [], []
+            guard_error = MODULE.Refused("output-data-result-post")
+            original = subprocess.CompletedProcess(["inert-xctest"], 0, b"inert-original", b"")
+            real_need = MODULE.need
+            def need_original(condition, reason):
+                if not condition and reason == "output-data-result-post": raise guard_error
+                return real_need(condition, reason)
+            def current(values):
+                changed_at = 1 if query_kind == "summary" else 2
+                return values if len(records) >= changed_at else base
+            def fd_stat(fd):
+                self.assertEqual(fd, 77); events.append("fstat")
+                return SimpleNamespace(**dict(zip(names, current(held))))
+            def named_stat(path, *, follow_symlinks):
+                self.assertEqual(path, request["result"]); self.assertFalse(follow_symlinks); events.append("stat")
+                return SimpleNamespace(**dict(zip(names, current(named))))
+            def consume(fd):
+                self.assertEqual(fd, 77); events.append("close")
+                if close_fault: raise OSError("inert-consuming-close")
+            def clock_check():
+                events.append("clock")
+            def source_state(*args): events.append("source"); return ()
+            def query(role, argv, cap, limit):
+                self.assertEqual((cap, limit), (30, 262144)); events.append(role)
+                code = 17 if nonzero and argv[4] == query_kind else 0
+                records.append(dict(command, role=role, returncode=code, timeoutSeconds=30, roleCapSeconds=30,
+                    outputLimitBytes=262144, stdoutBytes=1, stderrBytes=0))
+                return subprocess.CompletedProcess(argv, code, b"x", b"")
+            def parse(*args): events.append("parse"); return {"inert": True}
+            def capture(*args): events.append("write"); published.append(args)
+            def annotate_failure(*args): raise KeyboardInterrupt("inert-annotation-interruption")
+            phase = SimpleNamespace(call=query, records=records,
+                clock=SimpleNamespace(check=clock_check, before_publication=lambda: {}))
+            returned = caught = None
+            with ExitStack() as stack:
+                for name, replacement in (("normal_source_state", source_state),
+                        ("output_data_read_build", lambda *args: "a" * 64),
+                        ("run_admitted_test", lambda *args, **kwargs: (original, {})),
+                        ("open_directory", lambda *args: 77), ("need", need_original),
+                        ("os", SimpleNamespace(fstat=fd_stat, stat=named_stat, close=consume,
+                                               getuid=lambda: base[3], getgid=lambda: base[4])),
+                        ("output_data_result", parse), ("exclusive_output", capture)):
+                    stack.enter_context(patch.object(MODULE, name, replacement))
+                if annotation_fault:
+                    stack.enter_context(patch.object(MODULE, "output_data_result_post_masks", annotate_failure))
+                try: returned = MODULE.execute_output_data_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                except BaseException as error: caught = error
+            self.assertEqual(events.count("close"), 1)
+            self.assertEqual(events.count("clock"), 2 if caught is None and returned.returncode == 0 else 1)
+            return returned, caught, guard_error, records, events, published
+
+        # Every full9 field remains mandatory, even when held and named agree
+        # with each other at a different value. Such two-change masks are valid.
+        for index in range(9):
+            altered = tuple(value + (slot == index) for slot, value in enumerate(base))
+            with self.subTest(result_post_component=index):
+                returned, caught, expected, records, events, published = exercise(altered, altered)
+                self.assertIsNone(returned); self.assertIs(caught, expected)
+                self.assertEqual(events, ["source", "fstat", "stat", "normal-ui-summary", "fstat", "stat", "close", "clock"])
+                self.assertEqual(published, [])
+                result = MODULE.normal_admission_failure("execute", caught, None, records)
+                observation = result["resultPost"]
+                self.assertEqual(observation, dict(schemaVersion=1, query="summary", originalReturncode=0,
+                    heldVsPre=[slot == index for slot in range(9)], namedVsPre=[slot == index for slot in range(9)],
+                    heldVsNamed=[False] * 9))
+                projected = MODULE.classify_normal_admission_failure(MODULE.encoded(result))
+                self.assertEqual(projected["resultPost"], observation)
+                self.assertEqual(projected["status"], "observed-exception-only")
+                self.assertFalse(projected["nativeSuccessInferred"])
+                self.assertLessEqual(len(MODULE.encoded(projected)) + 1, 4096)
+        replacement = tuple(value + (index == 1) for index, value in enumerate(base))
+        returned, caught, expected, records, events, published = exercise(base, replacement, query_kind="tests")
+        self.assertIs(caught, expected); self.assertIsNone(returned); self.assertEqual(published, [])
+        self.assertEqual([x for x in events if x.startswith("normal-ui-")], ["normal-ui-summary", "normal-ui-test-tree"])
+        self.assertNotIn("parse", events); self.assertNotIn("write", events); self.assertEqual(events.count("source"), 1)
+        valid = MODULE.normal_admission_failure("execute", caught, None, records)
+        self.assertEqual(valid["resultPost"]["heldVsPre"], [False] * 9)
+        self.assertEqual(valid["resultPost"]["namedVsPre"], [index == 1 for index in range(9)])
+        self.assertEqual(valid["resultPost"]["heldVsNamed"], valid["resultPost"]["namedVsPre"])
+        other = tuple(value + 2 * (index == 1) for index, value in enumerate(base))
+        triple = MODULE.output_data_result_post_masks("tests", base, replacement, other)
+        self.assertEqual(MODULE.admit_output_data_result_post(triple, records), triple)
+        for flags in ((True, False), (False, True)):
+            returned, caught, expected, observed_records, events, published = exercise(replacement, replacement,
+                annotation_fault=flags[0], close_fault=flags[1])
+            self.assertIs(caught, expected); self.assertIsNone(returned); self.assertEqual(published, [])
+            self.assertEqual(events[-2:], ["close", "clock"])
+            value = MODULE.normal_admission_failure("execute", caught, None, observed_records)
+            self.assertEqual("resultPost" in value, not flags[0])
+        for kind in ("summary", "tests"):
+            returned, caught, _, observed_records, events, published = exercise(replacement, replacement, query_kind=kind, nonzero=True)
+            self.assertIsNone(caught); self.assertEqual(returned.returncode, 17); self.assertEqual(published, [])
+            self.assertNotIn("parse", events); self.assertNotIn("write", events)
+            self.assertEqual(events.count("source"), 1)
+            self.assertEqual(len(observed_records), 1 if kind == "summary" else 2)
+        returned, caught, _, records_ok, events, published = exercise(base, base)
+        self.assertIsNone(caught); self.assertEqual(returned.returncode, 0); self.assertEqual(len(published), 1)
+        self.assertEqual(events.count("source"), 2); self.assertEqual(events.count("parse"), 1)
+
+        # Closed decoder: no raw stats/names/paths, impossible equality triples,
+        # absent guard failure, wrong query original, or later command is accepted.
+        bad_observations = [dict(valid["resultPost"], **change) for change in (
+            {"schemaVersion": True}, {"query": "private-query"}, {"originalReturncode": True},
+            {"extra": private}, {"heldVsPre": [False] * 8}, {"heldVsPre": [0] * 9},
+            {"heldVsPre": [False] * 9, "namedVsPre": [False] * 9, "heldVsNamed": [False] * 9})]
+        for index in range(3):
+            impossible = dict(valid["resultPost"], **{key: [False] * 9 for key in mask_keys})
+            impossible[mask_keys[index]][0] = True
+            bad_observations.append(impossible)
+        invalid_records = [dict(valid, resultPost=entry) for entry in bad_observations]
+        invalid_records += [dict(valid, **change) for change in (
+            {"stage": "loader"}, {"exceptionClass": "OSError"},
+            {"commands": [dict(valid["commands"][-1], returncode=1)]},
+            {"commands": [dict(valid["commands"][-1], role="normal-ui-summary")]},
+            {"commands": valid["commands"] + [dict(command, role="normal-ui-source-roster", returncode=0)]})]
+        for invalid in invalid_records:
+            self.assertEqual(MODULE.classify_normal_admission_failure(MODULE.encoded(invalid))["status"], "unavailable")
+        for stage, error in (("loader", expected), ("execute", MODULE.Refused("different-refusal")),
+                             ("execute", ValueError("output-data-result-post"))):
+            error._output_data_result_post = valid["resultPost"]
+            self.assertNotIn("resultPost", MODULE.normal_admission_failure(stage, error, None, valid["commands"]))
+        with patch.object(MODULE, "admit_output_data_result_post", side_effect=KeyboardInterrupt(private)):
+            expected._output_data_result_post = valid["resultPost"]
+            self.assertNotIn("resultPost", MODULE.normal_admission_failure("execute", expected, None, valid["commands"]))
+
 
     def test_normal_runner_build_is_early_but_ui_stays_after_installation(self):
         workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()

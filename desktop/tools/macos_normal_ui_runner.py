@@ -1740,6 +1740,38 @@ def output_data_result(stdout, summary_body, tests_body):
         "oneOriginalAttemptObserved": True, "productReady": False}
 
 
+def output_data_result_post_masks(query, before, held, named):
+    """Changed-component booleans only, in full9 order; no raw identity values."""
+    return dict(schemaVersion=1, query=query, originalReturncode=0,
+        heldVsPre=[a != b for a, b in zip(held, before, strict=True)],
+        namedVsPre=[a != b for a, b in zip(named, before, strict=True)],
+        heldVsNamed=[a != b for a, b in zip(held, named, strict=True)])
+
+
+def admit_output_data_result_post(value, records):
+    """Optional refusal observation, never permission to adopt changed facts."""
+    masks = ("heldVsPre", "namedVsPre", "heldVsNamed")
+    need(type(value) is dict and set(value) == {"schemaVersion", "query", "originalReturncode", *masks}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and type(value["query"]) is str and value["query"] in ("summary", "tests")
+         and type(value["originalReturncode"]) is int and value["originalReturncode"] == 0,
+         "output-data-post-observation-fields")
+    need(all(type(value[key]) is list and len(value[key]) == 9
+             and all(type(item) is bool for item in value[key]) for key in masks), "output-data-post-masks")
+    # Equality is transitive: exactly one differing pair is impossible. Two
+    # changed pairs are valid, including held and named changing to the SAME value.
+    need(all(sum(parts) in (0, 2, 3) for parts in zip(*(value[key] for key in masks), strict=True))
+         and any(value["heldVsPre"] + value["namedVsPre"]), "output-data-post-mask-consistency")
+    role = "normal-ui-summary" if value["query"] == "summary" else "normal-ui-test-tree"
+    need(type(records) is list and 0 < len(records) <= 16 and type(records[-1]) is dict
+         and records[-1].get("role") == role and type(records[-1].get("returncode")) is int
+         and records[-1]["returncode"] == 0, "output-data-post-final-original")
+    result = dict(schemaVersion=1, query=value["query"], originalReturncode=0,
+                  **{key: list(value[key]) for key in masks})
+    need(len(encoded(result)) <= 1024, "output-data-post-observation-bound")
+    return result
+
+
 def execute_output_data_phase(phase, request, source, file_limit):
     need(request["target"] == ARM_TARGET and request["methods"] == (OUTPUT_DATA_METHOD,)
          and request["allowance"] == 60 and request["timeout"] == 120 and request["phaseSeconds"] == 345,
@@ -1766,8 +1798,17 @@ def execute_output_data_phase(phase, request, source, file_limit):
             if query.returncode != 0:
                 failed_query = query
                 break
-            need(full9(os.fstat(result_fd)) == full9(os.stat(result, follow_symlinks=False)) == result_facts,
-                 "output-data-result-post")
+            held_after = full9(os.fstat(result_fd))
+            named_after = full9(os.stat(result, follow_symlinks=False))
+            try:
+                need(held_after == named_after == result_facts, "output-data-result-post")
+            except Refused as error:
+                try:
+                    error._output_data_result_post = output_data_result_post_masks(
+                        kind, result_facts, held_after, named_after)
+                except BaseException:
+                    pass  # Optional observation cannot replace this exact first refusal.
+                raise
             bodies.append(query.stdout)
     except BaseException as error:
         primary = error
@@ -2421,9 +2462,16 @@ def normal_admission_failure(stage, error, owner, records):
         if filename in allowed and type(line) is int and 1 <= line <= 1_000_000:
             frames.append({"source": allowed[filename], "line": line})
         current = current.tb_next
-    return {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
+    result = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
         "error": "runner-admission-or-owner-error", "stage": stage, "exceptionClass": label,
         "sourceFrames": frames, "commands": records, "ownerFailure": owner_failure, "unknownStateRetained": True}
+    if stage == "execute" and type(error) is Refused and error.args == ("output-data-result-post",):
+        try:
+            result["resultPost"] = admit_output_data_result_post(
+                getattr(error, "_output_data_result_post", None), records)
+        except BaseException:
+            pass  # No invalid/absent optional metadata changes the primary error.
+    return result
 
 
 def classify_normal_admission_failure(body):
@@ -2433,8 +2481,9 @@ def classify_normal_admission_failure(body):
         "unknownStateRetained": True}
     try:
         value = document(body)
-        need(set(value) == {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
-             "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}, "admission-fields")
+        fields = {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
+                  "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}
+        need(set(value) in (fields, fields | {"resultPost"}), "admission-fields")
         need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
              and value["scope"] == "generated-ui-runner-refused" and value["productReady"] is False
              and value["error"] == "runner-admission-or-owner-error" and value["unknownStateRetained"] is True
@@ -2469,6 +2518,10 @@ def classify_normal_admission_failure(body):
             projected.append({key: command[key] for key in ("role", "returncode", "stdoutBytes", "stderrBytes")})
         result = dict(unavailable, status="observed-exception-only", stage=value["stage"],
             exceptionClass=value["exceptionClass"], sourceFrames=frames, ownerFailure=owner, commands=projected)
+        if "resultPost" in value:
+            need(value["stage"] == "execute" and value["exceptionClass"] == "Refused",
+                 "output-data-post-exception-context")
+            result["resultPost"] = admit_output_data_result_post(value["resultPost"], commands)
         need(len(encoded(result)) + 1 <= 4096, "admission-projection-bound")
         return result
     except Exception:
