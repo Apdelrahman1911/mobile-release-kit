@@ -295,13 +295,26 @@ export class EnvironmentDiagnosticsController {
   }
   private claimCancel(api: DesktopApi, row: EnvironmentDiagnosticsProjection): boolean {
     if (sameRun(this.state.cancelClaimed, row)) return false;
-    this.update({ cancelClaimed: { runId: row.runId, ownerGeneration: row.ownerGeneration } });
-    void this.cancelCommand(api, row.runId, row.ownerGeneration);
+    const claim = { runId: row.runId, ownerGeneration: row.ownerGeneration };
+    const binding = this.state.attempt?.binding ?? null, generation = this.state.connectionGeneration;
+    this.update({ cancelClaimed: claim });
+    void this.cancelCommand(api, claim, binding, generation);
     return true;
   }
-  private async cancelCommand(api: DesktopApi, runId: string, ownerGeneration: string): Promise<void> {
-    try { this.receive(await api.cancelEnvironmentDiagnostics(runId, ownerGeneration), 'reply'); }
-    catch (error) { if (!this.disposed) { this.failed(error); await this.checkStatus(); } }
+  private async cancelCommand(api: DesktopApi, claim: { runId: string; ownerGeneration: string },
+    binding: EnvironmentDiagnosticsBinding | null, generation: number): Promise<void> {
+    // Attempt records are copied on status updates; the binding and claim retain
+    // identity. A terminal original may permit a new explicit Start before this reply.
+    const current = (): boolean => !this.disposed && this.api === api && this.state.connectionGeneration === generation &&
+      this.state.cancelClaimed === claim && (this.state.attempt?.binding ?? null) === binding;
+    try {
+      const status = await api.cancelEnvironmentDiagnostics(claim.runId, claim.ownerGeneration);
+      if (current()) this.receive(status, 'reply');
+    } catch (error) {
+      if (!current()) return;
+      this.failed(error);
+      if (current()) await this.checkStatus();
+    }
   }
   dispose(): void {
     if (this.disposed) return;

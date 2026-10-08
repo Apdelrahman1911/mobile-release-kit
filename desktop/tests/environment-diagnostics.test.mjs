@@ -337,10 +337,125 @@ test('project/draft/baseline, context, navigation, picker and connection changes
     const h = harness(); await acknowledged(h); change(h);
     assert.equal(h.calls.length, 2); assert.equal(h.calls[1].kind, 'cancel');
     assert.deepEqual(h.calls[1].input, { runId: RUN, ownerGeneration: GENERATION });
+    const disconnected = h.state.mode === 'unavailable' ? h.state : null, reads = h.reads.length;
     h.reply(h.calls[1], status(2, null, finished())); await flush();
+    if (disconnected) {
+      // The retired observer's reply is not a current observation or settlement.
+      assert.equal(h.state, disconnected); assert.equal(h.state.observation, null);
+      assert.equal(h.state.attempt.projection.runId, RUN); assert.equal(h.state.attempt.projection.ownerGeneration, GENERATION);
+      assert.equal(h.state.attempt.projection.finality, 'pending'); assert.equal(h.state.status.active.runId, RUN);
+      assert.equal(h.reads.length, reads); assert.notEqual(diagnosticsOwnerReason(h.state), null);
+      // Only the explicitly reconnected observer's current registry read settles A.
+      await h.controller.connect(h.api);
+      assert.equal(h.reads.length, reads + 1); assert.equal(h.state.status.active, null);
+      assert.equal(h.state.status.lastTerminal.runId, RUN); assert.equal(h.state.status.lastTerminal.ownerGeneration, GENERATION);
+      assert.equal(h.state.status.lastTerminal.finality, 'settled'); assert.equal(h.state.attempt.projection.finality, 'settled');
+      assert.equal(h.state.attempt.binding, disconnected.attempt.binding);
+    }
     assert.equal(h.state.observation.stale, true); assert.equal(h.state.attempt.invalidated, true);
     h.controller.dispose(); assert.equal(h.calls.length, 2);
   }
+
+
+  const pairA = { runId: RUN, ownerGeneration: GENERATION };
+  const pairB = { runId: OTHER, ownerGeneration: 'd'.repeat(32) };
+  const cancelCount = (h) => h.calls.filter((call) => call.kind === 'cancel').length;
+  // A settled original is not a barrier to explicit B. Its pending Cancel reply
+  // must not parse, fail, read status for, or cancel the replacement attempt.
+  for (const completion of ['malformed', 'rejected', 'valid']) {
+    const h = harness(); await acknowledged(h);
+    assert.equal(h.controller.cancel(pairA), true);
+    const cancelA = h.calls[1];
+    h.emit(status(2, null, finished()));
+    assert.equal(h.controller.startReason(), null); assert.equal(h.controller.start(), true);
+    const startB = h.calls[2], bindingB = h.state.attempt.binding;
+    h.reply(startB, status(3, owner({ ...pairB, phase: 'checking' }), finished())); await flush();
+    assert.equal(startB.kind, 'start'); assert.equal(h.state.attempt.acknowledged, true);
+    assert.equal(h.state.attempt.projection.runId, OTHER); assert.equal(h.state.attempt.projection.phase, 'checking');
+    assert.equal(h.state.attempt.projection.finality, 'pending'); assert.equal(h.state.attempt.stopRequested, false);
+    assert.equal(h.state.attempt.invalidated, false);
+    const before = h.state, reads = h.reads.length;
+    if (completion === 'malformed') cancelA.resolve({ raw: 'PRIVATE_OLD_CANCEL' });
+    else if (completion === 'rejected') cancelA.reject(new Error('PRIVATE_OLD_CANCEL'));
+    else cancelA.resolve(status(2, null, finished()));
+    await flush();
+    assert.equal(cancelCount(h), 1, 'A stale Cancel completion must not dispatch Cancel for B');
+    assert.equal(h.state, before, 'A stale Cancel completion must not mutate B');
+    assert.equal(h.state.attempt.binding, bindingB); assert.equal(h.reads.length, reads);
+    assert.equal(h.calls.filter((call) => call.kind === 'start').length, 2);
+    h.controller.dispose();
+    assert.equal(cancelCount(h), 2); assert.deepEqual(h.calls[3].input, pairB);
+    const retired = h.state; h.calls[3].resolve(status(4, null, finished(pairB))); await flush();
+    assert.equal(h.state, retired);
+  }
+
+  // Current replies retain the original successful/protocol/transport behavior.
+  for (const completion of ['valid', 'malformed', 'rejected']) {
+    const h = harness(); await acknowledged(h);
+    const binding = h.state.attempt.binding, reads = h.reads.length, observedErrors = [];
+    const release = h.controller.subscribe(() => { if (h.state.error) observedErrors.push(h.state.error.code); });
+    try {
+      assert.equal(h.controller.cancel(pairA), true); assert.equal(h.controller.cancel(pairA), false);
+      if (completion === 'valid') h.reply(h.calls[1], status(2, null, finished()));
+      else if (completion === 'malformed') h.calls[1].resolve({ raw: 'PRIVATE_CURRENT_CANCEL' });
+      else h.calls[1].reject(new Error('PRIVATE_CURRENT_CANCEL'));
+      await flush();
+      assert.equal(cancelCount(h), 1); assert.equal(h.state.attempt.binding, binding);
+      assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+      assert.equal(JSON.stringify(h.state).includes('PRIVATE'), false);
+      if (completion === 'valid') {
+        assert.equal(h.state.attempt.projection.finality, 'settled'); assert.equal(h.state.status.active, null);
+        assert.equal(h.controller.startReason(), null); assert.equal(h.reads.length, reads);
+      } else if (completion === 'malformed') {
+        assert.equal(h.state.integrityFailed, true); assert.equal(h.state.error.code, 'environment_diagnostics_status_invalid');
+        assert.equal(h.state.attempt.invalidated, true); assert.equal(h.state.attempt.stopRequested, true);
+        assert.equal(h.controller.start(), false); assert.equal(h.reads.length, reads);
+      } else {
+        assert.ok(observedErrors.includes('environment_diagnostics_connection_lost'));
+        assert.equal(h.reads.length, reads + 1); assert.equal(h.state.integrityFailed, false);
+        assert.equal(h.state.status.active.runId, RUN); assert.equal(h.state.attempt.projection.finality, 'pending');
+        assert.equal(h.controller.start(), false);
+      }
+    } finally { release(); h.controller.dispose(); }
+    assert.equal(cancelCount(h), 1);
+  }
+
+  // Reusing the same API object is still a different observer generation.
+  const reconnected = harness(); await acknowledged(reconnected);
+  assert.equal(reconnected.controller.cancel(pairA), true);
+  const oldCancel = reconnected.calls[1];
+  reconnected.controller.beginConnection(); await reconnected.controller.connect(reconnected.api);
+  const observer = reconnected.state, reads = reconnected.reads.length;
+  oldCancel.resolve({ raw: 'PRIVATE_REPLACED_OBSERVER' }); await flush();
+  assert.equal(reconnected.state, observer); assert.equal(reconnected.reads.length, reads);
+  assert.equal(reconnected.state.attempt.projection.finality, 'pending'); assert.equal(cancelCount(reconnected), 1);
+  reconnected.controller.dispose();
+
+  // Explicit Cancel of a displayed native original does not require a Start binding.
+  const displayed = harness({ initial: status(1, owner()) }); await displayed.ready;
+  assert.equal(displayed.state.attempt, null); assert.equal(displayed.controller.cancel(pairA), true);
+  assert.equal(displayed.calls[0].kind, 'cancel'); assert.deepEqual(displayed.calls[0].input, pairA);
+  displayed.reply(displayed.calls[0], status(2, null, finished())); await flush();
+  assert.equal(displayed.state.attempt, null); assert.equal(displayed.state.status.lastTerminal.finality, 'settled');
+  assert.equal(displayed.calls.filter((call) => call.kind === 'start').length, 0); displayed.controller.dispose();
+
+  // A displayed B can also be unrelated to the retained, already-settled A attempt.
+  const unrelated = harness(); await acknowledged(unrelated);
+  assert.equal(unrelated.controller.cancel(pairA), true);
+  unrelated.emit(status(2, null, finished()));
+  unrelated.emit(status(3, owner({ ...pairB, phase: 'checking' }), finished()));
+  const retainedBinding = unrelated.state.attempt.binding;
+  assert.equal(unrelated.state.attempt.projection.runId, RUN);
+  assert.equal(unrelated.controller.cancel(pairB), true); assert.deepEqual(unrelated.calls[2].input, pairB);
+  const current = unrelated.state;
+  unrelated.calls[1].resolve({ raw: 'PRIVATE_SUPERSEDED_CLAIM' }); await flush();
+  assert.equal(unrelated.state, current); assert.equal(cancelCount(unrelated), 2);
+  unrelated.reply(unrelated.calls[2], status(4, null, finished(pairB))); await flush();
+  assert.equal(unrelated.state.status.lastTerminal.runId, OTHER); assert.equal(unrelated.state.status.lastTerminal.finality, 'settled');
+  assert.equal(unrelated.state.attempt.binding, retainedBinding); assert.equal(unrelated.state.attempt.projection.runId, RUN);
+  assert.equal(unrelated.state.observation.binding, null); assert.equal(unrelated.state.observation.stale, true);
+  assert.equal(unrelated.calls.filter((call) => call.kind === 'start').length, 1);
+  unrelated.controller.dispose(); assert.equal(cancelCount(unrelated), 2);
 });
 
 test('late Start acknowledgment after invalidation cancels only its exact original pair; synchronous pre-invoke retirement sends nothing', async () => {

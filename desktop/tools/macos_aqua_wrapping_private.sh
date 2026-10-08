@@ -840,7 +840,9 @@ def admit_peer_case(value, reader, frame_bytes):
             or h[7] != 0 or h[8] & 1 != 1 or h[12] != 1 or h[15:18] != [5, 5, 5]):
         raise ValueError("pair-lookup-original")
     raw = value["raw"]
-    expected_calls = [[4, 1, 1, 0], [5, 1, 1, 0], [6, 1, 1, 0], [11, 1, 1, -25308 if reader else 0]]
+    # Keep the observed denial categories distinct; never accept arbitrary errors.
+    lookup_status = {6: -25308, 7: -25293}.get(h[2]) if reader else 0
+    expected_calls = [[4, 1, 1, 0], [5, 1, 1, 0], [6, 1, 1, 0], [11, 1, 1, lookup_status]]
     if not reader: expected_calls.append([12, 1, 1, 0])
     expected_refs = [[1, 1, 1, 1, 1, 1]] * (5 if reader else 7)
     if reader: expected_refs.append([1, 1, 1, 0, 0, 0])
@@ -852,9 +854,9 @@ def admit_peer_case(value, reader, frame_bytes):
         raise ValueError("pair-full-native-namespace-custody")
     item = [row for row in value["raw"]["calls"] if row[0] in (10, 11)]
     if reader:
-        if (h[2] != 6 or h[5] != 11 or h[6] != 1249 or h[11] != 0 or item != [[11, 1, 1, -25308]]
+        if (h[2] not in (6, 7) or h[5] != 11 or h[6] != 1249 or h[11] != 0 or item != [[11, 1, 1, lookup_status]]
                 or value["frameRetired"] is not True or value["comparison"] is not None):
-            raise ValueError("pair-reader-unlocked-returned-uifail-required")
+            raise ValueError("pair-reader-unlocked-returned-noninteractive-denial-required")
     elif (h[2] != 2 or h[5] != 0 or h[6] != 1145 or h[11] != 32 or item != [[11, 1, 1, 0]]
             or value["frameRetired"] is not False or ints(value["comparison"], 5) != [1, 1, 1, frame_bytes, 1]):
         raise ValueError("pair-creator-contemporaneous-comparison-required")

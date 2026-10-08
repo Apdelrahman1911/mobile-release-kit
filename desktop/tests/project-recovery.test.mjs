@@ -209,6 +209,71 @@ test('partial failure and unconfirmed finality cannot reset the original owner o
   const subscriptions = h.listeners.length;
   h.controller.beginConnection(); await h.controller.connect({ ...h.api });
   assert.equal(h.listeners.length, subscriptions); assert.ok(projectRecoveryOwnerReason(h.state));
+
+  for (const late of ['reject', 'malformed']) {
+    const h = harness(t); await h.ready;
+    const firstPreparing = h.controller.prepare('inspect'), firstCall = h.calls.at(-1);
+    assert.equal(firstCall.kind, 'prepare');
+    const first = operation({ context: { ...firstCall.input, review: null } });
+    h.reply(firstCall, status(1, first, 'busy')); await flush();
+    const firstStart = h.calls.at(-1); assert.equal(firstStart.kind, 'start');
+    h.reply(firstStart, status(2, { ...first, phase: 'running', intentUsable: false }, 'busy')); await firstPreparing;
+    assert.equal(h.state.status.operation.phase, 'running');
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1); assert.equal(cancel.kind, 'cancel');
+    assert.deepEqual(cancel.input, { operationId: first.operationId, ownerGeneration: first.ownerGeneration });
+    const settled = { ...first, phase: 'terminal', intentUsable: false, outcome: 'cancelled', reason: 'cancelled' };
+    h.emit(status(3, settled)); await flush();
+    assert.deepEqual(clone(h.state.status.operation), settled);
+    assert.equal(h.state.integrityFailed, false); assert.equal(h.state.nativeBlocked, false);
+    assert.equal(h.controller.prepareReason('inspect'), null);
+    // A second explicit Inspect is sufficient: no fabricated recovery eligibility.
+    const nextPreparing = h.controller.prepare('inspect'), nextCall = h.calls.at(-1);
+    assert.equal(nextCall.kind, 'prepare');
+    const next = operation({ operationId: NEXT, ownerGeneration: '1'.repeat(32), context: { ...nextCall.input, review: null } });
+    h.reply(nextCall, status(4, next, 'busy')); await flush();
+    const nextStart = h.calls.at(-1); assert.equal(nextStart.kind, 'start');
+    h.reply(nextStart, status(5, { ...next, phase: 'running', intentUsable: false }, 'busy')); await nextPreparing;
+    assert.equal(h.state.status.operation.operationId, next.operationId);
+    assert.equal(h.state.status.operation.ownerGeneration, next.ownerGeneration);
+    assert.equal(h.state.status.operation.phase, 'running');
+    assert.equal(h.state.historical, false); assert.equal(h.state.error, null);
+    const current = clone(h.state);
+    if (late === 'reject') cancel.reject({ code: 'lost-response', message: 'PRIVATE OLD CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1,
+      'A stale Cancel completion must not dispatch Cancel for B');
+    assert.deepEqual(clone(h.state), current);
+    assert.deepEqual(h.calls.filter((call) => call.kind === 'cancel').map((call) => call.input),
+      [{ operationId: first.operationId, ownerGeneration: first.ownerGeneration }]);
+    h.emit(status(6, complete(next))); await flush();
+    assert.equal(h.state.status.operation.phase, 'terminal');
+    assert.equal(h.state.originalUnconfirmed, false);
+  }
+
+  for (const completion of ['valid', 'reject', 'malformed']) {
+    const h = harness(t); await inspect(h); const original = await review(h);
+    assert.equal(h.controller.cancel(), true);
+    const cancel = h.calls.at(-1); assert.equal(cancel.kind, 'cancel');
+    const settled = { ...original, phase: 'terminal', intentUsable: false, outcome: 'cancelled', reason: 'cancelled' };
+    if (completion === 'valid') h.reply(cancel, status(5, settled));
+    else if (completion === 'reject') cancel.reject({ code: 'lost-response', message: 'PRIVATE CURRENT CANCEL' });
+    else cancel.resolve({ schemaVersion: 999 });
+    await flush();
+    assert.equal(h.state.consent, null);
+    assert.equal(h.calls.filter((call) => call.kind === 'cancel').length, 1);
+    if (completion === 'valid') {
+      assert.deepEqual(clone(h.state.status.operation), settled);
+      assert.equal(h.state.error, null); assert.equal(h.state.integrityFailed, false);
+    } else {
+      assert.equal(h.state.observationIssue, completion === 'reject' ? 'bridge' : 'protocol');
+      assert.equal(h.state.integrityFailed, completion === 'malformed');
+      assert.equal(h.state.nativeBlocked, completion === 'malformed');
+      assert.ok(!JSON.stringify(h.state).includes('PRIVATE'));
+      h.emit(status(5, settled)); await flush();
+    }
+  }
 });
 
 test('conflicting native revisions and provisional results are rejected before returning UI consent', async (t) => {

@@ -8523,6 +8523,54 @@ class CreatorReaderUIFailDataTests(unittest.TestCase):
             bad = deepcopy(creator); bad["comparison"][field] = 0
             with self.assertRaises(ValueError): f["admit_peer_case"](bad, False, 40960)
 
+        # Both exact classic-Keychain denials are parser DATA, not native passes.
+        # All previous checks above remain, including -25293 with outcome6.
+        for status, outcome in ((-25308, 6), (-25293, 7)):
+            with self.subTest(status=status, outcome=outcome):
+                denied = self.lookup_data(True)
+                denied["raw"]["header"][2] = outcome
+                denied["raw"]["calls"][-1][3] = status
+                f["admit_peer_case"](denied, True, 40960)
+                for wrong_status in (0, -25300, -128, -25291, -25315, -1,
+                                     -25293 if status == -25308 else -25308):
+                    bad = deepcopy(denied); bad["raw"]["calls"][-1][3] = wrong_status
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                for index, value in ((2, 3), (2, 5), (2, 2), (3, 1), (5, 10), (6, 1253),
+                                     (8, 0), (11, 32), (12, 0), (17, 4)):
+                    bad = deepcopy(denied); bad["raw"]["header"][index] = value
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                for section, index, field, value in (("calls", 3, 2, 0), ("calls", 3, 0, 10),
+                                                     ("references", 0, 5, 0), ("descriptors", 0, 7, 0)):
+                    bad = deepcopy(denied); bad["raw"][section][index][field] = value
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                for key, value in (("frameRetired", False), ("retainedNativeBytes", 40960),
+                                   ("nativeReturned", False), ("verified", False), ("scopedValuePresent", True),
+                                   ("selection", [1, 1, 1, True, 0, 1]), ("comparison", [1] * 5)):
+                    bad = deepcopy(denied); bad[key] = value
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                bad = deepcopy(denied); bad["raw"]["calls"].append([11, 1, 1, status])
+                bad["raw"]["header"][10] += 1
+                with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                for index, value in ((2, 1), (8, 0), (9, 0)):
+                    bad = deepcopy(denied); bad["raw"]["policy"]["header"][index] = value
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+                for index, field, value in ((1, 5, 1), (3, 1, 0), (4, 6, 0)):
+                    bad = deepcopy(denied); bad["raw"]["policy"]["calls"][index][field] = value
+                    with self.assertRaises(ValueError): f["admit_peer_case"](bad, True, 40960)
+
+        # Bind the native predicate's closed two-way dispatch without executing
+        # Rust or substituting a fabricated native CaseReturn.
+        native = PATH.parents[1] / "native/macos-installed-native/src"
+        pair = (native / "wrapping_keychain_pair.rs").read_text()
+        signature = "fn reader_denied(row: &CaseReturn) -> bool {"
+        self.assertEqual(pair.count(signature), 1)
+        reader = " ".join(pair.split(signature, 1)[1].split("\n}", 1)[0].split())
+        self.assertIn("let denied = match f.outcome() { "
+                      "Outcome::InteractionRequired => exact_lookup(f, -25308), "
+                      "Outcome::AuthenticationFailed => exact_lookup(f, -25293), _ => false, };", reader)
+        self.assertIn("f.process_interaction_restored() && f.raw.policy.role == 2 && denied", reader)
+        self.assertNotIn("||", reader)
+
     @staticmethod
     def control_data(role):
         # Closed state model, not a report claimed to have run the native book.
