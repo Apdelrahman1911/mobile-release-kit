@@ -7395,6 +7395,13 @@ class MacAndroidSupportData(unittest.TestCase):
             for forbidden in ("GH_TOKEN", "github.token", "--retry", "--netrc", "--insecure", "--location-trusted", "java "):
                 self.assertNotIn(forbidden, block)
             self.assertIn("stage_macos_installed.py android-support", block)
+            if filename == "desktop-macos-installed.yml":
+                target_assignment = "target='${{ matrix.target }}'"
+                target_call = 'stage_macos_installed.py android-support --target "$target"'
+                self.assertEqual(block.count(target_assignment), 1)
+                self.assertEqual(block.count('--target "$target"'), 1)
+                self.assertLess(block.index(target_assignment), block.index(target_call))
+                self.assertNotIn("MRK_MACOS_TARGET", block)
             self.assertLess(workflow.index(name), workflow.index("Build and sign the separate fixed vault helper before binding the app"))
             if filename == "desktop-macos-aqua.yml":
                 condition = block.splitlines()[0]

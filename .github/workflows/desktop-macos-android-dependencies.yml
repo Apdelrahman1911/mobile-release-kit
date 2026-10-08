@@ -1,0 +1,136 @@
+name: Mac Android dependency preparation B (engineering DATA only)
+
+# Fixed reviewed prepare-b scope; no app, signing, protected registration or licence acceptance.
+on:
+  push:
+    branches: [verify/desktop-macos-android-dependencies]
+    paths:
+      - desktop/tools/macos_android_dependency_preparation.py
+      - desktop/tools/android_dependency_preparation_data/**
+      - tests/desktop/test_macos_android_dependency_preparation_source.py
+      - .github/workflows/desktop-macos-android-dependencies.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-android-dependencies-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-b:
+    if: github.ref == 'refs/heads/verify/desktop-macos-android-dependencies'
+    runs-on: macos-26
+    # 2+3+3+1+37+2+2=50 explicit step minutes, plus3 reserve.
+    timeout-minutes: 53
+    steps:
+      - name: Admit exact disposable ARM source and workflow
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-android-dependencies ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-android-dependencies.yml@$GITHUB_REF" ]]
+      - name: Exact checkout without persisted credentials
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Fixed isolated source Python
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Fresh private engineering work
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/id -un)" == runner ]]
+          work="$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-android-dependencies.XXXXXXXX")"
+          [[ "$work" =~ ^/Users/runner/work/_temp/mrk-android-dependencies\.[A-Za-z0-9]{8}$ ]]
+          printf 'root=%s\n' "$work" >> "$GITHUB_OUTPUT"
+      - name: Fresh strict-verification AGP replay with reviewed locks
+        id: prepare
+        timeout-minutes: 37
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_ANDROID_PREPARATION_WORK: ${{ steps.work.outputs.root }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -uo pipefail
+          umask 077
+          # Source-fixed B; B_DATA=None must not be dispatched until genuine A DATA nomination.
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            HOME="$MRK_ANDROID_PREPARATION_WORK" TMPDIR="$MRK_ANDROID_PREPARATION_WORK" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            MRK_ANDROID_PREPARATION_WORK="$MRK_ANDROID_PREPARATION_WORK" \
+            MRK_PROVISIONED_SDK_ROOT="${ANDROID_HOME:-}" ImageOS="${ImageOS:-}" ImageVersion="${ImageVersion:-}" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-b \
+            > "$MRK_ANDROID_PREPARATION_WORK/wrapper.stdout" 2> "$MRK_ANDROID_PREPARATION_WORK/wrapper.stderr"
+          code=$?
+          printf 'returncode=%s\n' "$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Publish finite replay receipts and exact reviewed lock inputs
+        id: evidence
+        if: always() && steps.work.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-android-dependency-preparation-b-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/sdk-observation.json
+            ${{ steps.work.outputs.root }}/prepare-b-failure.json
+            ${{ steps.work.outputs.root }}/acquire-failure.json
+            ${{ steps.work.outputs.root }}/acquisition.json
+            ${{ steps.work.outputs.root }}/evidence/acquisition-commands.json
+            ${{ steps.work.outputs.root }}/evidence/failed-commands.json
+            ${{ steps.work.outputs.root }}/evidence/gradle-failure.json
+            ${{ steps.work.outputs.root }}/evidence/receipt.json
+            ${{ steps.work.outputs.root }}/evidence/inventory.json
+            ${{ steps.work.outputs.root }}/evidence/inventory-drift.json
+            ${{ steps.work.outputs.root }}/evidence/buildscript-gradle.lockfile
+            ${{ steps.work.outputs.root }}/evidence/app-gradle.lockfile
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 9
+      - name: Dispose only identity-bound successful private work
+        if: always() && steps.prepare.outcome == 'success' && steps.prepare.outputs.returncode == '0' && steps.evidence.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_ANDROID_PREPARATION_WORK: ${{ steps.work.outputs.root }}
+          MRK_PREPARATION_WRAPPER_RETURN: ${{ steps.prepare.outputs.returncode }}
+          MRK_PREPARATION_EVIDENCE_UPLOAD: ${{ steps.evidence.outcome }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            HOME="$MRK_ANDROID_PREPARATION_WORK" TMPDIR="$MRK_ANDROID_PREPARATION_WORK" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_WORKSPACE="$GITHUB_WORKSPACE" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            MRK_ANDROID_PREPARATION_WORK="$MRK_ANDROID_PREPARATION_WORK" \
+            MRK_PREPARATION_WRAPPER_RETURN="$MRK_PREPARATION_WRAPPER_RETURN" \
+            MRK_PREPARATION_EVIDENCE_UPLOAD="$MRK_PREPARATION_EVIDENCE_UPLOAD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py cleanup \
+            > "$MRK_ANDROID_PREPARATION_WORK/cleanup.stdout" 2> "$MRK_ANDROID_PREPARATION_WORK/cleanup.stderr"
