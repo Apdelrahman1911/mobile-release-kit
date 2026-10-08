@@ -5,6 +5,7 @@ on:
     branches:
       - verify/desktop-macos-installed
       - verify/desktop-macos-preview
+      - verify/desktop-macos-image-compile
 
 permissions:
   contents: read
@@ -312,7 +313,7 @@ jobs:
       - name: Bind the complete reviewed first-party checkout before compilation
         id: source
         shell: bash
-        run: |
+        run: &mrk_installed_source_inventory |
           set -euo pipefail
           set -o noclobber
           [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
@@ -360,7 +361,7 @@ jobs:
       - name: Admit the fixed image Rust tools without installing a distribution
         timeout-minutes: 4
         shell: bash
-        run: |
+        run: &mrk_installed_direct_rust |
           set -euo pipefail
           "$MRK_PYTHON" -I -S -B - <<'PY_DIRECT_RUST'
           import importlib.util, os, re, stat, subprocess, sys, tomllib
@@ -4433,3 +4434,604 @@ jobs:
                   raise ValueError("task cleanup closed log refused")
               os.unlink(path)
           PY_CLEAN
+
+  # Compile the real shipping graph only: no signing environment, installed app,
+  # supplier receipt, launch, package or Store operation. Independent of the
+  # configured installed/preview engineering job above.
+  shipping-image-compile:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'
+    runs-on: macos-26
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      RUSTUP_TOOLCHAIN: 1.98.1
+      RUSTUP_AUTO_INSTALL: '0'
+      CARGO_HOME: /Users/runner/.cargo
+      RUSTUP_HOME: /Users/runner/.rustup
+      CARGO_INCREMENTAL: '0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Check out only the compile job's exact current SOURCE
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing public hosted Python for compile control
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14.7'
+      - name: Select the fixed Node frontend compiler
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v5
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Admit the exact nonroot ARM compile-only route and fresh work
+        id: compile_work
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          set +a
+          umask 077
+          git config --local core.autocrlf false
+          python3 -I -S -B - <<'PY_SHIPPING_COMPILE_ADMIT'
+          import json, os, platform, re, stat, sys, tempfile
+          from pathlib import Path
+
+
+          def need(value, reason):
+              if not value: raise ValueError(reason)
+
+
+          source = os.environ['GITHUB_SHA']
+          checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          ref = 'refs/heads/verify/desktop-macos-image-compile'
+          need(sys.platform == 'darwin' and sys.maxsize == 2**63 - 1 and platform.machine() == 'arm64'
+               and platform.mac_ver()[0].startswith('26.') and os.getuid() != 0
+               and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'shipping-compile-host')
+          need(re.fullmatch(r'[0-9a-f]{40}', source) and source != '0' * 40, 'shipping-compile-source')
+          expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
+                          GITHUB_EVENT_NAME='push', GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
+                          GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@' + ref,
+                          GITHUB_WORKFLOW_SHA=source, GITHUB_WORKSPACE=str(checkout), RUNNER_TEMP='/Users/runner/work/_temp',
+                          MRK_MACOS_TARGET='aarch64-apple-darwin', RUSTUP_TOOLCHAIN='1.98.1', HOME='/Users/runner',
+                          DEVELOPER_DIR='/Library/Developer/CommandLineTools', MACOSX_DEPLOYMENT_TARGET='26.0')
+          need(all(os.environ.get(name) == value for name, value in expected.items()), 'shipping-compile-route')
+          need(all(re.fullmatch(r'[1-9][0-9]{0,19}', os.environ[name]) for name in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')), 'shipping-compile-run')
+          need(Path(os.environ['DEVELOPER_DIR']).is_dir(), 'shipping-compile-clt')
+          for name in ('node_modules', 'dist'):
+              try: (checkout / 'desktop' / name).lstat()
+              except FileNotFoundError: pass
+              else: raise ValueError('shipping-compile-existing-frontend')
+          os.umask(0o077)
+          work = Path(tempfile.mkdtemp(prefix='mrk-macos-image-compile.', dir='/Users/runner/work/_temp'))
+          info = work.lstat()
+          need(stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700 and info.st_uid == os.getuid(), 'shipping-compile-original-work')
+          binding = dict(schemaVersion=1, source=source, workflowSource=source,
+                         runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                         workDirectory=[info.st_dev, info.st_ino, info.st_uid], frontendAbsentAtAdmission=True)
+          fd = os.open(work / 'compile-binding.json', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              with os.fdopen(fd, 'wb', closefd=False) as stream:
+                  raw = (json.dumps(binding, sort_keys=True, separators=(',', ':')) + '\n').encode('ascii')
+                  need(stream.write(raw) == len(raw), 'shipping-compile-binding-write')
+                  stream.flush(); os.fsync(stream.fileno())
+          finally:
+              os.close(fd)
+          python = str(Path(sys.executable).resolve(strict=True))
+          need('\n' not in python and '\n' not in str(work), 'shipping-compile-path')
+          # Existing Actions command files, not a reusable input or compilation permit.
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+              stream.write('MRK_MACOS_WORK=' + str(work) + '\nMRK_PYTHON=' + python + '\nCARGO_TARGET_DIR=' + str(work / 'cargo-target') + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
+              stream.write('root=' + str(work) + '\n')
+          PY_SHIPPING_COMPILE_ADMIT
+      - name: Bind compile-only SOURCE with the unchanged installed source inventory
+        timeout-minutes: 2
+        shell: bash
+        run: *mrk_installed_source_inventory
+      - name: Admit compile-only direct Rust with the unchanged installed original checks
+        timeout-minutes: 4
+        shell: bash
+        run: *mrk_installed_direct_rust
+      - name: Build genuine frontend and the fixed shipping facade without launching it
+        id: shipping_compile
+        timeout-minutes: 24
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          set +a
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY_SHIPPING_IMAGE_COMPILE'
+          import hashlib, importlib.util, json, math, os, re, shutil, stat, subprocess, sys, time, tomllib
+          from pathlib import Path
+
+          TARGET = 'aarch64-apple-darwin'
+          RUST_RELEASE = '1.98.1'
+          RUST_COMMIT = '48a229ceaefd4985c50990b14116b6d856af0985'
+          ROLES = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
+                   'npm-ci', 'frontend-build', 'shipping-image-build')
+          CAPTURE = 4 * 1024 * 1024
+          SOURCE_LIMIT = 2 * 1024 * 1024
+
+
+          def need(value, reason):
+              if not value: raise ValueError(reason)
+
+
+          def pairs(rows):
+              result = {}
+              for key, value in rows:
+                  need(key not in result, 'duplicate-json-key')
+                  result[key] = value
+              return result
+
+
+          def finite_float(value):
+              parsed = float(value)
+              need(math.isfinite(parsed), 'nonfinite-json')
+              return parsed
+
+
+          def document(raw):
+              return json.loads(raw.decode('utf-8', 'strict'), object_pairs_hook=pairs, parse_float=finite_float,
+                                parse_constant=lambda value: (_ for _ in ()).throw(ValueError('nonfinite-json')))
+
+
+          def identity(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+          def returned_data(result, argv, cap):
+              return (type(result) is subprocess.CompletedProcess and type(result.args) is list
+                      and result.args == argv and type(result.returncode) is int
+                      and type(result.stdout) is bytes and type(result.stderr) is bytes
+                      and len(result.stdout) + len(result.stderr) <= cap)
+
+
+          def commands_data(node, npm, rust_bin, work):
+              return (
+                  [str(node), '--version'], [str(node), str(npm), '--version'],
+                  [str(rust_bin / 'rustc'), '--version', '--verbose'],
+                  [str(rust_bin / 'cargo'), '--version', '--verbose'],
+                  [str(node), str(npm), 'ci', '--ignore-scripts', '--no-audit', '--no-fund',
+                   '--cache', str(work / 'npm-cache')],
+                  [str(node), str(npm), 'run', 'build'],
+                  [str(rust_bin / 'cargo'), 'build', '--locked', '--release', '--jobs', '1',
+                   '--manifest-path', '../helpers/macos-desktop-image/Cargo.toml', '--lib',
+                   '--target', TARGET, '--message-format=json-render-diagnostics'],
+              )
+
+
+          def artifact_data(raw, checkout, work):
+              need(type(raw) is bytes and 0 < len(raw) <= CAPTURE and raw.endswith(b'\n'), 'cargo-output-bound')
+              lines = raw.splitlines()
+              need(0 < len(lines) <= 16384 and all(0 < len(line) <= 1024 * 1024 for line in lines), 'cargo-line-bound')
+              rows = [document(line) for line in lines]
+              need(all(type(row) is dict and type(row.get('reason')) is str for row in rows), 'cargo-document')
+              finished = [row for row in rows if row['reason'] == 'build-finished']
+              need(len(finished) == 1 and type(finished[0].get('success')) is bool
+                   and finished[0]['success'] and rows[-1] is finished[0], 'cargo-finished')
+              facade = checkout / 'desktop/helpers/macos-desktop-image'
+              output = work / 'cargo-target' / TARGET / 'release/libmrk_desktop_image.dylib'
+              selected = [row for row in rows if row['reason'] == 'compiler-artifact'
+                          and row.get('manifest_path') == str(facade / 'Cargo.toml')]
+              need(len(selected) == 1, 'cargo-facade-count')
+              row = selected[0]
+              target, profile = row.get('target'), row.get('profile')
+              need(type(target) is dict and type(profile) is dict, 'cargo-target-shape')
+              need(target.get('name') == 'mrk_desktop_image' and target.get('kind') == ['cdylib']
+                   and target.get('crate_types') == ['cdylib'] and target.get('src_path') == str(facade / 'src/lib.rs')
+                   and profile.get('test') is False and profile.get('debug_assertions') is False
+                   and row.get('filenames') == [str(output)] and row.get('executable') is None
+                   and row.get('fresh') is False, 'cargo-real-facade')
+              app = [row for row in rows if row['reason'] == 'compiler-artifact'
+                     and row.get('manifest_path') == str(checkout / 'desktop/src-tauri/Cargo.toml')
+                     and type(row.get('target')) is dict and row['target'].get('name') == 'mobile_release_desktop']
+              need(len(app) == 1 and type(app[0].get('features')) is list, 'cargo-app-count')
+              need(len(app[0]['features']) == 3 and all(type(value) is str for value in app[0]['features'])
+                   and set(app[0]['features']) == {'desktop-shell', 'custom-protocol', 'macos-installed-desktop-image'}
+                   and app[0].get('profile', {}).get('test') is False, 'cargo-shipping-feature')
+              return output
+
+
+          def cleanup_allowed_data(rows, pending, source_post, tools_post):
+              return (pending is False and source_post is True and tools_post is True
+                      and type(rows) is list and len(rows) <= len(ROLES)
+                      and all(type(row) is dict and row.get('role') == ROLES[index]
+                              and row.get('returned') is True and row.get('capturesSettled') is True
+                              and type(row.get('returncode')) is int for index, row in enumerate(rows)))
+
+
+          def passed_data(receipt):
+              rows = receipt.get('commands')
+              return (type(rows) is list and len(rows) == len(ROLES)
+                      and cleanup_allowed_data(rows, receipt.get('originalPending'), receipt.get('sourcePost'), receipt.get('toolsPost'))
+                      and all(row['returncode'] == 0 for row in rows)
+                      and receipt.get('frontendGenerated') is True and receipt.get('facadeArtifactVerified') is True
+                      and receipt.get('inputOriginalsKnown') is True and receipt.get('toolOriginalsClosed') is True
+                      and receipt.get('generatedOutputsRetired') is True
+                      and all(receipt.get(name) is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed'))
+                      and receipt.get('failure') is None)
+
+
+          def main():
+              start = time.monotonic()
+              work_end, hard_end = start + 1320, start + 1440  # Same24min, reserve120 inside it.
+              checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+              work = Path(os.environ['MRK_MACOS_WORK'])
+              source = os.environ['GITHUB_SHA']
+              need(sys.platform == 'darwin' and sys.maxsize == 2**63 - 1 and sys.flags.isolated and sys.flags.no_site
+                   and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid()
+                   and os.uname().machine == 'arm64', 'compile-host')
+              need(work.parent == Path('/Users/runner/work/_temp') and re.fullmatch(r'mrk-macos-image-compile\.[A-Za-z0-9_]{8}', work.name)
+                   and Path(os.environ['GITHUB_WORKSPACE']) == checkout and os.environ['MRK_MACOS_TARGET'] == TARGET
+                   and re.fullmatch(r'[0-9a-f]{40}', source)
+                   and os.environ['GITHUB_WORKFLOW_SHA'] == source
+                   and os.environ['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-image-compile', 'compile-route')
+              initial = work.lstat()
+              need(stat.S_ISDIR(initial.st_mode) and stat.S_IMODE(initial.st_mode) == 0o700
+                   and initial.st_uid == os.getuid(), 'compile-original-work')
+              flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+              tools, outputs, roots, configs = [], {}, [], []
+              pending = False
+              input_originals_known = True
+              receipt = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+                             workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                             target=TARGET, commands=[], originalPending=False, sourcePost=False, toolsPost=False,
+                             frontendGenerated=False, facadeArtifactVerified=False, inputOriginalsKnown=True, toolOriginalsClosed=False,
+                             generatedOutputsRetired=False, shippingGraphCompiled=False, installedQualified=False,
+                             runtimeQualified=False, launched=False, signed=False, failure=None)
+              failure_status = 1
+              stage = 'admission'
+
+              def cut(cleanup=False):
+                  need(time.monotonic() < (hard_end if cleanup else work_end), 'compile-deadline')
+
+              def root_post():
+                  now = work.lstat()
+                  need((now.st_dev, now.st_ino, now.st_mode, now.st_uid, now.st_gid) ==
+                       (initial.st_dev, initial.st_ino, initial.st_mode, initial.st_uid, initial.st_gid), 'compile-root-changed')
+
+              def read(path, limit, *, expected=None):
+                  nonlocal input_originals_known
+                  fd = os.open(path, flags)
+                  try:
+                      before = os.fstat(fd)
+                      need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit,
+                           'compile-file-shape')
+                      raw = bytearray()
+                      while len(raw) < before.st_size:
+                          cut(True)
+                          block = os.read(fd, min(65536, before.st_size - len(raw)))
+                          need(bool(block), 'compile-file-short')
+                          raw.extend(block)
+                      need(not os.read(fd, 1) and identity(before) == identity(os.fstat(fd)) == identity(path.lstat()), 'compile-file-post')
+                      value = bytes(raw)
+                      if expected is not None: need(hashlib.sha256(value).hexdigest() == expected, 'compile-source-hash')
+                      return value, before
+                  finally:
+                      try: os.close(fd)  # One consuming close; never retry an uncertain original.
+                      except OSError:
+                          input_originals_known = False
+                          raise
+
+              def publish(name, raw, limit):
+                  nonlocal input_originals_known
+                  need(type(raw) is bytes and len(raw) <= limit, 'compile-public-bound')
+                  cut(True); root_post()
+                  path = work / name
+                  fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                  try:
+                      original = os.fstat(fd)
+                      need(stat.S_ISREG(original.st_mode) and stat.S_IMODE(original.st_mode) == 0o600
+                           and original.st_uid == os.getuid() and original.st_nlink == 1 and original.st_size == 0, 'compile-public-original')
+                      with os.fdopen(fd, 'wb', closefd=False) as stream:
+                          cut(True)
+                          need(stream.write(raw) == len(raw), 'compile-public-short')
+                          stream.flush(); cut(True); os.fsync(fd); cut(True)
+                      info = os.fstat(fd)
+                      need(identity(info)[:6] == identity(original)[:6] and info.st_size == len(raw)
+                           and identity(info) == identity(path.lstat()), 'compile-public-post')
+                      return identity(info)
+                  finally:
+                      try: os.close(fd)
+                      except OSError:
+                          input_originals_known = False
+                          raise
+
+              def configs_post():
+                  for path, original in configs:
+                      raw, info = read(path, 0)
+                      need(raw == b'' and identity(info) == original, 'compile-npm-config-changed')
+
+              def source_post(inventory):
+                  need(type(inventory) is dict and inventory.get('source') == source and type(inventory.get('files')) is list
+                       and 0 < len(inventory['files']) < 4096, 'compile-source-inventory')
+                  seen = set()
+                  for row in inventory['files']:
+                      cut(True)
+                      need(type(row) is dict and set(row) == {'path', 'gitMode', 'blob', 'size', 'sha256'}, 'compile-source-row')
+                      name = row['path']
+                      need(type(name) is str and not name.startswith('/') and name not in seen
+                           and all(part not in ('', '.', '..') for part in name.split('/'))
+                           and row['gitMode'] in ('100644', '100755') and type(row['size']) is int
+                           and 0 <= row['size'] <= 32 * 1024 * 1024, 'compile-source-path')
+                      seen.add(name)
+                      body, info = read(checkout / name, 32 * 1024 * 1024, expected=row['sha256'])
+                      need(len(body) == row['size'] and bool(info.st_mode & 0o111) == (row['gitMode'] == '100755')
+                           and hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body).hexdigest() == row['blob'], 'compile-source-blob')
+                  return True
+
+              def tool(path, executable=True):
+                  fd = os.open(path, flags)
+                  row = {'path': path, 'fd': fd, 'identity': None, 'sha256': None}
+                  tools.append(row)
+                  info = os.fstat(fd)
+                  need(stat.S_ISREG(info.st_mode) and info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022
+                       and info.st_nlink > 0 and (not executable or info.st_mode & 0o111)
+                       and 0 < info.st_size <= 256 * 1024 * 1024, 'compile-tool-shape')
+                  row['identity'] = identity(info)
+                  row['sha256'] = tool_hash(row)
+                  return path
+
+              def tool_hash(row):
+                  need(row['identity'] == identity(os.fstat(row['fd'])) == identity(row['path'].lstat()), 'compile-tool-changed')
+                  digest, offset = hashlib.sha256(), 0
+                  while offset < row['identity'][6]:
+                      cut(True)
+                      block = os.pread(row['fd'], min(1024 * 1024, row['identity'][6] - offset), offset)
+                      need(bool(block), 'compile-tool-short')
+                      digest.update(block); offset += len(block)
+                  need(not os.pread(row['fd'], 1, offset) and row['identity'] == identity(os.fstat(row['fd']))
+                       == identity(row['path'].lstat()), 'compile-tool-post')
+                  return digest.hexdigest()
+
+              def tools_post(full=False):
+                  for row in tools:
+                      need(row['identity'] == identity(os.fstat(row['fd'])) == identity(row['path'].lstat()), 'compile-tool-changed')
+                      if full: need(row['sha256'] == tool_hash(row), 'compile-tool-hash')
+                  return True
+
+              def produced_root(name):
+                  path = checkout / 'desktop' / name
+                  try: info = path.lstat()
+                  except FileNotFoundError: return False
+                  need(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+                       and info.st_dev == initial.st_dev, 'compile-generated-root')
+                  need(all(old != path for old, _ in roots), 'compile-root-replacement')
+                  roots.append((path, identity(info)[:5]))
+                  return True
+
+              def absent_frontend(name):
+                  try: (checkout / 'desktop' / name).lstat()
+                  except FileNotFoundError: return
+                  raise ValueError('compile-frontend-already-present')
+
+              def output_hash(path):
+                  nonlocal input_originals_known
+                  fd = os.open(path, flags)
+                  try:
+                      info = os.fstat(fd)
+                      need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                           and 0 < info.st_size <= 256 * 1024 * 1024, 'compile-artifact-file')
+                      digest, offset = hashlib.sha256(), 0
+                      while offset < info.st_size:
+                          cut(True)
+                          block = os.read(fd, min(1024 * 1024, info.st_size - offset))
+                          need(bool(block), 'compile-artifact-short')
+                          digest.update(block); offset += len(block)
+                      need(not os.read(fd, 1) and identity(info) == identity(os.fstat(fd)) == identity(path.lstat()), 'compile-artifact-post')
+                      return dict(bytes=offset, sha256=digest.hexdigest(), identity=identity(info))
+                  finally:
+                      try: os.close(fd)
+                      except OSError:
+                          input_originals_known = False
+                          raise
+
+              try:
+                  binding_raw, binding_original = read(work / 'compile-binding.json', 16384)
+                  binding = document(binding_raw)
+                  need(binding == dict(schemaVersion=1, source=source, workflowSource=source,
+                                      runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                                      workDirectory=[initial.st_dev, initial.st_ino, initial.st_uid],
+                                      frontendAbsentAtAdmission=True), 'compile-binding')
+                  inventory_raw, inventory_original = read(work / 'source-inventory.json', SOURCE_LIMIT)
+                  inventory = document(inventory_raw)
+                  receipt['sourceInventorySha256'] = hashlib.sha256(inventory_raw).hexdigest()
+                  receipt['sourceInventoryBytes'] = len(inventory_raw)
+                  source_post(inventory)
+                  release = document(read(checkout / 'desktop/macos-installed-inputs/build-release.json', 4096)[0])
+                  cargo = tomllib.loads(read(checkout / 'desktop/src-tauri/Cargo.toml', 65536)[0].decode())
+                  tauri = document(read(checkout / 'desktop/src-tauri/tauri.conf.json', 65536)[0])
+                  need(set(release) == {'schemaVersion', 'packageVersion', 'release'} and type(release['schemaVersion']) is int
+                       and release['schemaVersion'] == 1 and release['packageVersion'] == cargo['package']['version'] == tauri['version']
+                       and re.fullmatch(r'macos26-arm64-[a-z0-9](?:[a-z0-9._-]{0,40}[a-z0-9])?', release['release']), 'compile-release-source')
+                  for name in ('node_modules', 'dist'):
+                      try: (checkout / 'desktop' / name).lstat()
+                      except FileNotFoundError: pass
+                      else: raise ValueError('compile-frontend-already-present')
+                  for parent in (checkout / 'desktop', *(checkout / 'desktop').parents):
+                      try: (parent / '.npmrc').lstat()
+                      except FileNotFoundError: pass
+                      else: raise ValueError('compile-project-npm-config')
+                  for name in ('npm-cache', 'compile-home', 'compile-tmp', 'cargo-target'):
+                      cut(); root_post()
+                      path = work / name
+                      path.mkdir(mode=0o700)
+                      roots.append((path, identity(path.lstat())[:5]))
+                  for name in ('compile-user.npmrc', 'compile-global.npmrc'):
+                      cut()
+                      original = publish(name, b'', 0)
+                      configs.append((work / name, original))
+                  node_selected, npm_selected = shutil.which('node'), shutil.which('npm')
+                  need(node_selected is not None and npm_selected is not None, 'compile-node-unavailable')
+                  node = tool(Path(node_selected).resolve(strict=True))
+                  npm = tool(Path(npm_selected).resolve(strict=True), executable=False)
+                  need(npm == node.parent.parent / 'lib/node_modules/npm/bin/npm-cli.js', 'compile-npm-same-distribution')
+                  rust_bin = Path('/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin')
+                  tool(rust_bin / 'rustc'); tool(rust_bin / 'cargo')
+                  tool(Path(sys.executable).resolve(strict=True))
+                  spec = importlib.util.spec_from_file_location('_mrk_shipping_compile_existing_owner', checkout / 'desktop/tools/macos_aqua_qualification.py')
+                  qualification = importlib.util.module_from_spec(spec); sys.modules[spec.name] = qualification
+                  spec.loader.exec_module(qualification)
+                  owner = qualification.load_owner(checkout)
+                  base = dict(PATH=str(rust_bin) + ':' + str(node.parent) + ':/usr/bin:/bin:/usr/sbin:/sbin', HOME='/Users/runner',
+                              CARGO_HOME='/Users/runner/.cargo', RUSTUP_HOME='/Users/runner/.rustup', RUSTC=str(rust_bin / 'rustc'),
+                              RUSTUP_TOOLCHAIN=RUST_RELEASE, RUSTUP_AUTO_INSTALL='0', CARGO_INCREMENTAL='0',
+                              CARGO_TARGET_DIR=str(work / 'cargo-target'), TMPDIR=str(work / 'compile-tmp'),
+                              LANG='C', LC_ALL='C', TZ='UTC', CI='true', DEVELOPER_DIR='/Library/Developer/CommandLineTools',
+                              MACOSX_DEPLOYMENT_TARGET='26.0', MRK_MACOS_INSTALL_SOURCE_COMMIT=source, MRK_IMAGE_RELEASE_ID=release['release'])
+                  npm_env = dict(base, HOME=str(work / 'compile-home'), npm_config_userconfig=str(work / 'compile-user.npmrc'),
+                                 npm_config_globalconfig=str(work / 'compile-global.npmrc'), npm_config_registry='https://registry.npmjs.org/',
+                                 npm_config_cache=str(work / 'npm-cache'), npm_config_update_notifier='false')
+                  argv_rows = commands_data(node, npm, rust_bin, work)
+                  for index, (role, argv) in enumerate(zip(ROLES, argv_rows, strict=True)):
+                      stage = role
+                      cut(); root_post(); need(tools_post(), 'compile-tools-pre')
+                      if index in (1, 4, 5): configs_post()
+                      environment = npm_env if index in (1, 4, 5) else base
+                      cwd = checkout / ('desktop/src-tauri' if index in (2, 3, 6) else 'desktop')
+                      cap = 4096 if index < 4 else CAPTURE
+                      if index == 4:
+                          absent_frontend('node_modules'); absent_frontend('dist')
+                      elif index == 5:
+                          absent_frontend('dist')
+                          for path, original in roots:
+                              need(identity(path.lstat())[:5] == original, 'compile-generated-root-changed')
+                      timeout = min(15 if index < 4 else (300 if index == 4 else 180 if index == 5 else 900), work_end - time.monotonic())
+                      need(timeout > 0, 'compile-no-work-left')
+                      pending = True; receipt['originalPending'] = True
+                      result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
+                                               capture=True, text=False, output_limit=cap)
+                      need(returned_data(result, argv, cap), 'compile-original-return')
+                      pending = False; receipt['originalPending'] = False
+                      receipt['commands'].append(dict(role=role, argv=argv, returned=True, capturesSettled=True,
+                                                      returncode=result.returncode, stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr),
+                                                      stdoutSha256=hashlib.sha256(result.stdout).hexdigest(), stderrSha256=hashlib.sha256(result.stderr).hexdigest()))
+                      if result.returncode != 0: failure_status = result.returncode
+                      if index >= 4:
+                          outputs[role + '.stdout'] = result.stdout; outputs[role + '.stderr'] = result.stderr
+                      produced = True
+                      if index == 4: produced = produced_root('node_modules')
+                      elif index == 5: produced = produced_root('dist')
+                      if result.returncode != 0:
+                          raise ValueError('compile-original-nonzero')
+                      cut(); need(tools_post(), 'compile-tools-post')
+                      if index in (1, 4, 5): configs_post()
+                      need(produced, 'compile-generated-root-missing')
+                      if index == 0:
+                          need(result.stdout == b'v24.20.0\n' and not result.stderr, 'compile-node-version')
+                      elif index == 1:
+                          need(re.fullmatch(rb'[0-9]+\.[0-9]+\.[0-9]+\n', result.stdout) and not result.stderr, 'compile-npm-version')
+                      elif index in (2, 3):
+                          tool_name = 'rustc' if index == 2 else 'cargo'
+                          lines = result.stdout.decode('utf-8', 'strict').strip().splitlines()
+                          need(not result.stderr and lines[0].startswith(tool_name + ' ')
+                               and [line for line in lines if line.startswith('release:')] == ['release: ' + RUST_RELEASE]
+                               and [line for line in lines if line.startswith('host:')] == ['host: ' + TARGET], 'compile-rust-version')
+                          if index == 2: need([line for line in lines if line.startswith('commit-hash:')] == ['commit-hash: ' + RUST_COMMIT], 'compile-rust-commit')
+                      elif index == 5:
+                          body, info = read(checkout / 'desktop/dist/index.html', 1024 * 1024)
+                          need(body and info.st_uid == os.getuid(), 'compile-genuine-frontend')
+                          receipt['frontendGenerated'] = True
+                      elif index == 6:
+                          output = artifact_data(result.stdout, checkout, work)
+                          receipt['facadeArtifact'] = output_hash(output)
+                          receipt['facadeArtifactVerified'] = True
+                  receipt['release'] = release
+              except BaseException as error:
+                  receipt['failure'] = dict(stage=stage, kind=type(error).__name__)
+              finally:
+                  receipt['originalPending'] = pending
+                  try:
+                      cut(True); root_post()
+                      if not pending and input_originals_known:
+                          if 'inventory' in locals():
+                              current, current_info = read(work / 'source-inventory.json', SOURCE_LIMIT, expected=receipt['sourceInventorySha256'])
+                              need(current == inventory_raw and identity(current_info) == identity(inventory_original), 'compile-source-inventory-changed')
+                              current, current_info = read(work / 'compile-binding.json', 16384)
+                              need(current == binding_raw and identity(current_info) == identity(binding_original), 'compile-binding-changed')
+                              receipt['sourcePost'] = source_post(inventory)
+                          receipt['toolsPost'] = tools_post(full=True)
+                          configs_post()
+                  except BaseException as error:
+                      if receipt['failure'] is None: receipt['failure'] = dict(stage='source-tool-post', kind=type(error).__name__)
+                  close_ok = True
+                  # Unknown owner return does not grant retirement of tool originals or output trees.
+                  if not pending and input_originals_known:
+                      for row in reversed(tools):
+                          fd, row['fd'] = row['fd'], None
+                          try: os.close(fd)
+                          except OSError: close_ok = False
+                      receipt['toolOriginalsClosed'] = close_ok
+                  if (cleanup_allowed_data(receipt['commands'], pending, receipt['sourcePost'], receipt['toolsPost'])
+                          and close_ok and input_originals_known):
+                      try:
+                          cut(True); root_post()
+                          need(shutil.rmtree.avoids_symlink_attacks, 'compile-safe-cleanup-unavailable')
+                          for path, before in reversed(configs):
+                              cut(True); root_post()
+                              need(identity(path.lstat()) == before, 'compile-npm-config-changed')
+                              path.unlink()
+                              try: path.lstat()
+                              except FileNotFoundError: pass
+                              else: raise ValueError('compile-cleanup-not-absent')
+                          for path, before in reversed(roots):
+                              cut(True); root_post()
+                              info = path.lstat()
+                              need(identity(info)[:5] == before and stat.S_ISDIR(info.st_mode)
+                                   and info.st_uid == os.getuid() and info.st_dev == initial.st_dev, 'compile-cleanup-original')
+                              shutil.rmtree(path)
+                              try: path.lstat()
+                              except FileNotFoundError: pass
+                              else: raise ValueError('compile-cleanup-not-absent')
+                          cut(True)
+                          receipt['generatedOutputsRetired'] = True
+                      except BaseException as error:
+                          if receipt['failure'] is None: receipt['failure'] = dict(stage='generated-cleanup', kind=type(error).__name__)
+                  if not receipt['toolOriginalsClosed'] and receipt['failure'] is None:
+                      receipt['failure'] = dict(stage='tool-close', kind='UnknownOriginal')
+                  receipt['toolOriginals'] = [dict(path=str(row['path']), identity=row['identity'], sha256=row['sha256']) for row in tools]
+                  receipt['inputOriginalsKnown'] = input_originals_known
+                  # Public fixed-source compiler output only; no binary/cache/runtime/signing upload.
+                  try:
+                      for name, raw in outputs.items(): publish(name, raw, CAPTURE)
+                  except BaseException as error:
+                      if receipt['failure'] is None: receipt['failure'] = dict(stage='public-capture', kind=type(error).__name__)
+                  receipt['inputOriginalsKnown'] = input_originals_known
+                  receipt['shippingGraphCompiled'] = passed_data(receipt)
+                  try:
+                      publish('compile-receipt.json', (json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii'), 65536)
+                      cut(True); root_post()
+                  except BaseException:
+                      # Never replace an original child failure or retry a partial public file.
+                      raise SystemExit(failure_status)
+              if not receipt['shippingGraphCompiled']: raise SystemExit(failure_status)
+
+
+          main()
+          PY_SHIPPING_IMAGE_COMPILE
+      - name: Preserve only bounded public compile evidence; upload is not qualification
+        if: always() && steps.compile_work.outputs.root != ''
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-shipping-image-compile-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            ${{ steps.compile_work.outputs.root }}/source-inventory.json
+            ${{ steps.compile_work.outputs.root }}/compile-receipt.json
+            ${{ steps.compile_work.outputs.root }}/npm-ci.stdout
+            ${{ steps.compile_work.outputs.root }}/npm-ci.stderr
+            ${{ steps.compile_work.outputs.root }}/frontend-build.stdout
+            ${{ steps.compile_work.outputs.root }}/frontend-build.stderr
+            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stdout
+            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stderr

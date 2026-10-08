@@ -179,12 +179,35 @@ REMOVE_PACKAGE_WORKFLOW_INVERSE = ((73519, 1623, '77826b06c51c25de52bc2f44acf448
   '/ "desktop/node_modules", workspace / "desktop/dist",\n'))
 
 
+# Exact independent shipping-compile job only. All prior installed/source
+# assertions receive their unchanged bytes; a partial or altered job refuses.
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 39104, 'e032b135b1928fb0d4ba5d355a95b26d37d7df40db90f76b38745714099ff1eb', ''))
+
+
+def without_shipping_compile_workflow(source):
+    marker = "  shipping-image-compile:\n"
+    if marker not in source:
+        if any(value in source for value in ("verify/desktop-macos-image-compile", "mrk_installed_source_inventory", "mrk_installed_direct_rust")):
+            raise AssertionError("partial shipping compile workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(SHIPPING_COMPILE_WORKFLOW_INVERSE):
+        actual = value[start:start + length]
+        if hashlib.sha256(actual).hexdigest() != expected:
+            raise AssertionError("shipping compile workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d":
+        raise AssertionError("shipping compile workflow inverse changed prior source")
+    return value.decode()
+
+
 # Exact Remove-output successor only. No original Install/instrumented workflow
 # safety assertion is weakened by the independent, fixed preview-only route.
 REMOVE_OUTPUT_WORKFLOW_INVERSE = ((629, 328, '11cd9e875296bd66a7fe4932b8774e3152110f531eec148ab376851c3f918b67', '    # Timed-step union445min; SOURCE scopes select disjoint UI work.\n    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.\n    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.\n    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.\n'), (150120, 9028, '9d50426024c5a0b7935ae93ee5c06be69221dce04aff47f27c4b8a4b610cada1', ''), (159699, 296, '757619f49bf177bc5404bec36b927f406b9ca1ddc8bbc79609c4ad7981e8105d', ''), (160791, 225, 'adbb7994c243addb230dcff883b114ded25035ee8931a15b6bb6aca2238a89fd', ''), (315226, 521, 'b37eab9482c0d97fa90e1f37e948849a9b3f7d8cfc3bda939e630b8bb07a0726', ''))
 
 
 def without_remove_output_workflow(source):
+    source = without_shipping_compile_workflow(source)
     marker = "      - name: Prepare the fixed two-file removal package without executing it\n"
     if marker not in source:
         if "finalize-remove-package --target" in source or "finalize-remove-image --target" in source or "package-remove --target" in source:
@@ -2005,7 +2028,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         # The unsigned iOS lane is an installed-only, SOURCE-selected addition.
         # All older workflow assertions above received the exact prior bytes;
         # this second read tests the actual new route, not its inverse view.
-        ios_workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        ios_workflow = without_shipping_compile_workflow((ROOT / '.github/workflows/desktop-macos-installed.yml').read_text())
         ios_ids, ios_blocks = steps(ios_workflow)
         ios_names = ('normal_ios_ui_test', 'normal_ios_ui_summary')
         ios_condition = ("github.ref == 'refs/heads/verify/desktop-macos-installed' "
@@ -2097,7 +2120,10 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual((ios_minutes, ios_minutes + 5, preview_minutes + 5), (243, 248, 350))
         self.assertLessEqual(ios_minutes + 5, 350)
         self.assertEqual(ios_workflow.count('    timeout-minutes: 350\n'), 1)
-        self.assertIn('iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.', ios_workflow)
+        self.assertIn('    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.\n'
+                      '    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.\n'
+                      '    # Remove preview adds90 nominal step maxima; this sum establishes no fit.\n'
+                      '    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.\n', ios_workflow)
         public_ios = ('ios-unsigned-archive-test.status', 'ios-unsigned-archive-summary.status',
                       'ios-unsigned-archive.facts.json', 'ios-unsigned-archive-test.runner-admission.json',
                       'ios-unsigned-archive-summary.command-admission.json',

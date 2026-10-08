@@ -44,12 +44,35 @@ def workflow_step(workflow, name):
     return workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
 
 
+# Exact independent shipping-compile job only. All prior installed/source
+# assertions receive their unchanged bytes; a partial or altered job refuses.
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 39104, 'e032b135b1928fb0d4ba5d355a95b26d37d7df40db90f76b38745714099ff1eb', ''))
+
+
+def without_shipping_compile_workflow(source):
+    marker = "  shipping-image-compile:\n"
+    if marker not in source:
+        if any(value in source for value in ("verify/desktop-macos-image-compile", "mrk_installed_source_inventory", "mrk_installed_direct_rust")):
+            raise AssertionError("partial shipping compile workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(SHIPPING_COMPILE_WORKFLOW_INVERSE):
+        actual = value[start:start + length]
+        if hashlib.sha256(actual).hexdigest() != expected:
+            raise AssertionError("shipping compile workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d":
+        raise AssertionError("shipping compile workflow inverse changed prior source")
+    return value.decode()
+
+
 # Exact Remove-output successor only. No original Install/instrumented workflow
 # safety assertion is weakened by the independent, fixed preview-only route.
 REMOVE_OUTPUT_WORKFLOW_INVERSE = ((629, 328, '11cd9e875296bd66a7fe4932b8774e3152110f531eec148ab376851c3f918b67', '    # Timed-step union445min; SOURCE scopes select disjoint UI work.\n    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.\n    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.\n    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.\n'), (150120, 9028, '9d50426024c5a0b7935ae93ee5c06be69221dce04aff47f27c4b8a4b610cada1', ''), (159699, 296, '757619f49bf177bc5404bec36b927f406b9ca1ddc8bbc79609c4ad7981e8105d', ''), (160791, 225, 'adbb7994c243addb230dcff883b114ded25035ee8931a15b6bb6aca2238a89fd', ''), (315226, 521, 'b37eab9482c0d97fa90e1f37e948849a9b3f7d8cfc3bda939e630b8bb07a0726', ''))
 
 
 def without_remove_output_workflow(source):
+    source = without_shipping_compile_workflow(source)
     marker = "      - name: Prepare the fixed two-file removal package without executing it\n"
     if marker not in source:
         if "finalize-remove-package --target" in source or "finalize-remove-image --target" in source or "package-remove --target" in source:
@@ -4200,7 +4223,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
-        actual = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
                  "Emit the genuine removal descriptor and readonly carrier without Installer",
@@ -5306,7 +5329,7 @@ class MacInstalledData(unittest.TestCase):
         # I intentionally has no Aqua workflow: that separately-based source
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
-        workflow = path.read_text(encoding="utf-8")
+        workflow = without_shipping_compile_workflow(path.read_text(encoding="utf-8"))
         probe = workflow.index("- name: Fail fast on native Scripts ownership and package format")
         sdk = workflow.index("- name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(probe, sdk)
@@ -5645,7 +5668,7 @@ class MacInstalledData(unittest.TestCase):
         if aqua.is_file():
             paths.append(aqua)  # A validates both; I does not pretend it includes A.
         for path in paths:
-            workflow = path.read_text(encoding="utf-8")
+            workflow = without_shipping_compile_workflow(path.read_text(encoding="utf-8"))
             exports = workflow_evidence_paths(workflow)
             installer_name = ("Application installation uses only standard privileged Installer; app and Python stay nonroot"
                               if path.name == "desktop-macos-aqua.yml"
@@ -8010,6 +8033,124 @@ class MacCurrentRuntimeData(unittest.TestCase):
         guide = (root / "desktop/packaging/macos-installed.md").read_text(encoding="utf-8")
         self.assertIn("ordinary4 remains a separate later obligation", guide)
         self.assertIn("No normal P2/project-picker qualification bit is enabled", guide)
+
+        # Independent compile-only job. Run only its pure fixed validators on
+        # inert DATA; never execute the inline main, npm, Cargo or a dylib here.
+        import math
+        import re
+        actual_shipping = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        shipping = actual_shipping.split("  shipping-image-compile:\n", 1)[1]
+        self.assertEqual(hashlib.sha256(without_shipping_compile_workflow(actual_shipping).encode()).hexdigest(), '03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d')
+        self.assertEqual(actual_shipping.count("      - verify/desktop-macos-image-compile\n"), 1)
+        self.assertEqual(re.findall(r"^    if: (.+)$", shipping, re.M),
+                         ["github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'"])
+        self.assertIn("    runs-on: macos-26\n    timeout-minutes: 35\n", shipping)
+        self.assertEqual(re.findall(r"^        timeout-minutes: ([0-9]+)$", shipping, re.M), ["1", "2", "4", "24", "2"])
+        for anchor in ("mrk_installed_source_inventory", "mrk_installed_direct_rust"):
+            self.assertEqual(actual_shipping.count("        run: &" + anchor + " |\n"), 1)
+            self.assertEqual(shipping.count("        run: *" + anchor + "\n"), 1)
+        for forbidden in ("secrets.", "    environment:", "/usr/sbin/installer", "xcodebuild", "codesign", "notarytool", "package-install"):
+            self.assertNotIn(forbidden, shipping)
+        build = workflow_step(actual_shipping, "Build genuine frontend and the fixed shipping facade without launching it")
+        opening = "          \"$MRK_PYTHON\" -I -S -B - <<'PY_SHIPPING_IMAGE_COMPILE'\n"
+        self.assertEqual(build.count(opening), 1)
+        body = build.split(opening, 1)[1].split("          PY_SHIPPING_IMAGE_COMPILE\n", 1)[0]
+        program = ''.join(line[10:] if line.startswith('          ') else line for line in body.splitlines(keepends=True))
+        tree = ast.parse(program)
+        pure_names = {"need", "pairs", "finite_float", "document", "identity", "returned_data", "commands_data",
+                      "artifact_data", "cleanup_allowed_data", "passed_data"}
+        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT"}
+        selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
+                    or isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants]
+        self.assertEqual({node.name for node in selected if isinstance(node, ast.FunctionDef)}, pure_names)
+        ns = {"json": json, "math": math, "Path": Path, "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "<fixed-shipping-pure-DATA>", "exec"), ns)
+        self.assertIn("work_end, hard_end = start + 1320, start + 1440", program)
+        self.assertIn("timeout=timeout,", program)
+        self.assertEqual(program.count("owner.run_owned("), 1)
+        self.assertIn("if not pending and input_originals_known:", program)
+        self.assertIn("shutil.rmtree.avoids_symlink_attacks", program)
+        self.assertNotIn("subprocess.run(", program)
+        self.assertNotIn("shell=True", program)
+        self.assertNotIn("qualification.main(", program)
+        self.assertNotIn("MRK_GITHUB_TOOLING_MANIFEST_SHA256=", program)
+        for variable in ("MRK_MACOS_INSTALL_SOURCE_COMMIT=source", "MRK_IMAGE_RELEASE_ID=release['release']",
+                         "npm_config_userconfig=", "npm_config_globalconfig=", "npm_config_registry='https://registry.npmjs.org/'"):
+            self.assertIn(variable, program)
+        checkout, work = Path("/synthetic-checkout"), Path("/synthetic-work")
+        node, npm, rust = Path("/synthetic-node/bin/node"), Path("/synthetic-node/lib/node_modules/npm/bin/npm-cli.js"), Path("/synthetic-rust/bin")
+        argv = ns['commands_data'](node, npm, rust, work)
+        self.assertEqual(len(argv), 7)
+        self.assertEqual(argv[4], [str(node), str(npm), 'ci', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', str(work / 'npm-cache')])
+        self.assertEqual(argv[5], [str(node), str(npm), 'run', 'build'])
+        self.assertEqual(argv[6], [str(rust / 'cargo'), 'build', '--locked', '--release', '--jobs', '1', '--manifest-path',
+                                  '../helpers/macos-desktop-image/Cargo.toml', '--lib', '--target', 'aarch64-apple-darwin',
+                                  '--message-format=json-render-diagnostics'])
+        returned = CompletedProcess(argv[6], 0, b'actual bounded DATA', b'')
+        self.assertTrue(ns['returned_data'](returned, argv[6], 4096))
+        for bad in (CompletedProcess(argv[5], 0, b'', b''), CompletedProcess(argv[6], True, b'', b''),
+                    CompletedProcess(argv[6], 0, '', b''), CompletedProcess(argv[6], 0, b'x' * 4097, b'')):
+            self.assertFalse(ns['returned_data'](bad, argv[6], 4096))
+        _target, output, rows, _macho = normal_cargo_fixture(work / 'cargo-target', checkout=checkout)
+        rows.append({'reason': 'build-finished', 'success': True})
+        encoded = lambda value: b''.join(json.dumps(row, separators=(',', ':')).encode() + b'\n' for row in value)
+        self.assertEqual(ns['artifact_data'](encoded(rows), checkout, work), output)
+        mutations = [lambda v: v.pop(), lambda v: v.append(dict(v[-1])), lambda v: v[-1].update(success=False),
+                     lambda v: v[-1].update(success=1), lambda v: v[0].update(fresh=True),
+                     lambda v: v[0].update(filenames=[str(output) + '.other']), lambda v: v[0]['profile'].update(test=True),
+                     lambda v: v[0]['target'].update(kind=['test']), lambda v: v[0]['target'].update(src_path='/other.rs'),
+                     lambda v: v[1].update(features=['desktop-shell', 'custom-protocol', 'macos-installed-observation']),
+                     lambda v: v[1]['features'].append('macos-installed-desktop-image'), lambda v: v.insert(0, dict(v[0]))]
+        for mutate in mutations:
+            changed = copy.deepcopy(rows); mutate(changed)
+            with self.assertRaises(ValueError): ns['artifact_data'](encoded(changed), checkout, work)
+        for raw in (b'', encoded(rows).rstrip(b'\n'), b'{"reason":"build-finished","success":true,"success":true}\n',
+                    b'{"reason":"build-finished","success":true,"number":1e9999}\n'):
+            with self.assertRaises(ValueError): ns['artifact_data'](raw, checkout, work)
+        command_rows = [dict(role=role, returned=True, capturesSettled=True, returncode=0) for role in ns['ROLES']]
+        good = dict(commands=command_rows, originalPending=False, sourcePost=True, toolsPost=True, inputOriginalsKnown=True,
+                    frontendGenerated=True, facadeArtifactVerified=True, toolOriginalsClosed=True, generatedOutputsRetired=True,
+                    installedQualified=False, runtimeQualified=False, launched=False, signed=False, failure=None)
+        self.assertTrue(ns['passed_data'](good))
+        for key in ('sourcePost', 'toolsPost', 'inputOriginalsKnown', 'frontendGenerated', 'facadeArtifactVerified',
+                    'toolOriginalsClosed', 'generatedOutputsRetired'):
+            self.assertFalse(ns['passed_data'](dict(good, **{key: False})), key)
+        for key in ('originalPending', 'installedQualified', 'runtimeQualified', 'launched', 'signed'):
+            self.assertFalse(ns['passed_data'](dict(good, **{key: True})), key)
+        self.assertFalse(ns['passed_data'](dict(good, failure={'stage': 'actual-child'})))
+        self.assertFalse(ns['passed_data'](dict(good, commands=command_rows[:-1])))
+        for key, value in (('returned', False), ('capturesSettled', False), ('role', 'other'), ('returncode', True)):
+            bad = copy.deepcopy(command_rows); bad[-1][key] = value
+            self.assertFalse(ns['cleanup_allowed_data'](bad, False, True, True))
+        failed_original = copy.deepcopy(command_rows); failed_original[-1]['returncode'] = 65
+        self.assertTrue(ns['cleanup_allowed_data'](failed_original, False, True, True))
+        self.assertFalse(ns['passed_data'](dict(good, commands=failed_original)))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, True, True, True))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, False, False, True))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, False, True, False))
+        facade = tomllib.loads((root / 'desktop/helpers/macos-desktop-image/Cargo.toml').read_text())
+        self.assertEqual(facade['lib']['crate-type'], ['cdylib'])
+        self.assertIs(facade['lib']['test'], False)
+        self.assertEqual(facade['dependencies']['mobile-release-kit-desktop']['features'], ['macos-installed-desktop-image'])
+        package = json.loads((root / 'desktop/package.json').read_text())
+        self.assertEqual(package['scripts']['build'], 'tsc --noEmit -p tsconfig.json && vite build')
+        app_cargo = tomllib.loads((root / 'desktop/src-tauri/Cargo.toml').read_text())
+        self.assertEqual(app_cargo['features']['macos-installed-desktop-image'],
+                         ['desktop-shell', 'custom-protocol', 'mrk-macos-installed-native/desktop-image'])
+        tauri = json.loads((root / 'desktop/src-tauri/tauri.conf.json').read_text())
+        self.assertEqual(tauri['build']['frontendDist'], '../dist')
+        native_build = (root / 'desktop/native/macos-installed-native/build.rs').read_text()
+        self.assertIn('MRK_MACOS_INSTALL_SOURCE_COMMIT', native_build)
+        self.assertIn('MRK_IMAGE_RELEASE_ID', native_build)
+        evidence = workflow_step(actual_shipping, 'Preserve only bounded public compile evidence; upload is not qualification')
+        public = re.findall(r'^            \$\{\{ steps.compile_work.outputs.root \}\}/([^\n]+)$', evidence, re.M)
+        self.assertEqual(public, ['source-inventory.json', 'compile-receipt.json', 'npm-ci.stdout', 'npm-ci.stderr',
+                                  'frontend-build.stdout', 'frontend-build.stderr', 'shipping-image-build.stdout', 'shipping-image-build.stderr'])
+        for text in (actual_shipping.replace("run: *mrk_installed_source_inventory", "run: *other", 1),
+                     actual_shipping.replace("timeout-minutes: 35", "timeout-minutes: 36", 1),
+                     actual_shipping.replace("  shipping-image-compile:\n", "  wrong-compile:\n", 1)):
+            with self.assertRaises(AssertionError): without_shipping_compile_workflow(text)
 
 
 
