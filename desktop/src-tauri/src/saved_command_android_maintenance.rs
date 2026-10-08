@@ -32,7 +32,8 @@ mod selected{
     /// Fixed explicit application-level consent, not arbitrary project/copy input.
     /// The admitted native shell is the only production entry. This value is
     /// not ownership, native qualification, or permission to install/remove files.
-    pub(crate) struct Request{at:Instant,operation:[u8;16],id:String}
+    pub(crate) struct Request{at:Instant,operation:[u8;16],id:String,
+        removal:Option<Arc<native::RemovalClock>>}
     impl Request{
         pub(crate) fn confirmed(value:&str)->Result<Self,BridgeError>{
             let at=Instant::now();
@@ -40,7 +41,18 @@ mod selected{
             let mut operation=[0;16];getrandom::fill(&mut operation).map_err(|_|unavailable())?;
             if operation==[0;16]{return Err(unavailable());}
             let id=operation.iter().map(|byte|format!("{byte:02x}")).collect();
-            Ok(Self{at,operation,id})
+            Ok(Self{at,operation,id,removal:None})
+        }
+        /// A native original confirmation, never a renderer string, supplies
+        /// this additional constraint. Local300/310 starts normally; the older
+        /// authenticated Parent110/120 original is retained without renewal.
+        pub(crate) fn confirmed_removal(confirmation:&service_setup::RemovalConfirmed)->Result<Self,BridgeError>{
+            let clock=confirmation.for_request().ok_or_else(unavailable)?;
+            let at=Instant::now();let mut operation=[0;16];
+            getrandom::fill(&mut operation).map_err(|_|unavailable())?;
+            if operation==[0;16]{return Err(unavailable());}
+            let id=operation.iter().map(|byte|format!("{byte:02x}")).collect();
+            Ok(Self{at,operation,id,removal:Some(clock)})
         }
     }
     pub(crate) fn unavailable()->BridgeError{BridgeError::new("macos_maintenance_unavailable",
@@ -74,18 +86,26 @@ mod selected{
     struct FailureProjection{imported:Option<(u64,Instant,wire::Reason)>,exported:Option<(u64,wire::Reason)>}
     /// One original conservative bracket. The coordinator never borrows client,
     /// identity or AppKit custody to publish STOP/deadline contractions.
-    pub(crate) struct OriginalClock{bridge:ClockBridge,projection:Mutex<FailureProjection>}
+    enum ClockSource{Ordinary(ClockBridge),Removal(Arc<native::RemovalClock>)}
+    pub(crate) struct OriginalClock{source:ClockSource,projection:Mutex<FailureProjection>}
     impl OriginalClock{
-        fn capture(control:&Control,signal:&native::Signal)->Option<Self>{
-            let bridge=ClockBridge::capture()?;let origin=bridge.earlier_endpoint(control.admitted)?;
+        fn capture(control:&Control,signal:&native::Signal,removal:Option<&Arc<native::RemovalClock>>)->Option<Self>{
+            let source=match removal{Some(clock)=>ClockSource::Removal(clock.clone()),None=>ClockSource::Ordinary(ClockBridge::capture()?)};
+            let original=Self{source,projection:Mutex::new(FailureProjection::default())};let bridge=original.bridge();
+            let origin=bridge.earlier_endpoint(control.admitted)?;
             let bounds=native::Bounds{origin,work:origin.checked_add(native::WORK_NS)?,hard:origin.checked_add(native::HARD_NS)?};
             if !bounds.valid() || bridge.earlier_endpoint(control.work)!=Some(bounds.work)
                 || bridge.earlier_endpoint(control.hard)!=Some(bounds.hard) || signal.arm(bounds).is_err(){return None;}
-            Some(Self{bridge,projection:Mutex::new(FailureProjection::default())})
+            if let Some(clock)=removal{if signal.bind_removal_clock(clock).is_err(){return None;}}
+            Some(original)
         }
-        pub(crate) fn bridge(&self)->&ClockBridge{&self.bridge}
+        pub(crate) fn bridge(&self)->&ClockBridge{match &self.source{ClockSource::Ordinary(bridge)=>bridge,ClockSource::Removal(clock)=>clock.bridge()}}
         pub(crate) fn synchronize(&self,control:&Control,signal:&native::Signal){
-            control.advance(Instant::now());
+            if signal.removal_cutoff().is_some(){
+                // Synchronization observes failure/cleanup, not new work. Each
+                // real work entry keeps its independent strict work gate.
+                let _=signal.admitted(true);let _=control.advance_cleanup(Instant::now());
+            }else{control.advance(Instant::now());}
             let mut projection=match self.projection.try_lock(){Ok(p)=>p,Err(TryLockError::WouldBlock)=>return,
                 Err(_)=>{signal.clock_unknown();control.poisoned();return;}};
             if let Some((reason,first))=control.failure(){
@@ -93,8 +113,8 @@ mod selected{
                 // Never re-export an imported lower bound through the bracket:
                 // otherwise each heartbeat would subtract the bracket width.
                 if projection.imported.is_none_or(|(_,bound,_)|first<bound){
-                    signal.local_failure(&self.bridge,first,control.unknown.load(Ordering::SeqCst));
-                    projection.exported=self.bridge.earlier_endpoint(first).map(|raw|(raw,reason));
+                    signal.local_failure(self.bridge(),first,control.unknown.load(Ordering::SeqCst));
+                    projection.exported=self.bridge().earlier_endpoint(first).map(|raw|(raw,reason));
                 }
             }
             if control.unknown.load(Ordering::SeqCst){
@@ -102,18 +122,23 @@ mod selected{
             }
             let frozen=signal.snapshot();
             if let Some(raw)=frozen.first{
-                let Some(first)=self.bridge.earlier_instant_data(raw)else{signal.clock_unknown();control.poisoned();return;};
+                let Some(first)=self.bridge().earlier_instant_data(raw)else{signal.clock_unknown();control.poisoned();return;};
                 let reason=projection.exported.filter(|(value,_)|*value==raw).map(|(_,reason)|reason)
                     .or_else(||projection.imported.filter(|(value,_,_)|*value==raw).map(|(_,_,reason)|reason))
                     .unwrap_or(wire::Reason::ServiceUnavailable);
                 projection.imported=Some((raw,first,reason));control.stop_at(reason,first);
             }
-            let Some(end)=frozen.cleanup.and_then(|raw|self.bridge.earlier_instant_data(raw))else{
+            let Some(end)=frozen.cleanup.and_then(|raw|self.bridge().earlier_instant_data(raw))else{
                 signal.clock_unknown();control.poisoned();return;
             };
             // Normal R only narrows. It does not call failure_at/stop_at.
             control.narrow_maintenance(end);
-            if frozen.unknown{control.poisoned();}
+            if let Some(clock)=signal.removal_clock(){
+                // Do not subtract a global Parent flag from frozen.unknown:
+                // a concurrent genuine own Unknown is independent and primary.
+                if signal.stored_unknown() || signal.stored_clock_unknown() || clock.invalid(){control.poisoned();}
+                else if clock.work_stopped(){control.parent_stopped();}
+            }else if frozen.unknown{control.poisoned();}
         }
     }
     struct Original{
@@ -121,6 +146,7 @@ mod selected{
         pickers:[Option<Arc<crate::asset_session::OriginalWork>>;3],source_generation:u32,
         cohort:AdmissionCohort,control:Arc<Control>,reservation:OnceLock<usize>,
         signal:Arc<native::Signal>,clock:OnceLock<OriginalClock>,client:Mutex<Option<transport::Client>>,
+        removal:Option<Arc<native::RemovalClock>>,
         preparation:service_setup::MaintenancePreparation,
         worker:AsyncMutex<Option<JoinHandle<WorkerReturn>>>,returned:Mutex<Option<Result<WorkerReturn,tokio::task::JoinError>>>,
         worker_joined:AtomicBool,coordinator:Mutex<Option<JoinHandle<bool>>>,
@@ -133,6 +159,9 @@ mod selected{
     impl Handle{
         pub(crate) fn same(&self,other:&Self)->bool{Arc::ptr_eq(&self.original,&other.original)}
         pub(crate) fn can_exit(&self)->bool{self.original.accepted.load(Ordering::SeqCst) && self.original.known_return()}
+        pub(crate) fn removal_matches(&self,cutoff:&mrk_macos_installed_native::removal_coordinator::ParentCutoff)->bool{
+            self.original.removal.as_ref().and_then(|clock|clock.cutoff()).is_some_and(|original|original.same_original(cutoff))
+        }
     }
     pub(crate) struct Admitted{handle:Handle,release:Option<oneshot::Sender<()>>}
     impl Admitted{
@@ -153,20 +182,36 @@ mod selected{
     }
     /// Issued only by the original finalization below. DATA fields are not a
     /// constructor; the document must consume this exact one-shot result.
-    pub(crate) struct Completion{status:Status,at:Instant,endpoint:Instant}
+    struct RemovalCompletion {
+        handle:Handle,clock:Arc<native::RemovalClock>,at_raw:u64,
+    }
+    pub(crate) struct Completion{status:Status,at:Instant,endpoint:Instant,removal:Option<RemovalCompletion>}
     impl Completion{
         pub(crate) fn status(&self)->Status{self.status}
         pub(crate) fn may_reopen(&self)->bool{self.status.phase==Phase::Refused && !self.status.started_or_uncertain}
         pub(crate) fn request_quit(&self)->bool{self.status.phase==Phase::Prepared
-            && timely_sample(self.at,Instant::now(),self.endpoint)}
+            && timely_sample(self.at,Instant::now(),self.endpoint)
+            && self.removal.as_ref().is_none_or(|binding|binding.clock.work_sample()
+                .is_some_and(|now|binding.at_raw<=now))}
+        pub(crate) fn matches_removal(&self,handle:&Handle,
+            cutoff:&mrk_macos_installed_native::removal_coordinator::ParentCutoff)->bool{
+            self.removal.as_ref().is_some_and(|binding|binding.handle.same(handle)
+                && binding.clock.cutoff().is_some_and(|original|original.same_original(cutoff)) && handle.removal_matches(cutoff))
+        }
     }
     impl Original{
+        fn pause(&self)->Duration{
+            if self.removal.is_none(){HEARTBEAT}
+            else{HEARTBEAT.min(self.control.endpoint().saturating_duration_since(Instant::now()))}
+        }
         fn same_owner(&self,inner:&Inner)->bool{self.owner.as_ptr()==inner as *const Inner
             && self.document.upgrade().is_some_and(|document|inner.android_original_document_matches(Some(&document)))}
         fn synchronize(&self){
             // Accepted publisher F lives in the SAME cohort before watch
             // projection. Import it even while the IPC worker is in native code.
-            let _=WorkGate{slot:self.cohort.slot.clone(),control:self.control.clone()}.try_work();
+            let gate=WorkGate{slot:self.cohort.slot.clone(),control:self.control.clone()};
+            if self.removal.is_some(){gate.import_retained(true);let _=self.control.advance_cleanup(Instant::now());}
+            else{let _=gate.try_work();}
             if let Some(clock)=self.clock.get(){clock.synchronize(&self.control,&self.signal);}
             else{self.control.advance(Instant::now());}
         }
@@ -229,10 +274,13 @@ mod selected{
             let Some(handle)=slot.as_mut()else{original.control.poisoned();return true;};
             let waker=Waker::from(Arc::new(FinalWake(original.owner.clone())));let mut cx=TaskContext::from_waker(&waker);
             let Poll::Ready(result)=Pin::new(handle).poll(&mut cx)else{return changed;};
-            let known=matches!(result,Ok(true));*returned=Some(result);slot.take();
+            let join_failed=result.is_err();let known=matches!(result,Ok(true));*returned=Some(result);slot.take();
             original.coordinator_joined.store(true,Ordering::SeqCst);drop(returned);drop(slot);changed=true;
             let at=Instant::now();original.synchronize();
-            if !known || !original.known_return() || at>=original.control.endpoint(){original.control.mark_unknown(at);return changed;}
+            if join_failed{original.control.mark_unknown(at);return changed;}
+            if !known || !original.known_return() || at>=original.control.endpoint(){
+                original.control.propagated_refusal(wire::Reason::CleanupUnknown,at);return changed;
+            }
             if !original.same_owner(inner){original.control.stop_at(wire::Reason::DocumentLost,at);}
             if original.joined_at.set(at).is_err(){original.control.poisoned();}
             changed
@@ -246,23 +294,35 @@ mod selected{
         if returned.is_some(){original.control.poisoned();return Poll::Ready(false);}
         let Some(handle)=slot.as_mut()else{original.control.poisoned();return Poll::Ready(false);};
         let Poll::Ready(result)=Pin::new(handle).poll(cx)else{return Poll::Pending;};
+        let join_failed=result.is_err();
         let known=matches!(&result,Ok(value) if value.facts.known && value.facts.retained.is_some());
         if let Ok(value)=&result{if let Some((reason,at))=value.first{original.control.stop_at(reason,at);}}
         *returned=Some(result);slot.take();original.worker_joined.store(true,Ordering::SeqCst);drop(returned);
-        original.synchronize();if !known{original.control.mark_unknown(Instant::now());}
+        original.synchronize();if join_failed{original.control.mark_unknown(Instant::now());}
+        else if !known{original.control.propagated_refusal(wire::Reason::CleanupUnknown,Instant::now());}
         Poll::Ready(known && !original.control.unknown.load(Ordering::SeqCst))
     }
     fn worker(original:Arc<Original>,mut enter:oneshot::Receiver<()>)->WorkerReturn{
         loop{
-            original.control.advance(Instant::now());
+            original.synchronize();
             if original.control.failure().is_some() || original.control.unknown.load(Ordering::SeqCst){break;}
-            match enter.try_recv(){Ok(())=>break,Err(oneshot::error::TryRecvError::Empty)=>std::thread::park_timeout(HEARTBEAT),
+            match enter.try_recv(){Ok(())=>break,Err(oneshot::error::TryRecvError::Empty)=>std::thread::park_timeout(original.pause()),
                 Err(oneshot::error::TryRecvError::Closed)=>{original.control.stop_at(wire::Reason::ServiceUnavailable,Instant::now());break;}}
         }
         if original.reservation.get().is_none_or(|bytes|*bytes>OWNED_LIMIT){original.control.poisoned();}
-        let clock=OriginalClock::capture(&original.control,&original.signal);
-        if clock.is_none() || original.clock.set(clock.unwrap()).is_err(){original.control.poisoned();
-            return WorkerReturn{facts:service_setup::MaintenanceRun::default(),first:original.control.failure()};}
+        if let Some(clock)=&original.removal{
+            // Removal prepared this SAME strict clock before GO. It cannot be
+            // recaptured/rearmed after authentication or user confirmation.
+            if original.clock.get().is_none() || original.signal.removal_clock()
+                .is_none_or(|actual|!Arc::ptr_eq(actual,clock)){
+                original.control.poisoned();
+                return WorkerReturn{facts:service_setup::MaintenanceRun::default(),first:original.control.failure()};
+            }
+        }else{
+            let clock=OriginalClock::capture(&original.control,&original.signal,None);
+            if clock.is_none() || original.clock.set(clock.unwrap()).is_err(){original.control.poisoned();
+                return WorkerReturn{facts:service_setup::MaintenanceRun::default(),first:original.control.failure()};}
+        }
         original.synchronize();
         let mut client=match original.client.try_lock(){Ok(client)=>client,Err(_)=>{original.control.poisoned();
             return WorkerReturn{facts:service_setup::MaintenanceRun::default(),first:original.control.failure()};}};
@@ -279,7 +339,9 @@ mod selected{
         let waker=Waker::from(Arc::new(FinalWake(original.owner.clone())));
         loop{
             original.synchronize();original.preparation.tick(true);
-            if Instant::now()>=original.control.endpoint(){original.control.mark_unknown(Instant::now());return false;}
+            if Instant::now()>=original.control.endpoint(){
+                original.control.propagated_refusal(wire::Reason::CleanupUnknown,Instant::now());return false;
+            }
             if original.control.failure().is_some() || original.control.unknown.load(Ordering::SeqCst){worker_enter.take();}
             if !released && worker_enter.is_some(){match release.try_recv(){
                 Ok(())=>released=true,Err(oneshot::error::TryRecvError::Empty)=>{},
@@ -293,7 +355,7 @@ mod selected{
             let joined={let mut cx=TaskContext::from_waker(&waker);poll_worker(&original,&mut worker,&mut cx)};
             if let Poll::Ready(known)=joined{drop(worker);return known && original.known_return()
                 && Instant::now()<original.control.endpoint();}
-            tokio::time::sleep(HEARTBEAT).await;
+            tokio::time::sleep(original.pause()).await;
         }
     }
     fn retained(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
@@ -367,22 +429,41 @@ mod selected{
             let hard=snapshot.request.at.checked_add(HARD).ok_or_else(unavailable)?;
             if Instant::now()>=work{return Err(unavailable());}
             let(stop,_)=watch::channel(false);let(audit,_)=watch::channel(hard);
-            let control=Arc::new(Control{lane:ControlLane::Maintenance,owner:Arc::downgrade(&self.inner),id:snapshot.request.id.clone(),
+            let control=Arc::new(Control{
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                removal:std::sync::OnceLock::new(),lane:ControlLane::Maintenance,owner:Arc::downgrade(&self.inner),id:snapshot.request.id.clone(),
                 generation,admitted:snapshot.request.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),
                 cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),
                 dirty:AtomicBool::new(false),latches:AtomicUsize::new(0),stop,audit});
-            let whole=prior.checked_add(arc_bytes::<Original>().ok_or_else(unavailable)?)
+            let extra_removal=if snapshot.request.removal.is_some(){
+                service_setup::RemovalMainCut::reservation_bytes().ok_or_else(unavailable)?
+            }else{0};
+            let whole=prior.checked_add(extra_removal).and_then(|bytes|bytes.checked_add(arc_bytes::<Original>()?))
                 .and_then(|bytes|bytes.checked_add(control.retained_bytes()?))
                 .and_then(|bytes|bytes.checked_add(arc_bytes::<native::Signal>()?))
                 .and_then(|bytes|bytes.checked_add(service_setup::MaintenancePreparation::reservation_bytes()?))
                 .and_then(|bytes|bytes.checked_add(transport::Client::project_owned_upper_bound()?))
                 .and_then(|bytes|bytes.checked_add(12*SIGNAL_STORAGE+TASK_STORAGE))
                 .filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(unavailable)?;
+            let signal=Arc::new(native::Signal::reserved());let original_clock=OnceLock::new();
+            let removal_cut=if let Some(removal)=&snapshot.request.removal{
+                let clock=OriginalClock::capture(&control,&signal,Some(removal)).ok_or_else(unavailable)?;
+                let main=service_setup::RemovalMainCut::capture(&control,&signal,clock.bridge()).ok_or_else(unavailable)?;
+                if !control.bind_removal(main.clone()){return Err(unavailable());}
+                clock.synchronize(&control,&signal);
+                if control.failure().is_some() || signal.unknown(){return Err(unavailable());}
+                original_clock.set(clock).map_err(|_|unavailable())?;Some(main)
+            }else{None};
+            let preparation=match removal_cut{
+                Some(cut)=>service_setup::Preparation::for_removal_maintenance(
+                    WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()},dispatcher,snapshot.request.operation,cut),
+                None=>service_setup::Preparation::for_maintenance(
+                    WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()},dispatcher,snapshot.request.operation),
+            };
             let original=Arc::new(Original{owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),
                 operation:snapshot.request.operation,generation,pickers:snapshot.pickers.clone(),source_generation:snapshot.source_generation,
-                cohort,control:control.clone(),reservation:OnceLock::new(),signal:Arc::new(native::Signal::reserved()),
-                clock:OnceLock::new(),client:Mutex::new(None),preparation:service_setup::Preparation::for_maintenance(
-                    WorkGate{slot:self.inner.android_registration_control.clone(),control:control.clone()},dispatcher,snapshot.request.operation),
+                cohort,control:control.clone(),reservation:OnceLock::new(),signal,
+                clock:original_clock,client:Mutex::new(None),preparation,removal:snapshot.request.removal.clone(),
                 worker:AsyncMutex::new(None),returned:Mutex::new(None),worker_joined:AtomicBool::new(false),
                 coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),coordinator_joined:AtomicBool::new(false),
                 joined_at:OnceLock::new(),accepted:AtomicBool::new(false)});
@@ -443,6 +524,13 @@ mod selected{
                 || book.cohort.as_ref().is_some_and(|cohort|cohort.first.is_some())
                 || !registry.android_sources.same_census_originals(&original.pickers)
                 || registry.android_sources.census_generation()!=original.source_generation){return None;}
+            let removal=if let Some(clock)=&original.removal{
+                // Actual Parent-domain stamp before consuming accepted service
+                // state. No UPTIME value is compared with Parent endpoints.
+                let Some(at_raw)=clock.cleanup_sample()else{
+                    drop(returned_guard);drop(book);original.control.poisoned();return None;};
+                Some(RemovalCompletion{handle:handle.clone(),clock:clock.clone(),at_raw})
+            }else{None};
             if !registry.android_registration.service.adopt_finalized_maintenance(&original.preparation){
                 drop(book);original.control.poisoned();return None;}
             let prepared=first.is_none() && returned.facts.prepared();
@@ -451,7 +539,7 @@ mod selected{
             original.accepted.store(true,Ordering::SeqCst);book.original=None;book.cohort=None;
             registry.android_registration.maintenance.last=Some(status);registry.android_registration.maintenance.active=None;
             drop(returned_guard);drop(book);self.inner.android_registration_control.wake.notify_all();self.inner.bump(&mut registry);
-            Some(Completion{status,at,endpoint})
+            Some(Completion{status,at,endpoint,removal})
         }
     }
     #[cfg(test)]
@@ -491,12 +579,12 @@ mod selected{
                 service_setup::MaintenanceRun{retained:None,..absent}]{assert!(!bad.prepared());}
             let at=Instant::now();let status=Status{operation:[1;16],generation:1,phase:Phase::Refused,reason:wire::Reason::ServiceUnavailable,
                 started_or_uncertain:true,unregister_accepted:true,not_registered:true};
-            let completion=Completion{status,at,endpoint:at+Duration::from_secs(1)};
+            let completion=Completion{status,at,endpoint:at+Duration::from_secs(1),removal:None};
             assert!(!completion.may_reopen() && !completion.request_quit());
-            let closed=Completion{status:Status{phase:Phase::Prepared,..status},at,endpoint:at};
+            let closed=Completion{status:Status{phase:Phase::Prepared,..status},at,endpoint:at,removal:None};
             assert!(!closed.request_quit()); // no fresh interval from a completion projection
             let absent_completion=Completion{status:Status{phase:Phase::Prepared,started_or_uncertain:false,
-                unregister_accepted:false,not_registered:true,..status},at,endpoint:at+Duration::from_secs(1)};
+                unregister_accepted:false,not_registered:true,..status},at,endpoint:at+Duration::from_secs(1),removal:None};
             assert!(!absent_completion.may_reopen() && absent_completion.request_quit());
         }
     }

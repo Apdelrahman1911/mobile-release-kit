@@ -263,6 +263,8 @@ pub(super) struct Control {
     first:Mutex<Option<(wire::Reason,Instant)>>,unknown:AtomicBool,dirty:AtomicBool,
     latches:std::sync::atomic::AtomicUsize,
     stop:watch::Sender<bool>,audit:watch::Sender<Instant>,
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    removal:std::sync::OnceLock<Arc<service_setup::RemovalMainCut>>,
 }
 /// Short control-only resolution borrow, never resource/native custody. Counted
 /// under the mirror lock before clone leaves it. The SAME final owner cannot
@@ -288,13 +290,57 @@ impl Control {
         let shortened=self.audit.send_if_modified(|end|if self.admitted<*end{*end=self.admitted;true}else{false});
         if newly_unknown||stopped||shortened{self.changed();}
     }
-    fn mark_unknown(&self,at:Instant){self.stop_at(wire::Reason::CleanupUnknown,at);}
+    fn parent_stopped(&self){
+        // Known raw/frozen-projection work-stop is not an Instant first-F or
+        // uncertain custody. Keep the original cleanup audit/hard unchanged.
+        if self.stop.send_if_modified(|stop|if !*stop{*stop=true;true}else{false}){self.changed();}
+    }
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    fn removal_cut_result(&self,cut:service_setup::RemovalCut,cleanup:bool)->bool{
+        match cut{service_setup::RemovalCut::Allowed=>true,
+            service_setup::RemovalCut::Stopped=>{self.parent_stopped();cleanup},
+            service_setup::RemovalCut::Unknown=>{self.poisoned();false}}
+    }
+    fn mark_unknown(&self,at:Instant){
+        // A genuine local/native failure is never suppressed by an unrelated
+        // earlier Parent-clock latch. Exact Parent veto sites use poisoned()
+        // directly; they must not route an invented Instant through this API.
+        self.stop_at(wire::Reason::CleanupUnknown,at);
+    }
+    /// Called only for a propagated missing positive proof, AFTER the actual
+    /// worker/native failure record has been imported. A removal Parent veto
+    /// has no convertible Instant first-F; the absence of proof cannot invent
+    /// one. New local failures/JoinError still use mark_unknown/stop_at directly.
+    fn propagated_refusal(&self,reason:wire::Reason,at:Instant){
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        let removal=self.removal.get().is_some();
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
+        let removal=false;
+        self.propagated_refusal_data(removal,reason,at);
+    }
+    fn propagated_refusal_data(&self,removal:bool,reason:wire::Reason,at:Instant){
+        if removal{self.poisoned();}else{self.stop_at(reason,at);}
+    }
     fn failure(&self)->Option<(wire::Reason,Instant)>{
         match self.first.lock(){Ok(first)=>*first,Err(_)=>{self.poisoned();Some((wire::Reason::CleanupUnknown,self.admitted))}}
     }
     fn endpoint(&self)->Instant{
         let end=self.failure().and_then(|(_,first)|first.checked_add(SETTLEMENT)).map_or(self.hard,|end|end.min(self.hard));
-        end.min(*self.audit.borrow())
+        let end=end.min(*self.audit.borrow());
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        let end=self.removal.get().map_or(end,|cut|end.min(cut.hard_at()));
+        end
+    }
+    fn work_endpoint(&self)->Instant{
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if let Some(cut)=self.removal.get(){return self.work.min(cut.work_at());}
+        self.work
+    }
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    fn bind_removal(&self,cut:Arc<service_setup::RemovalMainCut>)->bool{
+        if self.lane!=ControlLane::Maintenance || !cut.matches(self) || self.failure().is_some()
+            || self.unknown.load(Ordering::SeqCst) || self.removal.set(cut).is_err(){self.poisoned();return false;}
+        self.advance(Instant::now());self.failure().is_none() && !self.unknown.load(Ordering::SeqCst)
     }
     /// Same original audit only. Normal resident retirement is NOT failure.
     fn narrow_maintenance(&self,end:Instant)->bool{
@@ -320,15 +366,30 @@ impl Control {
         let stopped=self.stop.send_if_modified(|stop|if !*stop{*stop=true;true}else{false});
         if earlier||newly_unknown||shortened||stopped{self.changed();}
     }
-    fn advance(&self,now:Instant){
+    fn advance(&self,now:Instant){let _=self.advance_classified(now);}
+    /// False describes THIS actual additional-clock cut only. It is not a
+    /// query of a global unknown flag and never suppresses a genuine local F.
+    fn advance_classified(&self,now:Instant)->bool{self.advance_phase(now,false)}
+    fn advance_cleanup(&self,now:Instant)->bool{self.advance_phase(now,true)}
+    fn advance_phase(&self,now:Instant,cleanup:bool)->bool{
+        // The original own-domain deadline remains genuine first-F even when
+        // a later Parent observation stops work or makes its clock unknown.
         if now>=self.work && self.failure().is_none(){self.stop_at(wire::Reason::TimedOut,self.work);}
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if let Some(cut)=self.removal.get(){if !self.removal_cut_result(cut.cut(self,now),cleanup){return false;}}
+        #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
+        let _=cleanup;
         if now>=self.endpoint(){self.mark_unknown(now);}
+        true
     }
     fn matches(&self,input:&wire::Cancel)->bool{self.id==input.operation_id&&self.generation==input.registration_generation}
     fn retained_bytes(&self)->Option<usize>{
         let _first=self.first.try_lock().ok()?;
         if self.unknown.load(Ordering::SeqCst) || self.latches.load(Ordering::SeqCst)!=0{return None;}
-        arc_bytes::<Self>()?.checked_add(self.id.capacity())?.checked_add(SIGNAL_STORAGE)
+        let bytes=arc_bytes::<Self>()?.checked_add(self.id.capacity())?.checked_add(SIGNAL_STORAGE)?;
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        let bytes=match self.removal.get(){Some(cut)=>bytes.checked_add(cut.retained_bytes()?)?,None=>bytes};
+        Some(bytes)
     }
 }
 impl ControlSlot {
@@ -375,6 +436,9 @@ impl Drop for AdmissionCohort {
         drop(book); self.slot.wake.notify_all();
     }
 }
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum SourceWorkFailure { Local(AdmissionFailure),ParentClock }
 #[derive(Clone)]
 pub(crate) struct WorkGate { slot: Arc<ControlSlot>, control: Arc<Control> }
 impl WorkGate {
@@ -406,9 +470,30 @@ impl WorkGate {
         };
         if failure.is_some() { return None; }
         let ready = !ControlSlot::pending(&book) && !self.control.unknown.load(Ordering::SeqCst);
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if let Some(cut)=self.control.removal.get(){
+            // Resolve all potentially blocking local state BEFORE the final
+            // actual Parent/UPTIME cut. Keep this same book and first-F guard
+            // across that cut; no wait/lock follows a positive observation.
+            let end=self.control.work_endpoint().min(self.control.endpoint());
+            let first=match self.control.first.try_lock(){Ok(first)=>first,
+                Err(TryLockError::WouldBlock)=>return Some(false),
+                Err(TryLockError::Poisoned(_))=>{drop(book);self.control.poisoned();return None;}};
+            if first.is_some(){return None;}
+            let at=Instant::now();let clocks=cut.cut(&self.control,at);
+            let expired=Instant::now()>=end;
+            let unavailable=self.slot.is_unknown() || self.control.unknown.load(Ordering::SeqCst);
+            drop(first);drop(book);
+            if !self.control.removal_cut_result(clocks,false){
+                if at>=self.control.work{self.control.stop_at(wire::Reason::TimedOut,self.control.work);}
+                return None;
+            }
+            if expired{self.control.advance(Instant::now());return None;}
+            return if unavailable{None}else{Some(ready)};
+        }
         let at = Instant::now();
         drop(book);
-        if at >= self.control.work || self.control.lane==ControlLane::Maintenance && at>=self.control.endpoint() {
+        if at >= self.control.work_endpoint() || self.control.lane==ControlLane::Maintenance && at>=self.control.endpoint() {
             self.control.advance(at); None
         } else { Some(ready) }
     }
@@ -443,9 +528,14 @@ impl WorkGate {
     /// Source WORK can really WAIT. No watch::Ref, Doc/Registry/native lock is
     /// acquired here. The SAME worker-only source custody guard may stay held.
     pub(crate) fn work(&self) -> Result<(), (wire::Reason, Instant)> {
+        self.work_classified(&mut false)
+    }
+    fn work_classified(&self,parent_clock:&mut bool)->Result<(),(wire::Reason,Instant)>{
+        *parent_clock=false;
         loop {
-            let now = Instant::now(); self.control.advance(now);
+            let now=Instant::now();let clocks=self.control.advance_classified(now);
             if let Some(first) = self.control.failure() { return Err(first); }
+            if !clocks{*parent_clock=true;return Err((wire::Reason::CleanupUnknown,self.control.admitted));}
             if self.control.unknown.load(Ordering::SeqCst) || self.slot.is_unknown() {
                 self.control.poisoned(); return Err((wire::Reason::CleanupUnknown, self.control.admitted));
             }
@@ -479,17 +569,43 @@ impl WorkGate {
                     drop(book); self.control.poisoned();
                     return Err((wire::Reason::CleanupUnknown, self.control.admitted));
                 }
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                if let Some(cut)=self.control.removal.get(){
+                    let end=self.control.work_endpoint().min(self.control.endpoint());
+                    let first=match self.control.first.lock(){Ok(first)=>first,Err(error)=>{
+                        drop(error.into_inner());drop(book);self.control.poisoned();
+                        return Err((wire::Reason::CleanupUnknown,self.control.admitted));}};
+                    if let Some(first)=*first{drop(book);return Err(first);}
+                    // A sleep or local lock wait can advance CLOCK_MONOTONIC
+                    // independently of Instant. Sample it AFTER the last lock,
+                    // keeping exact epoch/cohort and current-F custody stable.
+                    let at=Instant::now();let clocks=cut.cut(&self.control,at);
+                    let expired=Instant::now()>=end;
+                    let unavailable=self.slot.is_unknown() || self.control.unknown.load(Ordering::SeqCst);
+                    drop(first);drop(book);
+                    if !self.control.removal_cut_result(clocks,false){
+                        if at>=self.control.work{
+                            self.control.stop_at(wire::Reason::TimedOut,self.control.work);
+                            return Err((wire::Reason::TimedOut,self.control.work));
+                        }
+                        *parent_clock=true;
+                        return Err((wire::Reason::CleanupUnknown,self.control.admitted));
+                    }
+                    if expired{self.control.advance(Instant::now());continue;}
+                    if unavailable{return Err((wire::Reason::CleanupUnknown,self.control.admitted));}
+                    return Ok(());
+                }
                 // Lock contention is part of the original W, not free time.
                 let entered_at = Instant::now();
-                if entered_at >= self.control.work
+                if entered_at >= self.control.work_endpoint()
                     || self.control.lane==ControlLane::Maintenance && entered_at>=self.control.endpoint() {
                     drop(book); self.control.advance(entered_at); continue;
                 }
                 return Ok(());
             }
             let end=if self.control.lane==ControlLane::Maintenance {
-                self.control.work.min(self.control.endpoint())
-            }else{self.control.work};
+                self.control.work_endpoint().min(self.control.endpoint())
+            }else{self.control.work_endpoint()};
             let remaining = end.saturating_duration_since(Instant::now());
             if remaining.is_zero() { drop(book); continue; }
             #[cfg(test)] {
@@ -509,22 +625,51 @@ impl WorkGate {
     /// A last WORK return after W is still failure at original W, even when the
     /// native next checkpoint has already switched to Cleanup.
     pub(crate) fn cleanup_expired(&self, first: Option<(wire::Reason, Instant)>) -> bool {
-        self.import_retained(true);
+        self.cleanup_classified(first,&mut false)
+    }
+    fn cleanup_classified(&self,first:Option<(wire::Reason,Instant)>,parent_clock:&mut bool)->bool{
+        *parent_clock=false;self.import_retained(true);
         if let Some((reason, at)) = first { self.note(reason, at); }
-        let now = Instant::now(); self.control.advance(now);
-        now >= self.control.endpoint()
+        let now=Instant::now();
+        if !self.control.advance_cleanup(now){*parent_clock=true;return true;}
+        let end=self.control.endpoint();
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if let Some(cut)=self.control.removal.get(){
+            // endpoint/import may acquire short local locks. A false expiry
+            // result is another positive native permission, so check actual P
+            // after those waits too, with no fabricated local failure stamp.
+            let at=Instant::now();
+            if !self.control.removal_cut_result(cut.cut(&self.control,at),true){
+                if at>=self.control.work{self.control.stop_at(wire::Reason::TimedOut,self.control.work);}
+                *parent_clock=true;return true;
+            }
+            return self.control.unknown.load(Ordering::SeqCst) || Instant::now()>=end;
+        }
+        now >= end
     }
     pub(crate) fn publishable(&self) -> bool {
+        #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+        if self.control.removal.get().is_some(){return self.try_work()==Some(true);}
         let now=Instant::now(); self.control.advance(now);
         self.control.failure().is_none() && !self.control.unknown.load(Ordering::SeqCst)
-            && now < self.control.work && self.slot.matches_epoch(self.control.epoch)
+            && now < self.control.work_endpoint() && self.slot.matches_epoch(self.control.epoch)
     }
     pub(crate) fn retained_bytes(&self) -> usize { std::mem::size_of::<Self>() }
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
-    pub(crate) fn source_work(&self)->Result<(),AdmissionFailure>{self.work().map_err(|(reason,_)|match reason{
-        wire::Reason::TimedOut=>AdmissionFailure::Deadline,wire::Reason::CleanupUnknown=>AdmissionFailure::Unknown,
-        wire::Reason::InputLimit|wire::Reason::ResultLimit=>AdmissionFailure::Bounds,_=>AdmissionFailure::Stopped,
+    pub(crate) fn source_work(&self)->Result<(),AdmissionFailure>{self.source_work_classified().map_err(|failure|match failure{
+        SourceWorkFailure::Local(failure)=>failure,SourceWorkFailure::ParentClock=>AdmissionFailure::Unknown,
     })}
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn source_work_classified(&self)->Result<(),SourceWorkFailure>{
+        let mut parent_clock=false;
+        self.work_classified(&mut parent_clock).map_err(|(reason,_)|if parent_clock{SourceWorkFailure::ParentClock}
+            else{SourceWorkFailure::Local(match reason{
+                wire::Reason::TimedOut=>AdmissionFailure::Deadline,wire::Reason::CleanupUnknown=>AdmissionFailure::Unknown,
+                wire::Reason::InputLimit|wire::Reason::ResultLimit=>AdmissionFailure::Bounds,_=>AdmissionFailure::Stopped,
+            })})
+    }
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn source_has_removal_cutoff(&self)->bool{self.control.removal.get().is_some()}
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{self.first().map(|(reason,at)|(match reason{
         wire::Reason::TimedOut=>AdmissionFailure::Deadline,wire::Reason::CleanupUnknown=>AdmissionFailure::Unknown,
@@ -536,8 +681,14 @@ impl WorkGate {
     }
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn source_cleanup_expired(&self,first:Option<(AdmissionFailure,Instant)>)->bool{
+        self.source_cleanup_verdict(first)!=crate::installed_runtime::AppRemovalCleanup::Allowed
+    }
+    #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn source_cleanup_verdict(&self,first:Option<(AdmissionFailure,Instant)>)->crate::installed_runtime::AppRemovalCleanup{
+        use crate::installed_runtime::AppRemovalCleanup as V;
         if let Some((failure,at))=first{self.source_note(failure,at);}
-        self.cleanup_expired(None)
+        let mut parent_clock=false;let expired=self.cleanup_classified(None,&mut parent_clock);
+        if parent_clock{V::ParentClock}else if expired{V::LocalExpired}else{V::Allowed}
     }
 }
 impl ControlSlot {
@@ -1314,7 +1465,9 @@ impl SavedCommandOwner {
             let cohort=snapshot.cohort.lock().map_err(|_|wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
             if !self.inner.android_registration_control.current_claim(&cohort){return Err(wire::invalid());}
             let (stop,_)=watch::channel(false);let (audit,audit_read)=watch::channel(hard);
-            let control=Arc::new(Control{lane:ControlLane::Sources,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
+            let control=Arc::new(Control{
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                removal:std::sync::OnceLock::new(),lane:ControlLane::Sources,owner:Arc::downgrade(&self.inner),id:checked.id.clone(),generation,
                 admitted:snapshot.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
                 latches:std::sync::atomic::AtomicUsize::new(0),stop,audit});
             let data=wire::Operation{operation_id:checked.id.clone(),registration_generation:generation,
@@ -1512,7 +1665,9 @@ mod catalogue_budget_tests {
         let admitted=Instant::now();let work=admitted.checked_add(WORK).unwrap();let hard=admitted.checked_add(HARD).unwrap();
         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
         // No claim/install, AdmissionCohort, owner, GO, retirement or receipt.
-        Arc::new(Control{lane,owner:Weak::new(),id,generation,admitted,work,hard,
+        Arc::new(Control{
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id,generation,admitted,work,hard,
             slot:Arc::downgrade(slot),cohort:Arc::new(()),epoch:0,first:Mutex::new(None),
             unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
             latches:std::sync::atomic::AtomicUsize::new(0),stop,audit})
@@ -1715,7 +1870,9 @@ mod lifecycle_book_tests {
         let cohort=slot.claim(0,None).unwrap();
         let work=admitted+WORK;let hard=admitted+HARD;
         let (stop,_)=watch::channel(false);let (audit,_)=watch::channel(hard);
-        let control=Arc::new(Control{lane,owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
+        let control=Arc::new(Control{
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                removal:std::sync::OnceLock::new(),lane,owner:Weak::new(),id:"inspection-original".to_owned(),generation:7,
             admitted,work,hard,slot:Arc::downgrade(&slot),cohort:cohort.identity.clone(),epoch:cohort.epoch,
             first:Mutex::new(None),unknown:AtomicBool::new(false),dirty:AtomicBool::new(false),
             latches:AtomicUsize::new(0),stop,audit});

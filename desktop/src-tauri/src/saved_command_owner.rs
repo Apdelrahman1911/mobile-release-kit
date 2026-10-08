@@ -34,12 +34,16 @@ pub(crate) type AndroidRegistrationFinalization = android_registration::Finaliza
 pub(crate) type AndroidRegistrationCancelPublisher = android_registration::CancelPublisher;
 pub(crate) use android_registration::{ControlSlot as AndroidRegistrationControl, Publisher as AndroidRegistrationPublisher, PublisherKind as AndroidRegistrationPublisherKind};
 pub(crate) use android_registration::WorkGate as AndroidRegistrationWorkGate;
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use android_registration::SourceWorkFailure as AndroidRegistrationSourceWorkFailure;
 pub(crate) type AndroidServiceSnapshot = android_registration::service_setup::Snapshot;
 pub(crate) type AndroidServiceChecked = android_registration::service_setup::Checked;
 pub(crate) type AndroidServiceAdmitted = android_registration::service_setup::Admitted;
 pub(crate) type AndroidServiceFinalization = android_registration::service_setup::Finalization;
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use android_registration::service_setup::Dispatcher as AndroidServiceDispatcher;
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+pub(crate) use android_registration::service_setup::{RemovalPrompt as MacosRemovalPrompt,RemovalConfirmed as MacosRemovalConfirmed};
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use android_registration::maintenance::{
     Request as MacosMaintenanceRequest,Snapshot as MacosMaintenanceSnapshot,Checked as MacosMaintenanceChecked,

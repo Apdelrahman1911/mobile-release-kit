@@ -975,7 +975,9 @@ pub(super) fn admit(owner: &SavedCommandOwner, document: &Arc<()>, registry: &mu
     let cohort = snapshot.cohort.lock().map_err(|_| wire::unconfirmed())?.take().ok_or_else(wire::invalid)?;
     if !owner.inner.android_registration_control.current_claim(&cohort) { return Err(wire::invalid()); }
     let (stop, _) = watch::channel(false); let (audit, audit_read) = watch::channel(hard);
-    let control = Arc::new(Control { lane:ControlLane::Sources, owner: Arc::downgrade(&owner.inner), id: checked.id.clone(), generation,
+    let control = Arc::new(Control {
+                #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+                removal:std::sync::OnceLock::new(), lane:ControlLane::Sources, owner: Arc::downgrade(&owner.inner), id: checked.id.clone(), generation,
         admitted: snapshot.at, work, hard, slot: Arc::downgrade(&owner.inner.android_registration_control),
         cohort: cohort.identity.clone(), epoch: cohort.epoch, first: Mutex::new(None),
         unknown: AtomicBool::new(false), dirty: AtomicBool::new(false), latches: AtomicUsize::new(0), stop, audit });

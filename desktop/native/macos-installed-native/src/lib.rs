@@ -44,7 +44,8 @@ pub mod vault_helper_launch;
 pub mod installed_entry;
 pub mod android_lease;
 pub mod android_registration;
-// Immutable proof type is shared; native adapters are separately role-gated.
+// Shared cutoff DATA is present in helpers; live confirmation/peer APIs remain
+// nonhelper-only inside this fixed module.
 pub mod removal_coordinator;
 pub mod android_maintenance_wire;
 #[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]

@@ -27,11 +27,24 @@ name = "mrk-macos-install"
 path = "src/bin/macos_install.rs"
 required-features = ["macos-installed-installer"]
 
+# Distinct source-selected role; the shared Parent source has an exclusive
+# remover entrypoint, never the install branch with another filename.
+[[bin]]
+name = "mrk-macos-remove"
+path = "src/bin/macos_install.rs"
+required-features = ["macos-installed-remover"]
+
 # Explicit external packaging child only; never a packaged application target.
 [[example]]
 name = "macos_package_producer"
 path = "examples/macos_package_producer.rs"
 required-features = ["macos-package-producer"]
+bench = false
+
+[[example]]
+name = "macos_remove_producer"
+path = "examples/macos_remove_producer.rs"
+required-features = ["macos-remove-producer"]
 bench = false
 
 [[bin]]
@@ -60,8 +73,10 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+macos-installed-remover = []
 # Private-key signing is isolated to the explicit nonshipping example graph.
 macos-package-producer = ["mrk-macos-installed-native/package-producer-signing"]
+macos-remove-producer = ["mrk-macos-installed-native/package-producer-signing"]
 # Separate fixed headless Android registration helper; never unified into UI.
 macos-android-registration-helper = ["mrk-macos-installed-native/android-registration-helper"]
 macos-installed-resident-image = ["macos-android-registration-helper", "mrk-macos-installed-native/resident-image"]

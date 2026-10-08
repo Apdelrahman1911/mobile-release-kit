@@ -16,6 +16,7 @@ pub const ENTRY_BINARY: &str = paths::ENTRY_INVENTORY_PATH;
 pub const APP_BINARY: &str = paths::PAYLOAD_INVENTORY_PATH;
 pub const VAULT_HELPER: &str = paths::VAULT_HELPER_INVENTORY_PATH;
 pub const ANDROID_HELPER: &str = paths::ANDROID_HELPER_INVENTORY_PATH;
+pub const REMOVER: &str = paths::REMOVER_INVENTORY_PATH;
 pub const ANDROID_SERVICE_PLIST: &str = paths::ANDROID_SERVICE_INVENTORY_PATH;
 pub const DESKTOP_IMAGE: &str = paths::DESKTOP_IMAGE_INVENTORY_PATH;
 pub const RESIDENT_IMAGE: &str = paths::RESIDENT_IMAGE_INVENTORY_PATH;
@@ -102,7 +103,7 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"),
+                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -403,6 +404,17 @@ mod tests {
                 wrong["files"].as_array_mut().unwrap().sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
                 assert!(Inventory::parse(&serde_json::to_vec(&wrong).unwrap(),&manifest).unwrap().index().is_err());
             }
+        }
+        // Historical authenticated inventories remain parseable. Only this
+        // new fixed executable joins the closed list; current-role admission
+        // must separately require its genuine signed original.
+        for (path,executable,accepted) in [(REMOVER,true,true),(REMOVER,false,false),
+            ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove-other",true,false)] {
+            let mut changed=original.clone();let rows=changed["files"].as_array_mut().unwrap();
+            rows.push(json!({"path":path,"sha256":"b".repeat(64),"size":1,"executable":executable}));
+            rows.sort_by(|a,b|a["path"].as_str().cmp(&b["path"].as_str()));
+            let bytes=serde_json::to_vec(&changed).unwrap();
+            assert_eq!(Inventory::parse(&bytes,&manifest).unwrap().index().is_ok(),accepted);
         }
     }
     #[test] fn closed_record_tuple_inventory_and_nonfinality() { closed_record_tuple_inventory_and_nonfinality_data(); }

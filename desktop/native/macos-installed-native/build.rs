@@ -151,6 +151,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/android_service_management.m");
     println!("cargo:rerun-if-changed=src/install_producer.m");
     println!("cargo:rerun-if-changed=src/install_producer.h");
+    println!("cargo:rerun-if-changed=src/removal_coordinator.m");
+    println!("cargo:rerun-if-changed=src/removal_coordinator.h");
     println!("cargo:rerun-if-changed=build_support/producer_selection.rs");
     println!("cargo:rerun-if-changed=build_support/producer_compile_only.h");
     println!("cargo:rerun-if-changed=../../packaging/macos-install-producer-signing.profile");
@@ -188,7 +190,9 @@ fn main() {
             .expect("bounded public producer SOURCE header");
         std::fs::write(out.join("mrk-install-producer-selection.h"), header)
             .expect("write fixed producer source selection");
-        build.include(&out).file("src/install_producer.m");
+        build.include(&out).file("src/install_producer.m").file("src/removal_coordinator.m");
+        // Documented audit-token field accessors; no PID/UID-only peer fallback.
+        println!("cargo:rustc-link-lib=bsm");
 
         if e2_fixture {
             // Compile the accepted CONFIGURED1 C branch in this existing native

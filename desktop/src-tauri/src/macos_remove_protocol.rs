@@ -1,4 +1,4 @@
-//! The four fixed removal frames and their transcript are DATA only.
+//! The outer removal request, four fixed frames and transcript are DATA only.
 //!
 //! This module does not read a clock, generate a nonce, open a channel, select
 //! code, confirm a user action or create Completion/QuitReady/EX authority.
@@ -19,6 +19,10 @@ pub const FRAME_COUNT: usize = 4;
 pub const WORK_NS: u64 = 110_000_000_000;
 pub const HARD_NS: u64 = 120_000_000_000;
 pub const PURPOSE: &str = "mrk-macos-remove-producer-v1";
+pub const REQUEST_LIMIT: usize = 32768;
+pub const DESCRIPTOR_LIMIT: usize = 16384;
+pub const SIGNATURE_LIMIT: usize = 512;
+pub const REQUEST_PURPOSE: &str = "mrk-macos-remove-request-v1";
 const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +318,176 @@ impl Write for BodyWriter<'_> {
     fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
+// The outer request is not a fifth channel frame or a signed descriptor. Its
+// two encoded leaves preserve the original signed bytes without interpreting
+// them. In particular, the binding and raw pair still need independent source,
+// signature, current-peer and original-clock admission by the enclosing owner.
+fn valid_request_lengths_data(descriptor: usize, signature: usize) -> DataResult<()> {
+    require(descriptor > 0 && descriptor <= DESCRIPTOR_LIMIT
+        && signature <= SIGNATURE_LIMIT && matches!(signature, 256 | 384 | 512), DataError::Limit)
+}
+fn request_base64_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62), b'/' => Some(63), _ => None,
+    }
+}
+fn decode_request_base64_data(text: &str, signature: bool) -> DataResult<Vec<u8>> {
+    let raw_limit = if signature { SIGNATURE_LIMIT } else { DESCRIPTOR_LIMIT };
+    let encoded_limit = (raw_limit + 2) / 3 * 4; // Fixed 684 or 21,848.
+    let bytes = text.as_bytes();
+    // Check both encoded and decoded limits before allocating decoded storage.
+    // The maximum encoded size alone is insufficient: 16,384 and 16,386 raw
+    // bytes, for example, have the same padded base64 length.
+    require(!bytes.is_empty() && bytes.len() <= encoded_limit && bytes.len() % 4 == 0,
+        DataError::Limit)?;
+    let padding = if bytes.ends_with(b"==") { 2 } else if bytes.ends_with(b"=") { 1 } else { 0 };
+    let used = bytes.len() - padding;
+    let decoded = bytes.len() / 4 * 3 - padding;
+    require(decoded > 0 && decoded <= raw_limit
+        && (!signature || matches!(decoded, 256 | 384 | 512)), DataError::Limit)?;
+    require(bytes[..used].iter().all(|byte| request_base64_value(*byte).is_some()), DataError::Shape)?;
+    // Only the last quartet may contain padding. Reject nonzero unused bits,
+    // rather than accepting multiple encodings for the same original bytes.
+    let tail = request_base64_value(bytes[used - 1]).ok_or(DataError::Shape)?;
+    require((padding != 2 || tail & 15 == 0) && (padding != 1 || tail & 3 == 0), DataError::Shape)?;
+    let mut output = Vec::new();
+    output.try_reserve_exact(decoded).map_err(|_| DataError::Limit)?;
+    for quartet in bytes.chunks_exact(4) {
+        let a = request_base64_value(quartet[0]).ok_or(DataError::Shape)?;
+        let b = request_base64_value(quartet[1]).ok_or(DataError::Shape)?;
+        output.push((a << 2) | (b >> 4));
+        if quartet[2] != b'=' {
+            let c = request_base64_value(quartet[2]).ok_or(DataError::Shape)?;
+            output.push((b << 4) | (c >> 2));
+            if quartet[3] != b'=' {
+                let d = request_base64_value(quartet[3]).ok_or(DataError::Shape)?;
+                output.push((c << 6) | d);
+            }
+        }
+    }
+    require(output.len() == decoded, DataError::Shape)?;
+    Ok(output)
+}
+struct RequestBase64 { signature: bool }
+impl<'de> Visitor<'de> for RequestBase64 {
+    type Value = Vec<u8>;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("bounded canonical removal-request base64 string")
+    }
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Vec<u8>, E> {
+        decode_request_base64_data(text, self.signature)
+            .map_err(|_| E::custom("invalid bounded removal-request base64"))
+    }
+}
+fn request_descriptor<'de, D: Deserializer<'de>>(decoder: D) -> Result<Vec<u8>, D::Error> {
+    decoder.deserialize_str(RequestBase64 { signature: false })
+}
+fn request_signature<'de, D: Deserializer<'de>>(decoder: D) -> Result<Vec<u8>, D::Error> {
+    decoder.deserialize_str(RequestBase64 { signature: true })
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestWire {
+    schema_version: u32, purpose: String,
+    #[serde(deserialize_with = "binding_object")]
+    binding: BindingWire,
+    #[serde(deserialize_with = "request_descriptor")]
+    remove_descriptor: Vec<u8>,
+    #[serde(deserialize_with = "request_signature")]
+    remove_signature: Vec<u8>,
+}
+fn write_request_base64_data(writer: &mut BodyWriter<'_>, bytes: &[u8]) -> DataResult<()> {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for part in bytes.chunks(3) {
+        let a = part[0];
+        let b = part.get(1).copied().unwrap_or(0);
+        let c = part.get(2).copied().unwrap_or(0);
+        let quartet = [ALPHABET[usize::from(a >> 2)], ALPHABET[usize::from(((a & 3) << 4) | (b >> 4))],
+            if part.len() > 1 { ALPHABET[usize::from(((b & 15) << 2) | (c >> 6))] } else { b'=' },
+            if part.len() > 2 { ALPHABET[usize::from(c & 63)] } else { b'=' }];
+        writer.write_all(&quartet).map_err(|_| DataError::Limit)?;
+    }
+    Ok(())
+}
+
+/// Immutable outer request DATA. No public Deserialize/Serialize constructor,
+/// signature verifier, path selector or native capability is provided here.
+pub struct RequestData {
+    binding: BindingData, remove_descriptor: Vec<u8>, remove_signature: Vec<u8>,
+}
+impl RequestData {
+    pub fn new_data(binding: &BindingData, remove_descriptor: &[u8], remove_signature: &[u8]) -> DataResult<Self> {
+        valid_request_lengths_data(remove_descriptor.len(), remove_signature.len())?;
+        validate_binding_data(binding.fields_data())?;
+        require(binding.wire.target == binding.target.target(), DataError::Binding)?;
+        let mut descriptor = Vec::new();
+        descriptor.try_reserve_exact(remove_descriptor.len()).map_err(|_| DataError::Limit)?;
+        descriptor.extend_from_slice(remove_descriptor);
+        let mut signature = Vec::new();
+        signature.try_reserve_exact(remove_signature.len()).map_err(|_| DataError::Limit)?;
+        signature.extend_from_slice(remove_signature);
+        Ok(Self { binding: binding.clone(), remove_descriptor: descriptor, remove_signature: signature })
+    }
+    pub fn parse_data(bytes: &[u8]) -> DataResult<Self> {
+        require(!bytes.is_empty() && bytes.len() <= REQUEST_LIMIT, DataError::Limit)?;
+        require(std::str::from_utf8(bytes).is_ok()
+            && bytes.iter().copied().find(|byte| !b" \t\r\n".contains(byte)) == Some(b'{'), DataError::Shape)?;
+        // The private string visitors decode directly into the retained Vecs;
+        // they never own a second base64 String. serde's escaped-string scratch
+        // and the caller's original JSON remain separate bounded parse storage.
+        let wire: RequestWire = serde_json::from_slice(bytes).map_err(|_| DataError::Shape)?;
+        require(wire.schema_version == SCHEMA_VERSION && wire.purpose == REQUEST_PURPOSE, DataError::Binding)?;
+        let request = Self { binding: BindingData::from_wire_data(wire.binding)?,
+            remove_descriptor: wire.remove_descriptor, remove_signature: wire.remove_signature };
+        request.validate_data()?;
+        Ok(request)
+    }
+    fn validate_data(&self) -> DataResult<()> {
+        validate_binding_data(self.binding.fields_data())?;
+        require(self.binding.wire.target == self.binding.target.target(), DataError::Binding)?;
+        valid_request_lengths_data(self.remove_descriptor.len(), self.remove_signature.len())
+    }
+    pub fn binding_data(&self) -> &BindingData { &self.binding }
+    pub fn remove_descriptor_data(&self) -> &[u8] { &self.remove_descriptor }
+    pub fn remove_signature_data(&self) -> &[u8] { &self.remove_signature }
+    /// Serialize exactly the five fields into the caller's fixed buffer. The
+    /// base64 encoder uses one four-byte quartet, not an encoded heap copy.
+    /// Every error leaves the entire buffer zeroed and unpublishable.
+    pub fn encode_data(&self, output: &mut [u8; REQUEST_LIMIT]) -> DataResult<usize> {
+        output.fill(0);
+        let result = (|| {
+            self.validate_data()?;
+            let mut writer = BodyWriter { bytes: output, used: 0 };
+            writer.write_all(b"{\"schemaVersion\":").map_err(|_| DataError::Limit)?;
+            serde_json::to_writer(&mut writer, &SCHEMA_VERSION).map_err(|_| DataError::Limit)?;
+            writer.write_all(b",\"purpose\":").map_err(|_| DataError::Limit)?;
+            serde_json::to_writer(&mut writer, REQUEST_PURPOSE).map_err(|_| DataError::Limit)?;
+            writer.write_all(b",\"binding\":").map_err(|_| DataError::Limit)?;
+            serde_json::to_writer(&mut writer, &self.binding.wire).map_err(|_| DataError::Limit)?;
+            writer.write_all(b",\"removeDescriptor\":\"").map_err(|_| DataError::Limit)?;
+            write_request_base64_data(&mut writer, &self.remove_descriptor)?;
+            writer.write_all(b"\",\"removeSignature\":\"").map_err(|_| DataError::Limit)?;
+            write_request_base64_data(&mut writer, &self.remove_signature)?;
+            writer.write_all(b"\"}").map_err(|_| DataError::Limit)?;
+            require(writer.used > 0 && writer.used <= REQUEST_LIMIT, DataError::Limit)?;
+            Ok(writer.used)
+        })();
+        if result.is_err() { output.fill(0); }
+        result
+    }
+    /// Actual retained Rust storage only. Count the original JSON, caller raw
+    /// pair/binding, fixed output, serde working storage and any simultaneous
+    /// request/frame/transcript/native objects separately in the owner budget.
+    pub fn owned_bytes_data(&self) -> Option<usize> {
+        std::mem::size_of::<Self>().checked_add(self.binding.heap_bytes_data()?)?
+            .checked_add(self.remove_descriptor.capacity())?
+            .checked_add(self.remove_signature.capacity())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoleData { Parent, App }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,6 +621,27 @@ mod tests {
         }
     }
 
+    fn request_bytes(request: &RequestData) -> Vec<u8> {
+        let mut output = [255; REQUEST_LIMIT];
+        let used = request.encode_data(&mut output).unwrap();
+        assert!(output[used..].iter().all(|byte| *byte == 0));
+        output[..used].to_vec()
+    }
+    fn request_value(request: &RequestData) -> Value {
+        serde_json::from_slice(&request_bytes(request)).unwrap()
+    }
+    fn parse_request_value(value: &Value) -> DataResult<RequestData> {
+        RequestData::parse_data(&serde_json::to_vec(value).unwrap())
+    }
+    fn raw_base64(bytes: &[u8]) -> String {
+        let mut output = [0; REQUEST_LIMIT];
+        let mut writer = BodyWriter { bytes: &mut output, used: 0 };
+        write_request_base64_data(&mut writer, bytes).unwrap();
+        let used = writer.used;
+        drop(writer);
+        String::from_utf8(output[..used].to_vec()).unwrap()
+    }
+
     #[test]
     fn four_frames_bind_both_targets_roles_and_preparation_labels_as_data_only() {
         for target in [TargetData::Arm64, TargetData::Intel] {
@@ -471,6 +666,33 @@ mod tests {
                     // or exit/close/removal authority is represented by it.
                     assert_eq!(state.advance_data(action(role, 0), &bytes(&frames[0]), START + 4).err(), Some(DataError::Order));
                     assert_eq!(state.progress_data(), ProgressData::Refused);
+                }
+            }
+        }
+
+        // Outer requests preserve both exact raw originals, not a normalized
+        // descriptor JSON or a hash substituted for a detached signature.
+        for target in [TargetData::Arm64, TargetData::Intel] {
+            for descriptor_length in [1, 2, 3, 4, DESCRIPTOR_LIMIT] {
+                let descriptor: Vec<u8> = (0..descriptor_length).map(|i| (i % 256) as u8).collect();
+                for signature_length in [256, 384, 512] {
+                    let signature: Vec<u8> = (0..signature_length).map(|i| 255 - (i % 256) as u8).collect();
+                    let expected = binding(target);
+                    let request = RequestData::new_data(&expected, &descriptor, &signature).unwrap();
+                    let encoded = request_bytes(&request);
+                    assert!(encoded.len() < REQUEST_LIMIT);
+                    let parsed = RequestData::parse_data(&encoded).unwrap();
+                    assert!(parsed.binding_data() == &expected);
+                    assert_eq!(parsed.remove_descriptor_data(), descriptor.as_slice());
+                    assert_eq!(parsed.remove_signature_data(), signature.as_slice());
+                    assert_eq!(parsed.binding_data().clock_data().start_data(), START);
+                    assert_eq!(request_bytes(&parsed), encoded);
+                    let wire: Value = serde_json::from_slice(&encoded).unwrap();
+                    assert_eq!(wire.as_object().unwrap().len(), 5);
+                    assert_eq!(wire["schemaVersion"], json!(1));
+                    assert_eq!(wire["purpose"], json!(REQUEST_PURPOSE));
+                    assert_eq!(wire["removeDescriptor"], json!(raw_base64(&descriptor)));
+                    assert_eq!(wire["removeSignature"], json!(raw_base64(&signature)));
                 }
             }
         }
@@ -559,6 +781,74 @@ mod tests {
         assert_eq!(state.advance_data(ActionData::Send, &extra, START).err(), Some(DataError::Limit));
         assert_eq!(state.advance_data(ActionData::Send, &valid, START).err(), Some(DataError::Limit));
         assert_eq!(state.progress_data(), ProgressData::Refused);
+
+        let request = RequestData::new_data(&binding(TargetData::Arm64), b"f", &[0; 256]).unwrap();
+        let request_original = request_value(&request);
+        let request_raw = String::from_utf8(request_bytes(&request)).unwrap();
+        for key in ["schemaVersion", "purpose", "binding", "removeDescriptor", "removeSignature"] {
+            let mut bad = request_original.clone(); bad.as_object_mut().unwrap().remove(key);
+            assert!(parse_request_value(&bad).is_err(), "request missing {key}");
+            let mut bad = request_original.clone(); bad[key] = Value::Null;
+            assert!(parse_request_value(&bad).is_err(), "request null {key}");
+            let duplicate = request_raw.replacen('{', &format!("{{\"{key}\":{},", request_original[key]), 1);
+            assert!(RequestData::parse_data(duplicate.as_bytes()).is_err(), "request duplicate {key}");
+        }
+        for key in request_original["binding"].as_object().unwrap().keys() {
+            let mut bad = request_original.clone(); bad["binding"].as_object_mut().unwrap().remove(key);
+            assert!(parse_request_value(&bad).is_err(), "request binding missing {key}");
+            let duplicate = request_raw.replacen("\"binding\":{",
+                &format!("\"binding\":{{\"{key}\":{},", request_original["binding"][key]), 1);
+            assert!(RequestData::parse_data(duplicate.as_bytes()).is_err(), "request binding duplicate {key}");
+        }
+        let escaped_duplicate = request_raw.replacen('{', r#"{"schema\u0056ersion":1,"#, 1);
+        assert!(RequestData::parse_data(escaped_duplicate.as_bytes()).is_err());
+        for nested in [false, true] {
+            let mut bad = request_original.clone();
+            if nested { bad["binding"]["allow"] = json!(true); } else { bad["allow"] = json!(true); }
+            assert!(parse_request_value(&bad).is_err());
+        }
+        for replacement in [json!(true), json!(1.0), json!("1"), json!(-1), json!(2)] {
+            let mut bad = request_original.clone(); bad["schemaVersion"] = replacement;
+            assert!(parse_request_value(&bad).is_err());
+        }
+        for replacement in [json!(true), json!(1), json!([]), json!({}), json!(PURPOSE), json!("")] {
+            let mut bad = request_original.clone(); bad["purpose"] = replacement;
+            assert!(parse_request_value(&bad).is_err());
+        }
+        for key in ["removeDescriptor", "removeSignature"] {
+            for replacement in [json!(true), json!(1), json!([]), json!({}), json!("")] {
+                let mut bad = request_original.clone(); bad[key] = replacement;
+                assert!(parse_request_value(&bad).is_err());
+            }
+        }
+        for bad_root in [json!([]), json!([1, REQUEST_PURPOSE, request_original["binding"].clone(), "Zg==", "AAAA"]),
+            Value::Null, json!(true), json!("object"), json!({})] {
+            assert!(parse_request_value(&bad_root).is_err());
+        }
+        let binding_order = ["requestId", "rootNonce", "sourceCommit", "release", "target", "removeProducerSha256",
+            "installedProducerSha256", "installedInventorySha256", "protocolSha256", "start", "work", "hard"];
+        for bad_binding in [json!([]), json!([1]), json!(true), json!("binding"), json!({}),
+            Value::Array(binding_order.iter().map(|key| request_original["binding"][*key].clone()).collect())] {
+            let mut bad = request_original.clone(); bad["binding"] = bad_binding;
+            assert!(parse_request_value(&bad).is_err());
+        }
+        for invalid in ["", "Zg", "Zg=", "Zg===", "Zg====", " Zg==", "Zg== ", "Zg==\n", "Zg\t==",
+            "Zg=-", "Zg__", "Zg=Z", "Z=g=", "=g==", "Zh==", "Zm9=", "Zg==AAAA", "----", "____",
+            "Zg==\0", "Zg==\u{a0}", "éAAA"] {
+            let mut bad = request_original.clone(); bad["removeDescriptor"] = json!(invalid);
+            assert!(parse_request_value(&bad).is_err(), "request canonical base64 {invalid:?}");
+        }
+        let signature_text = request_original["removeSignature"].as_str().unwrap();
+        assert!(signature_text.ends_with("AA=="));
+        let noncanonical = format!("{}AB==", &signature_text[..signature_text.len() - 4]);
+        let mut bad = request_original.clone(); bad["removeSignature"] = json!(noncanonical);
+        assert!(parse_request_value(&bad).is_err());
+        // JSON escapes do not relax base64 grammar or change the original bytes.
+        let escaped = request_raw.replacen("\"Zg==\"", r#""Zg\u003d\u003d""#, 1);
+        assert_eq!(RequestData::parse_data(escaped.as_bytes()).unwrap().remove_descriptor_data(), b"f");
+        assert!(RequestData::parse_data(format!("{request_raw}{{}}").as_bytes()).is_err());
+        let mut invalid_utf8 = request_raw.into_bytes(); invalid_utf8[1] = 255;
+        assert!(RequestData::parse_data(&invalid_utf8).is_err());
     }
 
     #[test]
@@ -624,6 +914,40 @@ mod tests {
             let mut bad = original.clone(); bad["binding"][key] = json!(bad_value);
             assert!(FrameData::parse_framed_data(&encoded(&bad)).is_err());
         }
+
+        let request = RequestData::new_data(&expected, b"raw descriptor", &[1; 256]).unwrap();
+        let request_original = request_value(&request);
+        for (key, replacement) in [("requestId", "a".repeat(32)), ("rootNonce", "b".repeat(32)),
+            ("sourceCommit", "c".repeat(40)), ("release", "macos26-arm64-other-02".into()),
+            ("removeProducerSha256", "d".repeat(64)), ("installedProducerSha256", "e".repeat(64)),
+            ("installedInventorySha256", "f".repeat(64)), ("protocolSha256", "9".repeat(64))] {
+            let mut changed = request_original.clone(); changed["binding"][key] = json!(replacement);
+            let parsed = parse_request_value(&changed).unwrap();
+            assert!(parsed.binding_data() != &expected);
+            let challenge = FrameData::challenge_data(parsed.binding_data()).unwrap();
+            let mut current = TranscriptData::new_data(RoleData::App, expected.clone());
+            assert_eq!(current.advance_data(ActionData::Receive, &bytes(&challenge), START).err(), Some(DataError::Binding));
+        }
+        let other = RequestData::new_data(&binding(TargetData::Intel), b"raw descriptor", &[1; 256]).unwrap();
+        let parsed = RequestData::parse_data(&request_bytes(&other)).unwrap();
+        assert!(parsed.binding_data() != &expected);
+        for (key, replacement) in [("rootNonce", "1".repeat(32)), ("requestId", "0".repeat(32)),
+            ("sourceCommit", "C".repeat(40)), ("target", "x86_64-unknown-linux-gnu".into()),
+            ("release", "macos26-x86_64-other-01".into())] {
+            let mut bad = request_original.clone(); bad["binding"][key] = json!(replacement);
+            assert!(parse_request_value(&bad).is_err());
+        }
+        // Syntax cannot authenticate a raw pair against the binding's digest.
+        // Both owners must verify these exact returned originals independently.
+        for key in ["removeDescriptor", "removeSignature"] {
+            let replacement = if key == "removeDescriptor" { raw_base64(b"different raw original") }
+                else { raw_base64(&[2; 256]) };
+            let mut changed = request_original.clone(); changed[key] = json!(replacement);
+            let parsed = parse_request_value(&changed).unwrap();
+            assert!(parsed.binding_data() == &expected);
+            if key == "removeDescriptor" { assert_ne!(parsed.remove_descriptor_data(), request.remove_descriptor_data()); }
+            else { assert_ne!(parsed.remove_signature_data(), request.remove_signature_data()); }
+        }
     }
 
     #[test]
@@ -674,6 +998,36 @@ mod tests {
             equal.advance_data(action(RoleData::Parent, index), &bytes(frame), START).unwrap();
         }
         assert_eq!(equal.progress_data(), ProgressData::FramesExchanged);
+
+        let request_binding = binding(TargetData::Arm64);
+        let request = RequestData::new_data(&request_binding, b"raw", &[1; 384]).unwrap();
+        let request_original = request_value(&request);
+        let parsed = RequestData::parse_data(&request_bytes(&request)).unwrap();
+        assert_eq!(parsed.binding_data().clock_data(), request_binding.clock_data());
+        assert_eq!(parsed.binding_data().fields_data().start, START);
+        for key in ["start", "work", "hard"] {
+            for replacement in [json!(-1), json!(1.0), json!("1"), json!(true), Value::Null] {
+                let mut bad = request_original.clone(); bad["binding"][key] = replacement;
+                assert!(parse_request_value(&bad).is_err());
+            }
+            let mut bad = request_original.clone();
+            bad["binding"][key] = json!(request_original["binding"][key].as_u64().unwrap() + 1);
+            assert!(parse_request_value(&bad).is_err());
+        }
+        let mut shifted = request_original.clone();
+        for key in ["start", "work", "hard"] {
+            shifted["binding"][key] = json!(request_original["binding"][key].as_u64().unwrap() + 1);
+        }
+        let shifted = parse_request_value(&shifted).unwrap();
+        assert_eq!(shifted.binding_data().fields_data().start, START + 1);
+        assert!(shifted.binding_data() != &request_binding);
+        // Parsing is not a new endpoint, native cutoff, or renewed transcript.
+        let challenge = FrameData::challenge_data(parsed.binding_data()).unwrap();
+        let mut late = TranscriptData::new_data(RoleData::App, request_binding);
+        assert_eq!(late.advance_data(ActionData::Receive, &bytes(&challenge), START + WORK_NS).err(), Some(DataError::WorkExpired));
+        assert!(RequestData::parse_data(&request_bytes(&request)).is_ok());
+        assert_eq!(late.first_error_data(), Some(DataError::WorkExpired));
+        assert_eq!(late.progress_data(), ProgressData::Refused);
     }
 
     #[test]
@@ -715,5 +1069,74 @@ mod tests {
             .and_then(|n| n.checked_add(FRAME_LIMIT)).is_some());
         assert_eq!(state.abort_data(), DataError::Aborted);
         assert_eq!(state.advance_data(ActionData::Receive, &bytes(&frames[2]), START + 2).err(), Some(DataError::Aborted));
+
+        assert_eq!(REQUEST_LIMIT, 32768);
+        assert_eq!(DESCRIPTOR_LIMIT, 16384);
+        assert_eq!(SIGNATURE_LIMIT, 512);
+        for (raw, encoded) in [(b"f".as_slice(), "Zg=="), (b"fo".as_slice(), "Zm8="),
+            (b"foo".as_slice(), "Zm9v"), (b"foob".as_slice(), "Zm9vYg=="),
+            (b"fooba".as_slice(), "Zm9vYmE="), (b"foobar".as_slice(), "Zm9vYmFy"),
+            (b"\xfb\xff".as_slice(), "+/8="), (b"\xff\xff\xff".as_slice(), "////")] {
+            assert_eq!(raw_base64(raw), encoded);
+            assert_eq!(decode_request_base64_data(encoded, false).unwrap().as_slice(), raw);
+        }
+        for descriptor in [Vec::new(), vec![0; DESCRIPTOR_LIMIT + 1]] {
+            assert_eq!(RequestData::new_data(&expected, &descriptor, &[0; 256]).err(), Some(DataError::Limit));
+        }
+        for length in [0, 255, 257, 383, 385, 511, 513] {
+            assert_eq!(RequestData::new_data(&expected, b"d", &vec![0; length]).err(), Some(DataError::Limit));
+        }
+        let request = RequestData::new_data(&expected, b"raw", &[1; 512]).unwrap();
+        let request_original = request_value(&request);
+        for length in [DESCRIPTOR_LIMIT + 1, DESCRIPTOR_LIMIT + 2, DESCRIPTOR_LIMIT + 3] {
+            let mut bad = request_original.clone(); bad["removeDescriptor"] = json!(raw_base64(&vec![0; length]));
+            assert!(parse_request_value(&bad).is_err());
+        }
+        for length in [255, 257, 383, 385, 511, 513, 514] {
+            let mut bad = request_original.clone(); bad["removeSignature"] = json!(raw_base64(&vec![0; length]));
+            assert!(parse_request_value(&bad).is_err());
+        }
+        let mut exact = request_bytes(&request); exact.resize(REQUEST_LIMIT, b' ');
+        assert!(RequestData::parse_data(&exact).is_ok());
+        exact.push(b' ');
+        assert_eq!(RequestData::parse_data(&exact).err(), Some(DataError::Limit));
+        assert_eq!(RequestData::parse_data(&[]).err(), Some(DataError::Limit));
+        for mutation in 0..4 {
+            let mut malformed = RequestData::new_data(&expected, b"raw", &[1; 256]).unwrap();
+            match mutation {
+                0 => malformed.remove_descriptor.clear(),
+                1 => malformed.remove_descriptor.resize(DESCRIPTOR_LIMIT + 1, 1),
+                2 => { malformed.remove_signature.pop(); },
+                _ => malformed.binding.wire.target = "x86_64-unknown-linux-gnu".into(),
+            }
+            let mut request_output = [255; REQUEST_LIMIT];
+            assert!(malformed.encode_data(&mut request_output).is_err());
+            assert!(request_output.iter().all(|byte| *byte == 0));
+        }
+        let mut small = [0; 3];
+        let mut writer = BodyWriter { bytes: &mut small, used: 0 };
+        assert_eq!(write_request_base64_data(&mut writer, b"f"), Err(DataError::Limit));
+        assert_eq!(writer.used, 0);
+        let mut retained = RequestData::new_data(&expected, b"raw", &[1; 256]).unwrap();
+        let original_count = retained.owned_bytes_data().unwrap();
+        let descriptor_spare = retained.remove_descriptor.capacity() + 7;
+        let signature_spare = retained.remove_signature.capacity() + 7;
+        let release_spare = retained.binding.wire.release.capacity() + 7;
+        retained.remove_descriptor.reserve_exact(descriptor_spare);
+        retained.remove_signature.reserve_exact(signature_spare);
+        retained.binding.wire.release.reserve_exact(release_spare);
+        assert!(retained.owned_bytes_data().unwrap() > original_count);
+        assert_eq!(retained.owned_bytes_data(), Some(std::mem::size_of::<RequestData>()
+            + retained.binding.heap_bytes_data().unwrap()
+            + retained.remove_descriptor.capacity() + retained.remove_signature.capacity()));
+        let reparsed = RequestData::parse_data(&request_bytes(&retained)).unwrap();
+        assert_eq!(reparsed.owned_bytes_data(), Some(std::mem::size_of::<RequestData>()
+            + reparsed.binding.heap_bytes_data().unwrap()
+            + reparsed.remove_descriptor.capacity() + reparsed.remove_signature.capacity()));
+        // These are two retained requests, not one shared byte count. Caller
+        // JSON/raw input, output and serde scratch are separate working memory.
+        assert!(retained.owned_bytes_data().unwrap().checked_add(reparsed.owned_bytes_data().unwrap())
+            .and_then(|count| count.checked_add(expected.owned_bytes_data().unwrap()))
+            .and_then(|count| count.checked_add(REQUEST_LIMIT)).is_some());
     }
 }

@@ -106,6 +106,70 @@ REMOVAL_SOURCES = (
     'desktop/src-tauri/src/macos_remove_record.rs',
     'desktop/src-tauri/src/macos_remove_protocol.rs',
 )
+# Fixed successor DATA selection. Historical removal4/10 records remain unchanged.
+# ConfirmationV2 adds retirement DATA to the existing cutoff test; eeb had Cutoff1 only.
+# Fixed peer/request/current Parent DATA only; final Document and production-image qualification remain pending.
+INTEGRATION_ARGUMENT = "--qualify-removal-integration-data"
+INTEGRATION_ROLES = (
+    'removal-integration-native-rust-tests',
+    'removal-integration-app-rust-tests',
+    'removal-integration-parent-rust-tests',
+)
+INTEGRATION_NATIVE_RUST_TESTS = (
+    'android_registration::tests::removal_cutoff_contracts_same_signal_without_rearming_or_widening_wire',
+    'removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',
+    'removal_coordinator::peer::tests::peer_binding_and_actual_verifier_roles_are_closed_data',
+    'removal_coordinator::peer::tests::peer_phase_ledger_rejects_cross_slot_replay_and_false_consumption',
+    'removal_coordinator::peer::tests::peer_actual_challenge_copy_and_post_precede_single_cutoff_factory',
+    'removal_coordinator::peer::tests::peer_consuming_original_is_recorded_before_late_post_and_never_retried',
+)
+INTEGRATION_APP_RUST_TESTS = (
+    'saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::removal_raw_clock_expiry_precedes_projection_and_hard_never_renews',
+    'edit_owner::installed_configuration_data_tests::installed_configuration_owner_contract_is_inert',
+    'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound',
+    'macos_install_record::tests::android_service_inventory_pair_and_executable_scope',
+    'macos_remove_protocol::tests::four_frames_bind_both_targets_roles_and_preparation_labels_as_data_only',
+    'macos_remove_protocol::tests::closed_json_types_duplicates_and_exact_framing_refuse_without_a_second_message',
+    'macos_remove_protocol::tests::current_binding_direction_order_and_fresh_nonce_data_cannot_be_replayed',
+    'macos_remove_protocol::tests::original_raw_endpoints_equality_regression_and_first_refusal_never_renew',
+    'macos_remove_protocol::tests::fixed_encoding_capacity_and_retained_storage_count_real_copies',
+)
+INTEGRATION_PARENT_RUST_TESTS = (
+    'installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow',
+    'installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality',
+)
+INTEGRATION_SOURCES = (
+    'desktop/native/macos-installed-native/Cargo.toml',
+    'desktop/native/macos-installed-native/build.rs',
+    'desktop/native/macos-installed-native/src/lib.rs',
+    'desktop/native/macos-installed-native/src/android_registration.rs',
+    'desktop/native/macos-installed-native/src/android_maintenance_client.rs',
+    'desktop/native/macos-installed-native/src/vault_helper_control.m',
+    'desktop/native/macos-installed-native/src/vault_helper_wire.rs',
+    'desktop/native/macos-installed-native/src/removal_coordinator.rs',
+    'desktop/native/macos-installed-native/src/removal_coordinator.h',
+    'desktop/native/macos-installed-native/src/removal_coordinator.m',
+    'desktop/src-tauri/Cargo.toml',
+    'desktop/src-tauri/build.rs',
+    'desktop/src-tauri/src/lib.rs',
+    'desktop/src-tauri/src/installed_runtime_macos.rs',
+    'desktop/src-tauri/src/installation_observation_macos.rs',
+    'desktop/src-tauri/src/edit_owner.rs',
+    'desktop/src-tauri/src/saved_command_owner.rs',
+    'desktop/src-tauri/src/saved_command_android_registration.rs',
+    'desktop/src-tauri/src/saved_command_android_registration_client.rs',
+    'desktop/src-tauri/src/saved_command_android_service_setup.rs',
+    'desktop/src-tauri/src/saved_command_android_maintenance.rs',
+    'desktop/src-tauri/src/macos_install_record.rs',
+    'desktop/src-tauri/src/macos_remove_protocol.rs',
+    'desktop/src-tauri/src/bin/macos_install.rs',
+    'desktop/src-tauri/src/macos_install_transaction.rs',
+    'desktop/src-tauri/src/macos_install_producer.rs',
+    'desktop/src-tauri/src/macos_remove_producer.rs',
+    'desktop/native/macos-installed-native/src/install_producer.rs',
+    'desktop/native/macos-installed-native/src/install_producer.m',
+    'desktop/native/macos-installed-native/src/install_producer.h',
+)
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 REGISTRATION_ARGUMENT = "--qualify-registration-reservation"
 REGISTRATION_SOURCE = "desktop/native/macos-installed-entry/registration_fixture.c"
@@ -586,10 +650,14 @@ def installer_worker_diagnostic_result(stdout, stderr, rows, *, removal_role=Non
     _names, aliases = source
     selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
     if removal_role is not None:
-        if removal_role not in REMOVAL_ROLES:
+        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES:
             return None
         selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
         selected_type = "mrk-macos-removal-data-diagnostic-v1"
+        if removal_role in INTEGRATION_ROLES:
+            selected_names = (INTEGRATION_NATIVE_RUST_TESTS, INTEGRATION_APP_RUST_TESTS,
+                              INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
+            selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
     result = {
         "schemaVersion": 1, "type": selected_type, "diagnosticOnly": True,
         "classification": "unrecognized", "stdoutSha256": digest(stdout), "stderrSha256": digest(stderr),
@@ -657,11 +725,15 @@ def installer_worker_diagnostic_data(value, call, rows, *, removal_role=None):
     selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
     selected_role = "installer-worker-rust-tests"
     if removal_role is not None:
-        if removal_role not in REMOVAL_ROLES:
+        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES:
             return None
         selected_role = removal_role
         selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
         selected_type = "mrk-macos-removal-data-diagnostic-v1"
+        if removal_role in INTEGRATION_ROLES:
+            selected_names = (INTEGRATION_NATIVE_RUST_TESTS, INTEGRATION_APP_RUST_TESTS,
+                              INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
+            selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
     source = installer_worker_diagnostic_sources(rows)
     if (source is None or type(value) is not dict or set(value) != keys or type(call) is not dict
             or call.get("role") != selected_role or call.get("entered") is not True
@@ -2297,7 +2369,7 @@ def package_producer_rust_test_record():
 def _rust_tests_data(value, expected, label):
     """Only fixed SOURCE wrappers supply this expected record; never output DATA."""
     count = len(expected["tests"])  # SOURCE-fixed wrapper record, not received DATA.
-    need(count in (1, 2, 3, 4, 5, 6, 10) and expected["passed"] == count, label + "-record")
+    need(count in (1, 2, 3, 4, 5, 6, 9, 10) and expected["passed"] == count, label + "-record")
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
@@ -2337,7 +2409,7 @@ def package_producer_rust_tests_data(value):
 def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
     count = len(expected_names)  # Only the fixed SOURCE tuples call this.
-    need(count in (1, 2, 3, 4, 5, 6, 10), label + "-roster")
+    need(count in (1, 2, 3, 4, 5, 6, 9, 10), label + "-roster")
     need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
     need(len(lines) == count + 6 and lines[:2] == [b"", ("running 1 test" if count == 1 else "running %d tests" % count).encode("ascii")]
@@ -2609,6 +2681,86 @@ def removal_data_result(result, source, rows):
              and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
     return {"scope": "removal-compiled-data-only", "clock": data["clock"],
             "nativeRustTests": data["nativeRustTests"], "appRustTests": data["appRustTests"],
+            "sourceHashes": data["sourceHashes"], "originalCalls": calls,
+            "liveRemovalQualified": False, "installerTransactionQualified": False,
+            "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
+
+
+def integration_native_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-integration-native-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(INTEGRATION_NATIVE_RUST_TESTS),
+            "passed": 6, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def integration_native_rust_tests_result(stdout):
+    _rust_test_output(stdout, INTEGRATION_NATIVE_RUST_TESTS, "removal-native-rust-test")
+    return integration_native_rust_test_record()
+
+
+def integration_app_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-integration-app-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(INTEGRATION_APP_RUST_TESTS),
+            "passed": 9, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def integration_app_rust_tests_result(stdout):
+    _rust_test_output(stdout, INTEGRATION_APP_RUST_TESTS, "removal-app-rust-test")
+    return integration_app_rust_test_record()
+
+
+def integration_parent_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-integration-parent-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(INTEGRATION_PARENT_RUST_TESTS),
+            "passed": 2, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def integration_parent_rust_tests_result(stdout):
+    _rust_test_output(stdout, INTEGRATION_PARENT_RUST_TESTS, "installer-worker-rust-test")
+    return integration_parent_rust_test_record()
+
+
+def removal_integration_data_result(result, source, rows):
+    """Only this returned three-graph DATA scope; never removal or installer authority."""
+    need(type(result) is dict and identity(source, 40) and result.get("source") == source
+         and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
+         and result.get("outcome") == "passed" and result.get("passed") is True
+         and result.get("failure") is None and result.get("phase") == INTEGRATION_ROLES[-1], "removal-owner-result")
+    need(all(result.get(key) is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown", "scratchRetired"))
+         and result.get("cleanupErrors") == []
+         and all(result.get(key) is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
+             "nativeOwnerReturned", "protectedRetentionRequired", "exactReceiptRetired", "protectedRootRetired",
+             "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified"))
+         and all(result.get(key) is None for key in ("native", "nativeRustTests", "package", "producerSigningRustTests",
+             "packageProducerRustTests", "contextReceiptDiagnostic", "installedReaderRustTests", "installerWorkerRustTests"))
+         and result.get("installedArtifactRoster") is None and result.get("receiptOriginals") == []
+         and result.get("protectedMetadataObservations") == [], "removal-owner-finality")
+    need(result["installerContext"]["started"] is False and result["installerContext"]["completed"] is False
+         and result["serviceLayoutObservation"]["selected"] is False and result["serviceLayoutObservation"]["started"] is False
+         and result["btmLogObservation"]["state"] == "not-requested", "removal-owner-scope")
+    artifacts = result.get("artifacts")
+    need(type(artifacts) is dict and set(artifacts) == {"removal-integration-data"}, "removal-artifacts")
+    data = artifacts["removal-integration-data"]
+    need(type(data) is dict and set(data) == {"clock", "nativeRustTests", "appRustTests", "parentRustTests", "sourceHashes"}, "removal-record")
+    registration_clock_data(data["clock"])
+    _rust_tests_data(data["nativeRustTests"], integration_native_rust_test_record(), "removal-native-rust-test")
+    _rust_tests_data(data["appRustTests"], integration_app_rust_test_record(), "removal-app-rust-test")
+    _rust_tests_data(data["parentRustTests"], integration_parent_rust_test_record(), "installer-worker-rust-test")
+    need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(INTEGRATION_SOURCES)
+         and all(identity(data["sourceHashes"][name], 64) and data["sourceHashes"][name] == rows[name]["sha256"]
+                 for name in INTEGRATION_SOURCES), "removal-source-binding")
+    calls = result.get("originalCalls")
+    need(type(calls) is list and len(calls) == 3 and all(type(call) is dict for call in calls)
+         and [call.get("role") for call in calls] == list(INTEGRATION_ROLES), "removal-call-roster")
+    for call in calls:
+        need(set(call) == {"role", "entered", "returned", "workTimeoutSeconds", "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
+             and call["entered"] is True and call["returned"] is True
+             and type(call["returncode"]) is int and call["returncode"] == 0
+             and type(call["workTimeoutSeconds"]) is int and 0 < call["workTimeoutSeconds"] <= 480
+             and type(call["outputLimitBytes"]) is int and call["outputLimitBytes"] == 4194304
+             and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
+    return {"scope": "removal-integration-compiled-data-only", "clock": data["clock"],
+            "nativeRustTests": data["nativeRustTests"], "appRustTests": data["appRustTests"],
+            "parentRustTests": data["parentRustTests"],
             "sourceHashes": data["sourceHashes"], "originalCalls": calls,
             "liveRemovalQualified": False, "installerTransactionQualified": False,
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
@@ -3288,7 +3440,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -3477,13 +3629,14 @@ class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
     def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
-                 service_cocoa=False, registration_reservation=False, removal_data=False):
+                 service_cocoa=False, registration_reservation=False, removal_data=False, removal_integration=False):
         need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
-             and type(registration_reservation) is bool and type(removal_data) is bool
-             and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data)) <= 1,
+             and type(registration_reservation) is bool and type(removal_data) is bool and type(removal_integration) is bool
+             and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data, removal_integration)) <= 1,
              "layout-operation-selector")
         self.registration_selected = registration_reservation
-        self.removal_selected = removal_data
+        self.removal_selected = removal_data or removal_integration
+        self.removal_integration_selected = removal_integration
         self.registration_deadline = self.registration_last = None
         self.registration_clock_failed = False
         self.service_cocoa_selected = service_cocoa
@@ -5111,7 +5264,7 @@ class Operation:
         return value
 
     def execute_removal_data(self):
-        # Existing sole command owner, two fixed graphs, no native fixture/BTM route.
+        # Existing sole command owner, fixed DATA graphs, no live native fixture/BTM route.
         failure = None
         self.scratch_retired = False
         self.sources_closed = self.outputs_closed = self.protected_closed = False
@@ -5121,17 +5274,32 @@ class Operation:
         data = {"clock": {"clock": "CLOCK_MONOTONIC", "startedNs": str(origin),
                           "deadlineNs": str(self.registration_deadline), "lastNs": str(origin), "closed": False},
                 "nativeRustTests": None, "appRustTests": None, "sourceHashes": {}}
-        self.artifacts["removal-data"] = data
+        integration = getattr(self, "removal_integration_selected", False)
+        if integration:
+            data["parentRustTests"] = None
+        artifact = "removal-integration-data" if integration else "removal-data"
+        sources = INTEGRATION_SOURCES if integration else REMOVAL_SOURCES
+        self.artifacts[artifact] = data
         try:
             self.registration_tick()
             self.begin()
-            for relative in REMOVAL_SOURCES:
+            for relative in sources:
                 data["sourceHashes"][relative] = digest(self.source.read(relative))
             batches = (
                 (REMOVAL_ROLES[0], NATIVE, ("--features", "package-producer-signing", "--lib"),
                  REMOVAL_NATIVE_RUST_TESTS, removal_native_rust_tests_result, "nativeRustTests"),
                 (REMOVAL_ROLES[1], INSTALLER, ("--lib",), REMOVAL_APP_RUST_TESTS, removal_app_rust_tests_result, "appRustTests"),
             )
+            if integration:
+                # Same original owner/deadline; two libs plus fixed remover-bin libtest, never main/UI/signing.
+                batches = (
+                    (INTEGRATION_ROLES[0], NATIVE, ("--lib",), INTEGRATION_NATIVE_RUST_TESTS,
+                     integration_native_rust_tests_result, "nativeRustTests"),
+                    (INTEGRATION_ROLES[1], INSTALLER, ("--lib",), INTEGRATION_APP_RUST_TESTS,
+                     integration_app_rust_tests_result, "appRustTests"),
+                    (INTEGRATION_ROLES[2], INSTALLER, ("--features", "macos-installed-remover", "--bin", "mrk-macos-remove"),
+                     INTEGRATION_PARENT_RUST_TESTS, integration_parent_rust_tests_result, "parentRustTests"),
+                )
             for role, directory, flags, names, parser, key in batches:
                 self.registration_tick()
                 target = self.scratch / (role + "-target")
@@ -5277,7 +5445,8 @@ def main():
                               context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT],
                               service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT],
                               registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT],
-                              removal_data=sys.argv[1:] == [REMOVAL_ARGUMENT])
+                              removal_data=sys.argv[1:] == [REMOVAL_ARGUMENT],
+                              removal_integration=sys.argv[1:] == [INTEGRATION_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -5305,7 +5474,10 @@ def main():
             registration_reservation_result(value, os.environ["GITHUB_SHA"], source.rows)
             operation.registration_tick()
         if operation.removal_selected and value["passed"]:
-            removal_data_result(value, os.environ["GITHUB_SHA"], source.rows)
+            if operation.removal_integration_selected:
+                removal_integration_data_result(value, os.environ["GITHUB_SHA"], source.rows)
+            else:
+                removal_data_result(value, os.environ["GITHUB_SHA"], source.rows)
             operation.registration_tick()
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")

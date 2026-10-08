@@ -62,6 +62,15 @@ impl InstalledProducer {
         for index in originals { book.check_name(*index,end,stop)?; }
         book.point(end,stop)
     }
+    fn cleanup_decision(book:&Book,verdict:AppRemovalCleanup,owner_expired:bool)
+        ->native::android_service_management::Decision {
+        use native::android_service_management::Decision;
+        if owner_expired || verdict==AppRemovalCleanup::LocalExpired {
+            // An independently observed local expiry is not Parent-only.
+            book.removal_clock_veto.set(false); Decision::Stop
+        }else if verdict==AppRemovalCleanup::ParentClock{Decision::Unknown}
+        else{Decision::Proceed}
+    }
     fn point(book: &Book, originals: &[usize;6], end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem,Instant), expired: &mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool,
         point: native::install_producer::ProducerCheckpoint) -> native::android_service_management::Decision {
@@ -77,15 +86,18 @@ impl InstalledProducer {
         if phase.is_cleanup() {
             // STOP closes only already owned originals inside the containing
             // owner's existing cleanup endpoint. No work or new interval here.
-            let registration_expired = book.registration_gate.as_ref()
-                .is_some_and(|gate| gate.source_cleanup_expired(book.first_failure()));
-            let owner_expired = expired(book.first_failure());
-            return if registration_expired || owner_expired { Decision::Stop } else { Decision::Proceed };
+            let first=book.first_failure();
+            let verdict=book.cleanup_verdict(first);
+            let owner_expired=expired(first);
+            return Self::cleanup_decision(book,verdict,owner_expired);
         }
         match Self::post(book,originals,end,stop) {
             Ok(()) => Decision::Proceed,
             Err(failure) => {
-                let at = Instant::now(); book.note_acl(failure,at); publish(native_problem(failure),at);
+                let at = Instant::now();
+                if !book.removal_clock_vetoed(){book.note_acl(failure,at);publish(native_problem(failure),at);}
+                // Unknown poisons this existing wrapper; its close path then
+                // cannot callback/reimport a derived local F after raw veto.
                 if matches!(failure,AdmissionFailure::Unknown | AdmissionFailure::Identity) { Decision::Unknown } else { Decision::Stop }
             },
         }
@@ -151,25 +163,238 @@ fn problem(failure: AdmissionFailure, content: Problem) -> Problem {
 }
 pub(crate) fn native_problem(failure: AdmissionFailure) -> Problem { problem(failure, Problem::PayloadMismatch) }
 
+// Exact original roles retained ONLY by the app removal inspector. All paths
+// are already consumed by the same closed Inventory walk; none is reopened.
+const REMOVAL_WALK_PATHS: [&str; 10] = [
+    "app/Contents", "app/Contents/MacOS", paths::ENTRY_INVENTORY_PATH,
+    "app/Contents/Helpers", "app/Contents/Helpers/MobileReleaseKitPayload.app",
+    "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents",
+    "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS", paths::PAYLOAD_INVENTORY_PATH,
+    "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers",
+    "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove",
+];
+const REMOVAL_EXECUTABLE_ROLES: [usize; 3] = [2, 7, 9];
+const REMOVAL_OWNED_FD_BOUND: usize = 43;
+fn removal_walk_role(path: &str) -> Option<usize> { REMOVAL_WALK_PATHS.iter().position(|fixed| *fixed == path) }
+struct RemovalRetention {
+    // root/library/support/install/versions/release/current-record/inventory/app/runtime.
+    base: [Option<usize>; 10], walk: [Option<usize>; 10],
+    record: Vec<u8>, inventory_raw: Vec<u8>, inventory: Option<Inventory>, selected: Option<ReleaseSetData>,
+    ready: Cell<bool>,
+}
+impl RemovalRetention {
+    fn new() -> Self { Self { base:[None;10],walk:[None;10],record:Vec::new(),inventory_raw:Vec::new(),
+        inventory:None,selected:None,ready:Cell::new(false) } }
+    fn retained_bytes(&self) -> Option<usize> {
+        // ReleaseSetData comes only from the bounded signed descriptor parser.
+        // Its private bounded String backing was already charged by the
+        // InstalledProducer planned reserve; no second parser/index is kept.
+        let mut bytes=size_of::<Self>().checked_add(self.record.capacity())?.checked_add(self.inventory_raw.capacity())?;
+        if let Some(inventory)=&self.inventory {
+            bytes=bytes.checked_add(inventory.files.capacity().checked_mul(size_of::<data::Entry>())?)?;
+            for entry in &inventory.files {bytes=bytes.checked_add(entry.path.capacity())?.checked_add(entry.sha256.capacity())?;}
+        }
+        Some(bytes)
+    }
+    fn hold(&mut self, path:&str, original:usize) -> InspectResult<bool> {
+        let Some(role)=removal_walk_role(path) else {return Ok(false)};
+        if self.walk[role].replace(original).is_some(){return Err(Problem::CleanupUnknown);}
+        Ok(true)
+    }
+    fn indices(&self, producer:&InstalledProducerIndices) -> InspectResult<[usize;26]> {
+        let mut result=[0;26];
+        for (slot,value) in result[..10].iter_mut().zip(self.base.iter()) {*slot=value.ok_or(Problem::CleanupUnknown)?;}
+        result[10..16].copy_from_slice(producer);
+        for (slot,value) in result[16..].iter_mut().zip(self.walk.iter()) {*slot=value.ok_or(Problem::CleanupUnknown)?;}
+        // Each entry is the SAME adopted descriptor, not another name for it.
+        for a in 0..result.len(){for b in 0..a{if result[a]==result[b]{return Err(Problem::CleanupUnknown);}}}
+        Ok(result)
+    }
+}
+type InstalledProducerIndices = [usize;6];
+
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) struct RemovalProducerAdmission { slots:Option<InstallationSlots> }
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) struct RemovalCurrent<'a> { slots:&'a InstallationSlots }
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl RemovalProducerAdmission {
+    pub(crate) fn new(gate:AppRemovalWorkGate) -> Self {
+        let mut slots=InstallationSlots::new();
+        // Inert construction, no native entry or endpoint recapture.
+        if let Some(book)=slots.book.as_mut(){book.removal_gate=Some(gate);}
+        slots.removal=Some(RemovalRetention::new()); Self{slots:Some(slots)}
+    }
+    pub(crate) fn admit(&mut self,end:Instant,stop:&watch::Receiver<bool>,publish:&mut dyn FnMut(Problem,Instant),
+        cleanup_expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool,
+        read_returned:&mut dyn FnMut(u32,u64))->InspectResult<()> {
+        let slots=self.slots.as_mut().ok_or(Problem::CleanupUnknown)?;
+        if slots.entered || slots.removal.is_none() || !slots.book.as_ref()
+            .is_some_and(|book|book.never_started() && book.removal_gate.is_some()) {
+            return slots.reject(Problem::CleanupUnknown,Instant::now(),publish);
+        }
+        slots.entered=true;
+        let result=slots.inspect(None,end,stop,publish,cleanup_expired,read_returned);
+        match result {
+            Ok(_)=>{
+                let current=RemovalCurrent{slots};
+                // Structural/native/retained-original admission precedes the
+                // first positive view; no Matching DTO grants this transition.
+                current.check_originals(end,stop,publish)?;
+                current.retained()?.ready.set(true); Ok(())
+            },
+            Err(why)=>{slots.reject(why,Instant::now(),publish)},
+        }
+    }
+    pub(crate) fn current(&mut self,end:Instant,stop:&watch::Receiver<bool>,publish:&mut dyn FnMut(Problem,Instant))
+        ->InspectResult<RemovalCurrent<'_>> {
+        let current=RemovalCurrent{slots:self.slots.as_ref().ok_or(Problem::CleanupUnknown)?};
+        current.recheck(end,stop,publish)?; Ok(current)
+    }
+    pub(crate) fn retained_bytes(&self)->Option<usize>{
+        size_of::<Self>().checked_add(match &self.slots{Some(slots)=>slots.control_bytes()?,None=>0})
+    }
+    pub(crate) fn settled(&self)->bool{self.slots.is_none()}
+    pub(crate) fn settle(&mut self,end:Instant,stop:&watch::Receiver<bool>,publish:&mut dyn FnMut(Problem,Instant),
+        cleanup_expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->bool {
+        let Some(slots)=self.slots.as_mut() else{return true};
+        if let Some(retained)=&slots.removal{retained.ready.set(false);}
+        // A never-entered inert cell has no original native/FD settlement owed.
+        if !slots.entered && slots.settled(){self.slots.take();return true;}
+        if slots.native_settled || slots.storage_disposed{return false;}
+        let producer_cleaned=match(slots.producer.as_mut(),slots.book.as_ref()){
+            (None,_)=>true,
+            (Some(producer),Some(book))=>producer.settle(book,end,stop,publish,cleanup_expired),
+            _=>false,
+        };
+        let cleaned=producer_cleaned && slots.book.as_mut()
+            .is_some_and(|book|book.settle(cleanup_expired)==CloseOutcome::Settled && book.settled());
+        slots.note_native(publish);
+        // Original cleanup clocks also cover the last real close return. A
+        // fully consumed ledger cannot turn a late/unknown original into pass.
+        let (final_expired,final_verdict)=match slots.book.as_ref(){
+            Some(book)=>{
+                let first=book.first_failure();
+                let verdict=book.removal_gate.as_ref().map_or(AppRemovalCleanup::LocalExpired,
+                    |gate|gate.source_cleanup_verdict(first));
+                let owner_expired=cleanup_expired(first);
+                let final_verdict=if owner_expired{book.removal_clock_veto.set(false);AppRemovalCleanup::LocalExpired}else{verdict};
+                (final_verdict!=AppRemovalCleanup::Allowed,final_verdict)
+            },None=>(true,AppRemovalCleanup::LocalExpired),
+        };
+        slots.native_settled=cleaned;
+        if !cleaned || final_expired{
+            // The actual final cleanup sample, not the previous work point or
+            // an absorbing global latch, identifies Parent-only provenance.
+            slots.cleanup_refusal(final_verdict,publish);
+            return false;
+        }
+        let closed=slots.book.take();drop(closed);
+        let producer=slots.producer.take();drop(producer);
+        slots.removal.take();slots.storage_disposed=true;
+        if !slots.settled(){return false;}
+        self.slots.take();true
+    }
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl Drop for RemovalProducerAdmission {
+    fn drop(&mut self){
+        if let Some(slots)=self.slots.take(){
+            if slots.settled(){drop(slots)}else{
+                // Never let early-return Drop implicitly close a live borrower.
+                // Unknown retains this bounded original cell until process exit;
+                // this is deliberately NOT a successful settlement report.
+                std::mem::forget(slots);
+            }
+        }
+    }
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl RemovalCurrent<'_> {
+    fn retained(&self)->InspectResult<&RemovalRetention>{self.slots.removal.as_ref().ok_or(Problem::CleanupUnknown)}
+    fn producer(&self)->InspectResult<&InstalledProducer>{self.slots.producer.as_ref().ok_or(Problem::CleanupUnknown)}
+    fn book(&self)->InspectResult<&Book>{self.slots.book.as_ref().ok_or(Problem::CleanupUnknown)}
+    fn require_ready(&self)->InspectResult<()>{if self.retained()?.ready.get(){Ok(())}else{Err(Problem::CleanupUnknown)}}
+    fn check_originals(&self,end:Instant,stop:&watch::Receiver<bool>,publish:&mut dyn FnMut(Problem,Instant))->InspectResult<()> {
+        use native::install_producer::CurrentProductRole;
+        let checked=(||{
+            let retained=self.retained()?;let producer=self.producer()?;let book=self.book()?;
+            if !self.slots.entered || self.slots.native_settled || self.slots.storage_disposed
+                || book.removal_gate.is_none() || !book.admission_custody_ready() || book.first_failure().is_some()
+                || retained.selected.is_none() || retained.inventory.is_none()
+                || retained.record.is_empty() || retained.inventory_raw.is_empty()
+                || !producer.signature.settled() || !producer.entry.settled() || !producer.payload.settled()
+                || !producer.signature.custody().signature_matched
+                || producer.entry.custody().purpose_matched!=Some(CurrentProductRole::EntryApp)
+                || producer.payload.custody().purpose_matched!=Some(CurrentProductRole::PayloadApp)
+                || [producer.signature.custody(),producer.entry.custody(),producer.payload.custody()].iter()
+                    .any(|c|c.failed || c.unknown || c.in_call || c.gate_entered)
+                || self.slots.control_bytes().is_none_or(|n|n>CONTROL_RESERVE){return Err(Problem::CleanupUnknown);}
+            self.slots.check(end,stop,publish)?;
+            let indices=retained.indices(&producer.originals)?;
+            if book.records.iter().filter(|r|r.state==State::Owned).count()!=indices.len(){return Err(Problem::CleanupUnknown);}
+            for original in indices{book.check_name(original,end,stop).map_err(native_problem)?;}
+            // Duplicate admissions of these fixed directories must identify the
+            // SAME originals; pathname equality never replaces this join.
+            for (a,b) in [(retained.base[8],Some(producer.originals[2])),
+                (retained.walk[0],Some(producer.originals[3])),(retained.walk[3],Some(producer.originals[4])),
+                (retained.walk[4],Some(producer.originals[5]))]{
+                let a=book.records.get(a.ok_or(Problem::CleanupUnknown)?).and_then(|r|r.identity);
+                let b=book.records.get(b.ok_or(Problem::CleanupUnknown)?).and_then(|r|r.identity);
+                if a.is_none() || a!=b{return Err(Problem::CleanupUnknown);}
+            }
+            self.slots.check(end,stop,publish)
+        })();
+        if let Err(why)=checked{
+            if let Some(retained)=&self.slots.removal{retained.ready.set(false);}
+            return self.slots.reject(why,Instant::now(),publish);
+        }
+        Ok(())
+    }
+    pub(crate) fn recheck(&self,end:Instant,stop:&watch::Receiver<bool>,publish:&mut dyn FnMut(Problem,Instant))->InspectResult<()> {
+        if !self.retained()?.ready.get(){return Err(Problem::CleanupUnknown);}
+        self.check_originals(end,stop,publish)
+    }
+    // Caller/native code receives borrowed descriptors, not duplicated handles.
+    // Fixed array order:10 base roles noted above,6 producer originals,10 walk
+    // roles in REMOVAL_WALK_PATHS. Borrow cannot outlive the original admission.
+    pub(crate) fn originals(&self)->InspectResult<[std::os::fd::BorrowedFd<'_>;26]>{
+        if !self.retained()?.ready.get(){return Err(Problem::CleanupUnknown);}
+        let indices=self.retained()?.indices(&self.producer()?.originals)?;let book=self.book()?;
+        let mut fds=[book.fd(indices[0]).map_err(native_problem)?.as_fd();26];
+        for (fd,index) in fds.iter_mut().zip(indices){*fd=book.fd(index).map_err(native_problem)?.as_fd();}Ok(fds)
+    }
+    pub(crate) fn installed_descriptor(&self)->InspectResult<&[u8]>{self.require_ready()?;Ok(&self.producer()?.descriptor)}
+    pub(crate) fn installed_signature(&self)->InspectResult<&[u8]>{self.require_ready()?;Ok(&self.producer()?.signature_bytes)}
+    pub(crate) fn current_record(&self)->InspectResult<&[u8]>{self.require_ready()?;Ok(&self.retained()?.record)}
+    pub(crate) fn inventory_bytes(&self)->InspectResult<&[u8]>{self.require_ready()?;Ok(&self.retained()?.inventory_raw)}
+    pub(crate) fn inventory(&self)->InspectResult<&Inventory>{self.require_ready()?;self.retained()?.inventory.as_ref().ok_or(Problem::CleanupUnknown)}
+    pub(crate) fn selected(&self)->InspectResult<&ReleaseSetData>{self.require_ready()?;self.retained()?.selected.as_ref().ok_or(Problem::CleanupUnknown)}
+    pub(crate) fn installed_signature_verifier(&self)->InspectResult<&native::install_producer::ProducerVerifier>{self.require_ready()?;Ok(&self.producer()?.signature)}
+    pub(crate) fn entry_verifier(&self)->InspectResult<&native::install_producer::CurrentProductVerifier>{self.require_ready()?;Ok(&self.producer()?.entry)}
+    pub(crate) fn payload_verifier(&self)->InspectResult<&native::install_producer::CurrentProductVerifier>{self.require_ready()?;Ok(&self.producer()?.payload)}
+}
+
 pub(crate) struct InstallationSlots {
     book: Option<Book>, entered: bool, native_settled: bool, storage_disposed: bool,
     #[cfg(not(feature = "macos-android-registration-helper"))]
     producer: Option<InstalledProducer>,
     // Original positive returns, never substitute for a child/coordinator join.
     files: u32, bytes: u64,
+    removal: Option<RemovalRetention>,
 }
 impl InstallationSlots {
     pub(crate) fn new() -> Self {
         Self { book: Some(Book::new()), entered: false, native_settled: false, storage_disposed: false,
             #[cfg(not(feature = "macos-android-registration-helper"))]
-            producer:None, files: 0, bytes: 0 }
+            producer:None, files: 0, bytes: 0, removal:None }
     }
     #[cfg(not(feature = "macos-android-registration-helper"))]
     pub(crate) fn new_registered(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
         // Same inert installation inspector, now subordinate to the caller's
         // original registration clock/cohort. No entry or observation here.
         let mut book = Book::new(); book.registration_gate = Some(gate);
-        Self { book: Some(book), entered: false, native_settled: false, storage_disposed: false, producer:None, files: 0, bytes: 0 }
+        Self { book: Some(book), entered: false, native_settled: false, storage_disposed: false, producer:None, files: 0, bytes: 0, removal:None }
     }
     pub(crate) fn settled(&self) -> bool {
         self.producer_absent() && ((!self.entered && self.book.as_ref().is_some_and(Book::never_started))
@@ -192,20 +417,44 @@ impl InstallationSlots {
         let producer = match &self.producer { Some(producer) => producer.retained_bytes()?, None => 0 };
         #[cfg(feature = "macos-android-registration-helper")]
         let producer = 0;
-        size_of::<Self>().checked_add(heap)?.checked_add(producer)
+        let retained=match &self.removal{Some(retained)=>retained.retained_bytes()?,None=>0};
+        size_of::<Self>().checked_add(heap)?.checked_add(producer)?.checked_add(retained)
     }
     fn note_native(&self, publish: &mut dyn FnMut(Problem, Instant)) {
         if let Some((failure, at)) = self.book.as_ref().and_then(Book::first_failure) {
             publish(native_problem(failure), at);
         }
     }
-    fn reject<T>(&self, why: Problem, at: Instant, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<T> {
-        self.note_native(publish); publish(why, at); Err(why)
+    fn removal_source_bound(&self)->bool {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        {self.removal.is_some() || self.book.as_ref().is_some_and(|book|
+            book.registration_gate.as_ref().is_some_and(|gate|gate.source_has_removal_cutoff()))}
+        #[cfg(feature = "macos-android-registration-helper")]
+        {self.removal.is_some()}
     }
-    fn attempt<T>(&mut self, content: Problem, publish: &mut dyn FnMut(Problem, Instant),
+    fn parent_point_vetoed(&self)->bool {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        {self.book.as_ref().is_some_and(Book::removal_clock_vetoed)}
+        #[cfg(feature = "macos-android-registration-helper")]
+        {false}
+    }
+    fn reject<T>(&self, why: Problem, at: Instant, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<T> {
+        // Keep actual prior failures; an exact current Parent-only point veto
+        // has no local Instant F and must not acquire one through publication.
+        self.note_native(publish); if !self.parent_point_vetoed(){publish(why, at);} Err(why)
+    }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn cleanup_refusal(&self, verdict:AppRemovalCleanup, publish:&mut dyn FnMut(Problem,Instant)) {
+        // Genuine native/local firstF is retained even if Parent vetoes this
+        // later sample. Parent-only final veto creates no fresh local Instant F.
+        self.note_native(publish);
+        if verdict!=AppRemovalCleanup::ParentClock{publish(Problem::CleanupUnknown,Instant::now());}
+    }
+    fn attempt<T>(&mut self, content: Problem, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
         call: impl FnOnce(&mut Book) -> Result<T>) -> InspectResult<T> {
+        let removal_bound=self.removal_source_bound();
         let Some(book) = self.book.as_mut() else { return self.reject(Problem::CleanupUnknown, Instant::now(), publish); };
-        let returned = call(book);
+        let returned = if removal_bound{book.point(end,stop).and_then(|()|call(book))}else{call(book)};
         let at = Instant::now(); // Before a containing-owner/Document mutex or join.
         self.note_native(publish);
         match returned {
@@ -222,7 +471,8 @@ impl InstallationSlots {
         }
     }
     fn check(&self, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
-        let returned = checkpoint(end, stop);
+        let returned = if self.removal_source_bound(){self.book.as_ref().ok_or(AdmissionFailure::Unknown)
+            .and_then(|book|book.point(end,stop))}else{checkpoint(end,stop)};
         let at = Instant::now();
         match returned { Ok(()) => Ok(()), Err(failure) => self.reject(native_problem(failure), at, publish) }
     }
@@ -235,7 +485,7 @@ impl InstallationSlots {
     }
     fn protected(&mut self, index: usize, mode: u16, end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
-        self.attempt(Problem::PayloadMismatch, publish, |book| {
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| {
             checkpoint(end, stop)?;
             let id = book.records.get(index).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)?;
             if id.uid != 0 || id.gid != 0 || id.mode & 0o7777 != mode || id.flags != 0 { return Err(AdmissionFailure::Ownership); }
@@ -245,12 +495,12 @@ impl InstallationSlots {
     }
     fn open(&mut self, parent: Option<usize>, name: &str, directory: bool, end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<usize> {
-        self.attempt(Problem::PayloadMismatch, publish, |book| book.open(parent, name, directory, end, stop))
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.open(parent, name, directory, end, stop))
     }
     fn close(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
         self.check(end, stop, publish)?;
-        self.attempt(Problem::PayloadMismatch, publish, |book| {
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| {
             if book.close(index) { Ok(()) } else { Err(AdmissionFailure::Unknown) }
         })?;
         self.check(end, stop, publish)
@@ -261,7 +511,7 @@ impl InstallationSlots {
     fn require_present(&mut self, parent: usize, name: &str, missing: Problem, end: Instant,
         stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
         self.check(end, stop, publish)?;
-        self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, end, stop))?;
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.check_name(parent, end, stop))?;
         let observed = match self.book.as_ref().and_then(|book| book.fd(parent).ok()) {
             Some(fd) => stat::fstatat(fd, name, AtFlags::AT_SYMLINK_NOFOLLOW),
             None => return self.reject(Problem::CleanupUnknown, Instant::now(), publish),
@@ -276,7 +526,7 @@ impl InstallationSlots {
                 // cleanup permission to issue another inspection. Either outcome
                 // contracts cleanup from the ORIGINAL negative-return instant.
                 let confirmed = (|| -> InspectResult<()> {
-                    self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, recheck_end, stop))?;
+                    self.attempt(Problem::PayloadMismatch, recheck_end, stop, publish, |book| book.check_name(parent, recheck_end, stop))?;
                     self.check(recheck_end, stop, publish)?;
                     let repeated = match self.book.as_ref().and_then(|book| book.fd(parent).ok()) {
                         Some(fd) => stat::fstatat(fd, name, AtFlags::AT_SYMLINK_NOFOLLOW),
@@ -286,7 +536,7 @@ impl InstallationSlots {
                     if !matches!(repeated, Err(nix::errno::Errno::ENOENT)) {
                         return self.reject(Problem::CleanupUnknown, repeated_at, publish);
                     }
-                    self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, recheck_end, stop))
+                    self.attempt(Problem::PayloadMismatch, recheck_end, stop, publish, |book| book.check_name(parent, recheck_end, stop))
                 })();
                 self.reject(if confirmed.is_ok() { missing } else { Problem::CleanupUnknown }, first_at, publish)
             },
@@ -301,7 +551,7 @@ impl InstallationSlots {
         let size = self.book.as_ref().and_then(|book| book.records[index].identity)
             .and_then(|id| u64::try_from(id.size).ok()).filter(|size| *size > 0 && *size <= limit as u64);
         let Some(size) = size else { return self.reject(Problem::Bounds, Instant::now(), publish); };
-        let (_, bytes) = self.attempt(Problem::RecordMismatch, publish, |book| book.read(index, size, true, end, stop))?;
+        let (_, bytes) = self.attempt(Problem::RecordMismatch, end, stop, publish, |book| book.read(index, size, true, end, stop))?;
         Ok((index,bytes))
     }
     fn read_record(&mut self, parent: usize, name: &str, limit: usize, end: Instant,
@@ -314,7 +564,7 @@ impl InstallationSlots {
         publish: &mut dyn FnMut(Problem,Instant)) -> InspectResult<bool> {
         // Only ENOENT between complete unchanged-parent observations is an
         // absence. A symlink, denied lookup, or changed parent cannot choose v1.
-        self.attempt(Problem::RecordMismatch,publish,|book| book.check_name(parent,end,stop))?;
+        self.attempt(Problem::RecordMismatch, end, stop,publish,|book| book.check_name(parent,end,stop))?;
         let observed = match self.book.as_ref().and_then(|book| book.fd(parent).ok()) {
             Some(fd) => stat::fstatat(fd,name,AtFlags::AT_SYMLINK_NOFOLLOW),
             None => return self.reject(Problem::CleanupUnknown,Instant::now(),publish),
@@ -322,7 +572,7 @@ impl InstallationSlots {
         let at = Instant::now();
         let present = match observed { Ok(_) => true, Err(nix::errno::Errno::ENOENT) => false,
             Err(_) => return self.reject(Problem::Native,at,publish) };
-        self.attempt(Problem::RecordMismatch,publish,|book| book.check_name(parent,end,stop))?;
+        self.attempt(Problem::RecordMismatch, end, stop,publish,|book| book.check_name(parent,end,stop))?;
         Ok(present)
     }
     fn installed_selection(&mut self, install: usize, supplied: Option<&ReleaseSetData>, end: Instant,
@@ -338,6 +588,7 @@ impl InstallationSlots {
             Ok(value) => value, Err(why) => return self.reject(why,Instant::now(),publish),
         };
         if !v2 {
+            if self.removal.is_some(){return self.reject(Problem::Incomplete,Instant::now(),publish);}
             // The later exact legacy roster also refuses stray historical v2
             // names. Absence is not migration permission or a signing fallback.
             return Ok(None);
@@ -387,7 +638,7 @@ impl InstallationSlots {
         let mut local = BTreeMap::new(); let mut buffer = [0u8; 65536];
         loop {
             self.check(end, stop, publish)?;
-            let used = self.attempt(Problem::PayloadMismatch, publish, |book|
+            let used = self.attempt(Problem::PayloadMismatch, end, stop, publish, |book|
                 native::directory_block(book.fd(parent)?.as_fd(), &mut buffer).map_err(native_error))?;
             if used == 0 { break; }
             let mut offset = 0;
@@ -416,7 +667,7 @@ impl InstallationSlots {
                 }
             }
         }
-        self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, end, stop))?;
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.check_name(parent, end, stop))?;
         Ok(local)
     }
     fn match_fixed_roster(&mut self, parent: usize, names: &[&str], optional_stage: Option<&str>, end: Instant,
@@ -427,14 +678,14 @@ impl InstallationSlots {
         if !expected { return self.reject(Problem::PayloadMismatch, Instant::now(), publish); }
         if let Some(name) = optional_stage.filter(|name| roster.contains_key(*name)) {
             self.check(end, stop, publish)?;
-            let before = self.attempt(Problem::PayloadMismatch, publish, |book|
+            let before = self.attempt(Problem::PayloadMismatch, end, stop, publish, |book|
                 stat::fstatat(book.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
             if before.st_mode != (SFlag::S_IFDIR.bits() | 0o700) || before.st_uid != 0 || before.st_gid != 0
                 || before.st_flags != 0 || roster[name] != (before.st_ino, nix::libc::DT_DIR) {
                 return self.reject(Problem::Protection, Instant::now(), publish);
             }
-            self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, end, stop))?;
-            let after = self.attempt(Problem::PayloadMismatch, publish, |book|
+            self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.check_name(parent, end, stop))?;
+            let after = self.attempt(Problem::PayloadMismatch, end, stop, publish, |book|
                 stat::fstatat(book.fd(parent)?, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
             if Identity::of(&before) != Identity::of(&after) {
                 return self.reject(Problem::CleanupUnknown, Instant::now(), publish);
@@ -488,14 +739,14 @@ impl InstallationSlots {
     fn private_stage(&mut self, install: usize, name: &str, inode: u64, end: Instant,
         stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
         self.check(end,stop,publish)?;
-        let before = self.attempt(Problem::PayloadMismatch,publish,|book|
+        let before = self.attempt(Problem::PayloadMismatch, end, stop,publish,|book|
             stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
         if before.st_mode != (SFlag::S_IFDIR.bits() | 0o700) || before.st_uid != 0 || before.st_gid != 0
             || before.st_flags != 0 || before.st_ino != inode {
             return self.reject(Problem::Protection,Instant::now(),publish);
         }
-        self.attempt(Problem::PayloadMismatch,publish,|book| book.check_name(install,end,stop))?;
-        let after = self.attempt(Problem::PayloadMismatch,publish,|book|
+        self.attempt(Problem::PayloadMismatch, end, stop,publish,|book| book.check_name(install,end,stop))?;
+        let after = self.attempt(Problem::PayloadMismatch, end, stop,publish,|book|
             stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
         if Identity::of(&before) != Identity::of(&after) { return self.reject(Problem::CleanupUnknown,Instant::now(),publish); }
         // An ordinary nonroot reader does not open root's0700 receipt directory
@@ -669,7 +920,7 @@ impl InstallationSlots {
             if directory { self.walk(item, &path, index, observed, depth+1, end, stop, publish, read_returned)?; }
             else {
                 let Some(entry) = index.files.get(&path) else { return self.reject(Problem::PayloadMismatch, Instant::now(), publish); };
-                let hash = self.attempt(Problem::PayloadMismatch, publish, |book| book.read(item, entry.size, false, end, stop))?.0;
+                let hash = self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.read(item, entry.size, false, end, stop))?.0;
                 if hash != entry.sha256 { return self.reject(Problem::PayloadMismatch, Instant::now(), publish); }
                 let Some(files) = self.files.checked_add(1).filter(|n| *n <= data::FILE_LIMIT as u32) else {
                     return self.reject(Problem::Bounds, Instant::now(), publish);
@@ -683,9 +934,11 @@ impl InstallationSlots {
                 read_returned(self.files, self.bytes);
                 self.check(end, stop, publish)?;
             }
-            self.close(item, end, stop, publish)?;
+            let retain=match self.removal.as_mut(){Some(retained)=>retained.hold(&path,item),None=>Ok(false)};
+            let retain=match retain{Ok(value)=>value,Err(why)=>return self.reject(why,Instant::now(),publish)};
+            if !retain{self.close(item, end, stop, publish)?;}
         }
-        self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(parent, end, stop))
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.check_name(parent, end, stop))
     }
     fn inspect(&mut self, supplied: Option<&ReleaseSetData>, end: Instant, stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant),
         cleanup_expired: &mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool,
@@ -700,8 +953,8 @@ impl InstallationSlots {
         if executable.as_deref().ok() != Some(Path::new(paths::PAYLOAD_EXECUTABLE)) {
             return self.reject(Problem::WrongLocation, executable_at, publish);
         }
-        self.attempt(Problem::PayloadMismatch, publish, |book| book.arm_acl_once(end, stop))?;
-        self.attempt(Problem::PayloadMismatch, publish, |book| {
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.arm_acl_once(end, stop))?;
+        self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| {
             if !book.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
             book.records.try_reserve_exact(RECORDS).map_err(|_| AdmissionFailure::Bounds)?;
             book.started = true; Ok(())
@@ -742,8 +995,15 @@ impl InstallationSlots {
         self.require_present(versions, paths::RELEASE, Problem::Incomplete, end, stop, publish)?;
         let release = self.open(Some(versions), paths::RELEASE, true, end, stop, publish)?;
         self.protected(release, 0o755, end, stop, publish)?;
-        let descriptor = self.read_record(release, data::RECORD_NAME, data::RECORD_LIMIT, end, stop, publish)?;
-        let inventory_bytes = self.read_record(release, data::INVENTORY_NAME, data::INVENTORY_LIMIT, end, stop, publish)?;
+        let (descriptor,inventory_bytes)=if self.removal.is_some(){
+            let (record_fd,descriptor)=self.held_record(release,data::RECORD_NAME,data::RECORD_LIMIT,end,stop,publish)?;
+            let (inventory_fd,raw)=self.held_record(release,data::INVENTORY_NAME,data::INVENTORY_LIMIT,end,stop,publish)?;
+            if let Some(retained)=self.removal.as_mut(){retained.base[6]=Some(record_fd);retained.base[7]=Some(inventory_fd);}
+            (descriptor,raw)
+        }else{
+            (self.read_record(release,data::RECORD_NAME,data::RECORD_LIMIT,end,stop,publish)?,
+                self.read_record(release,data::INVENTORY_NAME,data::INVENTORY_LIMIT,end,stop,publish)?)
+        };
         let install_root = match self.directory_identity(install) {
             Ok(value) => value, Err(why) => return self.reject(why, Instant::now(), publish),
         };
@@ -795,6 +1055,15 @@ impl InstallationSlots {
         }
         let runtime = self.open(Some(release), "runtime", true, end, stop, publish)?;
         self.protected(runtime, 0o555, end, stop, publish)?;
+        if let Some(retained)=self.removal.as_mut(){
+            for (slot,original) in [root,library,support,install,versions,release].into_iter().enumerate(){retained.base[slot]=Some(original);}
+            retained.base[8]=Some(app);retained.base[9]=Some(runtime);
+            for role in REMOVAL_EXECUTABLE_ROLES {
+                if !index.files.get(REMOVAL_WALK_PATHS[role]).is_some_and(|entry|entry.executable){
+                    return self.reject(Problem::PayloadMismatch,Instant::now(),publish);
+                }
+            }
+        }
         let mut observed = BTreeSet::from(["app".to_owned(), "runtime".to_owned()]);
         self.walk(app, "app", &index, &mut observed, 0, end, stop, publish, read_returned)?;
         self.walk(runtime, "runtime", &index, &mut observed, 0, end, stop, publish, read_returned)?;
@@ -804,10 +1073,16 @@ impl InstallationSlots {
         let count = book.records.len();
         for original in 0..count {
             if self.book.as_ref().is_some_and(|book| book.records[original].state == State::Owned) {
-                self.attempt(Problem::PayloadMismatch, publish, |book| book.check_name(original, end, stop))?;
+                self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| book.check_name(original, end, stop))?;
             }
         }
         self.check(end, stop, publish)?;
+        drop(index);
+        if let Some(retained)=self.removal.as_mut(){
+            retained.record=descriptor;retained.inventory_raw=inventory_bytes;
+            retained.inventory=Some(inventory);retained.selected=authenticated;
+            if self.control_bytes().is_none_or(|n|n>CONTROL_RESERVE){return self.reject(Problem::Bounds,Instant::now(),publish);}
+        }
         match Matching::checked(self.files as usize, self.bytes) {
             Some(result) => Ok(result), None => self.reject(Problem::Bounds, Instant::now(), publish),
         }
@@ -832,10 +1107,14 @@ impl InstallationSlots {
         if self.entered || !self.book.as_ref().is_some_and(Book::never_started) {
             return self.reject(Problem::CleanupUnknown, Instant::now(), publish);
         }
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let removal_bound=self.removal_source_bound();
         self.entered = true;
         let result = self.inspect(selected,end, stop, publish, cleanup_expired, read_returned);
         let at = Instant::now();
-        if let Err(why) = result { self.note_native(publish); publish(why, at); }
+        // This is the same returned point, before any cleanup sample can
+        // replace its marker. Retain a real first-F, never synthesize Parent F.
+        if let Err(why) = result { let _:InspectResult<()>=self.reject(why,at,publish); }
         // Stop means no more inspection, not permission to skip independently
         // allowed original cleanup. There is no second worker or new interval.
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -851,8 +1130,24 @@ impl InstallationSlots {
         let cleaned = producer_cleaned && self.book.as_mut()
             .is_some_and(|book| book.settle(cleanup_expired) == CloseOutcome::Settled && book.settled());
         self.note_native(publish);
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let (final_expired,final_verdict)=if removal_bound {
+            match self.book.as_ref(){
+                Some(book)=>{
+                    let first=book.first_failure();
+                    let verdict=book.cleanup_verdict(first);
+                    let owner_expired=cleanup_expired(first);
+                    // Local owner expiry takes precedence over Parent-only
+                    // provenance at this SAME final sample.
+                    let final_verdict=if owner_expired{book.removal_clock_veto.set(false);AppRemovalCleanup::LocalExpired}else{verdict};
+                    (final_verdict!=AppRemovalCleanup::Allowed,final_verdict)
+                },None=>(true,AppRemovalCleanup::LocalExpired),
+            }
+        }else{(false,AppRemovalCleanup::Allowed)};
+        #[cfg(feature = "macos-android-registration-helper")]
+        let final_expired=false;
         self.native_settled = cleaned;
-        if cleaned {
+        if cleaned && !final_expired {
             // Only already-closed DATA leaves the original. Drop is explicitly
             // not a native settle operation; its real return precedes credit.
             let closed = self.book.take();
@@ -862,7 +1157,13 @@ impl InstallationSlots {
                 let producer = self.producer.take(); drop(producer);
             }
             self.storage_disposed = true;
-        } else { publish(Problem::CleanupUnknown, Instant::now()); }
+        } else {
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            if removal_bound{self.cleanup_refusal(final_verdict,publish);}
+            else{publish(Problem::CleanupUnknown,Instant::now());}
+            #[cfg(feature = "macos-android-registration-helper")]
+            publish(Problem::CleanupUnknown,Instant::now());
+        }
         if !self.settled() { return Err(Problem::CleanupUnknown); }
         // An original refusal has already set STOP. Do not replace that
         // diagnosis with a later checkpoint's generic Cancelled.
@@ -904,6 +1205,24 @@ fn control_bound(descriptor: &Vec<u8>, raw: &Vec<u8>, inventory: &Inventory, ind
 #[test]
 fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
     assert!(!runtime::safe_payload_path(paths::APP_NAME));
+    assert_eq!(REMOVAL_WALK_PATHS.len(),10);
+    assert_eq!(16+REMOVAL_WALK_PATHS.len()+17,REMOVAL_OWNED_FD_BOUND);
+    let mut retained=RemovalRetention::new();
+    for (role,path) in REMOVAL_WALK_PATHS.iter().enumerate(){
+        assert_eq!(removal_walk_role(path),Some(role));assert_eq!(retained.hold(path,16+role),Ok(true));
+        assert_eq!(removal_walk_role(&format!("{path}/private")),None);
+    }
+    assert!(retained.hold(REMOVAL_WALK_PATHS[0],40).is_err());
+    assert_eq!(retained.hold("app/Contents/Helpers/not-the-coordinator",40),Ok(false));
+    assert_eq!(REMOVAL_EXECUTABLE_ROLES.map(|role|REMOVAL_WALK_PATHS[role]),
+        [paths::ENTRY_INVENTORY_PATH,paths::PAYLOAD_INVENTORY_PATH,
+            "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove"]);
+    assert!(!retained.ready.get());assert!(retained.indices(&[10,11,12,13,14,15]).is_err());
+    for (i,slot) in retained.base.iter_mut().enumerate(){*slot=Some(i);}
+    retained.walk[0]=Some(16);
+    assert_eq!(retained.indices(&[10,11,12,13,14,15]).unwrap(),std::array::from_fn(|i|i));
+    retained.walk[9]=Some(0);assert!(retained.indices(&[10,11,12,13,14,15]).is_err());
+    assert!(retained.retained_bytes().is_some_and(|n|n<CONTROL_RESERVE));
     assert!(paths::APP_NAME == "Mobile Release Kit.app");
     let paths = ["app/Contents", "app/Contents/Info.plist", "app/Contents/MacOS",
         data::APP_BINARY, "runtime/python", "runtime/python/bin"];
@@ -921,8 +1240,62 @@ fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
     }
     #[cfg(not(feature = "macos-android-registration-helper"))]
     {
+        // Real inert Book cells exercise the production publication paths;
+        // there is no native call, fabricated ParentCutoff or filesystem here.
+        // A registered-removal inspection has no retained-current wrapper.
+        // The typed Book marker must work with OR without that wrapper; these
+        // inert cells manufacture no WorkGate, ParentCutoff or native call.
+        for retained_wrapper in [false,true]{
+        let mut probe=InstallationSlots::new();
+        if retained_wrapper{probe.removal=Some(RemovalRetention::new());}
+        assert_eq!(probe.removal_source_bound(),retained_wrapper);
+        let at=Instant::now();let mut publications=Vec::new();
+        probe.book.as_ref().unwrap().removal_clock_veto.set(true);
+        let _:InspectResult<()>=probe.reject(Problem::CleanupUnknown,at,&mut |why,when|publications.push((why,when)));
+        assert!(publications.is_empty());
+        probe.book.as_ref().unwrap().removal_clock_veto.set(false);
+        probe.cleanup_refusal(AppRemovalCleanup::ParentClock,&mut |why,when|publications.push((why,when)));
+        assert!(publications.is_empty()); // first veto is CLEANUP, not point.
+        probe.book.as_ref().unwrap().note_acl(AdmissionFailure::Native,at);
+        probe.book.as_ref().unwrap().removal_clock_veto.set(true);
+        let _:InspectResult<()>=probe.reject(Problem::CleanupUnknown,Instant::now(),&mut |why,when|publications.push((why,when)));
+        assert_eq!(publications,vec![(Problem::Native,at)]);
+        publications.clear();probe.book.as_ref().unwrap().removal_clock_veto.set(false);
+        probe.cleanup_refusal(AppRemovalCleanup::ParentClock,&mut |why,when|publications.push((why,when)));
+        assert_eq!(publications,vec![(Problem::Native,at)]);
+        for verdict in [AppRemovalCleanup::Allowed,AppRemovalCleanup::LocalExpired]{
+            publications.clear();probe.cleanup_refusal(verdict,&mut |why,when|publications.push((why,when)));
+            assert_eq!(publications[0],(Problem::Native,at));
+            assert_eq!(publications.len(),2);assert_eq!(publications[1].0,Problem::CleanupUnknown);
+        }
+        }
+        let callback=Book::new();let first=Instant::now();
+        callback.note_acl(AdmissionFailure::Native,first);
+        for verdict in [AppRemovalCleanup::Allowed,AppRemovalCleanup::LocalExpired,AppRemovalCleanup::ParentClock]{
+            for owner_expired in [false,true]{
+                callback.removal_clock_veto.set(verdict==AppRemovalCleanup::ParentClock);
+                let decision=InstalledProducer::cleanup_decision(&callback,verdict,owner_expired);
+                use native::android_service_management::Decision;
+                let expected=if owner_expired || verdict==AppRemovalCleanup::LocalExpired{Decision::Stop}
+                    else if verdict==AppRemovalCleanup::ParentClock{Decision::Unknown}else{Decision::Proceed};
+                assert_eq!(decision,expected);
+                assert_eq!(callback.removal_clock_vetoed(),!owner_expired && verdict==AppRemovalCleanup::ParentClock);
+                assert_eq!(callback.first_failure(),Some((AdmissionFailure::Native,first)));
+            }
+        }
         let original = InstallationSlots::new();
+        assert!(!original.removal_source_bound() && !original.parent_point_vetoed());
+        let at=Instant::now();let mut ordinary=Vec::new();
+        let _:InspectResult<()>=original.reject(Problem::RecordMismatch,at,&mut |why,when|ordinary.push((why,when)));
+        assert_eq!(ordinary,vec![(Problem::RecordMismatch,at)]);
         assert!(original.producer_absent() && original.settled());
+        let mut removal=RemovalProducerAdmission{slots:Some(original)};
+        let (_,stop)=watch::channel(false);let mut published=Vec::new();
+        assert!(removal.current(Instant::now(),&stop,&mut |why,_|published.push(why)).is_err());
+        assert!(published.is_empty());
+        assert!(removal.settle(Instant::now(),&stop,&mut |_,_|panic!("inert publication"),
+            &mut |_|panic!("inert cleanup clock")));
+        assert!(removal.settled());assert!(removal.retained_bytes().is_some_and(|n|n<CONTROL_RESERVE));
         assert!(InstalledProducer::planned_bytes().is_some_and(|n| n > 0 && n < CONTROL_RESERVE));
         // Inert wrappers are not consuming-close facts until their original
         // owner actually invokes close. No native/Security entry in this DATA.

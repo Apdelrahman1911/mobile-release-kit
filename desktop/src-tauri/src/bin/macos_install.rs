@@ -65,6 +65,9 @@ mod installer {
         // `end` remains the original legacy-entry clock. The private B2 path
         // never uses it: both processes receive this same absolute deadline.
         worker_deadline: Option<worker::Deadline>, worker_stderr_is_gate: bool, worker_go_eof: bool,
+        // Zero for all ordinary install/worker/fixture paths. The removal
+        // Parent debits native peer and retained-source costs in the SAME book.
+        removal_live_reserved: usize, removal_control_reserved: u64,
         payload_written: u64, payload_write_calls: u64,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
@@ -341,6 +344,7 @@ mod installer {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
+                removal_live_reserved:0,removal_control_reserved:0,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
                 gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
@@ -358,7 +362,8 @@ mod installer {
         fn identity(&self, n: usize) -> Result<Identity> { self.originals.get(n).and_then(|r| r.identity).ok_or("identity-missing") }
         fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
             self.clock()?;
-            let extra = if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 };
+            let extra = (if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 })
+                + self.removal_live_reserved;
             check(self.originals.len() < 24576 && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None }); Ok(n)
         }
@@ -1211,7 +1216,7 @@ mod installer {
             if book.registration.verified { names.insert(paths::REGISTRATION_GATE_NAME.into()); }
             exact_roster(book, root, &names)?; exact_roster(book, versions, &BTreeSet::new())
         }
-        fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+        pub(super) fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
             let reader = book.open(Some(parent), name, false)?;
             book.protected(reader, false, Some(0o444))?;
             native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-record-attributes")?;
@@ -1255,8 +1260,14 @@ mod installer {
         }
         // Bounded positional read on the SAME held original. Unlike read(), this
         // does not depend on a previously consumed offset or mutate a shared OFD.
-        fn held_bytes(book: &Install, reader: usize, expected: &[u8]) -> Result<()> {
-            check(!expected.is_empty() && expected.len() <= transaction::CAPSULE_LIMIT, "maintenance-record-size")?;
+        pub(super) fn held_bytes(book: &Install, reader: usize, expected: &[u8]) -> Result<()> {
+            held_bytes_bounded(book,reader,expected,transaction::CAPSULE_LIMIT)
+        }
+        fn held_inventory(book: &Install, reader: usize, expected: &[u8]) -> Result<()> {
+            held_bytes_bounded(book,reader,expected,installation_record::INVENTORY_LIMIT)
+        }
+        fn held_bytes_bounded(book: &Install, reader: usize, expected: &[u8], limit: usize) -> Result<()> {
+            check(!expected.is_empty() && expected.len() <= limit, "maintenance-record-size")?;
             book.check_name(reader, true)?;
             check(book.identity(reader)?.size == expected.len() as i64, "maintenance-record-size")?;
             let mut at: usize = 0; let mut block = [0u8;4096];
@@ -1428,6 +1439,66 @@ mod installer {
             selected_compile(&selected)?;
             check(book.gate.verified && (book.gate.exclusive_acquired || book.worker_stderr_is_gate),
                 "maintenance-original-gate-required")?;
+            observe_admitted(book,prepared,selected,pending_intent)
+        }
+        // Only this module can access the inner writer-shaped observation.
+        // No conversion exposes it to the removal Parent or to the renderer.
+        pub(super) struct RemovalObserved {
+            inner: Observed, inventory_original: usize, record_original: usize, record_bytes: Vec<u8>,
+        }
+        // Comparison DATA only. It cannot create a RemovalObserved or grant
+        // writer authority; the caller still owns the actual complete audit.
+        pub(super) fn removal_current_only_data(action: ActionData, present: [bool;2],
+            intent: bool, controls: bool, current: bool) -> bool {
+            action==ActionData::SamePackageNoop && present==[true;2] && !intent && controls && current
+        }
+        impl RemovalObserved {
+            pub(super) fn inventory(&self) -> &Inventory { &self.inner.prepared.inventory }
+            pub(super) fn inventory_bytes(&self) -> &[u8] { &self.inner.prepared.inventory_bytes }
+            pub(super) fn post(&self, book: &Install) -> Result<()> {
+                held_inventory(book,self.inventory_original,self.inventory_bytes())?;
+                held_bytes(book,self.record_original,&self.record_bytes)?;
+                self.inner.controls_post(book)?;
+                let history=self.inner.history.as_ref().ok_or("removal-current-history")?;
+                held_bytes(book,history.state_original,&history.state_bytes)?;
+                book.check_name(self.inner.old_app.ok_or("removal-current-app")?,true)?;
+                book.check_name(self.inner.old_release.ok_or("removal-current-release")?,true)
+            }
+        }
+        pub(super) fn observe_removal(book: &mut Install, source: &worker::RemovalAdmission) -> Result<RemovalObserved> {
+            let selected=source.current_selection(book)?.clone();
+            source.reservation_post(book)?;
+            let root=source.root_original();
+            let versions=book.open(Some(root),"versions",true)?;
+            book.protected(versions,true,Some(0o755))?;
+            let binding=selected.current_data().binding_data();
+            let release=book.open(Some(versions),binding.release,true)?;
+            book.protected(release,true,Some(0o755))?;
+            let (inventory_original,raw)=metadata_original(book,release,installation_record::INVENTORY_NAME,
+                installation_record::INVENTORY_LIMIT)?;
+            check(hash(&raw)==binding.inventory_sha256,"removal-current-inventory")?;
+            let (record_original,record_bytes)=metadata_original(book,release,installation_record::RECORD_NAME,
+                installation_record::RECORD_LIMIT)?;
+            let expected=installation_record::Expected { kind:installation_record::Kind::Ordinary,
+                source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
+                install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(release)? };
+            let record=installation_record::Record::parse_for_release_data(&record_bytes,&raw,&expected,selected.current_data())?;
+            let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
+            let prepared=PreparedFresh { input:root,inventory,inventory_bytes:raw,destination:root,versions };
+            let observed=observe_admitted(book,prepared,selected,None)?;
+            check(removal_current_only_data(observed.action,[observed.old_app.is_some(),observed.old_release.is_some()],
+                observed.intent.is_some(),observed.controls.is_some(),observed.history.as_ref().is_some_and(|history|
+                    history.current.state.current_data().release_data()==observed.selected.current_data())),
+                "removal-current-only")?;
+            observed.incoming_controls(book,source.installed_bytes(),source.installed_signature_bytes())?;
+            check(observed.history.as_ref().is_some_and(|history|
+                history.current.state.current_data().instance_data()==record.instance()),"removal-current-record")?;
+            source.reservation_post(book)?;
+            let value=RemovalObserved { inner:observed,inventory_original,record_original,record_bytes };
+            value.post(book)?; Ok(value)
+        }
+        fn observe_admitted(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
+            pending_intent: Option<&str>) -> Result<Observed> {
             let root = prepared.destination; let versions = prepared.versions;
             let history = match book.named(Some(root), transaction::STATE_NAME) {
                 Err(Errno::ENOENT) => None,
@@ -1530,10 +1601,12 @@ mod installer {
                 .and_then(|n| n.checked_add(prepared.inventory_bytes.len() as u64 * 3))
                 .and_then(|n| n.checked_add(selected_bytes.len() as u64 + 128 * 1024 + 2 * EXPORT_LIMIT as u64))
                 .and_then(|n| n.checked_add(6 * transaction::PRODUCER_CONTROL_LIMIT as u64))
+                .and_then(|n| n.checked_add(book.removal_control_reserved))
                 .ok_or("maintenance-control-bound")?;
             let records = (book.originals.len() as u64).checked_add(copy_files.checked_mul(3).ok_or("maintenance-original-bound")?)
                 .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256 + 3)).ok_or("maintenance-original-bound")?;
-            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1;
+            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
+                + book.removal_live_reserved as u64;
             data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
             Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls })
         }
@@ -1933,6 +2006,47 @@ mod installer {
             DESCRIPTOR_LIMIT, SIGNATURE_LIMIT};
         use nix::sys::uio::pread;
 
+        // Internal callers select a purpose BEFORE reading untrusted names or
+        // descriptor bytes. This selects an input grammar, never signature or
+        // installed-code authority. The ordinary Install path is unchanged.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum InputPurpose { Install, Remove }
+        impl InputPurpose {
+            fn request_id(self, name: &str) -> Result<Option<String>> {
+                match self {
+                    Self::Install => transaction::request_from_package_name_data(name)
+                        .map_err(|_| "producer-package-name"),
+                    Self::Remove => {
+                        check(name == "Remove.pkg", "producer-package-name")?;
+                        Ok(None)
+                    },
+                }
+            }
+            fn descriptor_name(self) -> &'static str {
+                match self {
+                    Self::Install => DESCRIPTOR_FILENAME,
+                    Self::Remove => mobile_release_desktop::macos_remove_producer::DESCRIPTOR_FILENAME,
+                }
+            }
+            fn signature_name(self) -> &'static str {
+                match self {
+                    Self::Install => SIGNATURE_FILENAME,
+                    Self::Remove => mobile_release_desktop::macos_remove_producer::SIGNATURE_FILENAME,
+                }
+            }
+            fn descriptor_limit(self) -> usize {
+                match self {
+                    Self::Install => DESCRIPTOR_LIMIT,
+                    Self::Remove => mobile_release_desktop::macos_remove_producer::DESCRIPTOR_LIMIT,
+                }
+            }
+            fn signature_limit(self) -> usize {
+                // The actual Remove verifier accepts only RSA signatures of
+                // 256/384/512 bytes. Do not widen ordinary Install's old limit.
+                match self { Self::Install => SIGNATURE_LIMIT, Self::Remove => 512 }
+            }
+        }
+
         #[derive(Clone, PartialEq, Eq)]
         struct MountData { id: statfs::fsid_t, flags: MntFlags, kind: String, device: i64 }
         impl MountData {
@@ -1957,12 +2071,15 @@ mod installer {
             value.len() <= 255 && value.split(' ').all(component)
         }
         fn source_name(path: &str) -> Result<(&str, Vec<&str>)> {
+            source_name_for(path, InputPurpose::Install)
+        }
+        fn source_name_for(path: &str, purpose: InputPurpose) -> Result<(&str, Vec<&str>)> {
             check(path.starts_with('/') && path.len() <= 4096
                 && path[1..].split('/').count() <= 32, "producer-source-spelling")?;
             let mut parts: Vec<_> = path[1..].split('/').collect();
             check(parts.len() >= 2 && parts.iter().all(|name| source_component(name)), "producer-source-spelling")?;
             let name = parts.pop().ok_or("producer-package-name")?;
-            transaction::request_from_package_name_data(name).map_err(|_| "producer-package-name")?;
+            purpose.request_id(name)?;
             Ok((name,parts))
         }
         // Offset reads retain this SAME held original and never reset or share
@@ -2010,16 +2127,25 @@ mod installer {
             }
         }
         pub(super) struct Input {
+            purpose: InputPurpose,
             held: Vec<Held>, package: usize, descriptor: usize, signature: usize,
             package_sha256: String, descriptor_sha256: String, signature_sha256: String,
             descriptor_body: Vec<u8>, signature_body: Vec<u8>, requested_id: Option<String>,
         }
         impl Input {
             pub(super) fn open(book: &mut Install, completed_path: &str) -> Result<Self> {
+                Self::open_for(book, completed_path, InputPurpose::Install)
+            }
+            // Deliberately not dispatched until the Parent's separate Remove
+            // signature/current-source/peer/exclusion composition is admitted.
+            pub(super) fn open_removal(book: &mut Install, completed_path: &str) -> Result<Self> {
+                Self::open_for(book, completed_path, InputPurpose::Remove)
+            }
+            fn open_for(book: &mut Install, completed_path: &str, purpose: InputPurpose) -> Result<Self> {
                 // The caller must already have admitted the fixed extracted
                 // SOURCE and self image; no argument alone grants this role.
                 book.clock()?;
-                let (name,parts) = source_name(completed_path)?;
+                let (name,parts) = source_name_for(completed_path,purpose)?;
                 let mut directories = Vec::new();
                 let mut parent = book.open(None,"/",true)?; directories.push(parent);
                 for part in parts { parent=book.open(Some(parent),part,true)?; directories.push(parent); }
@@ -2043,15 +2169,15 @@ mod installer {
                     value.post(book)?;held.push(value);Ok(original)
                 };
                 let package=open_file(name)?;
-                let descriptor=open_file(DESCRIPTOR_FILENAME)?;
-                let signature=open_file(SIGNATURE_FILENAME)?;
+                let descriptor=open_file(purpose.descriptor_name())?;
+                let signature=open_file(purpose.signature_name())?;
                 drop(open_file); // No retained mutable book borrow across reads.
                 let (package_sha256,prefix)=original_bytes(book,package,installation_record::PAYLOAD_LIMIT as usize,false)?;
                 check(book.identity(package)?.size >= 28 && prefix == b"xar!","producer-completed-package")?;
-                let (descriptor_sha256,descriptor_body)=original_bytes(book,descriptor,DESCRIPTOR_LIMIT,true)?;
-                let (signature_sha256,signature_body)=original_bytes(book,signature,SIGNATURE_LIMIT,true)?;
-                let requested_id=transaction::request_from_package_name_data(name).map_err(|_| "producer-package-name")?;
-                let input=Self { held,package,descriptor,signature,package_sha256,descriptor_sha256,signature_sha256,
+                let (descriptor_sha256,descriptor_body)=original_bytes(book,descriptor,purpose.descriptor_limit(),true)?;
+                let (signature_sha256,signature_body)=original_bytes(book,signature,purpose.signature_limit(),true)?;
+                let requested_id=purpose.request_id(name)?;
+                let input=Self { purpose,held,package,descriptor,signature,package_sha256,descriptor_sha256,signature_sha256,
                     descriptor_body,signature_body,requested_id };
                 input.post(book)?;Ok(input)
             }
@@ -2063,8 +2189,8 @@ mod installer {
             pub(super) fn content_post(&self, book: &Install) -> Result<()> {
                 self.post(book)?;
                 let (package,prefix)=original_bytes(book,self.package,installation_record::PAYLOAD_LIMIT as usize,false)?;
-                let (descriptor,body)=original_bytes(book,self.descriptor,DESCRIPTOR_LIMIT,true)?;
-                let (signature,sign)=original_bytes(book,self.signature,SIGNATURE_LIMIT,true)?;
+                let (descriptor,body)=original_bytes(book,self.descriptor,self.purpose.descriptor_limit(),true)?;
+                let (signature,sign)=original_bytes(book,self.signature,self.purpose.signature_limit(),true)?;
                 check(package==self.package_sha256 && prefix==b"xar!" && descriptor==self.descriptor_sha256
                     && body==self.descriptor_body && signature==self.signature_sha256 && sign==self.signature_body,
                     "producer-original-content-changed")?;
@@ -2095,6 +2221,29 @@ mod installer {
                 "/Volumes/a/Other.pkg","/Volumes/a/Install.pkg/","/Volumes/a/Install.pkg\0"] {
                 assert!(source_name(path).is_err());
             }
+            // These checks establish closed grammar/bounds only. They do NOT
+            // substitute parsed DATA for native package or signing admission.
+            let removal = InputPurpose::Remove;
+            assert_eq!(source_name_for("/Volumes/Mobile Release Kit Remove/Remove.pkg",removal)
+                .unwrap().0,"Remove.pkg");
+            assert_eq!(removal.request_id("Remove.pkg"),Ok(None));
+            assert!(source_name("/Volumes/Mobile Release Kit Remove/Remove.pkg").is_err());
+            for name in ["Install.pkg","producer.json","remove-producer.json",
+                "MobileReleaseKit-Request-11111111111111111111111111111111.pkg","remove.pkg"] {
+                assert!(source_name_for(&format!("/Volumes/Removal/{name}"),removal).is_err());
+            }
+            for path in ["Remove.pkg","/Remove.pkg","/Volumes/../Remove.pkg","/Volumes/a//Remove.pkg",
+                "/Volumes/a/Remove.pkg/","/Volumes/a/Remove.pkg\0"] {
+                assert!(source_name_for(path,removal).is_err());
+            }
+            assert_eq!(removal.descriptor_name(),"remove-producer.json");
+            assert_eq!(removal.signature_name(),"remove-producer.sig");
+            assert_eq!(removal.descriptor_limit(),16*1024);
+            assert_eq!(removal.signature_limit(),512);
+            assert_eq!(InputPurpose::Install.descriptor_name(),DESCRIPTOR_FILENAME);
+            assert_eq!(InputPurpose::Install.signature_name(),SIGNATURE_FILENAME);
+            assert_eq!(InputPurpose::Install.descriptor_limit(),DESCRIPTOR_LIMIT);
+            assert_eq!(InputPurpose::Install.signature_limit(),SIGNATURE_LIMIT);
         }
     }
 
@@ -2119,6 +2268,9 @@ mod installer {
         const CONTROL_LIMIT: usize = 2 * 1024;
         const RESULT_LIMIT: usize = 64 * 1024;
         const SELF_LIMIT: u64 = 64 * 1024 * 1024;
+        // Same 16MiB containing reservation, not an additional budget. Includes
+        // shared request/raw encoding, its native binding and frame copies.
+        const REMOVAL_REQUEST_RESERVE: usize = 256 * 1024;
         // Three inherited standard descriptors and one transferred Command
         // gate reference are accounted independently of the existing book.
         pub(super) const EXTRA_LIVE: usize = 4;
@@ -2196,6 +2348,7 @@ mod installer {
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
+                    removal_live_reserved:0,removal_control_reserved:0,
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
@@ -2857,6 +3010,472 @@ mod installer {
                     && self.entry.settled() && self.signature.settled()
             }
         }
+        struct RemovalOriginals {
+            input: completed_package::Input,
+            // Native3 first fifteen originals, in its fixed documented order.
+            code: [usize;15], installed_pair: [usize;2], installed_raw: [Vec<u8>;2],
+        }
+        impl RemovalOriginals {
+            fn post(&self, book: &Install) -> Result<()> {
+                self.input.post(book)?;
+                for n in self.code { book.check_name(n,true)?; }
+                for (n,raw) in self.installed_pair.iter().zip(&self.installed_raw) {
+                    maintenance::held_bytes(book,*n,raw)?;
+                }
+                book.clock()
+            }
+        }
+        fn removal_source_point(book: &Install, originals: &RemovalOriginals, first: &mut Option<&'static str>,
+            point: native::install_producer::ProducerCheckpoint) -> native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody)=producer_phase(point);
+            if phase.is_cleanup() { return producer_cleanup_point(book,point); }
+            if custody.unknown { first.get_or_insert("removal-native-custody-unknown"); return Decision::Unknown; }
+            if first.is_some() { return Decision::Stop; }
+            if let Err(error)=originals.post(book) {
+                first.get_or_insert(error);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown) { Decision::Unknown } else { Decision::Stop };
+            }
+            Decision::Proceed
+        }
+        // Stored by the original Parent BEFORE any verifier call. Its raw
+        // current data is not independently constructible writer authority.
+        pub(super) struct RemovalAdmission {
+            originals: RemovalOriginals,
+            signature: native::install_producer::ProducerVerifier,
+            entry: native::install_producer::CurrentProductVerifier,
+            payload: native::install_producer::CurrentProductVerifier,
+            remove: native::install_producer::RemovalProducerVerifier,
+            program: native::install_producer::RemovalProgramVerifier,
+            descriptor: Option<mobile_release_desktop::macos_install_producer::ProducerData>,
+            removal: Option<mobile_release_desktop::macos_remove_producer::RemovalData>,
+            inspected: bool, first: Option<&'static str>,
+            code_sha256: Option<[[u8;32];3]>,
+        }
+        impl RemovalAdmission {
+            fn new(book: &mut Install, completed_path: &str) -> Result<Self> {
+                use native::install_producer::{ProducerVerifier,CurrentProductVerifier,CurrentProductRole,
+                    RemovalProducerVerifier,RemovalProgramVerifier};
+                check(cfg!(feature="macos-installed-remover") && !cfg!(feature="macos-installed-installer-fixture")
+                    && unistd::getuid().is_root() && unistd::geteuid().is_root()
+                    && unistd::getgid().as_raw()==0 && unistd::getegid().as_raw()==0,"removal-fixed-role")?;
+                native::platform().map_err(|_| "removal-platform")?;
+                check(std::env::current_exe().ok().as_deref()==Some(Path::new(paths::REMOVER_BINARY)),"removal-fixed-image")?;
+                check(book.removal_live_reserved==0 && book.removal_control_reserved==0
+                    && !book.registration.entered && !book.gate.entered,"removal-original-once")?;
+                let bound=ProducerVerifier::project_owned_upper_bound()
+                    .and_then(|n| CurrentProductVerifier::project_owned_upper_bound()?.checked_mul(2)?.checked_add(n))
+                    .and_then(|n| n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n| n.checked_add(RemovalProgramVerifier::project_owned_upper_bound()?))
+                    .and_then(|n| n.checked_add(native::removal_coordinator::RemovalPeer::project_owned_upper_bound()?))
+                    // Retained raw pairs and their bounded parse/copy backing,
+                    // plus current record. Inventory/history are charged by the
+                    // SAME observe_admitted BudgetData, not a second allowance.
+                    .and_then(|n| n.checked_add(6*65536+2*installation_record::RECORD_LIMIT))
+                    .and_then(|n| n.checked_add(REMOVAL_REQUEST_RESERVE))
+                    .ok_or("removal-control-bound")?;
+                check(bound<=16*1024*1024,"removal-control-bound")?;
+                book.removal_live_reserved=3;
+                book.removal_control_reserved=bound as u64;
+                let input=completed_package::Input::open_removal(book,completed_path)?;
+                let mut code=[0usize;15];
+                code[0]=book.open(None,"/",true)?;
+                book.protected_as(code[0],true,None,AclRole::SystemRoot)?;
+                for (slot,parent,name) in [(1,0,"Library"),(2,1,"Application Support"),(3,2,"MobileReleaseKit"),
+                    (4,3,paths::APP_NAME),(5,4,"Contents"),(6,5,"Helpers"),(7,6,"MobileReleaseKitPayload.app"),
+                    (8,7,"Contents"),(9,8,"MacOS"),(10,8,"Helpers"),(11,5,"MacOS"),
+                    (12,11,"mrk-macos-entry"),(13,9,"mobile-release-kit-desktop"),(14,10,"mrk-macos-remove")] {
+                    let directory=slot<12;
+                    code[slot]=book.open(Some(code[parent]),name,directory)?;
+                    let role=match slot {1=>AclRole::SystemLibrary,2=>AclRole::SystemSupport,_=>AclRole::Other};
+                    book.protected_as(code[slot],directory,match slot {1|2=>None,3=>Some(0o755),_=>Some(0o555)},role)?;
+                    native::no_xattrs(book.fd(code[slot])?.as_fd()).map_err(|_| "removal-current-attributes")?;
+                    check(stat::fstat(book.fd(code[slot])?).map_err(|_| "removal-current-stat")?.st_flags==0,
+                        "removal-current-flags")?;
+                }
+                let target=if cfg!(target_arch="aarch64") { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64 }
+                    else { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Intel };
+                let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(target,paths::RELEASE)
+                    .map_err(|_| "removal-current-control-name")?;
+                let (descriptor,raw)=maintenance::metadata_original(book,code[3],&names.0,
+                    mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT)?;
+                let (signature,sign)=maintenance::metadata_original(book,code[3],&names.1,
+                    mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?;
+                let originals=RemovalOriginals { input,code,installed_pair:[descriptor,signature],installed_raw:[raw,sign] };
+                originals.post(book)?;
+                Ok(Self { originals,signature:ProducerVerifier::new(),entry:CurrentProductVerifier::new(CurrentProductRole::EntryApp),
+                    payload:CurrentProductVerifier::new(CurrentProductRole::PayloadApp),remove:RemovalProducerVerifier::new(),
+                    program:RemovalProgramVerifier::new(),descriptor:None,removal:None,inspected:false,first:None,code_sha256:None })
+            }
+            fn inspect(&mut self, book: &Install) -> Result<()> {
+                use native::install_producer::{SignatureResult,CurrentProductResult,RemovalProgramResult};
+                check(!self.inspected,"removal-original-once")?; self.inspected=true;
+                self.originals.post(book)?;
+                let removed={ let Self { originals,remove,first,.. }=self;
+                    remove.verify_and_close(originals.input.descriptor_data(),originals.input.signature_data(),
+                        &mut |point| removal_source_point(book,originals,first,point)) };
+                check(removed==SignatureResult::SignatureVerified && self.remove.settled(),
+                    self.first.unwrap_or("removal-package-signature"))?;
+                let installed={ let Self { originals,signature,first,.. }=self;
+                    signature.verify_and_close(&originals.installed_raw[0],&originals.installed_raw[1],
+                        &mut |point| removal_source_point(book,originals,first,point)) };
+                check(installed==SignatureResult::SignatureVerified && self.signature.settled(),
+                    self.first.unwrap_or("removal-installed-signature"))?;
+                let target=if cfg!(target_arch="aarch64") { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64 }
+                    else { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Intel };
+                let removal=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(
+                    self.originals.input.descriptor_data(),target).map_err(|_| "removal-package-descriptor")?;
+                let descriptor=removal.installed_data(&self.originals.installed_raw[0]).map_err(|_| "removal-installed-binding")?;
+                let binding=descriptor.release_set_data().current_data().binding_data();
+                check(removal_source_binding_data(&binding,option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
+                    option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),removal.binding_data().package_sha256,
+                    self.originals.input.package_sha256_data()),"removal-source-binding")?;
+                let signer=native::install_producer::source_signer_data().ok_or("removal-source-unavailable")?;
+                check(producer_policy_matches_data(descriptor.signing_policy_data(),signer.team_data(),signer.leaf_sha1_data(),
+                    signer.leaf_sha256_data()),"removal-source-policy")?;
+                self.descriptor=Some(descriptor); self.removal=Some(removal);
+                let entry={ let Self { originals,entry,first,.. }=self;
+                    entry.verify_and_close(book.fd(originals.code[4])?.as_fd(),book.fd(originals.code[4])?.as_fd(),Path::new(paths::APP),
+                        &mut |point| removal_source_point(book,originals,first,point)) };
+                check(entry==CurrentProductResult::PurposeVerified && self.entry.settled(),self.first.unwrap_or("removal-entry-purpose"))?;
+                let payload={ let Self { originals,payload,first,.. }=self;
+                    payload.verify_and_close(book.fd(originals.code[4])?.as_fd(),book.fd(originals.code[7])?.as_fd(),Path::new(paths::APP),
+                        &mut |point| removal_source_point(book,originals,first,point)) };
+                check(payload==CurrentProductResult::PurposeVerified && self.payload.settled(),self.first.unwrap_or("removal-payload-purpose"))?;
+                let program={ let Self { originals,program,first,.. }=self;
+                    program.verify_and_close(book.fd(originals.code[10])?.as_fd(),book.fd(originals.code[14])?.as_fd(),Path::new(paths::PAYLOAD_HELPERS),
+                        &mut |point| removal_source_point(book,originals,first,point)) };
+                check(program==RemovalProgramResult::PurposeVerified && self.program.settled(),self.first.unwrap_or("removal-program-purpose"))?;
+                self.current_selection(book).map(|_| ())
+            }
+            fn settled(&self) -> bool { self.signature.settled() && self.entry.settled() && self.payload.settled()
+                && self.remove.settled() && self.program.settled() }
+            fn settle(&mut self, book: &Install) -> bool {
+                let mut gate=|point| producer_cleanup_point(book,point);
+                let program=self.program.close(&mut gate); let payload=self.payload.close(&mut gate);
+                let entry=self.entry.close(&mut gate); let signature=self.signature.close(&mut gate);
+                let remove=self.remove.close(&mut gate);
+                program && payload && entry && signature && remove && self.settled()
+            }
+            pub(super) fn root_original(&self) -> usize { self.originals.code[3] }
+            pub(super) fn installed_bytes(&self) -> &[u8] { &self.originals.installed_raw[0] }
+            pub(super) fn installed_signature_bytes(&self) -> &[u8] { &self.originals.installed_raw[1] }
+            pub(super) fn current_selection(&self, book: &Install) -> Result<&ReleaseSetData> {
+                check(removal_native_admitted_data(self.inspected,self.first.is_none(),
+                    [self.signature.settled(),self.entry.settled(),self.payload.settled(),self.remove.settled(),self.program.settled()],
+                    [self.signature.custody(),self.entry.custody(),self.payload.custody(),self.remove.custody(),self.program.custody()]),
+                    "removal-native-admission")?;
+                self.originals.post(book)?;
+                self.descriptor.as_ref().map(|data|data.release_set_data()).ok_or("removal-current-descriptor")
+            }
+            pub(super) fn reservation_post(&self, book: &Install) -> Result<()> {
+                self.current_selection(book)?;
+                check(!book.gate.entered && !book.worker_stderr_is_gate && book.registration.entered
+                    && book.registration.parent==Some(self.root_original()) && book.registration.verified
+                    && book.registration.creation=="existing-not-modified" && book.registration.lock_attempted
+                    && book.registration.exclusive_acquired && !book.registration.closed_under_maintenance,
+                    "removal-original-reservation")?;
+                book.registration_protected(book.registration.participant.ok_or("removal-original-reservation")?)
+            }
+            fn bind_inventory(&mut self, book: &Install, observed: &maintenance::RemovalObserved) -> Result<()> {
+                check(self.code_sha256.is_none(),"removal-inventory-once")?;
+                self.reservation_post(book)?; observed.post(book)?;
+                let index=observed.inventory().index()?;
+                let mut digests=[[0u8;32];3];
+                for (slot,path) in [paths::ENTRY_INVENTORY_PATH,paths::PAYLOAD_INVENTORY_PATH,paths::REMOVER_INVENTORY_PATH].into_iter().enumerate() {
+                    let entry=index.files.get(path).ok_or("removal-inventory-code")?;
+                    check(entry.executable,"removal-inventory-code")?;
+                    let digest=book.read(self.originals.code[12+slot],entry.size,false)?.0;
+                    check(digest==entry.sha256,"removal-inventory-code")?;
+                    for (n,byte) in digests[slot].iter_mut().enumerate() {
+                        *byte=u8::from_str_radix(&digest[n*2..n*2+2],16).map_err(|_| "removal-inventory-code")?;
+                    }
+                }
+                let removal=self.removal.as_ref().ok_or("removal-package-descriptor")?;
+                check(index.files.get(paths::REMOVER_INVENTORY_PATH).is_some_and(|entry|
+                    entry.sha256==removal.binding_data().remover_executable_sha256),"removal-package-code-binding")?;
+                self.reservation_post(book)?; observed.post(book)?;
+                self.code_sha256=Some(digests); Ok(())
+            }
+        }
+        // Held by the same Parent before publication. All fields come from
+        // actual admitted originals and its one original deadline, never from
+        // a renderer/argv-selected JSON tuple. Still no peer or file authority.
+        struct RemovalRequest {
+            data: mobile_release_desktop::macos_remove_protocol::RequestData,
+            encoded: Vec<u8>, digest: [u8;32],
+            native: native::removal_coordinator::RemovalChallengeData,
+        }
+        fn removal_hex_data<const N:usize>(text:&str)->Result<[u8;N]> {
+            check(text.len()==N*2 && text.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "removal-binding-hex")?;
+            let mut value=[0;N];
+            for (i,byte) in value.iter_mut().enumerate() {
+                *byte=u8::from_str_radix(&text[2*i..2*i+2],16).map_err(|_| "removal-binding-hex")?;
+            }
+            check(value.iter().any(|b|*b!=0),"removal-binding-hex")?; Ok(value)
+        }
+        fn removal_native_binding_data(binding:&mobile_release_desktop::macos_remove_protocol::BindingData)
+            ->Result<native::removal_coordinator::RemovalChallengeData> {
+            use native::removal_coordinator::{RemovalChallengeData,RemovalTargetData};
+            use mobile_release_desktop::macos_remove_protocol::TargetData;
+            let fields=binding.fields_data();
+            let mut release=[0;128];
+            check(fields.release.len()<=release.len(),"removal-binding-release")?;
+            release[..fields.release.len()].copy_from_slice(fields.release.as_bytes());
+            let native=RemovalChallengeData {
+                request_id:removal_hex_data(fields.request_id)?,root_nonce:removal_hex_data(fields.root_nonce)?,
+                source:removal_hex_data(fields.source_commit)?,target:match fields.target {
+                    TargetData::Arm64=>RemovalTargetData::Arm64,TargetData::Intel=>RemovalTargetData::Intel },
+                release,release_len:u8::try_from(fields.release.len()).map_err(|_| "removal-binding-release")?,
+                remove_producer:removal_hex_data(fields.remove_producer_sha256)?,
+                installed_producer:removal_hex_data(fields.installed_producer_sha256)?,
+                inventory:removal_hex_data(fields.installed_inventory_sha256)?,protocol:removal_hex_data(fields.protocol_sha256)?,
+                start:fields.start,work:fields.work,hard:fields.hard,
+            };
+            check(native.valid_data(),"removal-native-binding")?; Ok(native)
+        }
+        impl RemovalRequest {
+            fn new(book:&Install,source:&RemovalAdmission,observed:&maintenance::RemovalObserved)->Result<Self> {
+                use mobile_release_desktop::macos_remove_protocol as protocol;
+                source.reservation_post(book)?; observed.post(book)?;
+                check(source.code_sha256.is_some(),"removal-inventory-missing")?;
+                let selected=source.current_selection(book)?;
+                let binding=selected.current_data().binding_data();
+                let deadline=book.shared_deadline()?;
+                let mut id=[0;16];let mut nonce=[0;16];
+                book.clock()?;getrandom::fill(&mut id).map_err(|_| "removal-request-random")?;book.clock()?;
+                getrandom::fill(&mut nonce).map_err(|_| "removal-request-random")?;book.clock()?;
+                // A zero/duplicate/colliding value is a refusal, never a second
+                // request identity, RNG retry loop or refreshed deadline.
+                check(id!=[0;16] && nonce!=[0;16] && id!=nonce,"removal-request-random")?;
+                let hex=|value:&[u8]|value.iter().map(|b|format!("{b:02x}")).collect::<String>();
+                let id=hex(&id);let nonce=hex(&nonce);
+                let remove_sha=format!("{:x}",Sha256::digest(source.originals.input.descriptor_data()));
+                let installed_sha=format!("{:x}",Sha256::digest(source.installed_bytes()));
+                let binding=protocol::BindingData::new_data(protocol::BindingInputData {
+                    request_id:&id,root_nonce:&nonce,source_commit:binding.source_commit,release:binding.release,
+                    target:if cfg!(target_arch="aarch64"){protocol::TargetData::Arm64}else{protocol::TargetData::Intel},
+                    remove_producer_sha256:&remove_sha,installed_producer_sha256:&installed_sha,
+                    installed_inventory_sha256:binding.inventory_sha256,protocol_sha256:binding.protocol_sha256,
+                    start:deadline.start,work:deadline.end-SETTLEMENT,hard:deadline.end,
+                }).map_err(|_| "removal-request-binding")?;
+                let data=protocol::RequestData::new_data(&binding,source.originals.input.descriptor_data(),
+                    source.originals.input.signature_data()).map_err(|_| "removal-request-data")?;
+                let mut buffer=[0;protocol::REQUEST_LIMIT];
+                let length=data.encode_data(&mut buffer).map_err(|_| "removal-request-data")?;
+                let native=removal_native_binding_data(data.binding_data())?;
+                let encoded=buffer[..length].to_vec();let digest=Sha256::digest(&encoded).into();
+                let value=Self { data,encoded,digest,native };
+                // Charge retained storage PLUS all temporary originals still
+                // alive here, before permitting any successor publication.
+                let bytes=value.retained_bytes()?.checked_add(buffer.len())
+                    .and_then(|n|n.checked_add(binding.owned_bytes_data()?))
+                    .and_then(|n|n.checked_add(id.capacity()+nonce.capacity()+remove_sha.capacity()+installed_sha.capacity()))
+                    .ok_or("removal-request-bound")?;
+                check(bytes<=REMOVAL_REQUEST_RESERVE,"removal-request-bound")?;
+                source.reservation_post(book)?;observed.post(book)?;Ok(value)
+            }
+            fn retained_bytes(&self)->Result<usize> {
+                self.data.owned_bytes_data().and_then(|n|n.checked_add(self.encoded.capacity()))
+                    .and_then(|n|n.checked_add(std::mem::size_of::<Self>())).ok_or("removal-request-bound")
+            }
+            fn post(&self,book:&Install,source:&RemovalAdmission,observed:&maintenance::RemovalObserved)->Result<()> {
+                source.reservation_post(book)?;observed.post(book)?;
+                check(self.retained_bytes()?<=REMOVAL_REQUEST_RESERVE
+                    && self.data.remove_descriptor_data()==source.originals.input.descriptor_data()
+                    && self.data.remove_signature_data()==source.originals.input.signature_data()
+                    && self.native==removal_native_binding_data(self.data.binding_data())?
+                    && self.digest==<[u8;32]>::from(Sha256::digest(&self.encoded)),"removal-request-current")?;
+                book.clock()
+            }
+        }
+        const REMOVAL_REQUESTS_NAME:&str="MobileReleaseKit-RemovalRequests";
+        // These fields record returned effects in the existing Parent/Book.
+        // A complete JSON file is NOT native readiness or permission to quit.
+        struct RemovalPublication {
+            infrastructure:Option<usize>, directory:Option<usize>, writer:Option<usize>, reader:Option<usize>,
+            attempted:bool, written:usize, sealed:bool, file_persisted:bool, directory_persisted:bool,
+            writer_closed:bool, readback:bool,
+        }
+        fn removal_parent_change_data(before:Identity,before_flags:u32,actual:Identity,actual_flags:u32,
+            named:Identity,named_flags:u32,created:bool)->bool {
+            actual==named && actual_flags==named_flags && before_flags==actual_flags
+                && before.dev==actual.dev && before.ino==actual.ino && before.mode==actual.mode
+                && before.uid==actual.uid && before.gid==actual.gid
+                && before.mode&0o170000==0o040000 && (created || before==actual)
+        }
+        fn removal_request_name_data(name:&str)->bool {
+            name.len()==34 && name.starts_with("r-") && removal_hex_data::<16>(&name[2..]).is_ok()
+        }
+        impl RemovalPublication {
+            fn new()->Self { Self { infrastructure:None,directory:None,writer:None,reader:None,attempted:false,
+                written:0,sealed:false,file_persisted:false,directory_persisted:false,writer_closed:false,readback:false } }
+            fn parent_before(book:&Install,n:usize)->Result<(Identity,u32)> {
+                book.check_name(n,true)?;
+                book.protected_as(n,true,None,if book.originals[n].name=="Application Support" {
+                    AclRole::SystemSupport } else { AclRole::Other })?;
+                book.clock()?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_| "removal-request-parent-stat")?;
+                let original=&book.originals[n];
+                let named=book.named(original.parent,&original.name).map_err(|_| "removal-request-parent-name")?;
+                check(Identity::of(&actual)==book.identity(n)? && Identity::of(&actual)==Identity::of(&named)
+                    && actual.st_flags==named.st_flags,"removal-request-parent-original")?;
+                book.clock()?;Ok((Identity::of(&actual),actual.st_flags))
+            }
+            fn returned_parent_change(book:&mut Install,n:usize,before:(Identity,u32),created:bool)->Result<()> {
+                book.clock()?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_| "removal-request-parent-stat")?;
+                let original=&book.originals[n];
+                let named=book.named(original.parent,&original.name).map_err(|_| "removal-request-parent-name")?;
+                check(removal_parent_change_data(before.0,before.1,Identity::of(&actual),actual.st_flags,
+                    Identity::of(&named),named.st_flags,created),"removal-request-parent-effect")?;
+                book.protected_as(n,true,None,if book.originals[n].name=="Application Support" {
+                    AclRole::SystemSupport } else { AclRole::Other })?;
+                // Only this parent's returned own directory-entry effect can
+                // advance its baseline. All other held originals stay exact.
+                for (other,original) in book.originals.iter().enumerate() {
+                    if other!=n && original.fd.is_some() { book.check_name(other,true)?; }
+                }
+                book.clock()?;
+                book.originals[n].identity=Some(Identity::of(&actual));
+                book.check_name(n,true)
+            }
+            fn directory(book:&mut Install,parent:usize,name:&str,fresh:bool)->Result<usize> {
+                let before=Self::parent_before(book,parent)?;
+                if fresh { book.absent(parent,name)?; }
+                let effect=book.creations.len();
+                let n=book.directory(parent,name,fresh,0o755)?;
+                let returned=book.creations.get(effect).ok_or("removal-request-directory-effect")?;
+                check(returned.parent==parent && returned.name==name && returned.identity==Some(book.identity(n)?)
+                    && matches!(returned.state,"created"|"existing-not-modified")
+                    && (!fresh || returned.state=="created"),"removal-request-directory-effect")?;
+                let created=returned.state=="created";
+                book.clock()?;
+                check(stat::fstat(book.fd(n)?).map_err(|_| "removal-request-directory-stat")?.st_flags==0,
+                    "removal-request-directory-flags")?;
+                Self::returned_parent_change(book,parent,before,created)?; Ok(n)
+            }
+            // Only the fixed private request namespace is enumerated. Do not
+            // expand the ordinary installer roster to accept sockets, or audit
+            // unrelated entries in the user's Application Support directory.
+            fn census(book:&Install,parent:usize,infrastructure:bool)->Result<BTreeSet<[u8;34]>> {
+                book.check_name(parent,true)?;book.clock()?;
+                check(unistd::lseek(book.fd(parent)?,0,unistd::Whence::SeekSet)
+                    .map_err(|_| "removal-request-census-seek")?==0,"removal-request-census-seek")?;
+                let mut found=BTreeSet::new();let mut block=[0u8;65536];
+                loop {
+                    book.clock()?;
+                    let used=native::directory_block(book.fd(parent)?.as_fd(),&mut block)
+                        .map_err(|_| "removal-request-census")?;
+                    if used==0 { break; }
+                    check(used<=block.len(),"removal-request-census-bound")?;
+                    let mut offset=0;
+                    while offset<used {
+                        check(used-offset>=11,"removal-request-census-shape")?;
+                        let kind=block[offset+8];
+                        let inode=u64::from_ne_bytes(block[offset..offset+8].try_into().map_err(|_| "removal-request-census-shape")?);
+                        let length=usize::from(u16::from_ne_bytes([block[offset+9],block[offset+10]]));
+                        let end=offset.checked_add(11+length).filter(|end|*end<=used).ok_or("removal-request-census-shape")?;
+                        let name=std::str::from_utf8(&block[offset+11..end]).map_err(|_| "removal-request-census-name")?;
+                        offset=end;
+                        if name=="." || name==".." { continue; }
+                        let valid=if infrastructure { kind==nix::libc::DT_DIR && removal_request_name_data(name) }
+                            else { kind==nix::libc::DT_REG && name=="request.json" };
+                        check(valid && inode!=0 && found.len()<if infrastructure {64}else{1},
+                            "removal-request-census-bound")?;
+                        let mut fixed=[0u8;34];fixed[..name.len()].copy_from_slice(name.as_bytes());
+                        check(found.insert(fixed),"removal-request-census-duplicate")?;
+                    }
+                }
+                book.check_name(parent,true)?;book.clock()?;Ok(found)
+            }
+            fn prepare(&mut self,book:&mut Install,source:&RemovalAdmission,observed:&maintenance::RemovalObserved,
+                request:&RemovalRequest)->Result<()> {
+                check(!self.attempted,"removal-request-publication-once")?;self.attempted=true;
+                request.post(book,source,observed)?;
+                // Includes the largest transient census block/two small sets,
+                // readback block and this ledger in the already reserved256KiB.
+                check(request.retained_bytes()?.checked_add(96*1024+std::mem::size_of::<Self>())
+                    .is_some_and(|n|n<=REMOVAL_REQUEST_RESERVE),"removal-request-bound")?;
+                let infrastructure=Self::directory(book,source.originals.code[2],REMOVAL_REQUESTS_NAME,false)?;
+                self.infrastructure=Some(infrastructure);
+                request.post(book,source,observed)?;
+                let mut census=Self::census(book,infrastructure,true)?;
+                check(census.len()<64,"removal-request-census-full")?;
+                let name=format!("r-{}",request.data.binding_data().fields_data().request_id);
+                check(removal_request_name_data(&name),"removal-request-directory-name")?;
+                let directory=Self::directory(book,infrastructure,&name,true)?;
+                self.directory=Some(directory);
+                let fixed:[u8;34]=name.as_bytes().try_into().map_err(|_| "removal-request-directory-name")?;
+                check(census.insert(fixed) && Self::census(book,infrastructure,true)?==census,"removal-request-census-changed")?;
+                let before=Self::parent_before(book,directory)?;
+                book.absent(directory,"request.json")?;
+                let writer=book.create_file(directory,"request.json",Role::ReceiptWriter)?;
+                self.writer=Some(writer);
+                let file=book.identity(writer)?;
+                check(file.mode==0o100600 && file.uid==0 && file.gid==0 && file.links==1 && file.size==0,
+                    "removal-request-private-file")?;
+                Self::returned_parent_change(book,directory,before,true)?;
+                while self.written<request.encoded.len() {
+                    book.clock()?;
+                    let count=unistd::write(book.fd(writer)?,&request.encoded[self.written..])
+                        .map_err(|_| "removal-request-write")?;
+                    check(count>0 && count<=request.encoded.len()-self.written,"removal-request-write-bound")?;
+                    self.written+=count;book.clock()?;
+                }
+                let actual=stat::fstat(book.fd(writer)?).map_err(|_| "removal-request-written-stat")?;
+                let named=book.named(Some(directory),"request.json").map_err(|_| "removal-request-written-name")?;
+                check(file.same_object(Identity::of(&actual)) && u32::from(actual.st_mode)==file.mode
+                    && actual.st_nlink==1 && actual.st_size==self.written as i64 && actual.st_flags==0
+                    && Identity::of(&actual)==Identity::of(&named) && named.st_flags==0,"removal-request-written-original")?;
+                book.clock()?;
+                stat::fchmod(book.fd(writer)?,Mode::from_bits_truncate(0o444)).map_err(|_| "removal-request-seal")?;
+                self.sealed=true;book.clock()?;
+                let sealed=stat::fstat(book.fd(writer)?).map_err(|_| "removal-request-sealed-stat")?;
+                let named=book.named(Some(directory),"request.json").map_err(|_| "removal-request-sealed-name")?;
+                check(file.same_object(Identity::of(&sealed)) && sealed.st_mode==0o100444 && sealed.st_nlink==1
+                    && sealed.st_size==self.written as i64 && sealed.st_flags==0 && named.st_flags==0
+                    && Identity::of(&sealed)==Identity::of(&named),"removal-request-sealed-original")?;
+                book.originals[writer].identity=Some(Identity::of(&sealed));
+                book.protected(writer,false,Some(0o444))?;
+                native::no_xattrs(book.fd(writer)?.as_fd()).map_err(|_| "removal-request-file-attributes")?;
+                book.clock()?;
+                let persisted=native::sync(book.fd(writer)?.as_fd(),true);
+                self.file_persisted=persisted.is_ok();persisted.map_err(|_| "removal-request-file-persist")?;book.clock()?;
+                self.writer_closed=book.close(writer);check(self.writer_closed,"removal-request-writer-close")?;book.clock()?;
+                let persisted=native::sync(book.fd(directory)?.as_fd(),false);
+                self.directory_persisted=persisted.is_ok();persisted.map_err(|_| "removal-request-directory-persist")?;book.clock()?;
+                let reader=book.open(Some(directory),"request.json",false)?;self.reader=Some(reader);
+                check(book.identity(reader)?==Identity::of(&sealed),"removal-request-readback-original")?;
+                book.protected(reader,false,Some(0o444))?;
+                native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "removal-request-file-attributes")?;
+                maintenance::held_bytes(book,reader,&request.encoded)?;
+                self.readback=true;
+                check(Self::census(book,directory,false)?.len()==1,"removal-request-file-roster")?;
+                // The socket is absent until the same native peer owns its
+                // returned bind/mode/listen effects. No ready hint is sent here.
+                book.absent(directory,"s")?;book.check_name(directory,true)?;
+                request.post(book,source,observed)
+            }
+        }
+        fn removal_source_binding_data(binding:&mobile_release_desktop::macos_install_maintenance::ReleaseBindingData<'_>,
+            source:Option<&str>,runtime:Option<&str>,package:&str,actual_package:&str) -> bool {
+            binding.release==paths::RELEASE && binding.package_version==paths::PACKAGE_VERSION
+                && binding.protocol_sha256==paths::PROTOCOL_SHA && Some(binding.source_commit)==source
+                && Some(binding.runtime_manifest_sha256)==runtime && package==actual_package
+        }
+        fn removal_native_admitted_data(inspected:bool,first_absent:bool,settled:[bool;5],
+            custody:[native::install_producer::ProducerCustody;5]) -> bool {
+            use native::install_producer::{CurrentProductRole as Role,ProducerOperation as Operation};
+            let roles=[Operation::DetachedSignature,Operation::CurrentProduct(Role::EntryApp),
+                Operation::CurrentProduct(Role::PayloadApp),Operation::RemoveDetachedSignature,Operation::RemoveProgram];
+            inspected && first_absent && settled==[true;5]
+                && custody.iter().zip(roles).all(|(c,role)|c.operation==role && !c.failed && !c.unknown && !c.in_call && !c.gate_entered)
+                && custody[0].signature_matched && custody[1].purpose_matched==Some(Role::EntryApp)
+                && custody[2].purpose_matched==Some(Role::PayloadApp)
+                && custody[3].remove_signature_matched && custody[4].remove_program_matched
+        }
         fn producer_results_data(signature: Option<native::install_producer::SignatureResult>,
             entry: Option<native::install_producer::CurrentProductResult>,
             payload: Option<native::install_producer::CurrentProductResult>,
@@ -2880,6 +3499,10 @@ mod installer {
             source: Option<Source>, invocation: String, init_sha: String,
             maintenance: Option<maintenance::Observed>, request_export: Option<RequestExport>,
             producer: Option<ProducerAdmission>,
+            removal: Option<RemovalAdmission>, removal_observed: Option<maintenance::RemovalObserved>,
+            removal_request: Option<RemovalRequest>,
+            removal_request_started: bool,
+            removal_publication: Option<RemovalPublication>,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -2892,6 +3515,10 @@ mod installer {
                 deadline.check_work()?;
                 Ok(Self { book:Install::with_worker_deadline(deadline,false),entered:false,
                     command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),maintenance:None,request_export:None,producer:None,
+                    removal:None,removal_observed:None,
+                    removal_request:None,
+                    removal_request_started:false,
+                    removal_publication:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -2936,6 +3563,40 @@ mod installer {
                 }
             }
             fn admit_and_go(&mut self, source: &str) -> Result<()> { self.admit_and_go_selected(source,None) }
+            // Current-source/R-held inspection only. No entry dispatch, peer,
+            // durable admission, writer GO or success receipt is enabled here.
+            fn admit_removal_source(&mut self, completed_path: &str) -> Result<()> {
+                check(!self.entered && self.producer.is_none() && self.removal.is_none(),"worker-parent-once")?;
+                self.entered=true;
+                self.removal=Some(RemovalAdmission::new(&mut self.book,completed_path)?);
+                let source=self.removal.as_mut().ok_or("removal-original-missing")?;
+                source.inspect(&self.book)?;
+                self.book.registration_before_maintenance(source.root_original())?;
+                // R acquisition does not promote a stale pre-R signature or
+                // code snapshot: actual originals are checked again now.
+                source.reservation_post(&self.book)?;
+                self.removal_observed=Some(maintenance::observe_removal(&mut self.book,source)?);
+                source.bind_inventory(&self.book,self.removal_observed.as_ref().ok_or("removal-current-missing")?)
+            }
+            fn prepare_removal_request(&mut self)->Result<()> {
+                check(self.entered && !self.removal_request_started && self.removal_request.is_none(),"removal-request-once")?;
+                self.removal_request_started=true;
+                let source=self.removal.as_ref().ok_or("removal-original-missing")?;
+                let observed=self.removal_observed.as_ref().ok_or("removal-current-missing")?;
+                self.removal_request=Some(RemovalRequest::new(&self.book,source,observed)?);
+                self.removal_request.as_ref().ok_or("removal-request-missing")?.post(&self.book,source,observed)
+            }
+            fn prepare_removal_publication(&mut self)->Result<()> {
+                check(self.removal_publication.is_none(),"removal-request-publication-once")?;
+                // Store the ledger before the first potentially mutating call.
+                // Failure retains only our original Book/effects; no retry,
+                // foreign-directory removal or implicit publication is allowed.
+                self.removal_publication=Some(RemovalPublication::new());
+                self.removal_publication.as_mut().ok_or("removal-request-publication-missing")?.prepare(
+                    &mut self.book,self.removal.as_ref().ok_or("removal-original-missing")?,
+                    self.removal_observed.as_ref().ok_or("removal-current-missing")?,
+                    self.removal_request.as_ref().ok_or("removal-request-missing")?)
+            }
             fn admit_and_go_selected(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>) -> Result<()> {
                 self.admit_and_go_inputs(source,selected,None)
             }
@@ -3257,7 +3918,9 @@ mod installer {
                 if self.wait_unknown || self.child.is_some() && self.wait.is_none() { self.book.unknown = true; }
                 // Native references may still borrow these exact book FDs.
                 // Retire them under this original clock BEFORE any book close.
-                let native_settled = self.producer.as_mut().is_none_or(|producer| producer.settle(&self.book));
+                let producer_settled = self.producer.as_mut().is_none_or(|producer| producer.settle(&self.book));
+                let removal_settled = self.removal.as_mut().is_none_or(|removal| removal.settle(&self.book));
+                let native_settled = producer_settled && removal_settled;
                 if native_settled { self.parent_book_settled = self.book.settle_originals(); }
                 else {
                     self.note("producer-native-finality-unknown");
@@ -3512,6 +4175,102 @@ mod installer {
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
                 use native::install_producer::{SignatureResult,CurrentProductResult};
+                // Actual production DATA predicates, never fake verifier
+                // instances/current originals or a constructible capability.
+                assert!(maintenance::removal_current_only_data(ActionData::SamePackageNoop,[true;2],false,true,true));
+                for action in [ActionData::FreshInstall,ActionData::Update,ActionData::RestoreFixedApp] {
+                    assert!(!maintenance::removal_current_only_data(action,[true;2],false,true,true));
+                }
+                for present in [[false,true],[true,false],[false,false]] {
+                    assert!(!maintenance::removal_current_only_data(ActionData::SamePackageNoop,present,false,true,true));
+                }
+                for (intent,controls,current) in [(true,true,true),(false,false,true),(false,true,false)] {
+                    assert!(!maintenance::removal_current_only_data(ActionData::SamePackageNoop,[true;2],intent,controls,current));
+                }
+                use native::install_producer::{ProducerCustody,ProducerOperation as Operation,CurrentProductRole as Role};
+                let state=ProducerCustody { operation:Operation::DetachedSignature,phase:None,
+                    cell:native::android_service_management::CellCustody::Consumed,references:[0;26],
+                    entered:true,in_call:false,gate_entered:false,signature_matched:true,purpose_matched:None,
+                    remove_signature_matched:false,remove_program_matched:false,failed:false,unknown:false,
+                    calls:0,returned:0,first_failure:None };
+                let states=[state,
+                    ProducerCustody{operation:Operation::CurrentProduct(Role::EntryApp),signature_matched:false,purpose_matched:Some(Role::EntryApp),..state},
+                    ProducerCustody{operation:Operation::CurrentProduct(Role::PayloadApp),signature_matched:false,purpose_matched:Some(Role::PayloadApp),..state},
+                    ProducerCustody{operation:Operation::RemoveDetachedSignature,signature_matched:false,remove_signature_matched:true,..state},
+                    ProducerCustody{operation:Operation::RemoveProgram,signature_matched:false,remove_program_matched:true,..state}];
+                assert!(removal_native_admitted_data(true,true,[true;5],states));
+                assert!(!removal_native_admitted_data(false,true,[true;5],states));
+                assert!(!removal_native_admitted_data(true,false,[true;5],states));
+                for i in 0..5 {
+                    let mut closed=[true;5];closed[i]=false;
+                    assert!(!removal_native_admitted_data(true,true,closed,states));
+                    for bad in [ProducerCustody{failed:true,..states[i]},ProducerCustody{unknown:true,..states[i]},
+                        ProducerCustody{in_call:true,..states[i]},ProducerCustody{gate_entered:true,..states[i]},
+                        ProducerCustody{operation:states[(i+1)%5].operation,..states[i]},
+                        ProducerCustody{signature_matched:false,purpose_matched:None,remove_signature_matched:false,remove_program_matched:false,..states[i]}] {
+                        let mut changed=states;changed[i]=bad;
+                        assert!(!removal_native_admitted_data(true,true,[true;5],changed));
+                    }
+                }
+                use mobile_release_desktop::macos_install_maintenance::ReleaseBindingData;
+                let source="1".repeat(40);let digest="2".repeat(64);
+                let binding=ReleaseBindingData { profile:"unused",package_identifier:paths::PACKAGE_ID,bundle_identifier:paths::BUNDLE_ID,
+                    package_version:paths::PACKAGE_VERSION,release:paths::RELEASE,source_commit:&source,
+                    protocol_sha256:paths::PROTOCOL_SHA,runtime_manifest_sha256:&digest,inventory_sha256:&digest,
+                    signing_policy_sha256:&digest,package_sha256:&digest };
+                assert!(removal_source_binding_data(&binding,Some(&source),Some(&digest),&digest,&digest));
+                for changed in [ReleaseBindingData{release:"legacy",..binding},ReleaseBindingData{package_version:"0",..binding},
+                    ReleaseBindingData{source_commit:"different",..binding},ReleaseBindingData{protocol_sha256:"different",..binding},
+                    ReleaseBindingData{runtime_manifest_sha256:"different",..binding}] {
+                    assert!(!removal_source_binding_data(&changed,Some(&source),Some(&digest),&digest,&digest));
+                }
+                assert!(!removal_source_binding_data(&binding,None,Some(&digest),&digest,&digest));
+                assert!(!removal_source_binding_data(&binding,Some(&source),None,&digest,&digest));
+                assert!(!removal_source_binding_data(&binding,Some(&source),Some(&digest),&digest,"different"));
+                // The shared wire -> fixed native comparison tuple is a real
+                // protocol boundary. Test conversion without creating a peer,
+                // cutoff, random identity or native verifier capability.
+                assert_eq!(removal_hex_data::<16>(&"ff".repeat(16)),Ok([255;16]));
+                for bad in ["00".repeat(16),"AA".repeat(16),"gg".repeat(16),"1".repeat(31),"1".repeat(33),"é".repeat(16)] {
+                    assert!(removal_hex_data::<16>(&bad).is_err());
+                }
+                // Actual returned mkdir/file-entry effects alone may advance
+                // directory metadata. Full mode/owner/inode/flags remain fixed;
+                // no assumption about APFS directory link-count deltas is made.
+                let directory=Identity { dev:1,ino:2,mode:0o40755,uid:0,gid:0,links:2,size:64,
+                    mtime:1,mtime_ns:0,ctime:1,ctime_ns:0 };
+                let changed=Identity { links:3,size:128,mtime:2,ctime:2,..directory };
+                assert!(removal_parent_change_data(directory,0,directory,0,directory,0,false));
+                assert!(removal_parent_change_data(directory,0,changed,0,changed,0,true));
+                assert!(!removal_parent_change_data(directory,0,changed,0,changed,0,false));
+                assert!(!removal_parent_change_data(directory,0,changed,0,directory,0,true));
+                for unsafe_change in [Identity{dev:2,..changed},Identity{ino:3,..changed},
+                    Identity{mode:0o40777,..changed},Identity{uid:1,..changed},Identity{gid:1,..changed},
+                    Identity{mode:0o100755,..changed}] {
+                    assert!(!removal_parent_change_data(directory,0,unsafe_change,0,unsafe_change,0,true));
+                }
+                assert!(!removal_parent_change_data(directory,0,changed,1,changed,1,true));
+                assert!(!removal_parent_change_data(directory,0,changed,0,changed,1,true));
+                assert!(removal_request_name_data(&format!("r-{}","1".repeat(32))));
+                for bad in ["r-".into(),format!("r-{}","0".repeat(32)),format!("r-{}","A".repeat(32)),
+                    format!("s-{}","1".repeat(32)),format!("r-{}","é".repeat(16)),"request.json".into()] {
+                    assert!(!removal_request_name_data(&bad));
+                }
+                use mobile_release_desktop::macos_remove_protocol::{BindingData,BindingInputData,TargetData};
+                for (target,release,native_target) in [(TargetData::Arm64,"macos26-arm64-1",native::removal_coordinator::RemovalTargetData::Arm64),
+                    (TargetData::Intel,"macos26-x86_64-1",native::removal_coordinator::RemovalTargetData::Intel)] {
+                    let request=BindingData::new_data(BindingInputData { request_id:&"1".repeat(32),root_nonce:&"2".repeat(32),
+                        source_commit:&"3".repeat(40),release,target,remove_producer_sha256:&"4".repeat(64),
+                        installed_producer_sha256:&"5".repeat(64),installed_inventory_sha256:&"6".repeat(64),
+                        protocol_sha256:&"7".repeat(64),start:10,work:10+TOTAL-SETTLEMENT,hard:10+TOTAL }).unwrap();
+                    let actual=removal_native_binding_data(&request).unwrap();let mut expected_release=[0;128];
+                    expected_release[..release.len()].copy_from_slice(release.as_bytes());
+                    assert_eq!(actual,native::removal_coordinator::RemovalChallengeData {
+                        request_id:[0x11;16],root_nonce:[0x22;16],source:[0x33;20],target:native_target,
+                        release:expected_release,release_len:release.len() as u8,remove_producer:[0x44;32],
+                        installed_producer:[0x55;32],inventory:[0x66;32],protocol:[0x77;32],
+                        start:10,work:10+TOTAL-SETTLEMENT,hard:10+TOTAL });
+                }
                 let signature=Some(SignatureResult::SignatureVerified);
                 let purpose=Some(CurrentProductResult::PurposeVerified);
                 assert!(producer_results_data(signature,purpose,purpose,true,true,[true;3]));

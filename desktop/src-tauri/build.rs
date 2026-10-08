@@ -213,7 +213,8 @@ fn main() {
             }
             println!("cargo:rustc-env=MRK_MACOS_INSTALL_SOURCE_COMMIT={value}");
         }
-        Err(_) if cfg!(feature = "macos-installed-installer") => panic!("Installer builds require the explicit source commit"),
+        Err(_) if cfg!(feature = "macos-installed-installer") || cfg!(feature = "macos-installed-remover")
+            => panic!("Installed installer/remover builds require the explicit source commit"),
         Err(_) => {},
     }
     if cfg!(feature = "macos-installed-installer-fixture") && cfg!(feature = "desktop-shell") {

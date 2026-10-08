@@ -28,6 +28,8 @@ pub(crate) use android_runtime::{AndroidBuildRuntimeSlots, AndroidBuildInstalled
 mod installation_observation;
 pub(crate) use installation_observation::{InstallationSlots, native_problem as installation_native_problem};
 #[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) use installation_observation::{RemovalProducerAdmission,RemovalCurrent};
+#[cfg(not(feature = "macos-android-registration-helper"))]
 #[path = "android_fixed_support_macos.rs"]
 mod android_fixed_support;
 #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -67,7 +69,9 @@ impl AndroidServiceIdentitySlots {
     fn attempt<T>(&mut self,call:impl FnOnce(&mut Book)->Result<T>)->Result<T> {
         let result=call(&mut self.original);let at=Instant::now();
         if let Some((failure,first))=self.original.first_failure(){Self::note_failure(&self.gate,failure,first);}
-        if let Err(failure)=&result{Self::note_failure(&self.gate,*failure,at);}
+        if !self.original.removal_clock_vetoed(){
+            if let Err(failure)=&result{Self::note_failure(&self.gate,*failure,at);}
+        }
         result
     }
     fn note_failure(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,failure:AdmissionFailure,at:Instant){
@@ -164,27 +168,49 @@ impl AndroidServiceIdentitySlots {
                 Problem::Cancelled=>crate::android_registration_app_protocol::Reason::Cancelled,
                 _=>crate::android_registration_app_protocol::Reason::SigningUnavailable};
             gate.note(reason,at);
-        },&mut |first|gate.source_cleanup_expired(first),&mut |_,_|{});
+        },&mut |first|if gate.source_has_removal_cutoff(){false}else{gate.source_cleanup_expired(first)},&mut |_,_|{});
+        // The removal-bound Book already samples this SAME gate at each
+        // cleanup boundary. A duplicate bool callback would erase its typed
+        // Parent-only provenance; ordinary registration keeps its old callback.
         if result.is_err(){return Err(if self.installation.settled(){AdmissionFailure::Inventory}else{AdmissionFailure::Unknown});}
         let result=self.fixed_payload(end,stop);let at=Instant::now();
-        if let Err(failure)=result{Self::note_failure(&self.gate,failure,at);return Err(failure);}
-        let result=self.signing.check_once(&mut |point|Self::signing_gate(&gate,point));
+        if let Err(failure)=result{
+            if !self.original.removal_clock_vetoed(){Self::note_failure(&self.gate,failure,at);}
+            return Err(failure);
+        }
+        let parent_veto=Cell::new(false);
+        let result=self.signing.check_once(&mut |point|Self::signing_gate(&gate,point,&parent_veto));
         match result {
             management::IdentityResult::Verified=>{self.recheck(end,stop)?;self.checked=true;Ok(())},
-            management::IdentityResult::Unknown=>{gate.source_note(AdmissionFailure::Unknown,Instant::now());Err(AdmissionFailure::Unknown)},
+            management::IdentityResult::Unknown=>{
+                if !parent_veto.get(){gate.source_note(AdmissionFailure::Unknown,Instant::now());}
+                Err(AdmissionFailure::Unknown)
+            },
             _=>{gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,Instant::now());Err(AdmissionFailure::Inventory)},
         }
     }
     fn signing_gate(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,
-        point:native::android_service_management::IdentityCheckpoint)->native::android_service_management::Decision {
+        point:native::android_service_management::IdentityCheckpoint,parent_veto:&Cell<bool>)->native::android_service_management::Decision {
         use native::android_service_management::{IdentityCheckpoint as Point,Decision};
         let (phase,custody,returned)=match point {Point::Before{phase,custody}=>(phase,custody,None),
             Point::Returned{phase,at,custody}=>(phase,custody,Some(at))};
         if let Some(at)=custody.first_failure{gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,at);}
         if custody.unknown{gate.note(crate::android_registration_app_protocol::Reason::CleanupUnknown,
             custody.first_failure.or(returned).unwrap_or_else(Instant::now));}
-        if phase.is_cleanup(){if gate.source_cleanup_expired(None){Decision::Unknown}else{Decision::Proceed}}
-        else if gate.source_work().is_ok(){Decision::Proceed}else{Decision::Stop}
+        let parent=if phase.is_cleanup(){match gate.source_cleanup_verdict(None){
+            AppRemovalCleanup::Allowed=>return Decision::Proceed,AppRemovalCleanup::LocalExpired=>return Decision::Unknown,
+            AppRemovalCleanup::ParentClock=>true,
+        }}else{match gate.source_work_classified(){
+            Ok(())=>return Decision::Proceed,
+            Err(crate::saved_command_owner::AndroidRegistrationSourceWorkFailure::Local(_))=>return Decision::Stop,
+            Err(crate::saved_command_owner::AndroidRegistrationSourceWorkFailure::ParentClock)=>true,
+        }};
+        // IdentityBook immediately poisons and returns on this Unknown; later
+        // settle short-circuits that original, so its derived wrapper timestamp
+        // cannot callback as a purported native first-F. Actual custody.first
+        // above was imported before this exact veto and is never suppressed.
+        if parent && custody.first_failure.is_none(){parent_veto.set(true);}
+        Decision::Unknown
     }
     pub(crate) fn recheck(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         for index in 0..self.original.records.len() {
@@ -192,15 +218,17 @@ impl AndroidServiceIdentitySlots {
                 self.attempt(|book|book.check_name(index,end,stop))?;
             }
         }
-        self.gate.source_work()
+        if self.gate.source_has_removal_cutoff(){self.original.point(end,stop)}else{self.gate.source_work()}
     }
     pub(crate) fn settle(&mut self)->bool {
         if self.closed{return self.settled();}
         let gate=self.gate.clone();
-        let signing=self.signing.settle(&mut |point|Self::signing_gate(&gate,point));
+        let parent_veto=Cell::new(false);
+        let signing=self.signing.settle(&mut |point|Self::signing_gate(&gate,point,&parent_veto));
         // One signature failure never suppresses independently permitted FD/ACL
         // settlement. Both are retained on the same original if either is unknown.
-        let files=self.original.settle(&mut |first|gate.source_cleanup_expired(first))==CloseOutcome::Settled;
+        let files=self.original.settle(&mut |first|
+            if gate.source_has_removal_cutoff(){false}else{gate.source_cleanup_expired(first)})==CloseOutcome::Settled;
         self.closed=true;signing && files && self.settled()
     }
     pub(crate) fn settled(&self)->bool {self.closed && self.installation.settled() && self.original.settled() && self.signing.settled()}
@@ -240,10 +268,98 @@ impl Identity {
             mode: u32::from(self.mode), owner: self.uid, group: self.gid, flags: self.flags })
     }
 }
+/// Shared removal-only source gate. Its preauth clock DATA can only shorten
+/// finite admission, never issue a peer, source or confirmation capability.
+#[cfg(not(feature = "macos-android-registration-helper"))]
+#[derive(Clone)]
+pub(crate) struct AppRemovalWorkGate{original:std::sync::Arc<AppRemovalGateOriginal>}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+struct AppRemovalGateOriginal {
+    clock:std::sync::Arc<native::android_registration::RemovalClock>,work:Instant,hard:Instant,
+    first:std::sync::Mutex<Option<(AdmissionFailure,Instant)>>,unknown:std::sync::atomic::AtomicBool,
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+enum AppRemovalCut { Local(AdmissionFailure),ParentClock }
+#[cfg(not(feature = "macos-android-registration-helper"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AppRemovalCleanup { Allowed,LocalExpired,ParentClock }
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl AppRemovalWorkGate {
+    pub(crate) fn new(clock:std::sync::Arc<native::android_registration::RemovalClock>)->Option<Self>{
+        let work=clock.bridge().earlier_instant_data(clock.uptime_work())?;
+        let hard=clock.bridge().earlier_instant_data(clock.uptime_hard())?;
+        if work>=hard || Instant::now()>=work || clock.work_sample().is_none(){return None;}
+        Some(Self{original:std::sync::Arc::new(AppRemovalGateOriginal{clock,work,hard,
+            first:std::sync::Mutex::new(None),unknown:std::sync::atomic::AtomicBool::new(false)})})
+    }
+    fn cut(&self)->std::result::Result<(),AppRemovalCut>{
+        use std::sync::atomic::Ordering;
+        // Keep genuine local first-F before a subsequent Parent-only veto.
+        let first=self.source_first();let raw=self.original.clock.work_sample();
+        if Instant::now()>=self.original.work{self.original.clock.mark_work_stopped();}
+        if let Some((failure,_))=first{return Err(AppRemovalCut::Local(failure));}
+        if self.original.unknown.load(Ordering::SeqCst){return Err(AppRemovalCut::Local(AdmissionFailure::Unknown));}
+        if raw.is_none() || self.original.clock.unknown(){return Err(AppRemovalCut::ParentClock);}
+        Ok(())
+    }
+    pub(crate) fn source_work(&self)->Result<()>{self.cut().map_err(|failure|match failure{
+        AppRemovalCut::Local(failure)=>failure,AppRemovalCut::ParentClock=>AdmissionFailure::Unknown})}
+    pub(crate) fn source_note(&self,failure:AdmissionFailure,at:Instant){
+        use std::sync::atomic::Ordering;
+        if at>Instant::now(){self.original.unknown.store(true,Ordering::SeqCst);return;}
+        if matches!(failure,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.original.unknown.store(true,Ordering::SeqCst);}
+        match self.original.first.try_lock(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
+            Err(_)=>{self.original.unknown.store(true,Ordering::SeqCst);}}
+    }
+    pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{
+        match self.original.first.try_lock(){Ok(first)=>*first,Err(_)=>{
+            self.original.unknown.store(true,std::sync::atomic::Ordering::SeqCst);None}}
+    }
+    pub(crate) fn source_parent_vetoed(&self)->bool{self.original.clock.unknown()}
+    fn cleanup_cut(&self,first:Option<(AdmissionFailure,Instant)>)->AppRemovalCleanup{
+        if let Some((failure,at))=first{self.source_note(failure,at);}
+        let first=self.source_first();let unknown=self.original.unknown.load(std::sync::atomic::Ordering::SeqCst);
+        // Read same-original local state BEFORE the final actual Parent/UPTIME
+        // sample; a known work-stop alone does not disable consuming cleanup.
+        let raw=self.original.clock.cleanup_sample();let now=Instant::now();
+        Self::cleanup_data(raw.is_some(),unknown,first,now,self.original.hard)
+    }
+    fn cleanup_data(raw_allowed:bool,local_unknown:bool,first:Option<(AdmissionFailure,Instant)>,now:Instant,hard:Instant)->AppRemovalCleanup{
+        let end=match first{Some((_,at))=>match at.checked_add(std::time::Duration::from_secs(10)){
+            Some(end)=>end.min(hard),None=>return AppRemovalCleanup::LocalExpired},None=>hard};
+        if local_unknown || first.is_some() && now>=end{return AppRemovalCleanup::LocalExpired;}
+        if !raw_allowed || now>=end{return AppRemovalCleanup::ParentClock;}
+        AppRemovalCleanup::Allowed
+    }
+
+    /// One sampled verdict, including its exact provenance. A caller must not
+    /// convert ParentClock into a new local Instant failure or infer it from a
+    /// later global latch; genuine first-F/consuming-return facts stay separate.
+    pub(crate) fn source_cleanup_verdict(&self,first:Option<(AdmissionFailure,Instant)>)->AppRemovalCleanup{
+        self.cleanup_cut(first)
+    }
+    pub(crate) fn source_cleanup_expired(&self,first:Option<(AdmissionFailure,Instant)>)->bool{
+        !matches!(self.source_cleanup_verdict(first),AppRemovalCleanup::Allowed)
+    }
+    pub(crate) fn same_original(&self,other:&Self)->bool{std::sync::Arc::ptr_eq(&self.original,&other.original)}
+    pub(crate) fn clock(&self)->&std::sync::Arc<native::android_registration::RemovalClock>{&self.original.clock}
+    pub(crate) fn retained_bytes(&self)->Option<usize>{
+        std::mem::size_of::<Self>().checked_add(std::mem::size_of::<AppRemovalGateOriginal>())?
+            .checked_add(2*std::mem::size_of::<usize>())?
+            .checked_add(native::android_registration::RemovalClock::project_owned_upper_bound()?)
+    }
+}
+
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     #[cfg(not(feature = "macos-android-registration-helper"))]
     registration_gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    removal_gate: Option<AppRemovalWorkGate>,
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    removal_clock_veto: Cell<bool>,
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    removal_acl_derived: Cell<Option<(SnapshotFailure,Instant)>>,
     android_acl: Option<std::sync::Mutex<android_runtime::Audit>>,
     // Constructors are DATA only. Entered survives a lost frame allocation.
     acl_entered: bool, acl: Option<RefCell<SnapshotBook>>,
@@ -278,16 +394,74 @@ impl Book {
     fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        removal_gate: None,
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        removal_clock_veto: Cell::new(false),
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        removal_acl_derived: Cell::new(None),
         android_acl: None, acl_entered: false, acl: None, acl_invalid: Cell::new(false), acl_first: Cell::new(None) } }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn removal_point_result(&self,result:std::result::Result<(),AppRemovalCut>)->Result<()>{
+        match result{Ok(())=>Ok(()),Err(AppRemovalCut::Local(failure))=>Err(failure),
+            Err(AppRemovalCut::ParentClock)=>{self.removal_clock_veto.set(true);Err(AdmissionFailure::Unknown)}}
+    }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn removal_clock_vetoed(&self)->bool{self.removal_clock_veto.get()}
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn registration_point_result(&self,result:std::result::Result<(),crate::saved_command_owner::AndroidRegistrationSourceWorkFailure>)->Result<()>{
+        use crate::saved_command_owner::AndroidRegistrationSourceWorkFailure as F;
+        self.removal_point_result(result.map_err(|failure|match failure{
+            F::Local(failure)=>AppRemovalCut::Local(failure),F::ParentClock=>AppRemovalCut::ParentClock,
+        }))
+    }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn merge_cleanup_data(registration:AppRemovalCleanup,removal:AppRemovalCleanup)->AppRemovalCleanup{
+        use AppRemovalCleanup as V;
+        if registration==V::LocalExpired || removal==V::LocalExpired{V::LocalExpired}
+        else if registration==V::ParentClock || removal==V::ParentClock{V::ParentClock}else{V::Allowed}
+    }
+    /// This exact callback/final-cut verdict is sampled once. Its marker is
+    /// never inferred from an older point or the operation's global Unknown.
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn cleanup_verdict(&self,first:Option<(AdmissionFailure,Instant)>)->AppRemovalCleanup{
+        self.removal_clock_veto.set(false);
+        let registration=self.registration_gate.as_ref().map_or(AppRemovalCleanup::Allowed,
+            |gate|gate.source_cleanup_verdict(first));
+        let removal=self.removal_gate.as_ref().map_or(AppRemovalCleanup::Allowed,
+            |gate|gate.source_cleanup_verdict(first));
+        let verdict=Self::merge_cleanup_data(registration,removal);
+        self.removal_clock_veto.set(verdict==AppRemovalCleanup::ParentClock);verdict
+    }
+    fn source_acl_first(&self,first:Option<(SnapshotFailure,Instant)>)->Option<(AdmissionFailure,Instant)>{
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if first.is_some() && first==self.removal_acl_derived.get(){return None;}
+        first.map(|(failure,at)|(map_acl_failure(failure),at))
+    }
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    fn remember_acl_parent_veto(&self,first:Option<(SnapshotFailure,Instant)>)->bool{
+        // The bool callback returned true ONLY for a typed Parent veto while
+        // the actual native first was None. SnapshotBook synchronously records
+        // Stopped before any further native operation. Exclude only THAT tuple.
+        let Some(value@(SnapshotFailure::Stopped,_))=first else{self.invalid_acl();return false;};
+        if self.removal_acl_derived.get().is_some_and(|old|old!=value){self.invalid_acl();return false;}
+        self.removal_acl_derived.set(Some(value));self.removal_clock_veto.set(true);true
+    }
     fn point(&self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         #[cfg(not(feature = "macos-android-registration-helper"))]
-        if let Some(gate)=&self.registration_gate{gate.source_work()?;}
+        self.removal_clock_veto.set(false);
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.registration_gate{self.registration_point_result(gate.source_work_classified())?;}
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.removal_gate{self.removal_point_result(gate.cut())?;}
         checkpoint(end,stop)
     }
     fn note_acl(&self, failure: AdmissionFailure, at: Instant) {
         self.acl_first.set(earliest_failure(self.acl_first.get(), Some((failure, at))));
         #[cfg(not(feature = "macos-android-registration-helper"))]
         if let Some(gate)=&self.registration_gate{gate.source_note(failure,at);}
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.removal_gate{gate.source_note(failure,at);}
     }
     fn invalid_acl(&self) -> AdmissionFailure {
         self.acl_invalid.set(true); self.note_acl(AdmissionFailure::Unknown, Instant::now()); AdmissionFailure::Unknown
@@ -296,7 +470,7 @@ impl Book {
         let native = match (self.acl_entered, &self.acl) {
             (false, None) => None,
             (true, Some(acl)) if self.android_acl.is_none() => match acl.try_borrow() {
-                Ok(acl) => acl.first_failure().map(|(failure, at)| (map_acl_failure(failure), at)),
+                Ok(acl) => self.source_acl_first(acl.first_failure()),
                 Err(_) => { self.invalid_acl(); None },
             },
             _ => { self.invalid_acl(); None },
@@ -304,6 +478,8 @@ impl Book {
         let first=earliest_failure(self.acl_first.get(), native);
         #[cfg(not(feature = "macos-android-registration-helper"))]
         let first=earliest_failure(first,self.registration_gate.as_ref().and_then(|gate|gate.source_first()));
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let first=earliest_failure(first,self.removal_gate.as_ref().and_then(|gate|gate.source_first()));
         first
     }
     fn pristine(&self) -> bool { !self.started && !self.inspected && !self.prepared && !self.closed && !self.unknown
@@ -373,6 +549,8 @@ impl Book {
         };
         let mut bytes = self.records.capacity().checked_mul(std::mem::size_of::<Record>())?.checked_add(frame)?;
         for record in &self.records { bytes = bytes.checked_add(record.name.capacity())?; }
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if let Some(gate)=&self.removal_gate{bytes=bytes.checked_add(gate.retained_bytes()?)?;}
         Some(bytes)
     }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
@@ -397,21 +575,45 @@ impl Book {
         let expected = identity.acl_expected()?;
         let cell = self.acl.as_ref().ok_or_else(|| self.invalid_acl())?;
         let mut acl = cell.try_borrow_mut().map_err(|_| self.invalid_acl())?;
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let parent_veto=Cell::new(false);
         let result = acl.observe_phased(fd.as_fd(), expected, Policy::Empty,&mut |phase,first|{
             #[cfg(not(feature = "macos-android-registration-helper"))]
             if let Some(gate)=&self.registration_gate {
-                if phase==native::vault_filesystem::ObservePhase::Cleanup {
-                    // SnapshotBook's successful ACL close tail is cleanup too.
-                    // Never call a WAITing work predicate on this branch.
-                    return gate.source_cleanup_expired(first.map(|(failure,at)|(map_acl_failure(failure),at)));
-                }
-                if gate.source_work().is_err(){return true;}
+                let local=self.source_acl_first(first);
+                if let Some((failure,at))=local{gate.source_note(failure,at);}
+                let parent=if phase==native::vault_filesystem::ObservePhase::Cleanup {
+                    // SnapshotBook's actual close tail remains non-WAITing.
+                    match gate.source_cleanup_verdict(local){AppRemovalCleanup::Allowed=>false,
+                        AppRemovalCleanup::LocalExpired=>return true,AppRemovalCleanup::ParentClock=>true}
+                }else{match gate.source_work_classified(){Ok(())=>false,
+                    Err(crate::saved_command_owner::AndroidRegistrationSourceWorkFailure::Local(_))=>return true,
+                    Err(crate::saved_command_owner::AndroidRegistrationSourceWorkFailure::ParentClock)=>true}};
+                if parent{if first.is_none(){parent_veto.set(true);}return true;}
+            }
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            if let Some(gate)=&self.removal_gate {
+                let local=self.source_acl_first(first);
+                if let Some((failure,at))=local{gate.source_note(failure,at);}
+                let parent=if phase==native::vault_filesystem::ObservePhase::Cleanup{
+                    match gate.cleanup_cut(local){AppRemovalCleanup::Allowed=>false,
+                        AppRemovalCleanup::LocalExpired=>return true,AppRemovalCleanup::ParentClock=>true}
+                }else{match gate.cut(){Ok(())=>false,Err(AppRemovalCut::Local(_))=>return true,Err(AppRemovalCut::ParentClock)=>true}};
+                if parent{if first.is_none(){parent_veto.set(true);}return true;}
             }
             let _=(phase,first);stopped()
         }).map_err(map_acl_failure);
-        if let Some((failure, at)) = acl.first_failure() { self.note_acl(map_acl_failure(failure), at); }
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if parent_veto.get(){
+            if !matches!(result,Err(AdmissionFailure::Stopped)) || !self.remember_acl_parent_veto(acl.first_failure()){
+                return Err(self.invalid_acl());
+            }
+            return Err(AdmissionFailure::Unknown);
+        }
+        if let Some((failure,at))=self.source_acl_first(acl.first_failure()){self.note_acl(failure,at);}
         result
     }
+
     fn open(&mut self, parent: Option<usize>, name: &str, directory: bool, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         self.point(end, stop)?;
         let index = self.reserve(parent, name)?;
@@ -681,12 +883,23 @@ impl Book {
     fn settle(&mut self, expired: &mut dyn FnMut(Option<(AdmissionFailure, Instant)>) -> bool) -> CloseOutcome {
         #[cfg(not(feature = "macos-android-registration-helper"))]
         let gate=self.registration_gate.clone();
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let removal=self.removal_gate.clone();
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        let cleanup_parent=Cell::new(false);
         let mut expired=|first|{
             #[cfg(not(feature = "macos-android-registration-helper"))]
-            let gate_expired=gate.as_ref().is_some_and(|gate|gate.source_cleanup_expired(first));
+            let verdict=Self::merge_cleanup_data(
+                gate.as_ref().map_or(AppRemovalCleanup::Allowed,|gate|gate.source_cleanup_verdict(first)),
+                removal.as_ref().map_or(AppRemovalCleanup::Allowed,|gate|gate.source_cleanup_verdict(first)));
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            let source_expired=verdict!=AppRemovalCleanup::Allowed;
             #[cfg(feature = "macos-android-registration-helper")]
-            let gate_expired=false;
-            let owner_expired=expired(first);gate_expired || owner_expired
+            let source_expired=false;
+            let owner_expired=expired(first);
+            #[cfg(not(feature = "macos-android-registration-helper"))]
+            cleanup_parent.set(verdict==AppRemovalCleanup::ParentClock && !owner_expired);
+            source_expired || owner_expired
         };
         let first = self.first_failure();
         let denied = expired(first); // Also publish around native poisoned/early returns.
@@ -695,10 +908,18 @@ impl Book {
             (true, Some(cell)) => match cell.try_borrow_mut() {
                 Ok(mut acl) => {
                     if !denied {
-                        let _ = acl.release(&mut |native| expired(earliest_failure(first,
-                            native.map(|(failure, at)| (map_acl_failure(failure), at)))));
+                        #[cfg(not(feature = "macos-android-registration-helper"))]
+                        let parent_veto=Cell::new(false);
+                        let _ = acl.release(&mut |native| {
+                            let denied=expired(earliest_failure(first,self.source_acl_first(native)));
+                            #[cfg(not(feature = "macos-android-registration-helper"))]
+                            if denied && native.is_none() && cleanup_parent.get(){parent_veto.set(true);}
+                            denied
+                        });
+                        #[cfg(not(feature = "macos-android-registration-helper"))]
+                        if parent_veto.get(){self.remember_acl_parent_veto(acl.first_failure());}
                     }
-                    if let Some((failure, at)) = acl.first_failure() { self.note_acl(map_acl_failure(failure), at); }
+                    if let Some((failure,at))=self.source_acl_first(acl.first_failure()){self.note_acl(failure,at);}
                 },
                 Err(_) => { self.invalid_acl(); },
             },
@@ -717,7 +938,13 @@ impl Book {
         }
         self.closed = true; if self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
     }
-    fn settled(&self) -> bool { self.closed && !self.unknown && self.common_settled() && self.records.iter().all(|r|
+    fn settled(&self) -> bool {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if self.removal_gate.as_ref().is_some_and(|gate|gate.source_cleanup_expired(None)){return false;}
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        if self.registration_gate.as_ref().is_some_and(|gate|gate.source_has_removal_cutoff()
+            && gate.source_cleanup_verdict(None)!=AppRemovalCleanup::Allowed){return false;}
+        self.closed && !self.unknown && self.common_settled() && self.records.iter().all(|r|
         r.fd.is_none() && matches!(r.state, State::NoHandle | State::Closed))
         && self.android_acl.as_ref().is_none_or(|audit|audit.try_lock().is_ok_and(|audit|audit.settled())) }
 }
@@ -935,6 +1162,65 @@ fn installed_github_action_original_slots_are_inert_and_uncertainty_is_absorbing
 // touches a descriptor. It tests missing/empty custody, not native free evidence.
 #[cfg(test)]
 pub(crate) fn common_acl_data_check() -> bool {
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    {
+        let book=Book::new();let (_sender,stop)=watch::channel(false);let now=Instant::now();
+        if book.removal_gate.is_some() || book.removal_clock_vetoed(){return false;}
+        if book.removal_point_result(Err(AppRemovalCut::ParentClock))!=Err(AdmissionFailure::Unknown)
+            || !book.removal_clock_vetoed() || book.first_failure().is_some(){return false;}
+        // A new real point resets the marker; ordinaryNone remains unchanged.
+        if book.point(now+std::time::Duration::from_secs(1),&stop).is_err() || book.removal_clock_vetoed(){return false;}
+        if book.removal_point_result(Err(AppRemovalCut::Local(AdmissionFailure::Unknown)))!=Err(AdmissionFailure::Unknown)
+            || book.removal_clock_vetoed(){return false;}
+        book.note_acl(AdmissionFailure::Ownership,now);
+        let _=book.removal_point_result(Err(AppRemovalCut::ParentClock));
+        if book.first_failure()!=Some((AdmissionFailure::Ownership,now)) || !book.removal_clock_vetoed(){return false;}
+        if book.point(now,&stop)!=Err(AdmissionFailure::Deadline) || book.removal_clock_vetoed(){return false;}
+        let later=now+std::time::Duration::from_nanos(1);
+        if !book.remember_acl_parent_veto(Some((SnapshotFailure::Stopped,now)))
+            || book.source_acl_first(Some((SnapshotFailure::Stopped,now))).is_some()
+            || book.source_acl_first(Some((SnapshotFailure::Native,now)))!=Some((AdmissionFailure::Native,now))
+            || book.source_acl_first(Some((SnapshotFailure::Stopped,later)))!=Some((AdmissionFailure::Stopped,later))
+            || book.first_failure()!=Some((AdmissionFailure::Ownership,now)){return false;}
+        let malformed=Book::new();
+        if malformed.remember_acl_parent_veto(Some((SnapshotFailure::Native,now))) || !malformed.acl_invalid.get(){return false;}
+        // The maintenance registration gate uses the SAME Book marker even
+        // without a retained-removal inspector. No native original is created.
+        use crate::saved_command_owner::AndroidRegistrationSourceWorkFailure as F;
+        let registered=Book::new();
+        if registered.registration_point_result(Err(F::ParentClock))!=Err(AdmissionFailure::Unknown)
+            || !registered.removal_clock_vetoed() || registered.first_failure().is_some(){return false;}
+        if registered.point(now+std::time::Duration::from_secs(1),&stop).is_err()
+            || registered.removal_clock_vetoed(){return false;}
+        if registered.registration_point_result(Err(F::Local(AdmissionFailure::Native)))!=Err(AdmissionFailure::Native)
+            || registered.removal_clock_vetoed(){return false;}
+        registered.note_acl(AdmissionFailure::Native,now);
+        let _=registered.registration_point_result(Err(F::ParentClock));
+        if registered.first_failure()!=Some((AdmissionFailure::Native,now)){return false;}
+        use AppRemovalCleanup as C;
+        for (left,right,expected) in [(C::Allowed,C::Allowed,C::Allowed),
+            (C::ParentClock,C::Allowed,C::ParentClock),(C::Allowed,C::ParentClock,C::ParentClock),
+            (C::ParentClock,C::ParentClock,C::ParentClock),(C::LocalExpired,C::ParentClock,C::LocalExpired),
+            (C::ParentClock,C::LocalExpired,C::LocalExpired),(C::LocalExpired,C::Allowed,C::LocalExpired)]{
+            if Book::merge_cleanup_data(left,right)!=expected{return false;}
+        }
+        // Known work-stop has no local first-F: the real cleanup reducer may
+        // use H, but a failed raw/hard cut and every real local failure remain
+        // independent. Equality is never an admitted cleanup instant.
+        let hard=now+std::time::Duration::from_secs(20);let local=Some((AdmissionFailure::Native,now));
+        if AppRemovalWorkGate::cleanup_data(true,false,None,now+std::time::Duration::from_secs(11),hard)!=C::Allowed
+            || AppRemovalWorkGate::cleanup_data(false,false,None,now,hard)!=C::ParentClock
+            || AppRemovalWorkGate::cleanup_data(true,false,None,hard,hard)!=C::ParentClock
+            || AppRemovalWorkGate::cleanup_data(true,false,local,now+std::time::Duration::from_secs(10),hard)!=C::LocalExpired
+            || AppRemovalWorkGate::cleanup_data(true,false,local,now+std::time::Duration::from_secs(9),hard)!=C::Allowed
+            || AppRemovalWorkGate::cleanup_data(true,true,None,now,hard)!=C::LocalExpired
+            || AppRemovalWorkGate::cleanup_data(false,true,local,now,hard)!=C::LocalExpired{return false;}
+        // A fresh final cleanup sample cannot recycle the preceding work veto.
+        if registered.cleanup_verdict(None)!=C::Allowed || registered.removal_clock_vetoed()
+            || registered.first_failure()!=Some((AdmissionFailure::Native,now)){return false;}
+
+    }
+
     macro_rules! empty_slots {
         ($($slot:ty),+ $(,)?) => { $({
             let mut slots = <$slot>::new();
