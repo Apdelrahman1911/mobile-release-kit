@@ -68,9 +68,9 @@ final class NormalAppUITests: XCTestCase {
         private var last: TimeInterval
         private var unusable = false
         private(set) var firstFailure: String?
-        init(seconds: TimeInterval) throws {
+        init(seconds: TimeInterval, androidPositive: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
-            guard now.isFinite, now >= 0, seconds == 60 || seconds == 300,
+            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),
                   (now + seconds).isFinite, now + seconds > now else {
                 throw Refusal.condition("case clock unavailable")
             }
@@ -364,9 +364,9 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
-    @MainActor private func beginCase(seconds: TimeInterval) throws {
+    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {
         try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
-        let clock = try CaseClock(seconds: seconds)
+        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)
         caseClock = clock
         journeyDeadline = clock.deadline
     }
@@ -1054,7 +1054,7 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -1120,6 +1120,7 @@ final class NormalAppUITests: XCTestCase {
         private var changes: [String: [String: Data]] = [:]
         private var current: [String: File] = [:]
         private var acceptedStages: Set<String> = []
+        private var androidPositiveProfile = false
         private var closeErrors: [String] = []
         private var applicationSupport: Directory?
         private var applicationDirectory: Directory?
@@ -1145,6 +1146,37 @@ final class NormalAppUITests: XCTestCase {
             var s = stat()
             try need(fstatat(parent, name, &s, AT_SYMLINK_NOFOLLOW) == 0, "named stat failed: " + name)
             return StatFacts(s)
+        }
+        // Only the two successful mkdtemp call sites below may initialize a
+        // new empty 0700 root. Never change a parent, adopted handoff or user input.
+        private static func initializeNewPrivateRootGroup(_ fd: Int32, parent: Int32, name: String,
+                                                          created: StatFacts) throws -> StatFacts {
+            try need(fd >= 0 && created.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                && created.uid == getuid() && created.mode & 0o7777 == 0o700 && created.flags == 0
+                && created == facts(fd) && created == named(parent, name),
+                "new private root initialization precondition")
+            let group = getgid()
+            let changed = created.gid != group
+            if changed {
+                // The UID sentinel leaves the owner unchanged; no pathname mutation.
+                try need(Darwin.fchown(fd, uid_t.max, group) == 0, "new private root group initialization failed")
+            }
+            let after = try facts(fd)
+            let transition: Bool
+            if changed {
+                // Only this requested GID and its ctime may differ. Do not discard
+                // other metadata changes or require clock-resolution advancement.
+                transition = created.device == after.device && created.inode == after.inode
+                    && created.mode == after.mode && created.uid == after.uid && created.flags == after.flags
+                    && created.links == after.links && created.bytes == after.bytes
+                    && created.modifiedSeconds == after.modifiedSeconds
+                    && created.modifiedNanoseconds == after.modifiedNanoseconds
+            } else {
+                transition = created == after // A no-op keeps the complete original, including ctime.
+            }
+            try need(transition && after.gid == group && after == facts(fd) && after == named(parent, name),
+                     "new private root initialization transition differs")
+            return after // Callers rebaseline only after this complete original POST.
         }
         private func adoptDirectory(_ fd: Int32, parent: Int32?, name: String) throws -> Directory {
             try Self.need(fd >= 0, "directory open failed")
@@ -1210,6 +1242,360 @@ final class NormalAppUITests: XCTestCase {
                 && before == Self.named(original.fd, name), "fixed leaf changed during observation")
             return File(bytes: bytes, facts: before)
         }
+        private static let androidPositivePaths: Set<String> = [
+            "project/.github/workflows/keep-user.yml",
+            "project/.gitignore",
+            "project/README-user.txt",
+            "project/app/build.gradle",
+            "project/app/gradle.lockfile",
+            "project/app/src/main/AndroidManifest.xml",
+            "project/app/src/main/java/org/example/saved/MainActivity.java",
+            "project/build.gradle",
+            "project/buildscript-gradle.lockfile",
+            "project/gradle/wrapper/gradle-wrapper.properties",
+            "project/release/mobile-release.json",
+            "project/release/store/android/en-US/full_description.txt",
+            "project/release/store/android/en-US/short_description.txt",
+            "project/release/store/android/en-US/title.txt",
+            "project/release/version.properties",
+            "project/settings.gradle",
+        ]
+        private static let androidPositiveBytes = 15_695
+        private static let androidPositiveSHA256 = "f0936a01330d095da8863571d78c1580e037d6d2a69d26c19a31814ffa251f4e"
+
+        // One runtime-PUBLIC certificate substitution, before ordinary Save.
+        // No private key/identity-status/Store authority enters this DATA stage.
+        func prepareAndroidCertificate(_ certificate: String) throws {
+            try Self.need(androidPositiveProfile && changes.isEmpty && acceptedStages.isEmpty && androidOutput == nil
+                && certificate.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil
+                && certificate != String(repeating: "0", count: 64), "Android public certificate stage admission")
+            let template = "{\n  \"schemaVersion\": 1,\n  \"version\": {\n    \"source\": \"release/version.properties\",\n    \"nameKey\": \"VERSION_NAME\",\n    \"buildKey\": \"BUILD_NUMBER\"\n  },\n  \"source\": {\n    \"candidateBranch\": \"main\",\n    \"productionBranch\": \"main\"\n  },\n  \"android\": {\n    \"enabled\": true,\n    \"module\": \":app\",\n    \"variant\": \"release\",\n    \"applicationId\": \"org.example.saved\",\n    \"identityStatus\": \"unverified\",\n    \"uploadCertificateSha256\": \"MRK_PUBLIC_CERTIFICATE_64HEX\"\n  },\n  \"ios\": {\n    \"enabled\": false\n  },\n  \"metadata\": {\n    \"root\": \"release/store\",\n    \"androidLocales\": [\n      \"en-US\"\n    ],\n    \"iosLocales\": []\n  },\n  \"services\": {\n    \"androidFirebase\": \"disabled\",\n    \"iosFirebase\": \"disabled\"\n  },\n  \"projectChecks\": {\n    \"preflight\": [],\n    \"androidArtifact\": [],\n    \"iosArtifact\": []\n  }\n}\n"
+            let config = Data(template.replacingOccurrences(of: "MRK_PUBLIC_CERTIFICATE_64HEX", with: certificate).utf8)
+            let ignore = Data("/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n.mobile-release-init-prepare/\n.mobile-release-init/\n.mobile-release-init-cleanup/\n.mobile-release-metadata-text-prepare/\n.mobile-release-metadata-text/\n.mobile-release-metadata-text-cleanup/\n.mobile-release-version-prepare/\n.mobile-release-version/\n.mobile-release-version-cleanup/\n.mobile-release-metadata-images-prepare/\n.mobile-release-metadata-images/\n.mobile-release-metadata-images-cleanup/\n".utf8)
+            try Self.need(config.count <= 32 * 1024 && ignore.count <= 32 * 1024
+                && originals[Self.config] != nil && originals["project/.gitignore"] != nil,
+                "Android exact public stage bound")
+            changes["android-public-certificate"] = [Self.config: config, "project/.gitignore": ignore]
+            try assertUnchanged()
+        }
+
+        // Exactly one same-job PRIVATE role. These are comparison originals,
+        // not product leases, legal acknowledgment, or authority to delete.
+        final class AndroidInputs {
+            private struct Leaf { let fd: Int32; let parent: Int32; let name: String; let original: File }
+            private var descriptors: [Int32] = []
+            private var held: [(Directory, Bool)] = []
+            private var leaves: [String: Leaf] = [:]
+            private var credentialDirectory: Directory?
+            private var scalars: [String: String] = [:]
+            private(set) var rootPath = ""
+            private(set) var publicCertificate = ""
+            private(set) var closed = false
+            private(set) var terminalClose = false
+            private static let roles = ["jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"]
+            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]
+            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"
+
+            private static func matches(_ value: String, _ pattern: String) -> Bool {
+                value.range(of: pattern, options: .regularExpression) != nil
+            }
+            private static func exactObject(_ value: Any?, keys: Set<String>) throws -> [String: Any] {
+                guard let object = value as? [String: Any], Set(object.keys) == keys else {
+                    throw Refusal.condition("Android private object shape differs")
+                }
+                return object
+            }
+            private static func wire(_ value: Any?) throws -> [String] {
+                guard let values = value as? [String], values.count == 10,
+                      values.allSatisfy({ matches($0, #"^(0|[1-9][0-9]{0,19})$"#) }) else {
+                    throw Refusal.condition("Android private fact shape differs")
+                }
+                return values
+            }
+            private static func digest(_ value: Any?) throws -> String {
+                guard let text = value as? String, matches(text, #"^[0-9a-f]{64}$"#) else {
+                    throw Refusal.condition("Android private digest shape differs")
+                }
+                return text
+            }
+            private static func canonical(_ object: [String: Any]) throws -> Data {
+                try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) + Data([10])
+            }
+            private func directory(_ parent: Directory?, name: String, full: Bool = false,
+                                   mode: mode_t? = nil, check: () throws -> Void) throws -> Directory {
+                try check()
+                let fd = parent.map { openat($0.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+                    ?? open(name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                try LocalFixture.need(fd >= 0, "Android private directory open")
+                descriptors.append(fd)
+                let before = try LocalFixture.facts(fd)
+                try LocalFixture.need(before.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+                    && (before.uid == 0 || before.uid == getuid()) && before.mode & 0o022 == 0 && before.flags == 0,
+                    "Android private directory shape")
+                if let parent {
+                    try LocalFixture.need(before == LocalFixture.androidOutputNamed(parent.fd, name),
+                                          "Android private directory binding")
+                }
+                if let mode {
+                    try LocalFixture.need(before.mode & 0o7777 == mode && before.uid == getuid()
+                        && before.gid == getgid(), "Android private owned directory")
+                }
+                let value = Directory(fd: fd, parent: parent?.fd, name: name, facts: before)
+                held.append((value, full))
+                try LocalFixture.need(held.count <= 14, "Android private directory bound")
+                return value
+            }
+            private func directoryPost(_ value: Directory, full: Bool) throws {
+                let actual = try LocalFixture.facts(value.fd)
+                try LocalFixture.need(full ? actual == value.facts : actual.sameDirectory(value.facts),
+                                      "Android private original directory changed")
+                if let parent = value.parent {
+                    let named = try LocalFixture.androidOutputNamed(parent, value.name)
+                    try LocalFixture.need(full ? actual == named : actual.sameDirectory(named),
+                                          "Android private named ancestor changed")
+                }
+            }
+            private func body(_ fd: Int32, parent: Directory, name: String, limit: Int,
+                              check: () throws -> Void) throws -> File {
+                try check()
+                let before = try LocalFixture.facts(fd)
+                try LocalFixture.need(before.mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+                    && before.mode & 0o7777 == 0o600 && before.links == 1 && before.uid == getuid()
+                    && before.gid == getgid() && before.flags == 0 && before.device == parent.facts.device
+                    && before.bytes > 0 && before.bytes <= limit,
+                    "Android private original file shape")
+                var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+                while true {
+                    try check()
+                    let count = buffer.withUnsafeMutableBytes { Darwin.pread(fd, $0.baseAddress!, $0.count, off_t(data.count)) }
+                    try LocalFixture.need(count >= 0 && data.count + count <= limit, "Android private bounded read")
+                    if count == 0 { break }
+                    data.append(contentsOf: buffer.prefix(count))
+                }
+                try LocalFixture.need(data.count == before.bytes && before == LocalFixture.facts(fd)
+                    && before == LocalFixture.androidOutputNamed(parent.fd, name), "Android private file POST")
+                try check()
+                return File(bytes: data, facts: before)
+            }
+            private func leaf(_ parent: Directory, name: String, limit: Int,
+                              check: () throws -> Void) throws -> File {
+                try LocalFixture.need(leaves[name] == nil, "Android private repeated leaf")
+                let fd = openat(parent.fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                try LocalFixture.need(fd >= 0, "Android private fixed leaf open")
+                descriptors.append(fd)
+                let original = try body(fd, parent: parent, name: name, limit: limit, check: check)
+                leaves[name] = Leaf(fd: fd, parent: parent.fd, name: name, original: original)
+                return original
+            }
+            private func credentialNames(check: () throws -> Void) throws {
+                guard let directory = credentialDirectory else { throw Refusal.condition("Android private credential directory absent") }
+                try directoryPost(directory, full: true); try check()
+                let fd = openat(directory.fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                try LocalFixture.need(fd >= 0, "Android private enumeration open")
+                guard let stream = fdopendir(fd) else {
+                    _ = Darwin.close(fd)
+                    throw Refusal.condition("Android private enumeration conversion")
+                }
+                var primary: Error?, names: Set<String> = []
+                do {
+                    while true {
+                        try check(); errno = 0
+                        guard let value = readdir(stream) else {
+                            try LocalFixture.need(errno == 0, "Android private enumeration read"); break
+                        }
+                        let name = withUnsafePointer(to: &value.pointee.d_name) {
+                            $0.withMemoryRebound(to: CChar.self, capacity: Int(NAME_MAX) + 1) { String(cString: $0) }
+                        }
+                        if name == "." || name == ".." { continue }
+                        try LocalFixture.need(names.count < 3 && Self.fileNames.contains(name) && names.insert(name).inserted,
+                                              "Android private credential roster")
+                    }
+                    try LocalFixture.need(names == Self.fileNames, "Android private credential roster incomplete")
+                    try directoryPost(directory, full: true)
+                } catch { primary = error }
+                if closedir(stream) != 0 && primary == nil { primary = Refusal.condition("Android private enumeration close") }
+                do { try check() } catch { if primary == nil { primary = error } }
+                if let primary { throw primary }
+            }
+            private func load(normal: Directory, path: String, source: String, run: String, attempt: String,
+                              check: () throws -> Void) throws {
+                rootPath = path + "/android-inputs"
+                let handoff = try leaf(normal, name: "android-input-fixture.json", limit: 16 * 1024, check: check)
+                var object = try Self.exactObject(JSONSerialization.jsonObject(with: handoff.bytes), keys: [
+                    "schemaVersion", "scope", "sourceCommit", "target", "runId", "runAttempt", "workflow", "ref", "root",
+                    "rootFacts", "credentialDirectoryFacts", "sourceCatalogueSha256", "sourceRosterSha256", "roots", "files",
+                    "publicCertificateSha256", "keyCommands", "parentReturncodeRequired", "phaseClock"])
+                try LocalFixture.need(object["schemaVersion"] as? Int == 1 && object["parentReturncodeRequired"] as? Int == 0
+                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] as? String == source
+                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == run
+                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath
+                    && object["workflow"] as? String == ".github/workflows/desktop-macos-installed.yml"
+                    && object["ref"] as? String == "refs/heads/verify/desktop-macos-installed"
+                    && object["sourceCatalogueSha256"] as? String == Self.catalogue,
+                    "Android private current context differs")
+                object["schemaVersion"] = 1; object["parentReturncodeRequired"] = 0
+                _ = try Self.digest(object["sourceRosterSha256"])
+                publicCertificate = try Self.digest(object["publicCertificateSha256"])
+                var phase = try Self.exactObject(object["phaseClock"], keys: ["startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"])
+                guard let startText = phase["startNs"] as? String, let deadlineText = phase["deadlineNs"] as? String,
+                      let beforeText = phase["beforePublicationNs"] as? String,
+                      [startText, deadlineText, beforeText].allSatisfy({ Self.matches($0, #"^[1-9][0-9]{0,19}$"#) }),
+                      let start = UInt64(startText), let deadline = UInt64(deadlineText), let before = UInt64(beforeText),
+                      deadline > start, deadline - start == 1_200_000_000_000, start <= before, before < deadline,
+                      phase["postCloseDeadlineRequired"] as? Bool == true else {
+                    throw Refusal.condition("Android private original phase clock differs")
+                }
+                phase["postCloseDeadlineRequired"] = true; object["phaseClock"] = phase
+                guard let commands = object["keyCommands"] as? [[String: Any]], commands.count == 2 else {
+                    throw Refusal.condition("Android private command roster differs")
+                }
+                var normalized: [[String: Any]] = []
+                for (index, value) in commands.enumerated() {
+                    var row = try Self.exactObject(value, keys: ["role", "returncode", "timeoutSeconds", "roleCapSeconds",
+                        "outputLimitBytes", "argvSha256", "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256"])
+                    guard row["role"] as? String == ["android-ui-disposable-jks", "android-ui-public-certificate"][index],
+                          row["returncode"] as? Int == 0, row["roleCapSeconds"] as? Int == 30,
+                          row["outputLimitBytes"] as? Int == 2_097_152,
+                          let timeout = row["timeoutSeconds"] as? Int, (1...30).contains(timeout),
+                          let out = row["stdoutBytes"] as? Int, let err = row["stderrBytes"] as? Int,
+                          out >= 0, out <= 2_097_152, err >= 0, err <= 2_097_152 - out else {
+                        throw Refusal.condition("Android private original command differs")
+                    }
+                    for key in ["argvSha256", "stdoutSha256", "stderrSha256"] { _ = try Self.digest(row[key]) }
+                    row["returncode"] = 0; row["roleCapSeconds"] = 30; row["outputLimitBytes"] = 2_097_152
+                    row["timeoutSeconds"] = timeout; row["stdoutBytes"] = out; row["stderrBytes"] = err
+                    normalized.append(row)
+                }
+                object["keyCommands"] = normalized
+                let roots = try Self.exactObject(object["roots"], keys: Set(Self.roles.keys))
+                let files = try Self.exactObject(object["files"], keys: Self.fileNames)
+                for (role, relative) in Self.roles {
+                    let row = try Self.exactObject(roots[role], keys: ["relative", "facts"])
+                    try LocalFixture.need(row["relative"] as? String == relative, "Android private fixed source path")
+                    _ = try Self.wire(row["facts"])
+                }
+                for name in Self.fileNames {
+                    let row = try Self.exactObject(files[name], keys: ["relative", "facts", "sha256"])
+                    try LocalFixture.need(row["relative"] as? String == "credentials/" + name, "Android private fixed credential path")
+                    _ = try Self.wire(row["facts"]); _ = try Self.digest(row["sha256"])
+                }
+                // Reconstruct numeric/boolean fields before byte equality, so
+                // JSON booleans/coerced numbers and duplicate keys cannot pass.
+                try LocalFixture.need(try Self.canonical(object) == handoff.bytes, "Android private canonical document differs")
+                let root = try directory(normal, name: "android-inputs", full: true, mode: 0o700, check: check)
+                let credentials = try directory(root, name: "credentials", full: true, mode: 0o700, check: check)
+                credentialDirectory = credentials
+                try LocalFixture.need(try LocalFixture.wireFacts(root.facts) == Self.wire(object["rootFacts"])
+                    && LocalFixture.wireFacts(credentials.facts) == Self.wire(object["credentialDirectoryFacts"]),
+                    "Android private held root facts differ")
+                let tools = try directory(root, name: "tools", full: true, mode: 0o700, check: check)
+                let jdk = try directory(tools, name: "jdk", full: true, mode: 0o755, check: check)
+                let observed = ["jdk": try directory(jdk, name: "temurin-17.jdk", full: true, mode: 0o755, check: check),
+                    "sdk": try directory(tools, name: "sdk", full: true, mode: 0o755, check: check),
+                    "gradle": try directory(tools, name: "gradle", full: true, mode: 0o755, check: check)]
+                for (role, directory) in observed {
+                    let row = roots[role] as! [String: Any]
+                    try LocalFixture.need(try LocalFixture.wireFacts(directory.facts) == Self.wire(row["facts"])
+                        && directory.facts.device == root.facts.device, "Android private source root differs")
+                }
+                var total = handoff.bytes.count
+                for name in Self.fileNames.sorted() {
+                    let file = try leaf(credentials, name: name, limit: 32 * 1024, check: check)
+                    let row = files[name] as! [String: Any]
+                    let hash = SHA256.hash(data: file.bytes).map { String(format: "%02x", $0) }.joined()
+                    try LocalFixture.need(try LocalFixture.wireFacts(file.facts) == Self.wire(row["facts"])
+                        && hash == Self.digest(row["sha256"]), "Android private current leaf differs")
+                    if name == "upload.der" { try LocalFixture.need(hash == publicCertificate, "Android public certificate differs") }
+                    if name == "scalars.json" {
+                        let parsed = try Self.exactObject(JSONSerialization.jsonObject(with: file.bytes), keys: ["alias", "storePassword", "keyPassword"])
+                        guard let alias = parsed["alias"] as? String, alias == "mrk-disposable-android-ui",
+                              let store = parsed["storePassword"] as? String, let key = parsed["keyPassword"] as? String,
+                              Self.matches(store, #"^[0-9a-f]{48}$"#), Self.matches(key, #"^[0-9a-f]{48}$"#),
+                              try Self.canonical(parsed) == file.bytes else {
+                            throw Refusal.condition("Android private scalar shape differs")
+                        }
+                        scalars = ["alias": alias, "storePassword": store, "keyPassword": key]
+                    }
+                    total += file.bytes.count
+                }
+                try LocalFixture.need(total <= 256 * 1024 && descriptors.count == 18 && held.count == 14 && leaves.count == 4,
+                                      "Android private complete original census differs")
+                try post(check: check)
+            }
+            static func admit(check: () throws -> Void) throws -> AndroidInputs {
+                let env = ProcessInfo.processInfo.environment
+                guard let source = env["MRK_NORMAL_UI_HARNESS_SOURCE"], Self.matches(source, #"^[0-9a-f]{40}$"#),
+                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,
+                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
+                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, #"^[1-9][0-9]{0,19}$"#),
+                      let attempt = env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"], Self.matches(attempt, #"^[1-9][0-9]{0,19}$"#),
+                      let handoff = env["MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"],
+                      Self.matches(handoff, #"^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/normal-ui/android-input-fixture\.json$"#) else {
+                    throw Refusal.condition("Android private fixed current context absent")
+                }
+                let normal = String(handoff.dropLast("/android-input-fixture.json".count))
+                let value = AndroidInputs()
+                do {
+                    var parent = try value.directory(nil, name: "/", check: check)
+                    for name in normal.split(separator: "/").map(String.init) {
+                        let mode: mode_t? = name == "normal-ui" || name.hasPrefix("mrk-macos-installed.") ? 0o700 : nil
+                        parent = try value.directory(parent, name: name, mode: mode, check: check)
+                    }
+                    try value.load(normal: parent, path: normal, source: source, run: run, attempt: attempt, check: check)
+                    return value
+                } catch {
+                    let primary = error
+                    do { try value.close(check: check) } catch { /* Primary failure remains authoritative. */ }
+                    throw primary
+                }
+            }
+            func post(check: () throws -> Void) throws {
+                try LocalFixture.need(!closed, "Android private original already consumed")
+                try check()
+                for (directory, full) in held { try directoryPost(directory, full: full); try check() }
+                try credentialNames(check: check)
+                for leaf in leaves.values {
+                    guard let parent = held.first(where: { $0.0.fd == leaf.parent })?.0 else {
+                        throw Refusal.condition("Android private original parent absent")
+                    }
+                    let current = try body(leaf.fd, parent: parent, name: leaf.name,
+                                           limit: leaf.name == "android-input-fixture.json" ? 16 * 1024 : 32 * 1024, check: check)
+                    try LocalFixture.need(current.bytes == leaf.original.bytes && current.facts == leaf.original.facts,
+                                          "Android private original changed")
+                }
+                try check()
+            }
+            func sourcePath(_ role: String) throws -> String {
+                guard !closed, let relative = Self.roles[role] else { throw Refusal.condition("Android fixed source role unavailable") }
+                return rootPath + "/" + relative
+            }
+            func credentialPath() throws -> String {
+                try LocalFixture.need(!closed && leaves["upload.jks"] != nil, "Android private key unavailable")
+                return rootPath + "/credentials"
+            }
+            func scalar(_ name: String) throws -> String {
+                guard !closed, let value = scalars[name] else { throw Refusal.condition("Android private scalar unavailable") }
+                return value
+            }
+            func close(check: () throws -> Void) throws {
+                if closed { return }
+                var primary: Error?
+                while let fd = descriptors.popLast() {
+                    if Darwin.close(fd) != 0 && primary == nil { primary = Refusal.condition("Android private original close failed") }
+                }
+                held.removeAll(); leaves.removeAll(); scalars.removeAll(); credentialDirectory = nil; closed = true
+                do { try check() } catch { if primary == nil { primary = error } }
+                if let primary { throw primary }
+            }
+            func finish(check: () throws -> Void) throws {
+                var primary: Error?
+                do { try post(check: check) } catch { primary = error }
+                do { try close(check: check) } catch { if primary == nil { primary = error } }
+                if let primary { throw primary }
+                terminalClose = true
+            }
+        }
+
         // Fixed public XML prerequisite only. No current Profile calls these
         // helpers, no generic JSON/leaf limit changes, and no Android UI claim.
         // A future positive profile must admit the fixed bytes before creation
@@ -1328,7 +1714,7 @@ final class NormalAppUITests: XCTestCase {
             try checkDirectory(directory)
             return result
         }
-        // Fixed positive Android output custody. No current Profile enters it.
+        // Fixed positive Android output custody; only the dedicated signed profile enters it.
         // Call begin at the real parsed review, start immediately before the ONE
         // Start action, and finish only after the same real terminal result says
         // complete / work removed / artifacts retained-local-result. The caller's
@@ -1409,7 +1795,8 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(closeErrors.isEmpty, "Android input roster consuming close failed")
         }
         func beginAndroidOutputObservation(_ identity: AndroidBuildIdentity, check: () throws -> Void) throws {
-            try Self.need(androidOutput == nil && acceptedStages.isEmpty,
+            try Self.need(androidOutput == nil && (androidPositiveProfile
+                ? acceptedStages == ["android-public-certificate"] : acceptedStages.isEmpty),
                           "Android output observation repeated or mixed with Save")
             // Unconfigured ordinary profiles cannot activate this seam. Future
             // positive input admission owns actual reviewed project/locks/keys;
@@ -1699,7 +2086,7 @@ final class NormalAppUITests: XCTestCase {
                 let rootName = String(fixture.rootPath.dropFirst("/private/tmp/".count))
                 var createdRoot = stat()
                 let rootNamed = fstatat(temporary, rootName, &createdRoot, AT_SYMLINK_NOFOLLOW)
-                let cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil
+                var cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil
                 let cleanupRoot = openat(temporary, rootName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 var created: [String] = []
                 var cleanupRows: [String: StatFacts] = [:]
@@ -1794,7 +2181,9 @@ final class NormalAppUITests: XCTestCase {
                 }
                 do {
                     try need(cleanupRoot >= 0, "Android output DATA cleanup original")
-                    guard let initialRoot = cleanupFacts else { throw Refusal.condition("fixture: Android DATA created root facts absent") }
+                    guard let createdFacts = cleanupFacts else { throw Refusal.condition("fixture: Android DATA created root facts absent") }
+                    let initialRoot = try initializeNewPrivateRootGroup(cleanupRoot, parent: temporary, name: rootName, created: createdFacts)
+                    cleanupFacts = initialRoot // Only a verified transition may become the cleanup baseline.
                     try need(initialRoot.mode & 0o7777 == 0o700, "Android output DATA private original root mode differs")
                     try need(initialRoot.uid == getuid(), "Android output DATA private original root uid differs")
                     try need(initialRoot.gid == getgid(), "Android output DATA private original root gid differs")
@@ -2158,7 +2547,8 @@ final class NormalAppUITests: XCTestCase {
         func prepare(_ profile: Profile = .projectEdits) throws {
             try Self.need(rootPath.isEmpty && current.isEmpty, "fixture preparation was repeated")
             let projectData = profile != .persistentCredentials
-            let resourceName = projectData ? "normal-project-v1" : "normal-persistence-v1"
+            let androidPositive = profile == .androidSignedBuild
+            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"
             guard let url = Bundle(for: NormalAppUITests.self).url(forResource: resourceName, withExtension: "json") else {
                 throw Refusal.condition("fixture: bundled fixed DATA absent")
             }
@@ -2185,15 +2575,20 @@ final class NormalAppUITests: XCTestCase {
             }
             if Darwin.close(resource) != 0 { closeErrors.append("resource-close") }
             try Self.need(closeErrors.isEmpty, "bundled DATA close failed")
+            if androidPositive {
+                try Self.need(data.count == Self.androidPositiveBytes
+                    && SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == Self.androidPositiveSHA256,
+                    "Android exact bundled public DATA pin")
+            }
             let spec = try JSONDecoder().decode(FixtureSpec.self, from: data)
-            let stagePaths: [String: Set<String>] = projectData ? [
+            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [
                 "config": [Self.config, "project/.gitignore"], "workflows": Set(Self.callers),
                 "text": [Self.title], "version": [Self.version], "images": Set(Self.imageTargets)
             ] : [:]
-            let expectedOriginals = projectData ? Self.originals : Self.persistenceOriginals
+            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals
             try Self.need(spec.schemaVersion == 1 && Set(spec.files.keys) == expectedOriginals
                 && Set(spec.stages.keys) == Set(stagePaths.keys)
-                && (projectData ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
+                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
                 "fixed DATA inventory mismatch")
             func decode(_ values: [String: String]) throws -> [String: Data] {
                 var decoded: [String: Data] = [:]
@@ -2206,6 +2601,13 @@ final class NormalAppUITests: XCTestCase {
                 return decoded
             }
             originals = try decode(spec.files)
+            if androidPositive {
+                originals[Self.androidVerificationPath] = try androidVerificationResource()
+                try Self.need(originals.count == 17 && Self.ancestors(Set(originals.keys)).count == 17
+                    && originals.values.reduce(0, { $0 + $1.count }) == 101_174,
+                    "Android public input census differs")
+                androidPositiveProfile = true
+            }
             if profile == .projectFields {
                 try Self.need(Set(originals.keys).isDisjoint(with: Self.projectFieldAdditions.keys),
                               "fixed project-field DATA collides with an original")
@@ -2299,9 +2701,13 @@ final class NormalAppUITests: XCTestCase {
                 try Self.need(refusedPath.split(separator: "/").count == 128 && refusedPath.utf8.count == 305,
                               "actual Android source refusal path census differs")
             }
-            let root = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+            let createdRoot = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
                 parent: temporary.fd, name: name)
-            directories[""] = root
+            directories[""] = createdRoot // Retain the one adopted FD even if initialization refuses.
+            let initialized = try Self.initializeNewPrivateRootGroup(createdRoot.fd, parent: temporary.fd,
+                                                                     name: name, created: createdRoot.facts)
+            let root = Directory(fd: createdRoot.fd, parent: createdRoot.parent, name: createdRoot.name, facts: initialized)
+            directories[""] = root // Replace only admitted facts; never adopt or close the FD twice.
             try Self.need(root.facts.uid == getuid() && root.facts.gid == getgid() && root.facts.mode & 0o7777 == 0o700,
                 "temporary parent policy refused")
             for path in Self.ancestors(Set(originals.keys)) where !path.isEmpty {
@@ -2334,7 +2740,7 @@ final class NormalAppUITests: XCTestCase {
                     throw error
                 }
                 if Darwin.close(fd) != 0 { closeErrors.append("created-leaf-close") }
-                let saved = try read(path)
+                let saved = try androidPositive && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
                 try Self.need(saved.bytes == bytes && saved.facts.mode & 0o7777 == mode, "new fixture readback failed")
                 current[path] = saved
             }
@@ -2483,9 +2889,16 @@ final class NormalAppUITests: XCTestCase {
             guard let bytes = originals[path] else { throw Refusal.condition("fixture: fixed image DATA missing") }
             return SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         }
+        func androidSavedDigest(_ path: String) throws -> String {
+            try Self.need(androidPositiveProfile && acceptedStages == ["android-public-certificate"]
+                && [Self.config, Self.version].contains(path), "Android saved public digest role")
+            guard let value = current[path] else { throw Refusal.condition("Android saved public original absent") }
+            return SHA256.hash(data: value.bytes).map { String(format: "%02x", $0) }.joined()
+        }
         func assertUnchanged() throws {
             for path in current.keys.sorted() {
-                let old = current[path]!, observed = try read(path)
+                let old = current[path]!
+                let observed = try androidPositiveProfile && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
                 try Self.need(old.bytes == observed.bytes && old.facts == observed.facts, "unexpected file change: " + path)
             }
             try checkRoster()
@@ -2506,7 +2919,7 @@ final class NormalAppUITests: XCTestCase {
             }
             var next: [String: File] = [:]
             for path in expectedPaths.sorted() {
-                let observed = try read(path)
+                let observed = try androidPositiveProfile && path == Self.androidVerificationPath ? readAndroidVerificationOriginal() : read(path)
                 if let bytes = update[path] {
                     try Self.need(observed.bytes == bytes, "exact expected bytes differ: " + path)
                     if let old = current[path] {
@@ -2566,6 +2979,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private var ownedFixture: LocalFixture?
+    @MainActor private var ownedAndroidInputs: LocalFixture.AndroidInputs?
     @MainActor private var journeyDeadline: TimeInterval?
     @MainActor private var journeyStage = "not-started"
 
@@ -4282,6 +4696,288 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_DIAGNOSTICS_UI=ordinary-ui-observed-original-diagnostics-report-and-settled-projection;commandsAttempted=\(commandsAttempted);cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
+    // All strings read here stay private. Only the closed public marker below is
+    // eligible for the parent projection; never print an accessibility dump.
+    @MainActor private func androidPublicText(_ root: XCUIElement) throws -> String {
+        let query = root.staticTexts
+        try require(query.count <= 256, "Android fixed panel text count")
+        var value = ""
+        for index in 0..<query.count {
+            _ = try remaining(5)
+            let text = query.element(boundBy: index).label
+            try require(text.utf8.count <= 4096 && value.utf8.count + text.utf8.count + 1 <= 32768,
+                        "Android fixed panel text bound")
+            value += text + "\n"
+        }
+        return value
+    }
+    private static func androidMatch(_ pattern: String, in text: String) throws -> String {
+        let expression = try NSRegularExpression(pattern: pattern)
+        let rows = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard rows.count == 1, rows[0].numberOfRanges == 2,
+              let range = Range(rows[0].range(at: 1), in: text) else {
+            throw Refusal.condition("Android fixed public fact absent or ambiguous")
+        }
+        return String(text[range])
+    }
+    @MainActor private func androidResult(_ result: XCUIElement, identity: LocalFixture.AndroidBuildIdentity,
+                                         certificate: String) throws -> (Int, String) {
+        try require(try androidCurrentBuildIdentity(result) == identity, "Android current result identity differs")
+        let text = try androidPublicText(result)
+        for expected in ["This build only", "Signed locally and verified with the selected upload key.",
+            "Known Gradle exit: 0. Structure: passed; native manifest: passed; application version: native-checked.",
+            "matches saved upload certificate", certificate, "app-release.aab · redacted local observation"] {
+            try require(text.contains(expected), "Android native signed result fact missing")
+        }
+        try require(!text.contains("Historical / retained context"), "Android historical result refused")
+        // Exactly one published AAB card. Saved-certificate text is deliberately
+        // NOT the line-start SHA-256 field of that artifact card.
+        let bytes = try Self.androidMatch(#"(?m)^([1-9][0-9]{0,8}) observed bytes · ABIs:"#, in: text)
+        let hash = try Self.androidMatch(#"(?m)^SHA-256:[ \n]*([0-9a-f]{64})[ \n]*$"#, in: text)
+        guard let count = Int(bytes), count <= 64 * 1024 * 1024 else {
+            throw Refusal.condition("Android public artifact byte bound")
+        }
+        return (count, hash)
+    }
+
+    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 900
+        try beginCase(seconds: 900, androidPositive: true)
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        var inputs: LocalFixture.AndroidInputs?
+        var certificate = ""
+        try stage("android-private-admission") {
+            let admitted = try LocalFixture.AndroidInputs.admit { _ = try self.remaining(5) }
+            ownedAndroidInputs = admitted; inputs = admitted
+            certificate = admitted.publicCertificate
+            try fixture.prepare(.androidSignedBuild)
+            try fixture.prepareAndroidCertificate(certificate)
+        }
+        guard let initialInputs = inputs else { throw Refusal.condition("Android private input admission absent") }
+        let (app, window, renderer) = try launchForJourney()
+        try stage("android-public-project-and-certificate") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
+                                in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "Android project selection differs")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.saved"), in: renderer)
+            try press(renderer, "Project settings", renderer: renderer)
+            let settings = try waitElement(named(renderer, "Settings section"), in: renderer)
+            try press(settings, "Android", renderer: renderer)
+            try replace(field(renderer, "Android upload certificate"), with: certificate, renderer: renderer)
+            try press(renderer, "Validate only", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Format validation complete")),
+                                in: renderer, failures: Self.configurationFailures)
+            try press(renderer, "Prepare save review", renderer: renderer, failures: Self.configurationFailures)
+            let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
+            try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])
+            try fixture.assertUnchanged()
+            try press(review, "Apply reviewed save", renderer: renderer, timeout: 48, failures: Self.configurationFailures)
+            try confirmedDialog(renderer, title: "Apply this configuration save?", action: "Apply reviewed save",
+                                checkbox: "I reviewed this exact inventory and understand that cancellation may be too late after Apply.")
+            _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")),
+                                in: review, timeout: 48, failures: Self.configurationFailures)
+            try fixture.accept("android-public-certificate")
+            try initialInputs.post { _ = try self.remaining(5) }
+        }
+        try stage("android-saved-input-read") {
+            try press(renderer, "Releases", renderer: renderer)
+            try press(renderer, "Refresh saved configuration", renderer: renderer, timeout: 48)
+            try press(renderer, "Read saved version", renderer: renderer, timeout: 48)
+            _ = try waitElement(renderer.buttons.matching(identifier: "Review saved inputs"), in: renderer, timeout: 48)
+            try fixture.assertUnchanged()
+        }
+        try stage("android-source-inspection-without-license-acceptance") {
+            let roles = [("jdk", "Java development kit (JDK)", "Choose an installed Java 17 JDK folder", "temurin-17.jdk"),
+                         ("sdk", "Android SDK", "Choose the Android SDK folder", "sdk"),
+                         ("gradle", "Gradle distribution", "Choose an extracted Gradle distribution folder", "gradle")]
+            for (role, label, title, leaf) in roles {
+                let group = try waitElement(controls(renderer, [.group], label: label + " source folder"), in: renderer)
+                try press(group, "Browse for folder", renderer: renderer, timeout: 48)
+                let sheet = try nativeSheet(window, title: title)
+                try goToFolder(sheet, path: initialInputs.sourcePath(role)); try nativeOpen(sheet)
+                _ = try waitElement(group.staticTexts.matching(NSPredicate(format: "label == %@ OR label CONTAINS %@",
+                    leaf, "Selected folder: " + leaf + " · folder selection only.")), in: group, timeout: 48)
+                _ = try waitElement(group.buttons.matching(identifier: "Choose a different folder"), in: group, enabled: true, timeout: 48)
+                try initialInputs.post { _ = try self.remaining(5) }
+            }
+            try press(renderer, "Inspect selected sources", renderer: renderer, timeout: 48)
+            let review = try waitElement(controls(renderer, [.group], label: "Confirm this exact protected-copy review"),
+                in: renderer, timeout: 120, failures: ["Inspection or registration refused", "Original cleanup is unconfirmed"])
+            let text = try androidPublicText(review)
+            for fact in ["complete compatible role observation", try fixture.androidSavedDigest(LocalFixture.config),
+                         try fixture.androidSavedDigest(LocalFixture.version)] {
+                try require(text.contains(fact), "Android source review saved binding differs")
+            }
+            let license = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",
+                "I acknowledge the applicable vendor licenses")), "Android separate vendor consent absent")
+            try require((license.value as? String) == "0" || (license.value as? NSNumber)?.intValue == 0,
+                        "Android vendor consent must remain unchecked")
+            let register = try unique(review.buttons.matching(identifier: "Register protected tool copy"),
+                                      "Android separate protected registration unavailable")
+            try require(!register.isEnabled, "Android protected registration enabled without legal authorization")
+            // Deliberately NO vendor acknowledgement, registration or system approval.
+            try press(renderer, "Discard this source review", renderer: renderer, timeout: 48)
+            try waitGone(review)
+            _ = try waitElement(renderer.buttons.matching(identifier: "Inspect selected sources"), in: renderer, enabled: true, timeout: 48)
+            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }
+        }
+        try stage("android-existing-protected-copy-full-readback") {
+            let catalog = try waitElement(named(renderer, "Protected Android tools on this Mac"), in: renderer)
+            try press(catalog, "Refresh tool list", renderer: renderer, timeout: 48)
+            _ = try waitElement(catalog.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Tool catalog: ready.")), in: catalog, timeout: 48)
+            let text = try androidPublicText(catalog)
+            let instance = try Self.androidMatch(#"(?m)^Instance[ \n]+([0-9a-f]{32})[ \n]+· observed catalog"#, in: text)
+            try require(text.contains("Gradle 8.14.5 · Android plugin 8.9.2 · android-35 · build tools 35.0.0."),
+                        "Android existing protected tuple differs")
+            // A unique actual current copy is a prerequisite, not created by this test.
+            try press(catalog, "Recover (full verification)", renderer: renderer, timeout: 120)
+            _ = try waitElement(catalog.staticTexts.matching(identifier:
+                "Full original readback verified in this session. Choose is still a separate action; Build admits the originals again."),
+                in: catalog, timeout: 120)
+            try require(try Self.androidMatch(#"(?m)^Instance[ \n]+([0-9a-f]{32})[ \n]+· observed catalog"#,
+                in: androidPublicText(catalog)) == instance, "Android protected original changed during recovery")
+            try press(catalog, "Choose this tool copy", renderer: renderer, timeout: 48)
+            _ = try waitElement(catalog.buttons.matching(identifier: "This copy is selected"), in: catalog, timeout: 48)
+            try fixture.assertUnchanged()
+        }
+        try stage("android-memory-input-assignment") {
+            try press(renderer, "Credentials", renderer: renderer)
+            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            try select(storage, label: "Platform", value: "Android", renderer: renderer)
+            try select(storage, label: "Release stage", value: "Candidate / internal testing", renderer: renderer)
+            try select(storage, label: "Input purpose", value: "Build / signing only", renderer: renderer)
+            try press(storage, "Start session — keep inputs in memory", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "open")
+            try privateContext(storage, renderer: renderer)
+            try privateRecordCount(storage, count: 0, assigned: 0)
+            try select(storage, label: "What would you like to provide?", value: "Android upload keystore", renderer: renderer)
+            try select(storage, label: "New or replacement copy?", value: "Keep a new session record", renderer: renderer)
+            try press(storage, "Select file…", renderer: renderer, failures: Self.privateInputFailures)
+            let sheet = try nativeSheet(window, title: "Choose a signing or iOS build-input file")
+            try goToFolder(sheet, path: initialInputs.credentialPath())
+            let selected = try waitElement(controls(sheet, [.cell, .outlineRow, .tableRow, .icon], label: "upload.jks"), in: sheet, enabled: true)
+            try require(selected.isHittable, "Android owned JKS picker item unavailable")
+            selected.click(); try require(selected.isSelected, "Android owned JKS picker selection missing")
+            try nativeOpen(sheet); try privateStatus(storage, action: "choose-file", phase: "selected")
+            for (label, key) in [("Keystore password", "storePassword"), ("Private-key alias", "alias"), ("Private-key password", "keyPassword")] {
+                let control = try waitElement(controls(storage, [.secureTextField], label: label, prefix: true),
+                                              in: storage, enabled: true, failures: Self.privateInputFailures)
+                try reveal(control, in: renderer); control.click()
+                // All three ordinary fields are write-only. Never inspect or print value.
+                control.typeText(try initialInputs.scalar(key))
+            }
+            try press(storage, "Prepare private review", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare", phase: "preview")
+            let review = try privateReview(storage, title: "Keep this input for this session?", target: "New android upload keystore session record")
+            try press(review, "Keep for this session", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "commit")
+            let row = try waitElement(named(storage, "Private input · Android upload keystore · item 1"), in: storage, failures: Self.privateInputFailures)
+            try privateValue(storage, row, label: "Private-input record revision", value: "1")
+            try privateRecordCount(storage, count: 1, assigned: 0)
+            try press(row, "Review assignment", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "prepare", phase: "preview")
+            let assignment = try privateReview(storage, title: "Assign this record to the submitted context?", target: "Android upload keystore · item 1 · revision 1")
+            try press(assignment, "Assign to this context", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "bind")
+            try privateRecordCount(storage, count: 1, assigned: 1)
+            try fixture.assertUnchanged(); try initialInputs.post { _ = try self.remaining(5) }
+        }
+        var identity: LocalFixture.AndroidBuildIdentity?
+        try stage("android-one-signed-build-original") {
+            try press(renderer, "Releases", renderer: renderer)
+            let signing = try waitElement(renderer.checkBoxes.matching(identifier: "Sign locally with my upload key"), in: renderer, enabled: true)
+            try require((signing.value as? String) == "0" || (signing.value as? NSNumber)?.intValue == 0,
+                        "Android signing must start opt-in")
+            try reveal(signing, in: renderer); signing.click()
+            _ = try waitElement(renderer.staticTexts.matching(identifier:
+                "Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification."), in: renderer)
+            try press(renderer, "Review saved inputs", renderer: renderer, timeout: 48)
+            let review = try waitElement(controls(renderer, [.group], label: "Confirm this saved Android-build intent"), in: renderer, timeout: 48)
+            let text = try androidPublicText(review)
+            for fact in ["org.example.saved", ":app", "release", "1.2.3", "build", "7", certificate,
+                         try fixture.androidSavedDigest(LocalFixture.config), try fixture.androidSavedDigest(LocalFixture.version)] {
+                try require(text.contains(fact), "Android signed review saved-input binding differs")
+            }
+            let original = try androidCurrentBuildIdentity(review)
+            identity = original
+            try fixture.beginAndroidOutputObservation(original) { _ = try self.remaining(5) }
+            let consent = try unique(review.checkBoxes.matching(NSPredicate(format: "label BEGINSWITH %@",
+                "I trust this project and authorize one build")), "Android one-build consent unavailable")
+            try require((consent.value as? String) == "0" || (consent.value as? NSNumber)?.intValue == 0,
+                        "Android build consent unexpectedly checked")
+            try reveal(consent, in: renderer); consent.click()
+            try require(try androidCurrentBuildIdentity(review) == original, "Android consent identity changed")
+            try fixture.confirmAndroidStart(original) { _ = try self.remaining(5) }
+            try press(review, "Build, sign and validate", renderer: renderer, timeout: 48) // The sole Start.
+        }
+        guard let identity else { throw Refusal.condition("Android original build identity missing") }
+        var artifact: (Int, String)?
+        try stage("android-known-native-terminal") {
+            let status = try waitElement(named(renderer, "Original Android build status"), in: renderer, timeout: 48)
+            try require(try androidCurrentBuildIdentity(status) == identity, "Android running original identity differs")
+            try fixture.assertAndroidRunning(identity) { _ = try self.remaining(5) }
+            let terminal = try waitElement(named(renderer, "Completed local Android AAB observation"), in: renderer,
+                timeout: try remaining(780), failures: ["No new Android-build outcome was confirmed", "Cleanup needs attention",
+                "The original request acknowledgement is unconfirmed. Do not repeat Start. Original Status may help cancel or settle that operation, but cannot create new consent."])
+            _ = try waitElement(status.staticTexts.matching(identifier:
+                "Task work: removed. Local artifacts: retained-local-result. Disposition is not permission for blanket deletion or a rerun."), in: status)
+            try require(try androidCurrentBuildIdentity(status) == identity, "Android terminal status identity differs")
+            artifact = try androidResult(terminal, identity: identity, certificate: certificate)
+            // Original private POST -> ALL18 consuming closes -> clock -> drop
+            // scalar-owning references. No private reopening after this boundary.
+            try initialInputs.finish { _ = try self.remaining(5) }
+            try require(initialInputs.terminalClose, "Android private original close unconfirmed")
+            ownedAndroidInputs = nil; inputs = nil
+            try press(renderer, "Credentials", renderer: renderer)
+            let storage = try waitElement(named(renderer, "Private-input storage controls"), in: renderer)
+            try press(storage, "Discard session…", renderer: renderer, failures: Self.privateInputFailures)
+            let discard = try waitElement(named(storage, "Confirm private-input lock"), in: storage, failures: Self.privateInputFailures)
+            try press(discard, "Discard session copies", renderer: renderer, failures: Self.privateInputFailures)
+            try privateStatus(storage, action: "lock")
+            _ = try waitElement(storage.staticTexts.matching(identifier: "Storage closed"), in: storage, failures: Self.privateInputFailures)
+            try privateRecordCount(storage, count: 0, assigned: 0)
+        }
+        guard let artifact else { throw Refusal.condition("Android native artifact observation missing") }
+        var summary: LocalFixture.AndroidOutputSummary?
+        try stage("android-output-census-and-normal-quit") {
+            summary = try fixture.finishAndroidOutputObservation(identity, artifactBytes: Int64(artifact.0), artifactSHA256: artifact.1) {
+                _ = try self.remaining(5)
+            }
+            try press(renderer, "Artifacts", renderer: renderer)
+            let result = try waitElement(named(renderer, "Completed local Android AAB observation"), in: renderer)
+            let repeated = try androidResult(result, identity: identity, certificate: certificate)
+            try require(repeated.0 == artifact.0 && repeated.1 == artifact.1, "Android Artifacts observation changed")
+            try fixture.assertAndroidOutputClosure(identity) { _ = try self.remaining(5) }
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "Android ordinary Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.closeAndroidOriginals(identity) { _ = try self.remaining(5) }
+            ownedFixture = nil
+        }
+        guard let summary else { throw Refusal.condition("Android final output census missing") }
+        try acceptFinalScenario()
+        let env = ProcessInfo.processInfo.environment
+        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",
+            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",
+            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",
+            "sourceRegistrationObserved": false, "nativeSigningVerified": true, "privateOriginalsClosed": true,
+            "memorySessionDiscarded": true, "outputPostMatched": true, "normalQuitObserved": true,
+            "releaseQualified": false, "parentReturncodeRequired": 0, "operationId": identity.operationID,
+            "ownerGeneration": identity.ownerGeneration, "publicCertificateSha256": certificate,
+            "artifactSha256": artifact.1, "artifactBytes": artifact.0, "outputEntries": summary.entries,
+            "outputNameBytes": summary.nameBytes, "outputLogicalBytes": summary.logicalBytes,
+            "moduleLogicalBytes": summary.moduleBytes, "outputCensusSha256": summary.censusSHA256]
+        let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, .withoutEscapingSlashes])
+        try require(raw.count <= 16 * 1024, "Android safe public result bound")
+        _ = try remaining(5)
+        print("MRK_MACOS_ANDROID_SIGNED_BUILD_UI=" + String(decoding: raw, as: UTF8.self))
+    }
+
     override func tearDown() async throws {
         var cleanupFailure: Error?
         do {
@@ -4304,6 +5000,16 @@ final class NormalAppUITests: XCTestCase {
         catch { if cleanupFailure == nil { cleanupFailure = error } }
         do { try await MainActor.run { try completedPersistenceLifetime?.gate.closeOriginal() } }
         catch { if cleanupFailure == nil { cleanupFailure = error } }
+        // Independent private consuming close after any partial setup or unknown
+        // native operation. This is NOT successful private POST/session disposal.
+        do {
+            try await MainActor.run {
+                if let inputs = ownedAndroidInputs {
+                    ownedAndroidInputs = nil
+                    try inputs.close { _ = try self.remaining(5) }
+                }
+            }
+        } catch { if cleanupFailure == nil { cleanupFailure = error } }
         // Never delete possibly live fixture/app state or seek a replacement owner.
         do {
             try await MainActor.run {

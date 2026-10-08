@@ -26,6 +26,118 @@ SPEC.loader.exec_module(MODULE)
 SWIFT = ROOT / "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"
 
 
+# Exact regional SOURCE inverse for the separately reviewed positive/private
+# addition. No existing ordinary-owner or historical whole-source hash is relaxed.
+ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
+  71,
+  '18d47688246d2599562ecbd80520613298438449478bcd019b61580c1760e8e5',
+  '        init(seconds: TimeInterval) throws {\n'),
+ (72,
+  73,
+  '90dc136b10da6a35858e66557a61d99462dcc242cc995e75c5b147d84c193909',
+  '            guard now.isFinite, now >= 0, seconds == 60 || seconds == 300,\n'),
+ (366,
+  367,
+  'b42389798fd9f698dbb02bdfba8d28cad7da3a646fc8303cf46303291909c364',
+  '    @MainActor private func beginCase(seconds: TimeInterval) throws {\n'),
+ (368,
+  369,
+  'dfc5996fc7856f951a5b859e0107475a7414a7afa54d08bde50285169cecf622',
+  '        let clock = try CaseClock(seconds: seconds)\n'),
+ (1056,
+  1057,
+  '53609dc044126f2020ad5eba2bc00dbce2d9dbdf257630ab0bdea8a720ca3dde',
+  '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, '
+  'savedVersionRecovery }\n'),
+ (1122, 1123, 'ee6ff2553dbc2086998719aa34f1e6d7490f586e97597e3e6714ba3a95e88e03', ''),
+ (1148, 1179, 'dfec62301b87370dbba26f83e97d5b71e2ea981616fc1c6c0ff3f3c7448d586a', ''),
+ (1244, 1598, 'e7ad67290bdf488bf83f6d914fd9f0a54b0b1889e5ab3f359a5a054ef574d749', ''),
+ (1716,
+  1717,
+  'd87ff8a55c8b4c0a6e25ccf9ab145f62a9d80b38f845ad0e355fe69eed6ecf3e',
+  '        // Fixed positive Android output custody. No current Profile enters it.\n'),
+ (1797,
+  1799,
+  '6b52423d9031f297094cfd7ac7804f4600b926ede04e6cf8b668f9108d482de9',
+  '            try Self.need(androidOutput == nil && acceptedStages.isEmpty,\n'),
+ (2088,
+  2089,
+  '1a7e02c89ffac69c14e9b959b07d02f6412b54ab6e992b7acc0e7fef9c27a5d7',
+  '                let cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil\n'),
+ (2172,
+  2179,
+  '6cc28f4048a9ba7524c8ad428d856ca3c1a76d6b72997fd86104812c79bfdfc6',
+  '                    catch Refusal.condition(let message) { observed = message == "fixture: " + reason }\n'),
+ (2183,
+  2193,
+  '69ab0671ac44cc263a23bdfab0de21f66c78c214dd5b36101be90745c0867ef7',
+  '                    guard let initialRoot = cleanupFacts else { throw Refusal.condition("fixture: Android DATA '
+  'created root facts absent") }\n'
+  '                    try need(initialRoot.mode & 0o7777 == 0o700 && initialRoot.uid == getuid()\n'
+  '                        && initialRoot.gid == getgid() && initialRoot.flags == 0\n'
+  '                        && initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)\n'
+  '                        && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),\n'
+  '                        "Android output DATA private original root differs")\n'),
+ (2362,
+  2366,
+  '8ee7a52613fd69c28a82a3bcf3f796cf5b75c525a1f9fbadfdb6d771280037b0',
+  '                if let primary { throw primary }\n'),
+ (2549,
+  2551,
+  '53e07f82570af9005a9512df66fea819c81413d6eb19eda20bdda68ec624e363',
+  '            let resourceName = projectData ? "normal-project-v1" : "normal-persistence-v1"\n'),
+ (2577, 2582, 'f843744260a518c433e5249e14de36aeecefc75b6aa14c52a287b2e79d395c88', ''),
+ (2583,
+  2584,
+  '846b4564aff220f9be648fe74fd4f7578743414f272cc87ecd86c615fd43607b',
+  '            let stagePaths: [String: Set<String>] = projectData ? [\n'),
+ (2587,
+  2588,
+  '768924e1546bba885fa35244665c03e830a5d34dbafd24bc6f521115c402781d',
+  '            let expectedOriginals = projectData ? Self.originals : Self.persistenceOriginals\n'),
+ (2590,
+  2591,
+  '292e59ef36b3ab8683b2eadbe6daad8901a7e016b96ae82135397e6934dee655',
+  '                && (projectData ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'),
+ (2603, 2610, '2062c0e8796cbbe10fc9fb0fc0ce260a5258e06bc905993b31881b2758b05960', ''),
+ (2703,
+  2704,
+  '5348ad9f129c9675f97a29b18dc87ee3c35c33ce56a3acd87e9a7d16b20544ae',
+  '            let root = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | '
+  'O_CLOEXEC),\n'),
+ (2705,
+  2710,
+  '1c512d2679edae9eb9f4db1127ae42eeb3f4e259c2d8e688275718569035c807',
+  '            directories[""] = root\n'),
+ (2742,
+  2743,
+  '683c9580e49ee032acc891b3accf807fdb313b618a444bae5cb76faa012fe78e',
+  '                let saved = try read(path)\n'),
+ (2891, 2897, '47fcb4f08a6315201fbe7551174aff00cf554aeeae5ea7ffb80537605aa2755e', ''),
+ (2899,
+  2901,
+  '330373cd0cb8ea89fc9f5eb6d0c41674e20da54dad89fa27c985c74b0432cb01',
+  '                let old = current[path]!, observed = try read(path)\n'),
+ (2921,
+  2922,
+  '92d403fa15562aab3c92fe0e5d78a9893a1f7dd0f440dd6a8614dc2548c60e31',
+  '                let observed = try read(path)\n'),
+ (2981, 2982, 'd044507984e3652c3ae6eda02752f307ceb65e38a6a8b5f81b3cf40440d6d6df', ''),
+ (4698, 4980, 'e71e33dd58d87777aeb8658cb7b7882ce323b89ebd98e9a441018f67a5d1ca0a', ''),
+ (5002, 5012, '1370af131a521e62e1f81d1a2a8ecc3e595711ec9bd8c754b6d9ad212d982dbc', ''))
+
+def without_positive_android_source(source):
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, original in reversed(ANDROID_POSITIVE_SWIFT_INVERSE):
+        observed = ''.join(rows[start:end])
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('positive Android exact SOURCE region differs')
+        rows[start:end] = original.splitlines(keepends=True)
+    value = ''.join(rows)
+    if hashlib.sha256(value.encode()).hexdigest() != '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4':
+        raise AssertionError('positive Android inverse changed ordinary SOURCE')
+    return value
+
 def target():
     return {"BlueprintName": MODULE.TARGET, "IsUITestBundle": True,
         "TestHostPath": "__TESTROOT__/" + MODULE.RUNNER,
@@ -146,6 +258,12 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 self.assertNotIn("project/gradle/verification-metadata.xml", spec["files"])
 
         project = (native / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        for added in ('\t\tA10000000000000000000016 = {isa = PBXBuildFile; fileRef = A10000000000000000000017; };\n',
+                      '\t\tA10000000000000000000017 = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/normal-android-positive-v1.json"; sourceTree = "<group>"; };\n'):
+            self.assertEqual(project.count(added), 1)
+            project = project.replace(added, '', 1)
+        project = project.replace(', A10000000000000000000017);', ');', 1).replace(', A10000000000000000000016);', ');', 1)
+        self.assertEqual(hashlib.sha256(project.encode()).hexdigest(), '7a2f623a3bbc2ad23ed7f04d6f373fdfaffa0cef83752bc3133c0e4fbf75f382')
         build = "A10000000000000000000014 = {isa = PBXBuildFile; fileRef = A10000000000000000000015; };"
         reference = ('A10000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = text.xml; '
                      'path = "Fixtures/' + name + '"; sourceTree = "<group>"; };')
@@ -158,7 +276,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(project.count("isa = PBXNativeTarget;"), 1)
         self.assertNotIn("PBXShellScriptBuildPhase", project)
 
-        source = SWIFT.read_text(encoding="utf-8")
+        source = without_positive_android_source(SWIFT.read_text(encoding="utf-8"))
         begin = "        // Fixed public XML prerequisite only."
         end = "        private func children(_ directory: Directory) throws -> Set<String> {"
         self.assertEqual(source.count(begin), 1)
@@ -223,10 +341,145 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn("<= 256 * 1024", prepare)
         self.assertNotIn("androidVerification", prepare)
 
+        # Public positive PROJECT only: genuine A9 + B2 locks + five normal
+        # user/locale sentinels. No supplier, private key or runtime handoff is
+        # part of this bundled DATA; current generic preparation is unchanged.
+        positive_raw = (fixtures / "normal-android-positive-v1.json").read_bytes()
+        self.assertEqual((len(positive_raw), hashlib.sha256(positive_raw).hexdigest()),
+                         (15695, "f0936a01330d095da8863571d78c1580e037d6d2a69d26c19a31814ffa251f4e"))
+        self.assertLessEqual(len(positive_raw), 64 * 1024)
+        positive = json.loads(positive_raw)
+        self.assertEqual(set(positive), {"schemaVersion", "files", "stages"})
+        self.assertIs(type(positive["schemaVersion"]), int)
+        self.assertEqual(positive["schemaVersion"], 1)
+        self.assertEqual(positive["stages"], {})
+        self.assertEqual((json.dumps(positive, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode(),
+                         positive_raw)
+        expected_positive = {
+            'project/.github/workflows/keep-user.yml': (76, '365244a6298332816ce5faeca4c2d8445fb29d887f981b0666ea32da005d742a'),
+            'project/.gitignore': (48, 'b4babbcd85071657df35045a4bc38c465e1720a96ffe4a07c4c2d6504e1d2cc8'),
+            'project/README-user.txt': (56, '3a6675d287793428f05e033457dbb6ca839a008fc6f70423f67ebddab9cb58f5'),
+            'project/app/build.gradle': (915, 'b78bad2b96b50b6613ed6c55c34be35a8b49842b595d447ad2a8c59fd1455f35'),
+            'project/app/gradle.lockfile': (326, 'b8ca8e27e9b203531b6bd0d08c8d9a906ba8fecf63a7797fbbb64cd34e316ec4'),
+            'project/app/src/main/AndroidManifest.xml': (306, 'dba12a22f84ec6f275f99979263344b25ba8c45131520648e1a8adb86695eb8d'),
+            'project/app/src/main/java/org/example/saved/MainActivity.java': (93, '8177c62171176ac7756a85bff7180eeb10f56d02465adc8c3e6ef979d3f96f96'),
+            'project/build.gradle': (674, '94666f4e4fe591e43c78929a5765c38c4b1553665f49834121f872f811232759'),
+            'project/buildscript-gradle.lockfile': (6566, 'ff53ec4b7427f2da997ed040dd338b0086c856564fe7001a0d030583c778ac85'),
+            'project/gradle/wrapper/gradle-wrapper.properties': (168, 'ef6da5202b4ca5bc4564e427bfcff6c2f761cbf761367f9ea561bf5141e33628'),
+            'project/release/mobile-release.json': (733, 'a64b904e27dac9df06377c7ad5d1f79988df3eec6295f689d2a5ead7c4d52144'),
+            'project/release/store/android/en-US/full_description.txt': (79, '61a57bfd859d0fd1fded8756580f38f51dc66c19e8ca6163588c1840aaf0584b'),
+            'project/release/store/android/en-US/short_description.txt': (49, '66f1806ac841eb119d3e3a9cfcb7218ab76d88c6120f7e7db43929933dbdea5c'),
+            'project/release/store/android/en-US/title.txt': (15, '8f06c2070f1e3f84db731b2a1ff568a06f18916dd7f24e75aa6e8a6359b629b3'),
+            'project/release/version.properties': (34, 'a811da0677c243236101fb4aa93319d28b731f963f8a295c1028b8aee136386b'),
+            'project/settings.gradle': (991, '0238825f1dccf203000d3cc80f5a4d1987b0456835f9c745efe25767f66901ea'),
+        }
+        self.assertEqual(set(positive["files"]), set(expected_positive))
+        positive_files = {path: base64.b64decode(value, validate=True)
+                          for path, value in positive["files"].items()}
+        self.assertEqual(len(positive_files), 16)
+        for path, (length, expected_sha) in expected_positive.items():
+            with self.subTest(positive_file=path):
+                raw = positive_files[path]
+                self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (length, expected_sha))
+                self.assertEqual(base64.b64encode(raw).decode("ascii"), positive["files"][path])
+                self.assertGreater(len(raw), 0)
+                self.assertLessEqual(len(raw), 32 * 1024)
+        positive_directories = {"/".join(path.split("/")[:depth]) for path in positive_files
+                                for depth in range(1, len(path.split("/")))}
+        self.assertEqual(len(positive_directories), 16)
+        self.assertEqual(sum(map(len, positive_files.values())), 11129)
+        self.assertEqual(max(map(len, positive_files.values())), 6566)
+        self.assertNotIn("project/gradle/verification-metadata.xml", positive_files)
+        self.assertEqual(sum(map(len, positive_files.values())) + len(xml), 101174)
+        self.assertLessEqual(sum(map(len, positive_files.values())) + len(xml), 256 * 1024)
+
+        positive_config = json.loads(positive_files["project/release/mobile-release.json"])
+        self.assertEqual(positive_config["version"], {"source": "release/version.properties",
+                         "nameKey": "VERSION_NAME", "buildKey": "BUILD_NUMBER"})
+        self.assertEqual(positive_config["android"], {"enabled": True, "module": ":app", "variant": "release",
+                         "applicationId": "org.example.saved", "identityStatus": "unverified"})
+        self.assertEqual(positive_config["ios"], {"enabled": False})
+        self.assertEqual(positive_config["source"], {"candidateBranch": "main", "productionBranch": "main"})
+        self.assertEqual(positive_config["services"], {"androidFirebase": "disabled", "iosFirebase": "disabled"})
+        self.assertEqual(positive_config["projectChecks"], {"preflight": [], "androidArtifact": [], "iosArtifact": []})
+        self.assertEqual(positive_config["metadata"], {"root": "release/store", "androidLocales": ["en-US"],
+                         "iosLocales": []})
+        self.assertEqual(positive_files["project/release/version.properties"], b"VERSION_NAME=1.2.3\nBUILD_NUMBER=7\n")
+        # The public starting config intentionally lacks the same-job signer
+        # fingerprint. The later ordinary UI must save the real public cert;
+        # this fixture cannot fabricate signing approval or a private asset.
+        self.assertNotIn("uploadCertificateSha256", positive_config["android"])
+        self.assertNotIn("signing", positive_config)
+        positive_app = positive_files["project/app/build.gradle"].decode("utf-8")
+        for required in (
+            "namespace 'org.example.saved'", "applicationId 'org.example.saved'",
+            "compileSdk 35", "buildToolsVersion '35.0.0'", "minSdk 23", "targetSdk 35",
+            "versionCode Integer.parseInt(System.getenv('MOBILE_RELEASE_BUILD_NUMBER'))",
+            "versionName System.getenv('MOBILE_RELEASE_VERSION_NAME')", "debuggable false",
+        ):
+            self.assertIn(required, positive_app)
+        self.assertNotIn("signingConfig", positive_app)
+        positive_manifest = ET.fromstring(positive_files["project/app/src/main/AndroidManifest.xml"])
+        self.assertEqual(positive_manifest.tag, "manifest")
+        positive_application = positive_manifest.find("application")
+        self.assertIsNotNone(positive_application)
+        android_ns = "{http://schemas.android.com/apk/res/android}"
+        self.assertNotIn(android_ns + "debuggable", positive_application.attrib)
+        self.assertEqual(positive_application.get(android_ns + "testOnly"), "false")
+        self.assertEqual(positive_application.find("activity").get(android_ns + "name"), ".MainActivity")
+        self.assertEqual(positive_files["project/app/src/main/java/org/example/saved/MainActivity.java"],
+                         b"package org.example.saved;\n\npublic final class MainActivity extends android.app.Activity {\n}\n")
+        positive_settings = positive_files["project/settings.gradle"].decode("utf-8")
+        positive_build = positive_files["project/build.gradle"].decode("utf-8")
+        for required in ("DependencyVerificationMode.STRICT", "file('gradle/verification-metadata.xml').isFile()",
+                         "rootProject.name = 'MacAndroidSignedBuildFixture'", "include(':app')"):
+            self.assertIn(required, positive_settings)
+        for required in ("classpath 'com.android.tools.build:gradle:8.9.2'",
+                         "resolutionStrategy.activateDependencyLocking()", "lockAllConfigurations()",
+                         "lockMode = LockMode.STRICT"):
+            self.assertIn(required, positive_build)
+        for forbidden in ("--write-locks", "--write-verification-metadata", "failOnNonReproducibleResolution"):
+            self.assertNotIn(forbidden, positive_settings + positive_build + positive_app)
+        self.assertEqual(positive_files["project/gradle/wrapper/gradle-wrapper.properties"].decode("ascii").splitlines(), [
+            r"distributionUrl=https\://services.gradle.org/distributions/gradle-8.14.5-bin.zip",
+            "distributionSha256Sum=6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854",
+        ])
+        self.assertEqual(positive_files["project/.gitignore"], b"/.mobile-release/\n/.gradle/\n/build/\n/app/build/\n")
+
+        lock_header = ["# This is a Gradle generated file for dependency locking.",
+                       "# Manual edits can break the build and are not advised.",
+                       "# This file is expected to be part of source control."]
+        root_lock = positive_files["project/buildscript-gradle.lockfile"].decode("ascii").splitlines()
+        app_lock = positive_files["project/app/gradle.lockfile"].decode("ascii").splitlines()
+        self.assertEqual(root_lock[:3], lock_header)
+        self.assertEqual(root_lock[-1], "empty=")
+        root_locked = root_lock[3:-1]
+        self.assertEqual(len(root_locked), 123)
+        self.assertEqual(root_locked, sorted(set(root_locked)))
+        self.assertTrue(all(row.endswith("=classpath") and row.count("=") == 1 for row in root_locked))
+        self.assertIn("com.android.tools.build:gradle:8.9.2=classpath", root_locked)
+        xml_coordinates = {(row.get("group"), row.get("name"), row.get("version")) for row in components}
+        self.assertTrue(all(tuple(row.removesuffix("=classpath").split(":")) in xml_coordinates for row in root_locked))
+        self.assertEqual(app_lock, lock_header + [
+            "empty=androidApis,androidJdkImage,lintChecks,releaseAnnotationProcessorClasspath,"
+            "releaseCompileClasspath,releaseReverseMetadataValues,releaseRuntimeClasspath"
+        ])
+        self.assertEqual(len(app_lock[3].removeprefix("empty=").split(",")), 7)
+        normal_public = json.loads((fixtures / "normal-project-v1.json").read_bytes())
+        for path in ("project/README-user.txt", "project/.github/workflows/keep-user.yml",
+                     "project/release/store/android/en-US/title.txt",
+                     "project/release/store/android/en-US/short_description.txt",
+                     "project/release/store/android/en-US/full_description.txt"):
+            self.assertEqual(positive_files[path], base64.b64decode(normal_public["files"][path], validate=True))
+        for name, limit in (("title", 30), ("short_description", 80), ("full_description", 4000)):
+            text = positive_files[f"project/release/store/android/en-US/{name}.txt"].decode("utf-8")
+            self.assertTrue(text.strip())
+            self.assertLessEqual(len(text.rstrip("\n")), limit)
+
     def test_android_output_custody_is_bounded_without_activating_a_profile(self):
         # SOURCE assertions are not the separately selected native DATA test.
         # In particular they never duplicate/execute a Python version of the DFS.
-        source = SWIFT.read_text(encoding="utf-8")
+        source = without_positive_android_source(SWIFT.read_text(encoding="utf-8"))
         begin = "        // Fixed positive Android output custody. No current Profile enters it."
         end = "        // A one-case transfer of observation custody, never a product lease."
         self.assertEqual(source.count(begin), 1)
@@ -615,7 +868,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                     parse.assert_not_called()
 
     def test_workflow_refusal_source_derives_originals_before_creation_and_never_applies(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
             "func admitDefaultVault()", 1)[0]
         self.assertIn("case projectEdits, projectFields, persistentCredentials, workflowRefusal", source)
@@ -666,7 +919,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn('"Local workflow bundle refused"', failures)  # Never remove it globally.
 
     def test_project_field_fixture_and_normal_workflow_keep_draft_only_scope(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         prepare = source.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split(
             "func admitDefaultVault()", 1)[0]
         self.assertIn("let projectData = profile != .persistentCredentials", prepare)
@@ -919,7 +1172,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
             MODULE.packaged_ui_result(output, summary[:-1] + b',"passedTests":1}', tree)
 
     def test_source_has_one_fixed_request_and_only_original_cleanup_receivers(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         self.assertEqual(source.count("NSWorkspace.shared.openApplication(at: requestURL"), 1)
         self.assertEqual(source.count("let app = try launchOrdinaryApplication()"), 2)
         self.assertEqual(source.count("original.terminate()"), 1)
@@ -966,7 +1219,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertIn('ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil', source)
 
     def test_first_callback_custody_survives_reordered_main_handoffs(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         reply = source.split("private final class LaunchReply:", 1)[1].split(
             "@MainActor private final class OrdinaryLaunch", 1)[0]
         body = reply.split("func body(", 1)[1].split("func snapshot()", 1)[0]
@@ -1104,7 +1357,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
     def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
         self.assertEqual(MODULE.LOADER_SHA,
                          hashlib.sha256((ROOT / "desktop/tools/macos_aqua_qualification.py").read_bytes()).hexdigest())
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         self.assertEqual(source.count("line: UInt = #line"), 3)
         self.assertIn("private enum RequireCheck: String { case condition, singleton, actionable }", source)
         self.assertEqual(source.count("packagedRequireDiagnosticActive = true"), 1)
@@ -1340,7 +1593,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                          tuple(method for methods, _, _ in MODULE.NORMAL_SELECTIONS.values() for method in methods))
 
     def test_source_uses_nonrenewable_case_clock_and_all_terminal_gates(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         custody = source.split("    private final class GateObservation {", 1)[0]
         self.assertEqual(source.count("try beginCase(seconds: 60)"), 2)
         self.assertEqual(source.count("try beginCase(seconds: 300)"), 8)
@@ -1414,14 +1667,14 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertLess(start.index(message), start.index("[panel setCanChooseFiles:"))
         self.assertLess(start.index(message), start.index("beginSheetModalForWindow:s->parent"))
         # A visible purpose is not permission to accept an arbitrary native sheet.
-        sheet = SWIFT.read_text().split("private func nativeSheet(", 1)[1].split(
+        sheet = without_positive_android_source(SWIFT.read_text()).split("private func nativeSheet(", 1)[1].split(
             "private func goToFolder(", 1)[0]
         self.assertIn("let sheet = try waitElement(window.sheets, in: window)", sheet)
         self.assertIn("if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {", sheet)
         self.assertIn('throw Refusal.condition("unexpected original native sheet title in " + journeyStage)', sheet)
 
     def test_reuse_profile_cannot_relax_the_existing_same_build_cases(self):
-        source = SWIFT.read_text()
+        source = without_positive_android_source(SWIFT.read_text())
         self.assertIn('#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error(', source)
         compiled = ('        #if arch(arm64)\n'
                     '        let hostedJob = "github-hosted-macos26-arm64"\n'
@@ -1532,6 +1785,243 @@ class GeneratedProductOriginalTests(unittest.TestCase):
 
 @unittest.skipUnless(hasattr(os, "O_NOFOLLOW") and hasattr(os, "pread"), "POSIX inert normal-phase DATA")
 class NormalPhaseDataTests(unittest.TestCase):
+    def test_android_private_input_schema_current_run_and_public_projection(self):
+        # Inert closed DATA; no key generation, source registration or UI call.
+        import copy
+        source, run, attempt = 'a' * 40, '42', '1'
+        normal = Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui')
+        root = normal / 'android-inputs'
+        facts = ['0'] * 10
+        commands = [dict(role=role, returncode=0, timeoutSeconds=30, roleCapSeconds=30,
+            outputLimitBytes=2097152, argvSha256='b'*64, stdoutBytes=0, stdoutSha256=hashlib.sha256(b'').hexdigest(),
+            stderrBytes=0, stderrSha256=hashlib.sha256(b'').hexdigest())
+            for role in ('android-ui-disposable-jks', 'android-ui-public-certificate')]
+        value = dict(schemaVersion=1, scope='one-owned-android-ui-inputs', sourceCommit=source,
+            target=MODULE.ARM_TARGET, runId=run, runAttempt=attempt, workflow=MODULE.ANDROID_WORKFLOW,
+            ref=MODULE.ANDROID_REF, root=str(root), rootFacts=facts, credentialDirectoryFacts=facts,
+            sourceCatalogueSha256=MODULE.ANDROID_CATALOGUE, sourceRosterSha256='c'*64,
+            publicCertificateSha256='d'*64,
+            roots={k: dict(relative=v, facts=facts) for k,v in MODULE.ANDROID_ROOTS.items()},
+            files={k: dict(relative='credentials/'+k, facts=facts, sha256='e'*64) for k in MODULE.ANDROID_PRIVATE_FILES},
+            keyCommands=commands, parentReturncodeRequired=0,
+            phaseClock=dict(startNs='1', deadlineNs=str(1+1200*10**9), beforePublicationNs='2', postCloseDeadlineRequired=True))
+        def admit(item):
+            return MODULE.android_input_document(MODULE.encoded(item)+b'\n', source=source, run=run, attempt=attempt, root=root)
+        self.assertEqual(admit(value), value)
+        for key, replacement in [('runId','41'),('runAttempt','2'),('sourceCommit','b'*40),('target',MODULE.INTEL_TARGET),
+            ('root',str(root/'elsewhere')),('schemaVersion',True),('parentReturncodeRequired',False),
+            ('sourceCatalogueSha256','0'*64),('unknown','private message')]:
+            bad=copy.deepcopy(value);bad[key]=replacement
+            with self.subTest(key=key),self.assertRaises(MODULE.Refused): admit(bad)
+        for mutation in ('command-bool','command-extra','command-order','clock','path','facts','digest'):
+            bad=copy.deepcopy(value)
+            if mutation=='command-bool': bad['keyCommands'][0]['returncode']=False
+            elif mutation=='command-extra': bad['keyCommands'][0]['stderr']='private'
+            elif mutation=='command-order': bad['keyCommands'].reverse()
+            elif mutation=='clock': bad['phaseClock']['deadlineNs']=str(1200*10**9)
+            elif mutation=='path': bad['files']['upload.jks']['relative']='../upload.jks'
+            elif mutation=='facts': bad['rootFacts']=[0]*10
+            elif mutation=='digest': bad['publicCertificateSha256']='F'*64
+            with self.subTest(mutation=mutation),self.assertRaises(MODULE.Refused): admit(bad)
+        raw=MODULE.encoded(value)+b'\n'
+        for bad in (raw[:-1], raw+b' ', b'{"schemaVersion":1,'+raw[1:], b'x'*16385):
+            with self.assertRaises((MODULE.Refused,ValueError)):
+                MODULE.android_input_document(bad,source=source,run=run,attempt=attempt,root=root)
+        scalars=dict(alias='mrk-disposable-android-ui',storePassword='1'*48,keyPassword='2'*48)
+        self.assertEqual(MODULE.android_input_scalars(MODULE.encoded(scalars)+b'\n'),scalars)
+        for key,badvalue in [('alias','other'),('storePassword','1'*49),('keyPassword',None)]:
+            bad=dict(scalars);bad[key]=badvalue
+            with self.assertRaises(MODULE.Refused): MODULE.android_input_scalars(MODULE.encoded(bad)+b'\n')
+        public=dict(schemaVersion=1,scope=MODULE.ANDROID_FACTS_SCOPE,sourceCommit=source,target=MODULE.ARM_TARGET,
+            runId=run,runAttempt=attempt,sourceRegistrationObserved=False,nativeSigningVerified=True,
+            privateOriginalsClosed=True,memorySessionDiscarded=True,outputPostMatched=True,normalQuitObserved=True,
+            releaseQualified=False,parentReturncodeRequired=0,operationId='3'*32,ownerGeneration='4'*32,
+            publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
+            outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
+        self.assertEqual(MODULE.android_signed_facts(public,source=source,run=run,attempt=attempt),public)
+        for field, invalid in [('source','private/path'),('source',True),('run','0'),('run','secret'),('attempt','01'),('attempt',1)]:
+            context=dict(source=source,run=run,attempt=attempt);context[field]=invalid
+            bad=dict(public);bad[{'source':'sourceCommit','run':'runId','attempt':'runAttempt'}[field]]=invalid
+            with self.subTest(public_context=field,value=invalid),self.assertRaisesRegex(MODULE.Refused,'android-signed-public-context'):
+                MODULE.android_signed_facts(bad,**context)
+        selected=b'-[MRKNormalAppUITests.NormalAppUITests '+MODULE.ANDROID_METHOD.encode()+b']'
+        stdout=b'\n'.join([b"Test Case '"+selected+b"' started.",MODULE.ORIGINAL_MARKER.encode(),
+            MODULE.ANDROID_FACTS_PREFIX+MODULE.encoded(public),b"Test Case '"+selected+b"' passed (2.000 seconds)."])+b'\n'
+        self.assertEqual(MODULE.android_signed_marker(stdout,source=source,run=run,attempt=attempt,certificate='d'*64),public)
+        for key,badvalue in [('runId','2'),('privateOriginalsClosed',False),('sourceRegistrationObserved',True),
+            ('parentReturncodeRequired',False),('operationId','private/path'),('artifactBytes',True),
+            ('moduleLogicalBytes',13),('privateKeySha256','e'*64)]:
+            bad=dict(public);bad[key]=badvalue
+            with self.subTest(public=key),self.assertRaises(MODULE.Refused):
+                MODULE.android_signed_facts(bad,source=source,run=run,attempt=attempt)
+        for bad in (stdout+MODULE.ANDROID_FACTS_PREFIX+MODULE.encoded(public)+b'\n',
+                    stdout.replace(b' passed (',b' failed ('),stdout+b'MRK_MACOS_UI_FAILURE_CLEANUP=unknown\n',b'x'*1048577):
+            with self.assertRaises(MODULE.Refused): MODULE.android_signed_marker(bad,source=source,run=run,attempt=attempt,certificate='d'*64)
+        request=MODULE.normal_request(['--normal-android-signed-build-test'],str(normal/'tmp')+'/')
+        self.assertEqual((request['methods'],request['allowance'],request['timeout'],request['phaseSeconds']),
+            ((MODULE.CLASS+MODULE.ANDROID_METHOD,),900,1020,1245))
+        self.assertEqual(MODULE.normal_request(['--normal-android-signed-build-summary'],str(normal/'tmp')+'/')['phaseSeconds'],90)
+        self.assertNotIn(MODULE.ANDROID_RESULT,MODULE.NORMAL_SELECTIONS)
+        for args in (['--target',MODULE.INTEL_TARGET,'--normal-android-signed-build-test'],
+                     ['--normal-android-signed-build-test','--work','/tmp/private']):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_request(args,str(normal/'tmp')+'/')
+
+        # Exercise the ACTUAL new normal_context with the exact Metadata
+        # clean environment. Only host/account observations are inert adapters;
+        # there is no caller private path, no target env and no native command.
+        import resource
+        import pwd
+        checkout=Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+        env=dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin',HOME='/Users/runner',USER='runner',LOGNAME='runner',
+            TMPDIR=str(normal/'tmp')+'/',LANG='en_US.UTF-8',LC_ALL='en_US.UTF-8',TZ='UTC',
+            DEVELOPER_DIR=MODULE.DEVELOPER,TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-arm64',
+            TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=source,TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=source,
+            GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit',GITHUB_EVENT_NAME='push',GITHUB_REF=MODULE.ANDROID_REF,
+            GITHUB_SHA=source,GITHUB_WORKFLOW_SHA=source,
+            GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/'+MODULE.ANDROID_WORKFLOW+'@'+MODULE.ANDROID_REF,
+            GITHUB_WORKSPACE=str(checkout),GITHUB_RUN_ID=run,GITHUB_RUN_ATTEMPT=attempt,
+            RUNNER_ENVIRONMENT='github-hosted',RUNNER_OS='macOS',RUNNER_ARCH='ARM64')
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(MODULE,'__file__',str(checkout/'desktop/tools/macos_normal_ui_runner.py')))
+            stack.enter_context(patch.object(MODULE.sys,'platform','darwin'))
+            stack.enter_context(patch.object(MODULE.sys,'version_info',(3,14,7)))
+            stack.enter_context(patch.object(MODULE.sys,'flags',SimpleNamespace(isolated=1,no_site=1)))
+            stack.enter_context(patch.object(MODULE.sys,'dont_write_bytecode',True))
+            stack.enter_context(patch.object(MODULE.platform,'machine',return_value='arm64'))
+            stack.enter_context(patch.object(MODULE.platform,'mac_ver',return_value=('26.6.2',(),'')))
+            stack.enter_context(patch.object(resource,'getrlimit',return_value=(1024**3,1024**3)))
+            stack.enter_context(patch.object(pwd,'getpwuid',return_value=SimpleNamespace(pw_uid=1000,pw_gid=1000,pw_name='runner',pw_dir='/Users/runner')))
+            for function in ('getuid','geteuid','getgid','getegid'):
+                stack.enter_context(patch.object(MODULE.os,function,return_value=1000))
+            stack.enter_context(patch.object(MODULE.os,'stat',return_value=SimpleNamespace(st_uid=1000)))
+            stack.enter_context(patch.object(MODULE.Path,'cwd',return_value=checkout))
+            with patch.dict(MODULE.os.environ,env,clear=True):
+                admitted,actual,forwarded,limit=MODULE.normal_context(request)
+            self.assertEqual((admitted,actual,limit),(checkout,source,(1024**3,1024**3)))
+            self.assertEqual(forwarded[MODULE.ANDROID_INPUT_ENV],str(normal/'android-input-fixture.json'))
+            self.assertEqual((forwarded[MODULE.ANDROID_RUN_ENV],forwarded[MODULE.ANDROID_ATTEMPT_ENV]),(run,attempt))
+            self.assertNotIn('MRK_MACOS_TARGET',forwarded)
+            self.assertNotIn('GITHUB_SHA',forwarded)
+            for key,badvalue in [('GITHUB_RUN_ID','0'),('GITHUB_RUN_ATTEMPT','secret'),('GITHUB_SHA','b'*40),
+                ('GITHUB_WORKFLOW_SHA','b'*40),('GITHUB_REF','refs/heads/other'),('RUNNER_ARCH','X64')]:
+                altered=dict(env);altered[key]=badvalue
+                with self.subTest(context=key),patch.dict(MODULE.os.environ,altered,clear=True),self.assertRaisesRegex(MODULE.Refused,'android-signed-fixed-installed-context'):
+                    MODULE.normal_context(request)
+
+    def test_android_private_reader_real_originals_post_and_consuming_close(self):
+        # Real tiny files and FD bindings, with only the fixed Mac root mapped to
+        # an isolated private test directory. No actual credential/vendor bytes.
+        native=Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui')
+        real_open,real_close,real_stat=os.open,os.close,os.stat
+        for fault in (None,'ancestor','leaf','fifo','hardlink','close','primary-close','post-close-clock'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as temporary:
+                scratch=Path(temporary);normal=scratch/str(native).lstrip('/');normal.mkdir(parents=True,mode=0o700)
+                for parent in normal.parents:
+                    if parent==scratch: break
+                    parent.chmod(0o700)
+                root=normal/'android-inputs';credentials=root/'credentials';credentials.mkdir(parents=True,mode=0o700);root.chmod(0o700);credentials.chmod(0o700)
+                tools=root/'tools';tools.mkdir(mode=0o700);(tools/'jdk').mkdir(mode=0o755);(tools/'jdk').chmod(0o755)
+                for relative in MODULE.ANDROID_ROOTS.values():
+                    (root/relative).mkdir(mode=0o755);(root/relative).chmod(0o755)
+                data={'upload.jks':b'inert-not-a-key','upload.der':b'inert-not-a-certificate',
+                    'scalars.json':MODULE.encoded(dict(alias='mrk-disposable-android-ui',storePassword='1'*48,keyPassword='2'*48))+b'\n'}
+                for name,body in data.items():
+                    path=credentials/name;path.write_bytes(body);path.chmod(0o600)
+                wire=lambda path:MODULE.decimal(MODULE.saved_version_facts(real_stat(path,follow_symlinks=False)))
+                commands=[dict(role=role,returncode=0,timeoutSeconds=30,roleCapSeconds=30,outputLimitBytes=2097152,
+                    argvSha256='b'*64,stdoutBytes=0,stdoutSha256=hashlib.sha256(b'').hexdigest(),
+                    stderrBytes=0,stderrSha256=hashlib.sha256(b'').hexdigest())
+                    for role in ('android-ui-disposable-jks','android-ui-public-certificate')]
+                doc=dict(schemaVersion=1,scope='one-owned-android-ui-inputs',sourceCommit='a'*40,target=MODULE.ARM_TARGET,
+                    runId='42',runAttempt='1',workflow=MODULE.ANDROID_WORKFLOW,ref=MODULE.ANDROID_REF,
+                    root=str(native/'android-inputs'),rootFacts=wire(root),credentialDirectoryFacts=wire(credentials),
+                    sourceCatalogueSha256=MODULE.ANDROID_CATALOGUE,sourceRosterSha256='c'*64,
+                    publicCertificateSha256=hashlib.sha256(data['upload.der']).hexdigest(),
+                    roots={k:dict(relative=v,facts=wire(root/v))for k,v in MODULE.ANDROID_ROOTS.items()},
+                    files={k:dict(relative='credentials/'+k,facts=wire(credentials/k),sha256=hashlib.sha256(v).hexdigest())for k,v in data.items()},
+                    keyCommands=commands,parentReturncodeRequired=0,
+                    phaseClock=dict(startNs='1',deadlineNs=str(1+1200*10**9),beforePublicationNs='2',postCloseDeadlineRequired=True))
+                handoff=normal/'android-input-fixture.json';handoff.write_bytes(MODULE.encoded(doc)+b'\n');handoff.chmod(0o600)
+                if fault=='fifo':
+                    (credentials/'upload.jks').unlink();os.mkfifo(credentials/'upload.jks',0o600)
+                    doc['credentialDirectoryFacts']=wire(credentials)
+                    handoff.write_bytes(MODULE.encoded(doc)+b'\n')
+                if fault=='hardlink': os.link(credentials/'upload.jks',scratch/'linked')
+                opened,closed,flags=[],[],[]
+                sentinel=ValueError('synthetic primary remains private')
+                def opening(path,mode,*args,**kwargs):
+                    actual=scratch if path=='/' else path
+                    fd=real_open(actual,mode,*args,**kwargs);opened.append(fd);flags.append((path,mode));return fd
+                def stating(path,*args,**kwargs): return real_stat(scratch if path=='/' else path,*args,**kwargs)
+                def closing(fd):
+                    closed.append(fd);real_close(fd)
+                    if fault in ('close','primary-close'): raise OSError('synthetic consuming close')
+                reader=None
+                def check():
+                    if fault=='post-close-clock' and reader is not None and reader.closed: raise ValueError('clock')
+                phase=SimpleNamespace(clock=SimpleNamespace(check=check),environment={MODULE.ANDROID_RUN_ENV:'42',MODULE.ANDROID_ATTEMPT_ENV:'1'})
+                reader=MODULE.AndroidPrivateInputs(phase,'a'*40,native)
+                failure=None
+                with patch.object(MODULE.os,'open',opening),patch.object(MODULE.os,'stat',stating),patch.object(MODULE.os,'close',closing):
+                    try:
+                        with reader:
+                            self.assertEqual((len(reader.fds),len(reader.files)),(18,4))
+                            self.assertEqual(reader.public_certificate,doc['publicCertificateSha256'])
+                            if fault=='ancestor':
+                                (scratch/'Users/runner/work').rename(scratch/'Users/runner/old-work')
+                                (scratch/'Users/runner/work').mkdir(mode=0o700)
+                            elif fault=='leaf':
+                                leaf=credentials/'upload.jks';leaf.write_bytes(b'x'*len(data['upload.jks']))
+                            elif fault=='primary-close': raise sentinel
+                    except BaseException as error: failure=error
+                    finally:
+                        # Safety precedes assertions, including failed __enter__.
+                        reader.close(primary=True)
+                self.assertTrue(reader.closed)
+                self.assertEqual(len(opened),len(closed))
+                self.assertEqual(len(closed),len(set(closed)))
+                self.assertFalse(reader.fds or reader.files or reader.directories)
+                self.assertTrue(all(mode&os.O_NONBLOCK for path,mode in flags if path in ('android-input-fixture.json',*MODULE.ANDROID_PRIVATE_FILES)))
+                if fault is None: self.assertIsNone(failure)
+                elif fault=='primary-close': self.assertIs(failure,sentinel)
+                else:
+                    expected={'ancestor':'android-input-ancestor-post','leaf':'android-input-private-post',
+                        'fifo':'android-input-private-file','hardlink':'android-input-private-file',
+                        'close':'android-input-close-or-clock','post-close-clock':'android-input-close-or-clock'}[fault]
+                    self.assertIsInstance(failure,MODULE.Refused)
+                    self.assertEqual(str(failure),expected)
+
+    def test_android_positive_source_uses_closed_private_role_and_ordinary_ui(self):
+        # Actual new Swift source, not an executable Python model of its reader.
+        source=SWIFT.read_bytes().decode('utf-8')
+        restored=without_positive_android_source(source)
+        self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4')
+        private=source.split('        final class AndroidInputs {',1)[1].split('        // Fixed public XML prerequisite only.',1)[0]
+        for token in ('O_NONBLOCK','descriptors.count == 18','held.count == 14','leaves.count == 4',
+                      'try directoryPost(directory, full: true)','while let fd = descriptors.popLast()',
+                      'scalars.removeAll()','do { try check() } catch { if primary == nil { primary = error } }'):
+            self.assertIn(token,private)
+        for forbidden in ('Process(', 'removeItem', 'unlinkat(', 'chmod(', 'try?'):
+            self.assertNotIn(forbidden,private)
+        journey=source.split('    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {',1)[1].split('    override func tearDown()',1)[0]
+        for token in ('beginCase(seconds: 900, androidPositive: true)','fixture.prepare(.androidSignedBuild)',
+                      'fixture.accept("android-public-certificate")','!register.isEnabled',
+                      '"Discard this source review"','"Recover (full verification)"','"Choose this tool copy"',
+                      '"Start session — keep inputs in memory"','"Keep for this session"','"Assign to this context"',
+                      '"Build, sign and validate"','"retained-local-result','finishAndroidOutputObservation',
+                      '"MRK_MACOS_ANDROID_SIGNED_BUILD_UI="'):
+            # Disposition phrase has its surrounding fixed text.
+            self.assertIn(token if token!='"retained-local-result' else 'Local artifacts: retained-local-result.',journey)
+        self.assertEqual(journey.count('try press(review, "Build, sign and validate"'),1)
+        self.assertNotIn('license.click()',journey)
+        for forbidden in ('"Open encrypted vault"','"Create encrypted vault"','"Register protected tool copy", renderer:',
+                          '"Request system registration"','"Open System Settings"'):
+            self.assertNotIn(forbidden,journey)
+        self.assertLess(journey.index('initialInputs.finish'),journey.index('"Discard session copies"'))
+        self.assertLess(journey.index('"Discard session copies"'),journey.index('finishAndroidOutputObservation'))
+        self.assertLess(journey.index('closeAndroidOriginals'),journey.index('MRK_MACOS_ANDROID_SIGNED_BUILD_UI='))
+        self.assertNotIn('testSyntheticProjectAndroidSignedBuild',str(MODULE.NORMAL_SELECTIONS))
+
     def test_normal_loader_registers_real_dataclasses_and_preserves_original_custody(self):
         name = MODULE.LOADER_MODULE
         self.assertNotIn(name, sys.modules)
@@ -3258,10 +3748,13 @@ class NormalPhaseDataTests(unittest.TestCase):
             (b'fixture: Android output DATA private original root kind differs', 'r136'),
             (b'fixture: Android output DATA private original root descriptor differs', 'r137'),
             (b'fixture: Android output DATA private original root entry differs', 'r138'),
+            (b'fixture: new private root initialization precondition', 'r139'),
+            (b'fixture: new private root group initialization failed', 'r140'),
+            (b'fixture: new private root initialization transition differs', 'r141'),
         )
-        self.assertEqual(len(data_reasons), 137)
-        self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 139) if i != 66])
-        self.assertEqual(len({literal for literal, _ in data_reasons}), 137)
+        self.assertEqual(len(data_reasons), 140)
+        self.assertEqual([code for _, code in data_reasons], [f"r{i:03d}" for i in range(1, 142) if i != 66])
+        self.assertEqual(len({literal for literal, _ in data_reasons}), 140)
         swift = SWIFT.read_text(encoding="utf-8")
         data_swift = swift.split("        static func exerciseAndroidOutputCustodyData() throws {", 1)[1].split(
             "        // A one-case transfer of observation custody", 1)[0]
@@ -3295,6 +3788,46 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertEqual(data_swift.count(expected_root_guards), 1)
         self.assertNotIn('"Android output DATA private original root differs"', data_swift)
         self.assertNotIn("r066", [code for _, code in data_reasons])
+
+        # The real Darwin creation fix retains the final policy rather than
+        # accepting an inherited group. This is SOURCE coverage, not syscall execution.
+        initialize = swift.split("        private static func initializeNewPrivateRootGroup(", 1)[1].split("\n        }\n", 1)[0]
+        self.assertEqual(swift.count("initializeNewPrivateRootGroup("), 3)  # One private definition, two fresh roots.
+        self.assertEqual(swift.count("Darwin.fchown("), 1)
+        self.assertEqual(initialize.count("Darwin.fchown(fd, uid_t.max, group) == 0"), 1)
+        before = initialize.split("            let group = getgid()", 1)[0]
+        for required in ("fd >= 0", "created.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)",
+                         "created.uid == getuid()", "created.mode & 0o7777 == 0o700", "created.flags == 0",
+                         "created == facts(fd)", "created == named(parent, name)"):
+            self.assertIn(required, before)
+        self.assertIn("let changed = created.gid != group\n            if changed {", initialize)
+        self.assertLess(initialize.index("new private root initialization precondition"), initialize.index("Darwin.fchown("))
+        self.assertLess(initialize.index("Darwin.fchown("), initialize.index("let after = try facts(fd)"))
+        self.assertEqual(re.findall(r"created\.(\w+) == after\.(\w+)", initialize),
+            [(field, field) for field in ("device", "inode", "mode", "uid", "flags", "links", "bytes",
+                                         "modifiedSeconds", "modifiedNanoseconds")])
+        self.assertIn("transition = created == after", initialize)
+        self.assertIn("transition && after.gid == group && after == facts(fd) && after == named(parent, name)", initialize)
+        self.assertLess(initialize.index("new private root initialization transition differs"), initialize.index("return after"))
+        for forbidden in ("created.changedSeconds", "created.changedNanoseconds", "open(", "openat(", "Darwin.close(", "fchmod(", "chown(parent", "while ", "try?", "catch"):
+            self.assertNotIn(forbidden, initialize)
+        self.assertIn("var cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil", data_swift)
+        data_initialize = "let initialRoot = try initializeNewPrivateRootGroup(cleanupRoot, parent: temporary, name: rootName, created: createdFacts)"
+        self.assertLess(data_swift.index("let cleanupRoot = openat("), data_swift.index(data_initialize))
+        self.assertLess(data_swift.index(data_initialize), data_swift.index("cleanupFacts = initialRoot"))
+        self.assertLess(data_swift.index("cleanupFacts = initialRoot"), data_swift.index(expected_root_guards))
+        self.assertLess(data_swift.index(expected_root_guards), data_swift.index('for path in ["project", "project/app"'))
+        self.assertIn("expected.sameDirectory(facts(cleanupRoot)) && expected.sameDirectory(named(temporary, rootName))", data_swift)
+        prepare = swift.split("        func prepare(", 1)[1].split("        // Read-only admission BEFORE app launch.", 1)[0]
+        saved_early_return = "if profile == .savedVersionRecovery {\n                try adoptSavedVersion(data, temporary: temporary)\n                return\n            }"
+        self.assertLess(prepare.index(saved_early_return), prepare.index("mkdtemp("))
+        self.assertLess(prepare.index("mkdtemp("), prepare.index("let createdRoot = try adoptDirectory("))
+        self.assertLess(prepare.index('directories[""] = createdRoot'), prepare.index("try Self.initializeNewPrivateRootGroup("))
+        self.assertLess(prepare.index("try Self.initializeNewPrivateRootGroup("), prepare.index("let root = Directory(fd: createdRoot.fd"))
+        self.assertIn("parent: createdRoot.parent, name: createdRoot.name, facts: initialized", prepare)
+        self.assertLess(prepare.index('directories[""] = root'), prepare.index("root.facts.uid == getuid() && root.facts.gid == getgid() && root.facts.mode & 0o7777 == 0o700"))
+        self.assertLess(prepare.index("temporary parent policy refused"), prepare.index("for path in Self.ancestors("))
+        self.assertIn("directory.facts.gid == getgid()", prepare)
 
         def data_marker(scenario="valid", ending=b"\n"):
             return (b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE=v1;scenario=" + scenario.encode()

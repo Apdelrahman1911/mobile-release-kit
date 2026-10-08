@@ -15,6 +15,118 @@ import re
 import unittest
 from pathlib import Path
 
+# Exact regional SOURCE inverse for the separately reviewed positive/private
+# addition. No existing ordinary-owner or historical whole-source hash is relaxed.
+ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
+  71,
+  '18d47688246d2599562ecbd80520613298438449478bcd019b61580c1760e8e5',
+  '        init(seconds: TimeInterval) throws {\n'),
+ (72,
+  73,
+  '90dc136b10da6a35858e66557a61d99462dcc242cc995e75c5b147d84c193909',
+  '            guard now.isFinite, now >= 0, seconds == 60 || seconds == 300,\n'),
+ (366,
+  367,
+  'b42389798fd9f698dbb02bdfba8d28cad7da3a646fc8303cf46303291909c364',
+  '    @MainActor private func beginCase(seconds: TimeInterval) throws {\n'),
+ (368,
+  369,
+  'dfc5996fc7856f951a5b859e0107475a7414a7afa54d08bde50285169cecf622',
+  '        let clock = try CaseClock(seconds: seconds)\n'),
+ (1056,
+  1057,
+  '53609dc044126f2020ad5eba2bc00dbce2d9dbdf257630ab0bdea8a720ca3dde',
+  '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, '
+  'savedVersionRecovery }\n'),
+ (1122, 1123, 'ee6ff2553dbc2086998719aa34f1e6d7490f586e97597e3e6714ba3a95e88e03', ''),
+ (1148, 1179, 'dfec62301b87370dbba26f83e97d5b71e2ea981616fc1c6c0ff3f3c7448d586a', ''),
+ (1244, 1598, 'e7ad67290bdf488bf83f6d914fd9f0a54b0b1889e5ab3f359a5a054ef574d749', ''),
+ (1716,
+  1717,
+  'd87ff8a55c8b4c0a6e25ccf9ab145f62a9d80b38f845ad0e355fe69eed6ecf3e',
+  '        // Fixed positive Android output custody. No current Profile enters it.\n'),
+ (1797,
+  1799,
+  '6b52423d9031f297094cfd7ac7804f4600b926ede04e6cf8b668f9108d482de9',
+  '            try Self.need(androidOutput == nil && acceptedStages.isEmpty,\n'),
+ (2088,
+  2089,
+  '1a7e02c89ffac69c14e9b959b07d02f6412b54ab6e992b7acc0e7fef9c27a5d7',
+  '                let cleanupFacts: StatFacts? = rootNamed == 0 ? StatFacts(createdRoot) : nil\n'),
+ (2172,
+  2179,
+  '6cc28f4048a9ba7524c8ad428d856ca3c1a76d6b72997fd86104812c79bfdfc6',
+  '                    catch Refusal.condition(let message) { observed = message == "fixture: " + reason }\n'),
+ (2183,
+  2193,
+  '69ab0671ac44cc263a23bdfab0de21f66c78c214dd5b36101be90745c0867ef7',
+  '                    guard let initialRoot = cleanupFacts else { throw Refusal.condition("fixture: Android DATA '
+  'created root facts absent") }\n'
+  '                    try need(initialRoot.mode & 0o7777 == 0o700 && initialRoot.uid == getuid()\n'
+  '                        && initialRoot.gid == getgid() && initialRoot.flags == 0\n'
+  '                        && initialRoot.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)\n'
+  '                        && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),\n'
+  '                        "Android output DATA private original root differs")\n'),
+ (2362,
+  2366,
+  '8ee7a52613fd69c28a82a3bcf3f796cf5b75c525a1f9fbadfdb6d771280037b0',
+  '                if let primary { throw primary }\n'),
+ (2549,
+  2551,
+  '53e07f82570af9005a9512df66fea819c81413d6eb19eda20bdda68ec624e363',
+  '            let resourceName = projectData ? "normal-project-v1" : "normal-persistence-v1"\n'),
+ (2577, 2582, 'f843744260a518c433e5249e14de36aeecefc75b6aa14c52a287b2e79d395c88', ''),
+ (2583,
+  2584,
+  '846b4564aff220f9be648fe74fd4f7578743414f272cc87ecd86c615fd43607b',
+  '            let stagePaths: [String: Set<String>] = projectData ? [\n'),
+ (2587,
+  2588,
+  '768924e1546bba885fa35244665c03e830a5d34dbafd24bc6f521115c402781d',
+  '            let expectedOriginals = projectData ? Self.originals : Self.persistenceOriginals\n'),
+ (2590,
+  2591,
+  '292e59ef36b3ab8683b2eadbe6daad8901a7e016b96ae82135397e6934dee655',
+  '                && (projectData ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'),
+ (2603, 2610, '2062c0e8796cbbe10fc9fb0fc0ce260a5258e06bc905993b31881b2758b05960', ''),
+ (2703,
+  2704,
+  '5348ad9f129c9675f97a29b18dc87ee3c35c33ce56a3acd87e9a7d16b20544ae',
+  '            let root = try adoptDirectory(openat(temporary.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | '
+  'O_CLOEXEC),\n'),
+ (2705,
+  2710,
+  '1c512d2679edae9eb9f4db1127ae42eeb3f4e259c2d8e688275718569035c807',
+  '            directories[""] = root\n'),
+ (2742,
+  2743,
+  '683c9580e49ee032acc891b3accf807fdb313b618a444bae5cb76faa012fe78e',
+  '                let saved = try read(path)\n'),
+ (2891, 2897, '47fcb4f08a6315201fbe7551174aff00cf554aeeae5ea7ffb80537605aa2755e', ''),
+ (2899,
+  2901,
+  '330373cd0cb8ea89fc9f5eb6d0c41674e20da54dad89fa27c985c74b0432cb01',
+  '                let old = current[path]!, observed = try read(path)\n'),
+ (2921,
+  2922,
+  '92d403fa15562aab3c92fe0e5d78a9893a1f7dd0f440dd6a8614dc2548c60e31',
+  '                let observed = try read(path)\n'),
+ (2981, 2982, 'd044507984e3652c3ae6eda02752f307ceb65e38a6a8b5f81b3cf40440d6d6df', ''),
+ (4698, 4980, 'e71e33dd58d87777aeb8658cb7b7882ce323b89ebd98e9a441018f67a5d1ca0a', ''),
+ (5002, 5012, '1370af131a521e62e1f81d1a2a8ecc3e595711ec9bd8c754b6d9ad212d982dbc', ''))
+
+def without_positive_android_source(source):
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, original in reversed(ANDROID_POSITIVE_SWIFT_INVERSE):
+        observed = ''.join(rows[start:end])
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('positive Android exact SOURCE region differs')
+        rows[start:end] = original.splitlines(keepends=True)
+    value = ''.join(rows)
+    if hashlib.sha256(value.encode()).hexdigest() != '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4':
+        raise AssertionError('positive Android inverse changed ordinary SOURCE')
+    return value
+
 ROOT = Path(__file__).absolute().parents[2]
 SWIFT = "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"
 FIXTURE = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json"
@@ -632,7 +744,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         return block
 
     def test_normal_saved_offline_and_empty_recovery_use_original_gui_only(self):
-        swift = self.restored_semantic_heading_queries(self.restored_engineering_main((ROOT / SWIFT).read_text()))
+        swift = self.restored_semantic_heading_queries(self.restored_engineering_main(without_positive_android_source((ROOT / SWIFT).read_text())))
         block = self.checked_saved_checks_block(swift)
         offline = block.split('@MainActor func testSyntheticProjectSavedOfflineChecks() throws {', 1)[1]
         offline, recovery = offline.split('@MainActor func testSyntheticProjectEmptyBuildInputInspection() throws {', 1)
@@ -786,7 +898,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
         # Additional exact singleton, not a claim that idle build-input recovery
         # above covered an interrupted saved-file transaction.
-        actual_swift = (ROOT / SWIFT).read_text()
+        actual_swift = without_positive_android_source((ROOT / SWIFT).read_text())
         journey = actual_swift.split('    @MainActor func testSyntheticProjectSavedVersionRecovery() throws {', 1)[1].split(
             '    @MainActor func testSyntheticProjectManagedWorkflowRefusal()', 1)[0]
         for token in ('try beginCase(seconds: 300)', 'fixture.prepare(.savedVersionRecovery)', 'try launchForJourney()',
@@ -855,7 +967,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn('files["project/.gitignore"] = decode(spec["stages"]["config"]["project/.gitignore"])', runner)
 
     def checked_diagnostics_source(self) -> tuple[str, str]:
-        swift = self.restored_semantic_heading_queries(self.restored_engineering_main((ROOT / SWIFT).read_text()))
+        swift = self.restored_semantic_heading_queries(self.restored_engineering_main(without_positive_android_source((ROOT / SWIFT).read_text())))
         # Require only the two accepted paired-host compile substitutions;
         # historical semantic/owner bytes remain under their original hash.
         for old, current in (('#if !os(macOS) || !arch(arm64)\n#error("This external UI scenario requires a fresh hosted ARM64 macOS 26 job.")\n', '#if !os(macOS) || !(arch(arm64) || arch(x86_64))\n#error("This external UI scenario requires a fresh hosted native64 macOS 26 job.")\n'), ('        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n', '        #if arch(arm64)\n        let hostedJob = "github-hosted-macos26-arm64"\n        #elseif arch(x86_64)\n        let hostedJob = "github-hosted-macos26-x86_64"\n        #endif\n        try require(context["MRK_NORMAL_UI_HOSTED_JOB"] == hostedJob,\n')):
@@ -879,7 +991,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_renderer_readiness_preserves_one_query_and_current_baseline(self):
         self.checked_diagnostics_source()
-        source = self.restored_engineering_main((ROOT / SWIFT).read_text())
+        source = self.restored_engineering_main(without_positive_android_source((ROOT / SWIFT).read_text()))
         original, semantic, count = SEMANTIC_HEADING_LINES[0]
         self.assertEqual(count, 1)
         restart_original, restart_semantic, restart_count = SEMANTIC_HEADING_LINES[-1]
@@ -899,7 +1011,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         # The new smoke is a separate private profile. Restore only its exact
         # reviewed regions, then retain EVERY historical ordinary-source pin
         # and negative query mutation above. These are SOURCE checks, not UI.
-        engineering_source = (ROOT / SWIFT).read_text()
+        engineering_source = without_positive_android_source((ROOT / SWIFT).read_text())
         begin = engineering_source.index(ENGINEERING_MAIN_BEGIN)
         end = engineering_source.index(ENGINEERING_MAIN_END) + len(ENGINEERING_MAIN_END)
         engineering = engineering_source[begin:end]
