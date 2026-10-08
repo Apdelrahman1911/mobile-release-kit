@@ -20,8 +20,10 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    # Closed SOURCE selection, not additive UI work: default preview345,
-    # recovery preview339 / installed210, cleanup included, plus5min overhead.
+    # Timed-step union445min; SOURCE scopes select disjoint UI work.
+    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.
+    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.
+    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -56,6 +58,10 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.
+      MRK_MACOS_ANDROID_UI_SCOPE: disabled
+      # Separately reviewed unsigned archive UI; an installed app is still mandatory.
+      MRK_MACOS_IOS_UI_SCOPE: disabled
       # A separate reviewed SOURCE change selects the targeted recovery run.
       # Default seven cases and the singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven
@@ -83,6 +89,17 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          case "$MRK_MACOS_ANDROID_UI_SCOPE" in
+            disabled|android-signed-build) ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_IOS_UI_SCOPE" in
+            disabled) ;;
+            ios-unsigned-archive)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
           case "$MRK_MACOS_TARGET" in
             aarch64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26 && "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
@@ -588,7 +605,7 @@ jobs:
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
         timeout-minutes: 9
         shell: bash
         env:
@@ -910,6 +927,7 @@ jobs:
           set -o noclobber
           umask 077
           work='${{ steps.work.outputs.root }}'
+          target='${{ matrix.target }}'
           [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1
           # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
@@ -923,7 +941,7 @@ jobs:
             --url 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar' \
             > "$work/aapt2-8.9.2-12782657-osx.jar"
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
-            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$MRK_MACOS_TARGET" \
+            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \
             --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
             > "$work/android-support-result.json"
       - name: Require the fixed SOURCE producer identity and release before ordinary signing
@@ -1530,6 +1548,7 @@ jobs:
           # actual original0/status and the retained closed receipt, not a flag.
 
       - name: Standard Installer only is privileged; never execute the app or Python as root
+        id: package_install
         timeout-minutes: 18
         shell: bash
         env:
@@ -1562,6 +1581,486 @@ jobs:
           # saved Installer0, same-request readback and known detach permit use.
           # Unknown resources remain retained; no forced detach or root Python.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Prepare fresh private Android UI suppliers and disposable key inputs
+        id: normal_android_inputs
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          # Exactly four fresh vendor-mode suppliers and two disposable keytool
+          # originals share the existing1200s owner. No A/B tree, Gradle probe,
+          # signing secret, vendor acknowledgement or protected registration.
+          # The closed handoff is NOT the outer original's completion proof.
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=C LC_ALL=C TZ=UTC \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" "MRK_ANDROID_PREPARATION_WORK=$MRK_MACOS_WORK" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-ui-inputs \
+            > "$MRK_MACOS_WORK/normal-ui/android-inputs.stdout" 2> "$MRK_MACOS_WORK/normal-ui/android-inputs.stderr"
+          inputs_status=$?
+          printf '%s\n' "$inputs_status" > "$MRK_MACOS_WORK/normal-ui/android-inputs.status"
+          inputs_status_saved=$?
+          set -e
+          if [[ "$inputs_status" != 0 ]]; then exit "$inputs_status"; fi
+          [[ "$inputs_status_saved" == 0 ]] || exit 1
+          # This actual0 includes original POST/consuming closes/final endpoint.
+          # Private inputs and receipts remain confined, including on failure.
+
+      - name: Exercise one ordinary signed Android build with current private inputs
+        id: normal_android_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 23
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The fixed parent freshly admits private inputs and this exact run;
+          # env strings and a handoff are never original-caller authorization.
+          # No vendor-license click, service approval or copy registration.
+          # An independently lawful current copy is a prerequisite, not a skip.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-android-signed-build-test \
+            > "$MRK_MACOS_WORK/normal-ui/android-signed-build-test.log" 2>&1
+          android_test_status=$?
+          printf '%s\n' "$android_test_status" > "$MRK_MACOS_WORK/normal-ui/android-signed-build-test.status"
+          android_test_status_saved=$?
+          set -e
+          if [[ "$android_test_status" != 0 ]]; then exit "$android_test_status"; fi
+          [[ "$android_test_status_saved" == 0 ]] || exit 1
+          # One900s case /1020s original /1245s phase. Raw logs, xcresult and
+          # the complete admission (including stream hashes) remain PRIVATE.
+
+      - name: Bind the single Android journey to current installed originals only
+        id: normal_android_ui_result
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-android-signed-build-summary \
+            > "$MRK_MACOS_WORK/normal-ui/android-signed-build-summary.json" 2> "$MRK_MACOS_WORK/normal-ui/android-signed-build-summary.stderr"
+          android_summary_status=$?
+          printf '%s\n' "$android_summary_status" > "$MRK_MACOS_WORK/normal-ui/android-signed-build-summary.status"
+          android_summary_status_saved=$?
+          set -e
+          if [[ "$android_summary_status" != 0 ]]; then exit "$android_summary_status"; fi
+          [[ "$android_summary_status_saved" == 0 ]] || exit 1
+          set +e
+          "$MRK_PYTHON" -I -S -B - <<'PY_ANDROID_INSTALLED_RESULT' > "$MRK_MACOS_WORK/normal-ui/android-signed-build-result.log" 2>&1
+          import hashlib, json, os, re, stat, sys, time, types
+          from pathlib import Path
+
+          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          TARGET = 'aarch64-apple-darwin'
+          env = dict(os.environ)
+          root = Path(env['MRK_MACOS_WORK'])
+          normal = root / 'normal-ui'
+          source = env['GITHUB_SHA']
+          run, attempt = env['GITHUB_RUN_ID'], env['GITHUB_RUN_ATTEMPT']
+          last = time.monotonic_ns()
+          deadline = last + 60 * 10**9
+          held, directories, originals = [], {}, {}
+          primary = None
+
+          def need(condition, reason):
+              if not condition: raise ValueError(reason)
+
+          def clock():
+              global last
+              now = time.monotonic_ns()
+              need(last <= now < deadline, 'ui-data-deadline')
+              last = now
+
+          def nine(info):
+              return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                      info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+          def unique(rows):
+              need(len(rows) <= 4096 and len({key for key, _ in rows}) == len(rows), 'ui-duplicate-fields')
+              return dict(rows)
+
+          def document(body):
+              def nonfinite(_): raise ValueError('ui-json-number')
+              def finite(value):
+                  number = float(value)
+                  need(number != float('inf') and number != -float('inf'), 'ui-json-number')
+                  return number
+              value = json.loads(body, object_pairs_hook=unique, parse_constant=nonfinite, parse_float=finite)
+              need(type(value) is dict, 'ui-json-object')
+              return value
+
+          def sha(body):
+              return hashlib.sha256(body).hexdigest()
+
+          def directory(path):
+              clock()
+              if path in directories: return directories[path]
+              need(path.is_absolute() and len(path.parts) <= 24 and '..' not in path.parts, 'ui-fixed-path')
+              parent = directory(path.parent) if path != Path('/') else None
+              fd = os.open(path.name if parent else '/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                           dir_fd=None if parent is None else parent['fd'])
+              row = dict(fd=fd, parent=parent, name=path.name if parent else '/', before=None, body=None)
+              held.append(row)  # Adopt before fstat.
+              before = nine(os.fstat(fd))
+              need(stat.S_ISDIR(before[2]) and before[3] in (0, os.getuid()) and not before[2] & 0o022,
+                   'ui-directory-policy')
+              row['before'] = before[:5]
+              need(nine(os.stat(row['name'], dir_fd=None if parent is None else parent['fd'],
+                                follow_symlinks=False))[:5] == row['before'], 'ui-directory-original')
+              directories[path] = row
+              return row
+
+          def original(path, limit):
+              clock()
+              need(type(limit) is int and 0 < limit <= 2 << 20, 'ui-read-limit')
+              if path in originals:
+                  row = originals[path]
+                  need(len(row['body']) <= limit, 'ui-original-limit')
+                  return row['body']
+              parent = directory(path.parent)
+              fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=parent['fd'])
+              row = dict(fd=fd, parent=parent, name=path.name, before=None, body=None)
+              held.append(row)
+              before = nine(os.fstat(fd))
+              need(stat.S_ISREG(before[2]) and before[3:5] == (os.getuid(), os.getgid()) and before[5] == 1
+                   and not before[2] & 0o022 and 0 < before[6] <= limit, 'ui-file-policy')
+              need(nine(os.stat(path.name, dir_fd=parent['fd'], follow_symlinks=False)) == before, 'ui-file-pre')
+              chunks = []
+              for offset in range(0, before[6], 65536):
+                  clock()
+                  part = os.pread(fd, min(65536, before[6] - offset), offset)
+                  need(len(part) == min(65536, before[6] - offset), 'ui-original-short')
+                  chunks.append(part)
+              need(not os.pread(fd, 1, before[6]) and nine(os.fstat(fd)) == before
+                   == nine(os.stat(path.name, dir_fd=parent['fd'], follow_symlinks=False)), 'ui-original-post')
+              row.update(before=before, body=b''.join(chunks))
+              originals[path] = row
+              return row['body']
+
+          def original_post():
+              for row in held:
+                  clock()
+                  parent_fd = None if row['parent'] is None else row['parent']['fd']
+                  current, named = nine(os.fstat(row['fd'])), nine(os.stat(row['name'], dir_fd=parent_fd, follow_symlinks=False))
+                  if row['body'] is None:
+                      need(current[:5] == named[:5] == row['before'], 'ui-parent-post')
+                  else:
+                      need(current == named == row['before'], 'ui-file-post')
+                      body = row['body']
+                      for offset in range(0, len(body), 65536):
+                          clock()
+                          need(os.pread(row['fd'], min(65536, len(body) - offset), offset) == body[offset:offset + 65536],
+                               'ui-bytes-post')
+                      need(not os.pread(row['fd'], 1, len(body)) and nine(os.fstat(row['fd'])) == row['before']
+                           == nine(os.stat(row['name'], dir_fd=parent_fd, follow_symlinks=False)), 'ui-eof-post')
+
+          def package_originals(rows, roles, *, credentials=False):
+              need(type(rows) is list and len(rows) == len(roles), 'ui-original-count')
+              for row, role in zip(rows, roles, strict=True):
+                  flags = ('entered', 'returned', 'settled') if credentials else ('entered', 'returned', 'capturesSettled')
+                  key = 'status' if credentials else 'returncode'
+                  allowed = (0, 1) if not credentials and role in ('installer-log-cursor', 'installer-log-capture') else (0,)
+                  need(type(row) is dict and row.get('role') == role and all(row.get(flag) is True for flag in flags)
+                       and type(row.get(key)) is int and row[key] in allowed, 'ui-original-result')
+
+          try:
+              need(re.fullmatch('/Users/runner/work/_temp/mrk-macos-installed[.][A-Za-z0-9]{8}', str(root))
+                   and os.getuid() != 0 and Path.cwd() == SOURCE and env['GITHUB_WORKSPACE'] == str(SOURCE)
+                   and env['GITHUB_REPOSITORY'] == 'Apdelrahman1911/mobile-release-kit'
+                   and env['GITHUB_EVENT_NAME'] == 'push'
+                   and env['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-installed'
+                   and env['GITHUB_WORKFLOW_REF'] == 'Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed'
+                   and re.fullmatch('[0-9a-f]{40}', source) and source == env['GITHUB_WORKFLOW_SHA'] == env['MRK_EXPECTED_SHA']
+                   and all(re.fullmatch('[1-9][0-9]{0,19}', value) for value in (run, attempt))
+                   and env['MRK_MACOS_TARGET'] == TARGET
+                   and env['MRK_MACOS_ANDROID_UI_SCOPE'] == 'android-signed-build', 'ui-current-context')
+              for path in (root, normal):
+                  item = directory(path)
+                  need(item['before'][3:5] == (os.getuid(), os.getgid()) and stat.S_IMODE(item['before'][2]) == 0o700,
+                       'ui-private-parent')
+              for name in ('normal-build.status', 'package-finalization.status', 'package-install.status', 'installer-output.status',
+                           'normal-ui/build.status', 'normal-ui/android-inputs.status',
+                           'normal-ui/android-signed-build-test.status', 'normal-ui/android-signed-build-summary.status'):
+                  need(original(root / name, 4) == b'0\n', 'ui-actual-original-status')
+              binding = document(original(root / 'source-binding.json', 65536))
+              inventory = document(original(root / 'source-inventory.json', 2 << 20))
+              need(binding.get('source') == binding.get('workflowSource') == inventory.get('source') == source
+                   and binding.get('runId') == run and binding.get('runAttempt') == attempt
+                   and binding.get('target') == TARGET and binding.get('packageRole') == 'ordinary-image'
+                   and binding.get('scope') == 'engineering-acl-probe-five-regressions-fixed-fixture-package-install-only'
+                   and binding.get('workDirectory') == [directory(root)['before'][0], directory(root)['before'][1], os.getuid()]
+                   and type(binding.get('tree')) is str and re.fullmatch('[0-9a-f]{40}', binding['tree'])
+                   and binding['tree'] == inventory.get('tree'), 'ui-source-binding')
+              rows = inventory.get('files')
+              need(type(rows) is list and 0 < len(rows) <= 4096 and all(type(row) is dict and type(row.get('path')) is str for row in rows)
+                   and len({row['path'] for row in rows}) == len(rows), 'ui-source-roster')
+              rows = {row['path']: row for row in rows}
+              def source_body(relative):
+                  row = rows.get(relative)
+                  need(type(row) is dict and row.get('gitMode') == '100644' and type(row.get('size')) is int
+                       and 0 < row['size'] <= 2 << 20, 'ui-source-row')
+                  body = original(SOURCE / relative, row['size'])
+                  need(len(body) == row['size'] and sha(body) == row.get('sha256')
+                       and hashlib.sha1(b'blob ' + str(len(body)).encode() + b'\0' + body).hexdigest() == row.get('blob'),
+                       'ui-source-original')
+                  return body
+              modules = []
+              for name, relative in (('mrk_android_ui_normal', 'desktop/tools/macos_normal_ui_runner.py'),
+                                     ('mrk_android_ui_stager', 'desktop/tools/stage_macos_installed.py'),
+                                     ('mrk_android_ui_package', 'desktop/tools/macos_android_helper_package.py')):
+                  need(name not in sys.modules, 'ui-source-module-collision')
+                  body = source_body(relative)
+                  module = types.ModuleType(name); module.__file__ = str(SOURCE / relative)
+                  sys.modules[name] = module
+                  exec(compile(body, module.__file__, 'exec'), module.__dict__)
+                  modules.append(module)
+              N, S, P = modules
+              release_raw = source_body('desktop/macos-installed-inputs/build-release.json')
+              release = S.build_release_data(release_raw, target=TARGET)
+              owner_raw = original(root / 'android-helper-package-install.json', 16384)
+              owner = document(owner_raw)
+              observed = document(original(root / 'installation-observation.json', 65536))
+              final_raw = original(root / 'android-helper-finalize-package.json', 16384)
+              need(type(owner.get('schemaVersion')) is int and owner['schemaVersion'] == 1 and owner.get('phase') == 'package-install'
+                   and owner.get('target') == TARGET and owner.get('packageRole') == 'ordinary-image'
+                   and all(owner.get(key) == env[variable] for key, variable in (('source', 'GITHUB_SHA'), ('workflowSource', 'GITHUB_WORKFLOW_SHA'),
+                       ('workflow', 'GITHUB_WORKFLOW_REF'), ('runId', 'GITHUB_RUN_ID'), ('runAttempt', 'GITHUB_RUN_ATTEMPT')))
+                   and owner.get('imageSourceCommit') == source and owner.get('imageReleaseId') == release['release']
+                   and owner.get('imageReleaseSourceSha256') == sha(release_raw)
+                   and all(owner.get(key) is True for key in ('passed', 'targetRetired', 'originalClosesKnown', 'outerFinalityRequired'))
+                   and owner.get('cleanupErrors') == [] and owner.get('directStagerIOPending') is None
+                   and owner.get('finalPackageReceiptSha256') == sha(final_raw), 'ui-current-package-owner')
+              package_originals(owner.get('originalCalls'), S.PACKAGING_CALL_ROLES)
+              package_originals(owner.get('credentialOriginals'), ('producer-adhoc', 'producer-adhoc-verify', 'producer-cdhash')
+                  + (P.CREDENTIAL_ROLES[:17] + ('search-final', 'default-after')) * 3, credentials=True)
+              contexts = owner.get('credentialContexts')
+              need(type(contexts) is list and len(contexts) == 3 and all(type(row) is dict for row in contexts)
+                   and tuple(row.get('purpose') for row in contexts) == ('producer', 'distribution-image', 'observation-image')
+                   and all(all(row.get(key) is True for key in ('retired', 'closed', 'searchRestored', 'defaultUnchanged')) for row in contexts),
+                   'ui-package-credential-closes')
+              need(owner.get('packageMount') == {'attachEntered': True, 'originalKnown': True, 'detached': True, 'retained': False,
+                   'installerEntered': True, 'installerOriginalZero': True, 'sameRequestV2Readback': True, 'systemServiceExitClaimed': False}
+                   and all(type(value) is bool for value in owner['packageMount'].values()), 'ui-package-mount')
+              distribution = owner.get('distribution')
+              need(type(distribution) is dict and type(distribution.get('schemaVersion')) is int and distribution['schemaVersion'] == 1
+                   and distribution.get('kind') == 'mrk-ordinary-package-observed-v2' and distribution.get('target') == TARGET
+                   and distribution.get('release') == release['release'] and distribution.get('packageVersion') == release['packageVersion']
+                   and type(distribution.get('packageBytes')) is int and 0 < distribution['packageBytes'] <= 512 << 20
+                   and S.maintenance_hex(distribution.get('packageSha256'), 64)
+                   and all(distribution.get(key) is True for key in ('originalInstallerReturnedZero', 'sameRequestV2Readback',
+                        'originalMountDetached', 'groupEndpointMet', 'originalOuterReturnRequired')), 'ui-package-distribution')
+              request = distribution.get('requestId')
+              need(S.maintenance_hex(request, 32) and original(root / 'package-request-id.txt', 33) == (request + '\n').encode(),
+                   'ui-package-request')
+              need(type(observed.get('schemaVersion')) is int and observed['schemaVersion'] == 2 and observed.get('requestId') == request
+                   and observed.get('sourceCommit') == source and observed.get('release') == release['release']
+                   and observed.get('completedPackageSha256') == distribution['packageSha256']
+                   and observed.get('originalInstallerReturnedZero') is True and observed.get('originalWriterJoined') is True
+                   and observed.get('historicalOuterExit') == 'unverified' and observed.get('applicationLaunched') is False
+                   and observed.get('guiSaveQualified') is False
+                   and observed.get('inventorySha256') == env['MRK_MACOS_INSTALL_INVENTORY_SHA256']
+                   and observed.get('runtimeManifestSha256') == binding.get('runtimeManifestSha256') == env['MRK_BUNDLED_RUNTIME_MANIFEST_SHA256'],
+                   'ui-same-request-readback')
+              nested = S.maintenance_result_data(S.canonical(observed.get('originalInstallerResult')) + b'\n', request)
+              need(nested['invocation'] == observed.get('invocation'), 'ui-installer-original-invocation')
+              descriptor = original(root / 'producer-root/producer.json', 16384)
+              signature = original(root / 'producer-root/producer.sig', 4096)
+              producer = S.maintenance_producer_data(descriptor, target=TARGET)
+              current = producer['releaseSet']['current']
+              need(current['sourceCommit'] == source and current['release'] == release['release']
+                   and current['packageVersion'] == release['packageVersion'] and current['protocolSha256'] == S.CURRENT_PROTOCOL
+                   and current['inventorySha256'] == observed['inventorySha256'] and current['runtimeManifestSha256'] == observed['runtimeManifestSha256']
+                   and current['packageSha256'] == distribution['packageSha256']
+                   and distribution.get('descriptorSha256') == sha(descriptor) and distribution.get('signatureSha256') == sha(signature),
+                   'ui-current-producer-binding')
+              signing = S.packaging_signing_data(source_body('desktop/packaging/macos-install-producer-signing.profile'),
+                                               source_body('desktop/packaging/macos-android-service-signing.profile'))
+              need(distribution.get('sourceProducerProfileSha256') == signing.producer_sha256
+                   and distribution.get('sourceServiceProfileSha256') == signing.service_sha256, 'ui-package-source-profiles')
+              installer_profile = source_body('desktop/packaging/macos-installer-signing.json')
+              installer_selection = P.installer_profile(installer_profile)
+              need(installer_selection is not None, 'ui-configured-installer-source')
+              P.final_package_receipt(final_raw, env, TARGET, installer_selection, sha(installer_profile),
+                  sha(source_body('desktop/packaging/macos-notary-service.json')), distribution['packageBytes'], distribution['packageSha256'],
+                  release['release'], sha(release_raw))
+              audit = document(original(root / 'package-audit.json', 16384))
+              need(audit.get('packageSha256') == distribution['packageSha256'] and type(audit.get('packageSize')) is int
+                   and audit['packageSize'] == distribution['packageBytes'] and audit.get('packageIdentifier') == 'dev.mobile-release-kit.desktop.installed'
+                   and audit.get('qualification') == 'scripts-only-package-audited-not-installed-or-GUI-qualified', 'ui-package-audit')
+              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', 16384)),
+                                             source=source, run=run, attempt=attempt)
+              build = document(original(normal / 'build.command-admission.json', 32768))
+              test = document(original(normal / 'android-signed-build-test.runner-admission.json', 32768))
+              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', 32768))
+              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, attempt=attempt)
+              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)
+              summary_data = document(summary_raw)
+              counts = {'totalTestCount': 1, 'passedTests': 1, 'failedTests': 0, 'skippedTests': 0, 'expectedFailures': 0}
+              need(all(type(summary_data.get(key)) is int and summary_data[key] == count for key, count in counts.items())
+                   and summary['commands'][1]['stdoutBytes'] == len(summary_raw)
+                   and summary['commands'][1]['stdoutSha256'] == sha(summary_raw), 'ui-exact-original-one-pass')
+              value = {'schemaVersion': 1, 'scope': 'ordinary-installed-one-android-signed-build-ui', 'target': TARGET,
+                  'applicationSourceCommit': source, 'harnessSourceCommit': source, 'sourceTree': binding['tree'],
+                  'workflow': '.github/workflows/desktop-macos-installed.yml', 'runId': run, 'runAttempt': attempt,
+                  'packageSha256': distribution['packageSha256'], 'packageBytes': distribution['packageBytes'],
+                  'runtimeManifestSha256': observed['runtimeManifestSha256'], 'installerInventorySha256': observed['inventorySha256'],
+                  'originalCommandStatuses': {'packageInstall': 0, 'installer': 0, 'supplier': 0, 'build': 0, 'test': 0, 'summary': 0},
+                  'testIdentifier': 'MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild', 'testCounts': counts,
+                  'observation': facts, 'resultOriginalReturncodeRequired': 0, 'privateInputsPublished': False,
+                  'vendorAcknowledgementAutomated': False, 'newProtectedCopyRegistered': False,
+                  'cleanExitStatus': None, 'allWorkerFinality': 'not-established-by-XCTest-UI-state',
+                  'fullUIQualified': False, 'distributionQualified': False, 'productReady': False}
+              body = N.encoded(value) + b'\n'
+              need(len(body) <= 16384, 'ui-public-envelope-bound')
+              original_post()
+              N.exclusive_output(normal / 'android-signed-build-result.json', body, 16384)
+              original_post()
+          except BaseException as error:
+              primary = error
+          finally:
+              # Actual0 must follow all consuming closes.
+              closing, held[:] = held[:], []
+              for row in reversed(closing):
+                  try: os.close(row['fd'])
+                  except BaseException as error:
+                      if primary is None: primary = error
+              try: clock()
+              except BaseException as error:
+                  if primary is None: primary = error
+          if primary is not None: raise primary
+          PY_ANDROID_INSTALLED_RESULT
+          android_result_status=$?
+          printf '%s\n' "$android_result_status" > "$MRK_MACOS_WORK/normal-ui/android-signed-build-result.status"
+          android_result_status_saved=$?
+          set -e
+          if [[ "$android_result_status" != 0 ]]; then exit "$android_result_status"; fi
+          [[ "$android_result_status_saved" == 0 ]] || exit 1
+
+      - name: Exercise one ordinary unsigned iOS archive and normal Quit
+        id: normal_ios_ui_test
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == ios-unsigned-archive ]] || exit 1
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          # Actual same-job installed producer and fresh external-runner originals
+          # are required above. No engineering app, signing substitute, SDK
+          # download, test key or product operation is introduced by this wrapper.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-unsigned-archive-test \
+            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1
+          ios_test_status=$?
+          printf '%s\n' "$ios_test_status" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"
+          ios_test_status_saved=$?
+          set -e
+          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi
+          [[ "$ios_test_status_saved" == 0 ]] || exit 1
+          # One900s case /1020s original /1245s phase; success observation must
+          # latch by750s. The same original reserve is for failure/cancel/close,
+          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.
+
+      - name: Observe the single unsigned iOS XCTest summary under the same source
+        id: normal_ios_ui_summary
+        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == ios-unsigned-archive ]] || exit 1
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          # Actual same-job installed producer and fresh external-runner originals
+          # are required above. No engineering app, signing substitute, SDK
+          # download, test key or product operation is introduced by this wrapper.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-unsigned-archive-summary \
+            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"
+          ios_summary_status=$?
+          printf '%s\n' "$ios_summary_status" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"
+          ios_summary_status_saved=$?
+          set -e
+          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi
+          [[ "$ios_summary_status_saved" == 0 ]] || exit 1
+          # The existing summary owner requires actual1/1 with no failure/skip.
+          # Its closed source/command receipt plus the separately retained test0
+          # and facts are evidence, never IPA/signing/distribution qualification.
+
       - name: Notarize, staple and verify only the final user image
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
         timeout-minutes: 32
@@ -3356,6 +3855,21 @@ jobs:
           name: desktop-macos-installed-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ format('{0}/source-binding.json
+            {0}/normal-ui/android-inputs.status
+            {0}/normal-ui/android-input-status.json
+            {0}/prepare-ui-inputs-failure.json
+            {0}/normal-ui/android-signed-build-test.status
+            {0}/normal-ui/android-signed-build-summary.status
+            {0}/normal-ui/android-signed-build-result.status
+            {0}/normal-ui/android-signed-build.facts.json
+            {0}/normal-ui/android-signed-build-result.json
+            {0}/normal-ui/ios-unsigned-archive-test.status
+            {0}/normal-ui/ios-unsigned-archive-summary.status
+            {0}/normal-ui/ios-unsigned-archive.facts.json
+            {0}/normal-ui/ios-unsigned-archive-test.runner-admission.json
+            {0}/normal-ui/ios-unsigned-archive-summary.command-admission.json
+            {0}/normal-ui/ios-unsigned-archive-test.failure-diagnostics.json
+            {0}/normal-ui/ios-unsigned-archive-summary.failure-diagnostics.json
             {0}/effective-rust-toolchain.json
             {0}/source-inventory.json
             {0}/data-contracts/mount.stdout

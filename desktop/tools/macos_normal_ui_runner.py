@@ -371,7 +371,7 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
@@ -380,11 +380,14 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
          and target == ARM_TARGET and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
          and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-selection")
-    need(android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
+         and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and Path(result).name == IOS_UNSIGNED_RESULT)),
+         "ios-unsigned-fixed-test-selection")
+    need(ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
-    need((android_positive and allowance == 900 or not android_positive and allowance in (60, 300))
+    need(((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300))
          and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
     return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
         "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
@@ -394,7 +397,7 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
@@ -403,10 +406,14 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
     need(type(android_positive) is bool and (not android_positive or (not engineering and not output_data
          and target == ARM_TARGET and tuple(methods) == (CLASS + ANDROID_METHOD,) and allowance == 900
          and timeout == 1020 and Path(result).name == ANDROID_RESULT)), "android-signed-fixed-test-owner")
+    need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
+         and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and timeout == 1020
+         and Path(result).name == IOS_UNSIGNED_RESULT)), "ios-unsigned-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
-        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
+        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
+                   if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
                    if android_positive else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
                    if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
                    if output_data else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target))
@@ -532,11 +539,62 @@ def normal_cli_arguments(arguments, *, target=ARM_TARGET):
 
 
 
+# This fixed opt-in route reuses the normal installed launch/original-command
+# owner. It neither enables a product feature nor substitutes an engineering app.
+IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
+IOS_UNSIGNED_RESULT = "ios-unsigned-archive-test.xcresult"
+IOS_UNSIGNED_PREFIX = b"MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI="
+
+
+def ios_unsigned_facts(value, *, source):
+    need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source), "ios-unsigned-source")
+    fixed = dict(schemaVersion=1, scope="one-ordinary-local-unsigned-ios-archive", sourceCommit=source,
+        savedVersion="1.2.3", savedBuild=7, inputFiles=9, inputBytes=7264, topLevelDirectories=4,
+        archiveDescendantsObserved=False, nativeResultDisplayed=True, outputPostMatched=True,
+        originalsClosed=True, normalQuitObserved=True, successBeforeCutoff=True, signed=False,
+        ipaExported=False, releaseQualified=False, parentReturncodeRequired=0)
+    need(type(value) is dict and set(value) == set(fixed) | {"operationId", "ownerGeneration", "originalEntries", "originalBytes"}
+         and all(type(value[k]) is type(v) and value[k] == v for k, v in fixed.items()), "ios-unsigned-closed-facts")
+    need(all(type(value[k]) is str and re.fullmatch(r"[0-9a-f]{32}", value[k]) for k in ("operationId", "ownerGeneration")),
+         "ios-unsigned-current-pair")
+    need(type(value["originalEntries"]) is int and 1 <= value["originalEntries"] <= 100000
+         and type(value["originalBytes"]) is int and 1 <= value["originalBytes"] <= 8 << 30,
+         "ios-unsigned-original-result-bounds")
+    return value
+
+
+def ios_unsigned_marker(stdout, *, source):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1048576, "ios-unsigned-original-output-bound")
+    lines = stdout.splitlines()
+    selected = b"-[MRKNormalAppUITests.NormalAppUITests " + IOS_UNSIGNED_METHOD.encode("ascii") + b"]"
+    attempts = [line for line in lines if line.startswith(b"Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == b"Test Case '" + selected + b"' started."
+         and re.fullmatch(rb"Test Case '" + re.escape(selected) + rb"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1])
+         and lines.count(ORIGINAL_MARKER.encode("ascii")) == 1
+         and sum(line.startswith(b"MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and not any(b"MRK_MACOS_UI_FAILURE_CLEANUP=" in line for line in lines), "ios-unsigned-one-original-attempt")
+    markers = [line[len(IOS_UNSIGNED_PREFIX):] for line in lines if line.startswith(IOS_UNSIGNED_PREFIX)]
+    need(len(markers) == 1 and 0 < len(markers[0]) <= 16384, "ios-unsigned-one-closed-marker")
+    need(lines.index(attempts[0]) < lines.index(ORIGINAL_MARKER.encode("ascii"))
+         < lines.index(IOS_UNSIGNED_PREFIX + markers[0]) < lines.index(attempts[1]), "ios-unsigned-original-terminal-order")
+    value = ios_unsigned_facts(document(markers[0]), source=source)
+    need(encoded(value) == markers[0], "ios-unsigned-canonical-marker")
+    return value
+
+
+def ios_unsigned_summary(body):
+    value = document(body)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(value.get(key)) is int and value[key] == count for key, count in counts.items()), "ios-unsigned-exact-one-pass")
+    return counts
+
+
 SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-summary",
     "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
     "saved-checks-test.xcresult": "saved-checks-summary",
     "workflow-refusal-test.xcresult": "workflow-refusal-summary",
-    "saved-version-recovery-test.xcresult": "saved-version-recovery-summary"}
+    "saved-version-recovery-test.xcresult": "saved-version-recovery-summary",
+    IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -565,6 +623,11 @@ def normal_request(arguments, temporary):
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / ANDROID_RESULT,
             methods=(CLASS + ANDROID_METHOD,) if testing else (), allowance=900 if testing else None,
             timeout=1020 if testing else 30, phaseSeconds=1245 if testing else 90, androidPositive=True)
+    elif arguments in (["--normal-ios-unsigned-archive-test"], ["--normal-ios-unsigned-archive-summary"]):
+        testing = arguments[0].endswith("-test")
+        value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / IOS_UNSIGNED_RESULT,
+            methods=(CLASS + IOS_UNSIGNED_METHOD,) if testing else (), allowance=900 if testing else None,
+            timeout=1020 if testing else 30, phaseSeconds=1245 if testing else 90, iosUnsigned=True)
     elif arguments == ["--normal-output-data-test"]:
         need(target == ARM_TARGET, "output-data-arm-only")
         value = dict(phase="test", derived=normal / "DerivedData", result=normal / OUTPUT_DATA_RESULT,
@@ -1878,6 +1941,8 @@ def execute_normal_phase(phase, request, source, file_limit):
         original = phase.call("normal-ui-summary", arguments, 30, 262144)
         facts = {"schemaVersion": 1, "scope": "normal-ui-original-command-admission-only", "phase": "summary",
                  "resultBundle": result.name, "originalCommandRole": "normal-ui-summary", "originalReturncode": original.returncode}
+        if request.get("iosUnsigned") is True and original.returncode == 0:
+            facts["iosUnsignedTestCounts"] = ios_unsigned_summary(original.stdout)
         receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
     else:
         need(mode == "test", "normal-phase-selection")
@@ -1892,6 +1957,11 @@ def execute_normal_phase(phase, request, source, file_limit):
                     facts["savedVersionRecovery"] = fixture.restored()
             if original.returncode == 0:
                 facts["savedVersionRecovery"]["originalClosesCompleted"] = True
+        elif request.get("iosUnsigned") is True:
+            original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
+                request["allowance"], request["timeout"], target=target, ios_unsigned=True)
+            if original.returncode == 0:
+                facts["iosUnsignedObservation"] = ios_unsigned_marker(original.stdout, source=source)
         else:
             original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
                                                 request["allowance"], request["timeout"], target=target)
@@ -1909,6 +1979,9 @@ def execute_normal_phase(phase, request, source, file_limit):
                  phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
     exclusive_output(receipt, encoded(facts) + b"\n", 32768)
     phase.clock.check()  # Includes actual original receipt close, never inferred from a persisted flag.
+    if request.get("iosUnsigned") is True and mode == "test" and original.returncode == 0:
+        exclusive_output(derived.parent / "ios-unsigned-archive.facts.json", encoded(facts["iosUnsignedObservation"]) + b"\n", 16384)
+        phase.clock.check()
     return original
 
 
@@ -1916,7 +1989,7 @@ def failure_base(phase, selection, original, *, engineering=False):
     # Diagnostic dispatch only: native/ordinary selection admission is unchanged.
     need(type(engineering) is bool and phase in ("build", "test", "summary", "query")
          and (selection is None if phase in ("build", "query") else
-              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection == OUTPUT_DATA_RESULT),
+              selection == "engineering-test.xcresult" if engineering else selection in NORMAL_SELECTIONS or selection in (OUTPUT_DATA_RESULT, IOS_UNSIGNED_RESULT)),
          "normal-diagnostic-selection")
     cap = 4096 if phase == "query" else 262144 if phase == "summary" else 1024 * 1024
     need(type(original) is subprocess.CompletedProcess and type(original.returncode) is int
@@ -1952,6 +2025,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
              + rb")[ \t]{1,8}Code=(-?(?:0|[1-9][0-9]{0,9}))(?=\Z|[ \t\r\n,;\"')}\x5d])")
     methods = (("testEngineeringMainCatalogueAndQuit",) if engineering else
                ("testPositiveAndroidOutputCustodyData",) if selection == OUTPUT_DATA_RESULT else
+               (IOS_UNSIGNED_METHOD,) if selection == IOS_UNSIGNED_RESULT else
                NORMAL_SELECTIONS[selection][0]) if selection is not None else ()
     method_pattern = b"|".join(re.escape(m.encode("ascii")) for m in methods)
     case = rb"-\[MRKNormalAppUITests\.NormalAppUITests (?:" + method_pattern + rb")\]"
@@ -2040,7 +2114,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     output_namespace = b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE"
     output_method = b"-[MRKNormalAppUITests.NormalAppUITests testPositiveAndroidOutputCustodyData"
     output_scenarios = {name.encode("ascii"): name for name in (
-        'valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start')}
+        'valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start', 'ios-valid', 'ios-work', 'ios-extra-operation', 'ios-foreign-output', 'ios-symlink', 'ios-replacement', 'ios-partial-open', 'ios-late-close', 'ios-input')}
     output_pattern = (re.escape(output_namespace) + rb"=v1;scenario=(" + b"|".join(output_scenarios)
                       + rb");sample=after-cleanup-attempt;originalFailurePreserved=1")
     output_condition = (rb'(?<![A-Za-z0-9_])condition\(("|\\")'
@@ -2186,6 +2260,27 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         b'fixture: new private root initialization precondition': 'r139',
         b'fixture: new private root group initialization failed': 'r140',
         b'fixture: new private root initialization transition differs': 'r141',
+        b'fixture: iOS original identity shape': 'r142',
+        b'fixture: iOS fixed profile or repeated review': 'r143',
+        b'fixture: iOS original Start identity or state': 'r144',
+        b'fixture: iOS terminal original identity or directory count': 'r145',
+        b'fixture: iOS settled top-level output roster': 'r146',
+        b'fixture: iOS output enumeration consuming close': 'r147',
+        b'fixture: iOS terminal original identity or state': 'r148',
+        b'fixture: iOS input project absent': 'r149',
+        b'fixture: iOS output original mode owner or filesystem': 'r150',
+        b'fixture: iOS output closure is not terminal': 'r151',
+        b'fixture: iOS final output observation was not joined before close': 'r152',
+        b'fixture: iOS DATA symlink setup': 'r153',
+        b'fixture: iOS DATA input mutation': 'r154',
+        b'fixture: iOS DATA fixed original descriptor census': 'r155',
+        b'fixture: iOS DATA same-parent replacement setup': 'r156',
+        b'fixture: iOS DATA closed deadline refusal': 'r157',
+        b'fixture: iOS DATA consuming close and late refusal': 'r158',
+        b'fixture: iOS DATA production observation deleted archive': 'r159',
+        b'fixture: iOS DATA scenario unmapped': 'r160',
+        b'fixture: iOS DATA partial opens not retained': 'r161',
+        b'fixture: unexpected owned output under project': 'r162',
     } if output_eligible else {}
     output_markers, output_failures = 0, 0
     output_scenario = output_reason = output_site = None
@@ -3181,7 +3276,7 @@ def main():
         owner = load_normal_owner(root)
         stage = "phase"
         phase = (NormalPhase(owner, environment, root, clock, retain_nonzero=True)
-                 if request.get("outputData") is True or request.get("androidPositive") is True else NormalPhase(owner, environment, root, clock))
+                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True else NormalPhase(owner, environment, root, clock))
         records = phase.records
         try:
             stage = "execute"
@@ -3223,6 +3318,20 @@ def main():
     except BaseException as error:
         if phase is not None:
             phase.clock.failed = True
+        if request is not None and request.get("iosUnsigned") is True:
+            code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
+            try:
+                # Optional closed diagnostics cannot replace an original return or
+                # create a usable result after failed/unknown publication/close.
+                need(phase is not None, "ios-unsigned-diagnostic-context-admitted")
+                failure = normal_admission_failure(stage, error, owner, records)
+                body = encoded(failure) + b"\n"
+                need(len(body) <= 16384, "ios-unsigned-failure-bound")
+                stem = SUMMARY_STEMS[request["result"].name] if request["phase"] == "summary" else request["result"].stem
+                exclusive_output(request["derived"].parent / (stem + ".failure-diagnostics.json"), body, 16384)
+            except BaseException:
+                pass
+            return code
         if request is not None and request.get("androidPositive") is True:
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
             try:

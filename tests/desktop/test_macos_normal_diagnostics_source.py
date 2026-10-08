@@ -115,7 +115,24 @@ ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
  (4698, 4980, 'e6c45d863e0f73cacaff298621176cc7b6ba90026d01f2a6acd536323396f824', ''),
  (5002, 5012, '1370af131a521e62e1f81d1a2a8ecc3e595711ec9bd8c754b6d9ad212d982dbc', ''))
 
+IOS_UNSIGNED_SWIFT_INVERSE = [(70, 71, '9bac829257dc5bfc3a439aac882d2dd08d941c3f649245b3d7a768774a240fb6', '        init(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (72, 73, '66f825502f9177249fae4721b875432bc67fb64cb82913b6316d1774c5a49dfd', '            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),\n'), (213, 214, '6cd754f487e73847150b083af7e63e879a8dbac5ad665697097f9ec96855aa0e', '        func healthy() throws {\n'), (216, 218, '6a92da92d5532c709c9f3120362f8254966396700c0466f327c01b0ab76b5dfa', '            _ = try clock.remaining(1)\n'), (367, 368, 'fd8a6b3740680e236e8d1b7230c780d1b2047a08811daf14f32e2a626a9bbca2', '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (369, 370, '3e8ede215cecb56df70dc3f608cc5f1cee333b9789c9dc3c9dad5490f8a90700', '        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)\n'), (1057, 1058, 'fe1a506227717451d1ea704c49f67707355cf944c26b23254692342734be093f', '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }\n'), (1717, 1815, '8207c234f1e8514a6fc76d5ce60326720330a45af6f3d21a939a9c241306c9fc', ''), (2169, 2172, 'dcf34ab30490e5e6f7018fc3909338186a496fd715c7f6dcc02f3b100cbbb33e', '                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {\n'), (2299, 2386, 'b6ebcf146b2dff8f0aad636bf67b3dda1162b9a7dd958e017a298ee8b7610e59', ''), (2511, 2512, '24e72c6479ac7bc1e357f0db0edc814203f1521b12a87159a84c81f83cd3e3b0', ''), (2517, 2518, '206f1b83b020317dd90a1fe16c65d22dc46b4f99d00d66327b63ec35596f83d2', ''), (2719, 2720, 'df6605ab7490f24679c4a978e7c5b13f93f85210ea6444e2e2e9efcfcae013d6', '                let expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in\n'), (2724, 2727, 'c960cb683f36e92409c4c587c97282b29c14f0ae014559e7ee26c650e4b95da0', ''), (2743, 2745, 'b73ca4989daede170caf6b6b1a0998e75ea6ebba25d2f8d1a6fe0156cdd7d1ae', '            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"\n'), (2776, 2782, '1107bb850d890130bbb52690bf0a0cb605709f74d8472036002b6a5a015cc10c', ''), (2783, 2784, 'ea2d11d0ac471ad6c10e11edf0f41fed2d107ed6d1e06de7711e25de619a9398', '            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [\n'), (2787, 2788, '2498cc74fb404e00c579acc48e5cfdd4a0960767e13892af10381bc785c3fbc5', '            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals\n'), (2790, 2791, '1a888d6908be38a47f83ceeb92e6a3bf14a2a1a3aeb4652e02395e1b491f385b', '                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'), (2803, 2809, '49b024bd18a645445fbd6b19e3fe2cbad35bf22b7bc08bcde6f5579952779f55', ''), (3149, 3150, '419b3fec90b5f9f9cab66658f88de15a911c551aeb16763ab01e151d74198a49', ''), (3157, 3158, '6849ff7af4e41318c8523669ea36515c7f32c00a1e67b3ef51f7f9e9a490a51e', ''), (3183, 3185, '649cb7eca7a5aa1accb59bfe7e5ae11533ec19478cee237ef8c4c35cb2e98be4', '    // Explicit DATA-only native selection; not an Android-positive application case.\n'), (4951, 5171, 'daf86c7067443724d660940776c521e0d1655f9cc3701f3579faa2c0fbecd1b7', '')]
+
+
+def without_ios_unsigned_source(source):
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, original in reversed(IOS_UNSIGNED_SWIFT_INVERSE):
+        observed = ''.join(rows[start:end])
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('unsigned iOS exact SOURCE region differs')
+        rows[start:end] = original.splitlines(keepends=True)
+    value = ''.join(rows)
+    if hashlib.sha256(value.encode()).hexdigest() != 'baa5731b9a25910affe6019ace6db58cccb35267a028a7034e70997ed96156eb':
+        raise AssertionError('unsigned iOS inverse changed prior SOURCE')
+    return value
+
+
 def without_positive_android_source(source):
+    source = without_ios_unsigned_source(source)
     rows = source.splitlines(keepends=True)
     for start, end, expected, original in reversed(ANDROID_POSITIVE_SWIFT_INVERSE):
         observed = ''.join(rows[start:end])
@@ -126,6 +143,40 @@ def without_positive_android_source(source):
     if hashlib.sha256(value.encode()).hexdigest() != '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4':
         raise AssertionError('positive Android inverse changed ordinary SOURCE')
     return value
+
+# Restore only this exact separately reviewed, disabled unsigned iOS route.
+# This preserves every earlier complete workflow assertion without normalizing
+# unknown source or expanding any default native selection.
+IOS_UNSIGNED_WORKFLOW_INVERSE = ((22,
+  24,
+  '25d5e48ce6a5b9ed6623aa8e2d641dd2b5283c38ae7e0c87aee2601100bec0c4',
+  '    # Timed-step union421min; SOURCE scopes select disjoint UI work.\n'
+  '    # Preview345 / recovery339 / installed210 / dormant ARM Android267, plus5 overhead.\n'),
+ (25, 26, '2efcc97e0a7ee7aa819e1a814e036cef0751b966ed949162de93c0e86f2626f3', ''),
+ (62, 64, '13af455f3ba85ffe5bfb6df297fd2b77955327e7afdd7092122a611a68c02c3b', ''),
+ (93, 100, '217f658c360f5de5cb6fe7bac982b124d62f2a0b97c20c65820a6118e9909424', ''),
+ (607,
+  608,
+  'b4c270696a678ce3d435c88f10530e83d756f2f103b1305e733416e526f7838a',
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build')\n"),
+ (1986, 2062, '42a622c64f52492d93cdbe83abe96113a21539f2d81cd5acf80ae0745bdb3d7b', ''),
+ (3865, 3872, '7d7de67e8395eda8fa407f0be71c16173855972af274c03bca09c465e0f9d562', ''))
+
+
+def without_ios_unsigned_workflow(source):
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, original in reversed(IOS_UNSIGNED_WORKFLOW_INVERSE):
+        observed = ''.join(rows[start:end])
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('unsigned iOS workflow exact region differs')
+        rows[start:end] = original.splitlines(keepends=True)
+    value = ''.join(rows)
+    if hashlib.sha256(value.encode()).hexdigest() != 'd7199d46c3292bca3f7f04a932a4cdde05513f91bbff5d2c859bee9451fcf8bb':
+        raise AssertionError('unsigned iOS workflow inverse changed prior SOURCE')
+    return value
+
 
 ROOT = Path(__file__).absolute().parents[2]
 SWIFT = "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"
@@ -445,7 +496,7 @@ SAVED_VERSION_WORKFLOW_REGIONS = (('    # Timed steps total359min, but the two r
  ('                       "saved-checks-test.log", "saved-checks-summary.raw.json", '
   '"saved-checks-summary.stderr"):\n',
   '                       *saved_logs):\n'))
-SAVED_VERSION_BEFORE_WORKFLOW = 'dbc8f93c8dced8bc1a0396bdf9a2d338828d7c48d97310ffd1e047be36f76fae'
+SAVED_VERSION_BEFORE_WORKFLOW = '47c8ef03bd6de39acd1e10cb91aefdf046b6b5466355b622857a95e7e1dbad9c'
 SAVED_VERSION_EVIDENCE = ('saved-version-recovery-test-file-limit.status',
  'saved-version-recovery-test.status',
  'saved-version-recovery-test.runner-admission.json',
@@ -1209,8 +1260,161 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(owner.count('active.projection.phase = Phase::Settled; active.projection.finality = Finality::Settled;'), 1)
 
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
-        workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
-        # Two mutually exclusive SOURCE scopes; no ninth-case additive budget,
+        workflow = without_ios_unsigned_workflow((ROOT / '.github/workflows/desktop-macos-installed.yml').read_text())
+# One dormant installed-only lane; no preview baseline or legal consent
+        # is fabricated. Exercise pure original-result/JSON validators, then
+        # invert only these explicit additions for all existing owner assertions.
+        actual_ids, actual_blocks = steps(workflow)
+        positive_ids = ('normal_android_inputs', 'normal_android_ui_test', 'normal_android_ui_result')
+        start = actual_ids.index('package_install')
+        self.assertEqual(tuple(actual_ids[start + 1:start + 4]), positive_ids)
+        positive = ("github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' "
+                    "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'")
+        preview = "github.ref == 'refs/heads/verify/desktop-macos-preview'"
+        self.assertEqual(re.findall(r'^        if: (.+)$', actual_blocks['normal_ui_build'], re.M),
+                         [preview + ' || (' + positive + ')'])
+        self.assertEqual(workflow.count('      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'), 1)
+        self.assertEqual(workflow.count('            disabled|android-signed-build) ;;\n            *) exit 1 ;;'), 1)
+        self.assertIn('if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi',
+                      actual_blocks['package_install'])
+        new_blocks = [actual_blocks[name] for name in positive_ids]
+        predecessors = ('normal_ui_build', 'normal_android_inputs', 'normal_android_ui_test')
+        for ident, block, predecessor, minutes in zip(positive_ids, new_blocks, predecessors, (22, 23, 3), strict=True):
+            self.assertEqual(actual_ids.count(ident), 1)
+            self.assertEqual(re.findall(r'^        if: (.+)$', block, re.M),
+                             [positive + " && steps." + predecessor + ".outcome == 'success' && steps.package_install.outcome == 'success'"])
+            self.assertEqual(re.findall(r'^        timeout-minutes: ([0-9]+)$', block, re.M), [str(minutes)])
+            self.assertNotIn('continue-on-error', block)
+            self.assertNotIn('always()', block)
+            self.assertNotIn(preview, block)
+            for fragment in ('set +x', 'set +a', 'set -o noclobber', 'umask 077', '/usr/bin/env -i',
+                             '"GITHUB_RUN_ID=$GITHUB_RUN_ID"', '"GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT"'):
+                self.assertIn(fragment, block)
+            run_body = block.split('        run: |\n', 1)[1]
+            decoded = ''.join(line[10:] if line.startswith('          ') else line for line in run_body.splitlines(keepends=True))
+            self.assertLessEqual(len(decoded), 21000, ident)
+        self.assertIn('Android adds build9 + preparation22 + test23 + summary3;272 <=350.', workflow)
+        self.assertEqual(210 + 9 + sum((22, 23, 3)) + 5, 272)
+        actual_caps = [int(n) for n in re.findall(r'^        timeout-minutes: ([0-9]+)$', workflow, re.M)]
+        self.assertEqual((len(actual_caps), sum(actual_caps)), (45, 421))
+        self.assertLessEqual(272, 350)
+        prep, positive_test, positive_result = new_blocks
+        helper_call = 'desktop/tools/macos_android_dependency_preparation.py prepare-ui-inputs'
+        self.assertEqual(workflow.count(helper_call), 1)
+        self.assertIn('"MRK_ANDROID_PREPARATION_WORK=$MRK_MACOS_WORK"', prep)
+        self.assertNotIn('desktop/tools/macos_android_dependency_preparation.py prepare-b', ''.join(new_blocks))
+        self.assertNotIn('desktop/tools/macos_android_dependency_preparation.py acquire', ''.join(new_blocks))
+        for block, word, variable in ((prep, helper_call, 'inputs_status'),
+             (positive_test, '--normal-android-signed-build-test', 'android_test_status'),
+             (positive_result, '--normal-android-signed-build-summary', 'android_summary_status')):
+            self.assertEqual(block.count(word), 1)
+            self.assertEqual(block.count(variable + '=$?'), 1)
+            self.assertLess(block.index(word), block.index(variable + '=$?'))
+            self.assertIn('if [[ "$' + variable + '" != 0 ]]; then exit "$' + variable + '"; fi', block)
+            self.assertIn('[[ "$' + variable + '_saved" == 0 ]] || exit 1', block)
+        self.assertIn('[[ "$android_result_status_saved" == 0 ]] || exit 1', positive_result)
+        self.assertIn('if [[ "$android_result_status" != 0 ]]; then exit "$android_result_status"; fi', positive_result)
+        self.assertNotIn('steps.normal_ui_result', ''.join(new_blocks))
+        for forbidden in ('-storepass ', '-keypass ', 'MRK_ANDROID_UI_KEY_PASSWORD=',
+                          'security unlock-keychain', 'sudo ', 'rm -rf', 'shutil.rmtree', 'P.main('):
+            self.assertNotIn(forbidden, ''.join(new_blocks))
+        evidence_actual = actual_blocks['evidence']
+        public_names = ('normal-ui/android-inputs.status', 'normal-ui/android-input-status.json',
+                        'prepare-ui-inputs-failure.json', 'normal-ui/android-signed-build-test.status',
+                        'normal-ui/android-signed-build-summary.status', 'normal-ui/android-signed-build-result.status',
+                        'normal-ui/android-signed-build.facts.json', 'normal-ui/android-signed-build-result.json')
+        for name in public_names:
+            self.assertEqual(evidence_actual.count('{0}/' + name + '\n'), 1)
+        for private in ('android-input-fixture.json', 'android-inputs/', 'android-inputs.stdout', 'android-inputs.stderr',
+                        'android-signed-build-test.log', 'android-signed-build-test.xcresult',
+                        'android-signed-build-test.runner-admission.json', 'android-signed-build-summary.command-admission.json',
+                        'android-signed-build-summary.json', 'android-signed-build-summary.stderr', 'android-signed-build-result.log'):
+            self.assertNotIn('/normal-ui/' + private, evidence_actual)
+        marker = 'PY_ANDROID_INSTALLED_RESULT'
+        head = '          "$MRK_PYTHON" -I -S -B - <<' + repr(marker) + ' > "$MRK_MACOS_WORK/normal-ui/android-signed-build-result.log" 2>&1\n'
+        self.assertEqual(positive_result.count(head), 1)
+        part = positive_result.split(head, 1)[1].split('          ' + marker + '\n', 1)[0]
+        self.assertTrue(all(not line.strip() or line.startswith('          ') for line in part.splitlines()))
+        code = ''.join(line[10:] if line.strip() else line for line in part.splitlines(keepends=True))
+        parsed = ast.parse(code)
+        functions = {node.name: node for node in parsed.body if isinstance(node, ast.FunctionDef)}
+        local = {'json': json}
+        exec(compile(ast.Module(body=[functions[name] for name in ('need', 'unique', 'document', 'package_originals')],
+                                type_ignores=[]), '<installed-original-data>', 'exec'), local)
+        self.assertEqual(local['document'](b'{"nested":{"finite":1.5},"closed":true}'),
+                         {'nested': {'finite': 1.5}, 'closed': True})
+        for bad in (b'[]', b'{"a":1,"a":2}', b'{"x":NaN}', b'{"x":Infinity}',
+                    b'{"x":1e9999}', b'{"outer":{"x":-1e9999}}'):
+            with self.assertRaises(ValueError): local['document'](bad)
+        roles = ('installer-log-cursor', 'installer', 'installer-log-capture')
+        rows = [dict(role=role, entered=True, returned=True, capturesSettled=True,
+                     returncode=0 if role == 'installer' else 1) for role in roles]
+        local['package_originals'](rows, roles)
+        for bad in (rows[:-1], list(reversed(rows)), rows + rows[:1],
+                    [dict(rows[0], returned=False)] + rows[1:],
+                    rows[:1] + [dict(rows[1], returncode=1)] + rows[2:],
+                    rows[:1] + [dict(rows[1], returncode=None)] + rows[2:],
+                    rows[:1] + [dict(rows[1], returncode=False)] + rows[2:],
+                    rows[:1] + [dict(rows[1], capturesSettled=1)] + rows[2:]):
+            with self.assertRaises(ValueError): local['package_originals'](bad, roles)
+        credentials = [dict(role='search-before', entered=True, returned=True, settled=True, status=0)]
+        local['package_originals'](credentials, ('search-before',), credentials=True)
+        for change in ({'status': 1}, {'status': False}, {'returned': False}, {'settled': None}):
+            with self.assertRaises(ValueError):
+                local['package_originals']([dict(credentials[0], **change)], ('search-before',), credentials=True)
+        for fragment in ("env[variable] for key, variable", "P.final_package_receipt(final_raw, env, TARGET",
+                         "package_originals(owner.get('originalCalls'), S.PACKAGING_CALL_ROLES)",
+                         "S.maintenance_result_data", "owner.get('finalPackageReceiptSha256') == sha(final_raw)",
+                         "'installer-output.status'", "'normal-ui/android-inputs.status'",
+                         "N.android_signed_facts(", "N.android_signed_receipts(build, test, summary, facts,",
+                         "summary['commands'][1]['stdoutSha256'] == sha(summary_raw)",
+                         "type(summary_data.get(key)) is int", "os.O_NOFOLLOW", "os.O_CLOEXEC",
+                         "need(last <= now < deadline", "'ui-file-pre'",
+                         "held.append(row)", "os.pread(", "follow_symlinks=False", "def original_post():",
+                         "closing, held[:] = held[:], []", "try: os.close(row['fd'])",
+                         "if primary is None: primary = error", "if primary is not None: raise primary"):
+            self.assertIn(fragment, code)
+        self.assertLess(code.index('N.android_signed_receipts('), code.index('N.exclusive_output('))
+        self.assertIn("original_post()\n    N.exclusive_output(normal / 'android-signed-build-result.json', body, 16384)\n    original_post()", code)
+        public = next(node.value for node in ast.walk(parsed) if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'value' for target in node.targets)
+                      and isinstance(node.value, ast.Dict))
+        public_fields = {key.value: value for key, value in zip(public.keys, public.values, strict=True)}
+        self.assertEqual(set(public_fields), {'schemaVersion', 'scope', 'target', 'applicationSourceCommit',
+            'harnessSourceCommit', 'sourceTree', 'workflow', 'runId', 'runAttempt', 'packageSha256', 'packageBytes',
+            'runtimeManifestSha256', 'installerInventorySha256', 'originalCommandStatuses', 'testIdentifier', 'testCounts',
+            'observation', 'resultOriginalReturncodeRequired', 'privateInputsPublished', 'vendorAcknowledgementAutomated',
+            'newProtectedCopyRegistered', 'cleanExitStatus', 'allWorkerFinality', 'fullUIQualified', 'distributionQualified', 'productReady'})
+        self.assertEqual(ast.literal_eval(public_fields['resultOriginalReturncodeRequired']), 0)
+        self.assertEqual(ast.unparse(public_fields['observation']), 'facts')
+        for flag in ('privateInputsPublished', 'vendorAcknowledgementAutomated', 'newProtectedCopyRegistered',
+                     'fullUIQualified', 'distributionQualified', 'productReady'):
+            self.assertIs(ast.literal_eval(public_fields[flag]), False)
+        self.assertIs(ast.literal_eval(public_fields['cleanExitStatus']), None)
+        self.assertEqual(ast.literal_eval(public_fields['allWorkerFinality']), 'not-established-by-XCTest-UI-state')
+        # Precisely restore only this lane. Every old assertion below, including
+        # block pins, complete step-condition budgets and preview cleanup, remains.
+        for ident in positive_ids:
+            self.assertEqual(workflow.count(actual_blocks[ident]), 1)
+            workflow = workflow.replace(actual_blocks[ident], '', 1)
+        installed_only_edits = (
+            ('    # Closed SOURCE selection, not additive UI work: default preview345,\n    # recovery preview339 / installed210, cleanup included, plus5min overhead.\n',
+             '    # Timed-step union421min; SOURCE scopes select disjoint UI work.\n    # Preview345 / recovery339 / installed210 / dormant ARM Android267, plus5 overhead.\n    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.\n'),
+            ('      MRK_MACOS_PACKAGE_ROLE: ordinary-image\n',
+             '      MRK_MACOS_PACKAGE_ROLE: ordinary-image\n      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.\n      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'),
+            ('          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1\n',
+             '          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n            disabled|android-signed-build) ;;\n            *) exit 1 ;;\n          esac\n'),
+            ("        id: normal_ui_build\n        if: github.ref == 'refs/heads/verify/desktop-macos-preview'\n",
+             "        id: normal_ui_build\n        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build')\n"),
+            ('      - name: Standard Installer only is privileged; never execute the app or Python as root\n',
+             '      - name: Standard Installer only is privileged; never execute the app or Python as root\n        id: package_install\n'),
+            ("            ${{ format('{0}/source-binding.json\n",
+             "            ${{ format('{0}/source-binding.json\n            {0}/normal-ui/android-inputs.status\n            {0}/normal-ui/android-input-status.json\n            {0}/prepare-ui-inputs-failure.json\n            {0}/normal-ui/android-signed-build-test.status\n            {0}/normal-ui/android-signed-build-summary.status\n            {0}/normal-ui/android-signed-build-result.status\n            {0}/normal-ui/android-signed-build.facts.json\n            {0}/normal-ui/android-signed-build-result.json\n"),
+        )
+        for old, new in reversed(installed_only_edits):
+            self.assertEqual(workflow.count(new), 1)
+            workflow = workflow.replace(new, old, 1)
+                # Two mutually exclusive SOURCE scopes; no ninth-case additive budget,
         # no unselected-cohort success or cleanup authority. No runtime exec here.
         actual = workflow
         current_ids, current = steps(actual)
@@ -1753,6 +1957,126 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn("steps.normal_saved_checks_ui_result.outcome == 'success'", cleanup.split('        run: |', 1)[0])
         self.assertIn('root / "normal-ui/saved-checks-test.xcresult"', cleanup)
         self.assertIn('"saved-checks-test.log", "saved-checks-summary.raw.json", "saved-checks-summary.stderr"', cleanup)
+
+        # The unsigned iOS lane is an installed-only, SOURCE-selected addition.
+        # All older workflow assertions above received the exact prior bytes;
+        # this second read tests the actual new route, not its inverse view.
+        ios_workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        ios_ids, ios_blocks = steps(ios_workflow)
+        ios_names = ('normal_ios_ui_test', 'normal_ios_ui_summary')
+        ios_condition = ("github.ref == 'refs/heads/verify/desktop-macos-installed' "
+                         "&& env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' "
+                         "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' "
+                         "&& env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'")
+        self.assertEqual(ios_workflow.count('      MRK_MACOS_IOS_UI_SCOPE: disabled\n'), 1)
+        self.assertEqual(ios_workflow.count('          case "$MRK_MACOS_IOS_UI_SCOPE" in\n'), 1)
+        self.assertIn('          case "$MRK_MACOS_IOS_UI_SCOPE" in\n'
+                      '            disabled) ;;\n'
+                      '            ios-unsigned-archive)\n'
+                      '              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && '
+                      '"$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'
+                      '              ;;\n            *) exit 1 ;;\n          esac\n', ios_workflow)
+        self.assertEqual(re.findall(r'^        if: (.+)$', ios_blocks['normal_ui_build'], re.M),
+                         [preview + ' || (' + positive + ') || (' + ios_condition + ')'])
+        last_android = ios_ids.index('normal_android_ui_result')
+        self.assertEqual(tuple(ios_ids[last_android + 1:last_android + 3]), ios_names)
+        self.assertTrue(ios_blocks['normal_ios_ui_summary'].endswith('\n\n'))
+        self.assertIn(ios_blocks['normal_ios_ui_summary'] +
+                      '      - name: Notarize, staple and verify only the final user image\n', ios_workflow)
+        ios_steps = [ios_blocks[name] for name in ios_names]
+        for (phase, minutes, block) in zip(('test', 'summary'), (22, 2), ios_steps, strict=True):
+            expected_if = ios_condition
+            if phase == 'summary':
+                expected_if += " && steps.normal_ios_ui_test.outcome == 'success'"
+            expected_if += " && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"
+            self.assertEqual(ios_ids.count('normal_ios_ui_' + phase), 1)
+            self.assertEqual(re.findall(r'^        if: (.+)$', block, re.M), [expected_if])
+            self.assertEqual(re.findall(r'^        timeout-minutes: ([0-9]+)$', block, re.M), [str(minutes)])
+            self.assertNotIn('always()', block)
+            self.assertNotIn('continue-on-error', block)
+            self.assertNotIn('refs/heads/verify/desktop-macos-preview', block)
+            for fragment in ('set +x\n', 'set +a\n', 'set -euo pipefail\n', 'set -o noclobber\n',
+                             'umask 077\n', 'ulimit -f 1048576\n',
+                             '[[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1',
+                             '[[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || exit 1'):
+                self.assertIn(fragment, block)
+            self.assertEqual(block.count('/usr/bin/env -i '), 1)
+            command = block.split('          /usr/bin/env -i ', 1)[1].split('          ios_' + phase + '_status=$?', 1)[0]
+            expected_env = {'PATH', 'HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'DEVELOPER_DIR',
+                            'TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB', 'TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE',
+                            'TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'}
+            environment = command.split('"$MRK_PYTHON"', 1)[0]
+            self.assertEqual(set(re.findall(r'\b([A-Z][A-Z0-9_]+)=', environment)), expected_env)
+            for fragment in ('PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner',
+                             '"TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC',
+                             '"DEVELOPER_DIR=$DEVELOPER_DIR"',
+                             '"TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB"',
+                             '"TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA"',
+                             '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA"'):
+                self.assertIn(fragment, environment)
+            invocation = ('"$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py '
+                          '--target "$MRK_MACOS_TARGET" --normal-ios-unsigned-archive-' + phase)
+            self.assertEqual(command.count(invocation), 1)
+            self.assertEqual(ios_workflow.count('--normal-ios-unsigned-archive-' + phase), 1)
+            self.assertNotIn('--normal-android', command)
+            self.assertNotIn('--engineering', command)
+            status = 'ios_' + phase + '_status'
+            self.assertEqual(block.count(status + '=$?'), 1)
+            self.assertLess(block.index(invocation), block.index(status + '=$?'))
+            self.assertIn('printf \'%s\\n\' "$' + status + '" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-' + phase + '.status"', block)
+            self.assertIn(status + '_saved=$?\n          set -e\n', block)
+            first_error = 'if [[ "$' + status + '" != 0 ]]; then exit "$' + status + '"; fi'
+            publication = '[[ "$' + status + '_saved" == 0 ]] || exit 1'
+            self.assertLess(block.index(first_error), block.index(publication))
+            for forbidden in ('curl ', 'wget ', 'security ', 'sudo ', 'rm -rf', 'shutil.rmtree', 'tee ',
+                              'secrets.', 'GITHUB_TOKEN=', 'MRK_ANDROID_UI_KEY_PASSWORD=', '--work ',
+                              'source ./', ' -c ', '<<', '/usr/bin/xcodebuild', '--test-timeout'):
+                self.assertNotIn(forbidden, block)
+            body = block.split('        run: |\n', 1)[1]
+            self.assertLess(len(body), 6000)
+        self.assertIn('> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1', ios_steps[0])
+        self.assertIn('> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" '
+                      '2> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"', ios_steps[1])
+        self.assertIn('same original reserve', ios_steps[0])
+        self.assertIn('not a replacement Start', ios_steps[0])
+        self.assertIn('never IPA/signing/distribution qualification', ios_steps[1])
+
+        # Use the earlier complete, pinned old-route census rather than assuming
+        # the new tail can be added to preview's350-minute job.
+        full_caps = [int(n) for n in re.findall(r'^        timeout-minutes: ([0-9]+)$', ios_workflow, re.M)]
+        self.assertEqual((len(full_caps), sum(full_caps)), (47, 445))
+        ios_build_minutes = int(re.search(r'^        timeout-minutes: ([0-9]+)$', ios_blocks['normal_ui_build'], re.M)[1])
+        ios_minutes = installed_minutes + ios_build_minutes + sum(
+            int(re.search(r'^        timeout-minutes: ([0-9]+)$', block, re.M)[1]) for block in ios_steps)
+        self.assertEqual((ios_minutes, ios_minutes + 5, preview_minutes + 5), (243, 248, 350))
+        self.assertLessEqual(ios_minutes + 5, 350)
+        self.assertEqual(ios_workflow.count('    timeout-minutes: 350\n'), 1)
+        self.assertIn('iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.', ios_workflow)
+        public_ios = ('ios-unsigned-archive-test.status', 'ios-unsigned-archive-summary.status',
+                      'ios-unsigned-archive.facts.json', 'ios-unsigned-archive-test.runner-admission.json',
+                      'ios-unsigned-archive-summary.command-admission.json',
+                      'ios-unsigned-archive-test.failure-diagnostics.json',
+                      'ios-unsigned-archive-summary.failure-diagnostics.json')
+        current_evidence = ios_blocks['evidence']
+        self.assertEqual(tuple(re.findall(r'^            \{0\}/normal-ui/(ios-unsigned-archive[^\n]*)$',
+                                         current_evidence, re.M)), public_ios)
+        self.assertEqual(current_evidence.count("${{ format('"), 1)
+        # The unchanged availability guard also names the root; only the
+        # artifact path scalar must contain exactly one format argument.
+        self.assertEqual(re.findall(r'^        if: (.+)$', current_evidence, re.M),
+                         ["always() && steps.work.outputs.root != ''"])
+        ios_path_scalar = current_evidence.split('          path: |\n', 1)[1].split('          if-no-files-found:', 1)[0]
+        self.assertEqual(ios_path_scalar.count('steps.work.outputs.root'), 1)
+        for private in ('ios-unsigned-archive-test.log', 'ios-unsigned-archive-test.xcresult',
+                        'ios-unsigned-archive-summary.json', 'ios-unsigned-archive-summary.stderr', 'archive.xcarchive'):
+            self.assertNotIn(private, current_evidence)
+        # The inverse refuses even a one-token new-scope alteration; it cannot
+        # hide a future semantic delta while keeping old SOURCE tests green.
+        self.assertEqual(digest(without_ios_unsigned_workflow(ios_workflow).encode()),
+                         'd7199d46c3292bca3f7f04a932a4cdde05513f91bbff5d2c859bee9451fcf8bb')
+        with self.assertRaisesRegex(AssertionError, 'unsigned iOS workflow'):
+            without_ios_unsigned_workflow(ios_workflow.replace('MRK_MACOS_IOS_UI_SCOPE: disabled',
+                                                               'MRK_MACOS_IOS_UI_SCOPE: other', 1))
 
 
 if __name__ == '__main__':

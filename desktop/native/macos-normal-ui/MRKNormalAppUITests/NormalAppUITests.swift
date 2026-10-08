@@ -68,9 +68,9 @@ final class NormalAppUITests: XCTestCase {
         private var last: TimeInterval
         private var unusable = false
         private(set) var firstFailure: String?
-        init(seconds: TimeInterval, androidPositive: Bool = false) throws {
+        init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
-            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),
+            guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300)),
                   (now + seconds).isFinite, now + seconds > now else {
                 throw Refusal.condition("case clock unavailable")
             }
@@ -211,10 +211,11 @@ final class NormalAppUITests: XCTestCase {
                 }
             }
         }
-        func healthy() throws {
+        func healthy(cleanup: Bool = false) throws {
             guard !workClosed else { throw clock.fail("ordinary launch work is closed") }
             try callbackHealthy()
-            _ = try clock.remaining(1)
+            if cleanup { _ = try payloadIdentity() } // Only the retained same original, never a lookup.
+            _ = try clock.remaining(1, cleanup: cleanup)
         }
         private func payloadIdentity() throws -> NSRunningApplication {
             switch profile {
@@ -364,9 +365,9 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
-    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {
+    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false) throws {
         try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
-        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)
+        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned)
         caseClock = clock
         journeyDeadline = clock.deadline
     }
@@ -1054,7 +1055,7 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild, iosUnsignedArchive }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -1714,6 +1715,104 @@ final class NormalAppUITests: XCTestCase {
             try checkDirectory(directory)
             return result
         }
+        // One ordinary unsigned archive's post-terminal namespace observation.
+        // Archive descendants are opaque: the product's original result already
+        // performed structural/dSYM inspection. This grants no deletion authority.
+        static let iosUnsignedPaths: Set<String> = [config, version, "project/.gitignore", "project/keep.txt",
+            "project/ios/MRKObserved.xcodeproj/project.pbxproj",
+            "project/ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme",
+            "project/ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+            "project/ios/MRKObserved/main.m", "project/ios/MRKObserved/Info.plist"]
+        struct IOSArchiveIdentity: Equatable {
+            let operationID: String
+            let ownerGeneration: String
+            init(operationID: String, ownerGeneration: String) throws {
+                try LocalFixture.need([operationID, ownerGeneration].allSatisfy {
+                    $0.utf8.count == 32 && $0.range(of: #"^[0-9a-f]{32}$"#, options: .regularExpression) != nil
+                }, "iOS original identity shape")
+                self.operationID = operationID; self.ownerGeneration = ownerGeneration
+            }
+        }
+        private var iosUnsignedProfile = false
+        private var iosIdentity: IOSArchiveIdentity?
+        private var iosStarted = false
+        private var iosCompleted = false
+        private var iosClosing = false
+        private var iosDirectories: [Directory] = []
+        func beginIOSArchiveObservation(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            try check()
+            try Self.need(iosUnsignedProfile && androidOutput == nil && iosIdentity == nil
+                && iosDirectories.isEmpty && !iosStarted && !iosCompleted
+                && acceptedStages.isEmpty && Set(current.keys) == Self.iosUnsignedPaths,
+                "iOS fixed profile or repeated review")
+            try assertUnchanged() // Includes absence of .mobile-release before the one Start.
+            try check()
+            iosIdentity = identity
+        }
+        func confirmIOSArchiveStart(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            try check()
+            try Self.need(iosIdentity == identity && !iosStarted && !iosCompleted, "iOS original Start identity or state")
+            try assertUnchanged()
+            try check()
+            iosStarted = true
+        }
+        private func checkIOSDirectories(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            try check()
+            try Self.need(iosIdentity == identity && iosStarted && iosDirectories.count == 4,
+                          "iOS terminal original identity or directory count")
+            for original in iosDirectories { try check(); try checkDirectory(original) }
+            for (index, names) in [Set(["desktop-ios-archive"]), Set([identity.operationID]), Set(["archive.xcarchive"])].enumerated() {
+                try Self.need(try children(iosDirectories[index]) == names, "iOS settled top-level output roster")
+            }
+            // Deliberately never enumerate, open or hash archive descendants.
+            for original in iosDirectories.reversed() { try checkDirectory(original) }
+            try Self.need(closeErrors.isEmpty, "iOS output enumeration consuming close")
+            try check()
+        }
+        func finishIOSArchiveObservation(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            try check()
+            try Self.need(iosUnsignedProfile && iosIdentity == identity && iosStarted && !iosCompleted
+                && iosDirectories.isEmpty && acceptedStages.isEmpty, "iOS terminal original identity or state")
+            guard var parent = directories["project"] else { throw Refusal.condition("fixture: iOS input project absent") }
+            let device = parent.facts.device
+            for (index, name) in [".mobile-release", "desktop-ios-archive", identity.operationID, "archive.xcarchive"].enumerated() {
+                try check(); try checkDirectory(parent)
+                let original = try adoptDirectory(openat(parent.fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC),
+                                                  parent: parent.fd, name: name)
+                iosDirectories.append(original) // Already adopted before any subsequent refusal.
+                try Self.need(original.facts.uid == getuid() && original.facts.device == device && original.facts.flags == 0
+                    && (index < 3 ? original.facts.mode & 0o7777 == 0o700 : original.facts.mode & 0o7022 == 0),
+                    "iOS output original mode owner or filesystem")
+                // Xcode archive group/mode is not a toolkit-created 0700 root.
+                parent = original
+            }
+            try checkIOSDirectories(identity, check: check)
+            // Entered only after the caller's current typed complete result AND
+            // all four originals/exact three immediate rosters above. No running
+            // output or pathname alone can enable checkRoster's one exception.
+            iosCompleted = true
+            try assertUnchanged()
+            try checkIOSDirectories(identity, check: check)
+        }
+        func assertIOSArchiveClosure(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            try Self.need(iosCompleted && iosIdentity == identity && !iosClosing, "iOS output closure is not terminal")
+            try checkIOSDirectories(identity, check: check)
+            try assertUnchanged()
+            try check()
+        }
+        func closeIOSArchiveOriginals(_ identity: IOSArchiveIdentity, check: () throws -> Void) throws {
+            var primary: Error?
+            do { try assertIOSArchiveClosure(identity, check: check) } catch { primary = error }
+            iosClosing = true
+            do { try closeOriginals() } catch { if primary == nil { primary = error } }
+            iosIdentity = nil; iosStarted = false; iosCompleted = false; iosClosing = false
+            iosDirectories.removeAll()
+            // This is the SAME original clock after all consuming closes. A late
+            // failure cannot publish success or mask an earlier observation error.
+            do { try check() } catch { if primary == nil { primary = error } }
+            if let primary { throw primary }
+        }
+
         // Fixed positive Android output custody; only the dedicated signed profile enters it.
         // Call begin at the real parsed review, start immediately before the ONE
         // Start action, and finish only after the same real terminal result says
@@ -2068,7 +2167,9 @@ final class NormalAppUITests: XCTestCase {
             let identity = try AndroidBuildIdentity(operationID: String(repeating: "a", count: 32),
                                                      ownerGeneration: String(repeating: "b", count: 32))
             for scenario in ["valid", "late-close", "extra-operation", "work", "journal", "project-cache", "extra-artifact",
-                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {
+                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start",
+                             "ios-valid", "ios-work", "ios-extra-operation", "ios-foreign-output", "ios-symlink",
+                             "ios-replacement", "ios-partial-open", "ios-late-close", "ios-input"] {
                 try check()
                 let fixture = LocalFixture()
                 let temporary = open("/private/tmp", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -2196,6 +2297,93 @@ final class NormalAppUITests: XCTestCase {
                     try need(fixture.directories[""]!.facts == initialRoot
                         && initialRoot == facts(cleanupRoot) && initialRoot == named(temporary, rootName),
                         "Android DATA adopted root is not the original")
+                    if scenario.hasPrefix("ios-") {
+                        // Inert tiny files exercise the real Swift original/namespace
+                        // reader, not an Xcode archive or a product result substitute.
+                        fixture.iosUnsignedProfile = true
+                        for path in ancestors(iosUnsignedPaths) where !path.isEmpty { try makeDirectory(path, input: true) }
+                        for path in iosUnsignedPaths.sorted() { try makeFile(path, Data("inert iOS SOURCE DATA\n".utf8), input: true) }
+                        let ios = try IOSArchiveIdentity(operationID: identity.operationID, ownerGeneration: identity.ownerGeneration)
+                        try fixture.beginIOSArchiveObservation(ios, check: check)
+                        try fixture.confirmIOSArchiveStart(ios, check: check)
+                        let operation = "project/.mobile-release/desktop-ios-archive/" + ios.operationID
+                        for path in ["project/.mobile-release", "project/.mobile-release/desktop-ios-archive", operation] {
+                            try makeDirectory(path, input: false)
+                        }
+                        let archive = operation + "/archive.xcarchive"
+                        if scenario == "ios-symlink" {
+                            let (fd, name, opened) = try parent(archive)
+                            do {
+                                try need(symlinkat("/private/tmp", fd, name) == 0, "iOS DATA symlink setup")
+                                created.append(archive); cleanupRows[archive] = try named(fd, name)
+                            } catch { try? closeTemporary(opened); throw error }
+                            try closeTemporary(opened)
+                        } else if scenario != "ios-partial-open" {
+                            try makeDirectory(archive, input: false)
+                            try makeFile(archive + "/opaque-data", Data([1])) // Not inspected by the production observer.
+                        }
+                        switch scenario {
+                        case "ios-work": try makeDirectory(operation + "/work", input: false)
+                        case "ios-extra-operation": try makeDirectory("project/.mobile-release/desktop-ios-archive/" + String(repeating: "c", count: 32), input: false)
+                        case "ios-foreign-output": try makeDirectory("project/foreign-output", input: false)
+                        case "ios-input":
+                            let (fd, name, opened) = try parent("project/keep.txt")
+                            do {
+                                try need(fchmodat(fd, name, 0o622, 0) == 0, "iOS DATA input mutation")
+                                cleanupRows["project/keep.txt"] = try named(fd, name)
+                            } catch { try? closeTemporary(opened); throw error }
+                            try closeTemporary(opened)
+                        default: break
+                        }
+                        if ["ios-valid", "ios-replacement", "ios-late-close"].contains(scenario) {
+                            try fixture.finishIOSArchiveObservation(ios, check: check)
+                            try need(fixture.iosDirectories.count == 4 && fixture.descriptors.count == 13,
+                                     "iOS DATA fixed original descriptor census")
+                            if scenario == "ios-replacement" {
+                                let moved = operation + "/retained-archive", (fd, name, opened) = try parent(archive)
+                                do {
+                                    try need(renameat(fd, name, fd, "retained-archive") == 0, "iOS DATA same-parent replacement setup")
+                                    // DATA cleanup follows ONLY its own original rows after
+                                    // this explicit mutation, never a production recovery rule.
+                                    for old in created.filter({ $0 == archive || $0.hasPrefix(archive + "/") }) {
+                                        let next = moved + String(old.dropFirst(archive.count))
+                                        cleanupRows[next] = cleanupRows.removeValue(forKey: old)
+                                        if let index = created.firstIndex(of: old) { created[index] = next }
+                                    }
+                                } catch { try? closeTemporary(opened); throw error }
+                                try closeTemporary(opened)
+                                try makeDirectory(archive, input: false)
+                                try refused("directory binding changed") { try fixture.assertIOSArchiveClosure(ios, check: check) }
+                            } else if scenario == "ios-late-close" {
+                                var reached = false
+                                try refused("iOS DATA closed deadline refusal") {
+                                    try fixture.closeIOSArchiveOriginals(ios) {
+                                        try check()
+                                        if fixture.descriptors.isEmpty {
+                                            reached = true
+                                            throw Refusal.condition("fixture: iOS DATA closed deadline refusal")
+                                        }
+                                    }
+                                }
+                                try need(reached && fixture.iosIdentity == nil && fixture.iosDirectories.isEmpty,
+                                         "iOS DATA consuming close and late refusal")
+                            } else { try fixture.closeIOSArchiveOriginals(ios, check: check) }
+                            try need(faccessat(cleanupRoot, archive, F_OK, AT_EACCESS) == 0,
+                                     "iOS DATA production observation deleted archive")
+                        } else {
+                            let reasons = ["ios-work": "iOS settled top-level output roster",
+                                "ios-extra-operation": "iOS settled top-level output roster",
+                                "ios-foreign-output": "unexpected owned output under project",
+                                "ios-symlink": "directory open failed", "ios-partial-open": "directory open failed",
+                                "ios-input": "leaf shape/mode/limit"]
+                            guard let reason = reasons[scenario] else { throw Refusal.condition("fixture: iOS DATA scenario unmapped") }
+                            try refused(reason) { try fixture.finishIOSArchiveObservation(ios, check: check) }
+                            if scenario == "ios-partial-open" {
+                                try need(fixture.iosDirectories.count == 3 && fixture.descriptors.count == 12,
+                                         "iOS DATA partial opens not retained")
+                            }
+                        }
+                    } else {
                     for path in ["project", "project/app", "project/app/src", "project/app/src/main", "project/gradle"] {
                         try makeDirectory(path, input: true)
                     }
@@ -2321,11 +2509,13 @@ final class NormalAppUITests: XCTestCase {
                                      "Android DATA primary closure failure was masked or state retained")
                         }
                     }
+                    } // Existing Android cases above; iOS adds only a fixed top-level reader.
                 } catch { primary = error }
                 // Consume production FDs even after every setup/assertion error.
                 // Running/refused state deliberately has no successful closure.
                 if !fixture.descriptors.isEmpty {
                     fixture.androidOutput = nil // DATA-test teardown only, never an operation result.
+                    fixture.iosIdentity = nil // Same DATA-only teardown, no completed iOS result inferred.
                     do { try fixture.closeOriginals() } catch { if primary == nil { primary = error } }
                 }
                 if cleanupRoot >= 0 {
@@ -2527,11 +2717,14 @@ final class NormalAppUITests: XCTestCase {
             for path in expectedDirectories.sorted() {
                 guard let directory = directories[path] else { throw Refusal.condition("fixture: directory absent") }
                 let prefix = path.isEmpty ? "" : path + "/"
-                let expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in
+                var expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in
                     guard item.hasPrefix(prefix), item != path else { return nil }
                     let suffix = String(item.dropFirst(prefix.count))
                     return suffix.contains("/") ? nil : suffix
                 })
+                if path == "project" && iosUnsignedProfile && iosCompleted && iosIdentity != nil && iosDirectories.count == 4 {
+                    expected.insert(".mobile-release") // Fixed completed iOS namespace; no other input-parent exception.
+                }
                 try Self.need(try children(directory) == expected, "unexpected owned output under " + path)
             }
             let project = directories["project"]!
@@ -2548,7 +2741,8 @@ final class NormalAppUITests: XCTestCase {
             try Self.need(rootPath.isEmpty && current.isEmpty, "fixture preparation was repeated")
             let projectData = profile != .persistentCredentials
             let androidPositive = profile == .androidSignedBuild
-            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"
+            let iosUnsigned = profile == .iosUnsignedArchive
+            let resourceName = iosUnsigned ? "normal-ios-unsigned-v1" : androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"
             guard let url = Bundle(for: NormalAppUITests.self).url(forResource: resourceName, withExtension: "json") else {
                 throw Refusal.condition("fixture: bundled fixed DATA absent")
             }
@@ -2580,15 +2774,21 @@ final class NormalAppUITests: XCTestCase {
                     && SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == Self.androidPositiveSHA256,
                     "Android exact bundled public DATA pin")
             }
+            if iosUnsigned {
+                try Self.need(data.count == 10237
+                    && SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined()
+                        == "999a48f946b2a26164d250086d5ece7588f3ff9b2b88824e596168b82faa8daf",
+                    "iOS exact bundled public DATA pin")
+            }
             let spec = try JSONDecoder().decode(FixtureSpec.self, from: data)
-            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [
+            let stagePaths: [String: Set<String>] = projectData && !androidPositive && !iosUnsigned ? [
                 "config": [Self.config, "project/.gitignore"], "workflows": Set(Self.callers),
                 "text": [Self.title], "version": [Self.version], "images": Set(Self.imageTargets)
             ] : [:]
-            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals
+            let expectedOriginals = iosUnsigned ? Self.iosUnsignedPaths : androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals
             try Self.need(spec.schemaVersion == 1 && Set(spec.files.keys) == expectedOriginals
                 && Set(spec.stages.keys) == Set(stagePaths.keys)
-                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
+                && (projectData && !androidPositive && !iosUnsigned ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),
                 "fixed DATA inventory mismatch")
             func decode(_ values: [String: String]) throws -> [String: Data] {
                 var decoded: [String: Data] = [:]
@@ -2601,6 +2801,12 @@ final class NormalAppUITests: XCTestCase {
                 return decoded
             }
             originals = try decode(spec.files)
+            if iosUnsigned {
+                try Self.need(originals.count == 9 && Self.ancestors(Set(originals.keys)).count == 9
+                    && originals.values.reduce(0, { $0 + $1.count }) == 7264,
+                    "iOS fixed public input census")
+                iosUnsignedProfile = true
+            }
             if androidPositive {
                 originals[Self.androidVerificationPath] = try androidVerificationResource()
                 try Self.need(originals.count == 17 && Self.ancestors(Set(originals.keys)).count == 17
@@ -2941,6 +3147,7 @@ final class NormalAppUITests: XCTestCase {
         }
         func closeOriginals() throws {
             let missingAndroidClosure = androidOutput != nil && !androidClosing
+            let missingIOSClosure = iosIdentity != nil && !iosClosing
             // Consume each original exactly once, including after partial setup.
             // Never retry close or search/reopen a replacement descriptor.
             while let fd = descriptors.popLast() {
@@ -2948,6 +3155,7 @@ final class NormalAppUITests: XCTestCase {
             }
             directories.removeAll(); anchors.removeAll()
             applicationSupport = nil; applicationDirectory = nil; vaultDirectory = nil
+            try Self.need(!missingIOSClosure, "iOS final output observation was not joined before close")
             try Self.need(!missingAndroidClosure, "Android final output observation was not joined before close")
             try Self.need(closeErrors.isEmpty, "original close errors: " + closeErrors.joined(separator: ","))
         }
@@ -2973,7 +3181,8 @@ final class NormalAppUITests: XCTestCase {
         return try LocalFixture.AndroidBuildIdentity(operationID: values[0], ownerGeneration: values[1])
     }
 
-    // Explicit DATA-only native selection; not an Android-positive application case.
+    // Legacy fixed selector, now Android+iOS filesystem DATA only. Neither an
+    // application case nor an archive/signing observation; same original 30s.
     func testPositiveAndroidOutputCustodyData() throws {
         try LocalFixture.exerciseAndroidOutputCustodyData()
     }
@@ -4738,6 +4947,226 @@ final class NormalAppUITests: XCTestCase {
             throw Refusal.condition("Android public artifact byte bound")
         }
         return (count, hash)
+    }
+
+    @MainActor private func iosCurrentArchiveIdentity(_ container: XCUIElement) throws -> LocalFixture.IOSArchiveIdentity {
+        let details = try unique(container.descendants(matching: .group).matching(identifier: "Archive details"),
+                                 "current unsigned Archive details missing or repeated")
+        var values: [String] = []
+        for prefix in ["Archive operation ID: ", "Archive owner generation: "] {
+            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+                                   "current unsigned archive identity absent or ambiguous")
+            let text = field.label
+            try require(field.isHittable && text.hasPrefix(prefix), "current unsigned archive identity not visible")
+            values.append(String(text.dropFirst(prefix.count)))
+        }
+        return try LocalFixture.IOSArchiveIdentity(operationID: values[0], ownerGeneration: values[1])
+    }
+    @MainActor private func iosPublicText(_ container: XCUIElement) throws -> String {
+        let query = container.staticTexts
+        try require(query.count <= 256, "iOS fixed panel text count")
+        var text = ""
+        for index in 0..<query.count {
+            _ = try remaining(5)
+            let value = query.element(boundBy: index).label
+            try require(value.utf8.count <= 4096 && text.utf8.count + value.utf8.count + 1 <= 32768,
+                        "iOS fixed panel text bound")
+            text += value + "\n"
+        }
+        return text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+    }
+    @MainActor private func iosResult(_ result: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws -> (Int, Int64) {
+        try require(try iosCurrentArchiveIdentity(result) == identity, "iOS current complete identity differs")
+        let text = try iosPublicText(result)
+        for required in ["This local artifact only", "Archive created and structurally checked — not a signed release.",
+            "Archive bundle identity and saved version/build.", "Archive symbols under the saved symbols policy.",
+            ".mobile-release/desktop-ios-archive/" + identity.operationID + "/archive.xcarchive"] {
+            try require(text.contains(required), "iOS current unsigned result fact missing")
+        }
+        try require(!text.contains("Historical / retained context"), "iOS historical result refused")
+        let expression = try NSRegularExpression(pattern: #"Saved version 1\.2\.3 · build 7\. ([1-9][0-9]{0,5}) observed entries · ([1-9][0-9]{0,9}) observed bytes\."#)
+        let rows = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard rows.count == 1, let entryRange = Range(rows[0].range(at: 1), in: text),
+              let byteRange = Range(rows[0].range(at: 2), in: text), let entries = Int(text[entryRange]),
+              let bytes = Int64(text[byteRange]), entries <= 100_000, bytes <= 8 * 1024 * 1024 * 1024 else {
+            throw Refusal.condition("iOS typed original result counts absent or outside bounds")
+        }
+        return (entries, bytes) // Displayed original result, NOT a new archive census.
+    }
+    @MainActor private func settleFailedIOSArchive(_ app: XCUIApplication, window: XCUIElement,
+                                                   panel: XCUIElement, identity: LocalFixture.IOSArchiveIdentity) throws {
+        guard let clock = caseClock, clock.firstFailure != nil, let owner = originalLaunch else {
+            throw Refusal.condition("iOS failure settlement requires the failed original")
+        }
+        // Leave ten seconds of the SAME 900s end for the existing original's
+        // teardown/gate closes. No renewed work, new owner or successful outcome.
+        let end = min(clock.deadline - 10, try clock.end(within: 140, cleanup: true))
+        func check() throws {
+            _ = try clock.remaining(1, before: end, cleanup: true)
+            try owner.healthy(cleanup: true)
+        }
+        func need(_ value: Bool) throws {
+            try check()
+            guard value else { throw Refusal.condition("iOS original failure settlement unavailable") }
+        }
+        func only(_ query: XCUIElementQuery) throws -> XCUIElement {
+            try need(query.count == 1)
+            return query.element(boundBy: 0)
+        }
+        func click(_ query: XCUIElementQuery) throws {
+            let item = try only(query)
+            try need(item.isEnabled && item.isHittable)
+            item.click()
+        }
+        var cancelRequested = false, statusRequested = false
+        while true {
+            try check()
+            let status = try only(panel.descendants(matching: .any).matching(identifier: "Original iOS archive status"))
+            let details = try only(status.descendants(matching: .group).matching(identifier: "Archive details"))
+            for (prefix, expected) in [("Archive operation ID: ", identity.operationID), ("Archive owner generation: ", identity.ownerGeneration)] {
+                let field = try only(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)))
+                try need(field.label == prefix + expected)
+            }
+            if status.staticTexts.matching(identifier: "iOS request finished").count == 1 { break }
+            if !cancelRequested {
+                let cancel = panel.buttons.matching(identifier: "Cancel this iOS archive")
+                try need(cancel.count == 1)
+                cancelRequested = true // Consume before any click/acknowledgement can fail.
+                try click(cancel)
+            }
+            if !statusRequested {
+                let read = panel.buttons.matching(identifier: "Check archive status")
+                if read.count == 1 && read.element(boundBy: 0).isEnabled && read.element(boundBy: 0).isHittable {
+                    statusRequested = true
+                    try click(read)
+                }
+            }
+            try clock.progress(until: end, cleanup: true)
+        }
+        // Same fixed native Quit UI, scoped to the retained application's menu.
+        // This is failure settlement only; normalQuitObserved stays false.
+        try need(window.sheets.count == 0)
+        let menu = try only(app.menuBars)
+        try click(menu.menuBarItems.matching(identifier: "Mobile Release Kit"))
+        try click(menu.menuItems.matching(identifier: "Quit"))
+        while window.sheets.count == 0 { try clock.progress(until: end, cleanup: true) }
+        let sheet = try only(window.sheets)
+        try need(sheet.staticTexts.matching(identifier: "Quit and discard unsaved drafts?").count == 1
+            && sheet.buttons.count == 2 && sheet.buttons.matching(identifier: "Cancel").count == 1)
+        try click(sheet.buttons.matching(identifier: "Quit"))
+        try need(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end, cleanup: true)))
+    }
+
+    @MainActor func testSyntheticProjectUnsignedIOSArchive() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 900
+        try beginCase(seconds: 900, iosUnsigned: true)
+        guard let clock = caseClock else { throw Refusal.condition("iOS original clock absent") }
+        let successCutoff = clock.deadline - 150
+        journeyDeadline = successCutoff
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        var selected: XCUIElement?
+        var identity: LocalFixture.IOSArchiveIdentity?
+        var observed: (Int, Int64)?
+        var successBeforeCutoff = false
+        do {
+            try stage("ios-unsigned-fixture") { try fixture.prepare(.iosUnsignedArchive) }
+            try stage("ios-unsigned-launch") { launched = try launchForJourney() }
+            guard let (app, window, renderer) = launched else { throw Refusal.condition("iOS ordinary launch absent") }
+            try stage("ios-unsigned-project") {
+                try press(renderer, "Open project folder", renderer: renderer)
+                let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
+                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")),
+                                    in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "iOS selected fixture differs")
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "org.example.mrk.observed"), in: renderer)
+                try fixture.assertUnchanged()
+            }
+            let failures = ["No new iOS archive outcome was confirmed", "Cleanup needs attention"]
+            try stage("ios-unsigned-review") {
+                try press(renderer, "Releases", renderer: renderer)
+                let panel = try waitElement(named(renderer, "Review the current saved inputs")
+                    .containing(.button, identifier: "Review saved iOS inputs"), in: renderer)
+                selected = panel
+                try require(named(panel, "Completed local unsigned iOS archive observation").count == 0
+                    && named(panel, "Original iOS archive status").count == 0, "iOS prior operation cannot supply this journey")
+                try press(panel, "Refresh saved configuration", renderer: renderer, failures: failures)
+                try press(panel, "Read saved version", renderer: renderer, failures: failures)
+                try press(panel, "Review saved iOS inputs", renderer: renderer, failures: failures)
+                let review = try waitElement(named(panel, "Confirm this saved unsigned iOS archive intent"), in: panel, failures: failures)
+                let text = try iosPublicText(review)
+                for expected in ["ios/MRKObserved.xcodeproj", "MRKObserved", "Release", "org.example.mrk.observed", "Saved preparation is not configured."] {
+                    try require(text.contains(expected), "iOS saved unsigned selection differs")
+                }
+                let pair = try iosCurrentArchiveIdentity(review)
+                identity = pair
+                try fixture.beginIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                let consent = try waitElement(controls(review, [.checkBox], label:
+                    "I trust this project and authorize one unsigned archive of these saved inputs.", prefix: true), in: review, enabled: true)
+                try reveal(consent, in: renderer)
+                try require(consent.value as? String == "0", "iOS trust consent must begin unchecked")
+                consent.click()
+                try require(consent.value as? String == "1", "iOS explicit trust consent not observed")
+                try require(try iosCurrentArchiveIdentity(review) == pair, "iOS review identity changed before Start")
+                try fixture.confirmIOSArchiveStart(pair) { _ = try self.remaining(5) }
+                try press(review, "Create unsigned archive", renderer: renderer, failures: failures) // Exactly ONE Start.
+            }
+            guard let panel = selected, let pair = identity else { throw Refusal.condition("iOS selected original absent") }
+            try stage("ios-unsigned-original-result") {
+                let result = try waitElement(named(panel, "Completed local unsigned iOS archive observation"),
+                    in: panel, timeout: 750, failures: failures)
+                try reveal(result, in: renderer)
+                observed = try iosResult(result, identity: pair)
+                let status = try unique(named(panel, "Original iOS archive status"), "iOS current terminal status absent")
+                try require(try iosCurrentArchiveIdentity(status) == pair, "iOS terminal status identity differs")
+                let text = try iosPublicText(status)
+                for required in ["iOS request finished", "Xcode version: known exit 0.", "iOS SDK selection: known exit 0.",
+                    "Saved preparation: not configured.", "Archive: known exit 0.",
+                    "Inspection snapshot: removed. Task work: removed. Archive output: retained-local-result."] {
+                    try require(text.contains(required), "iOS original command/finality fact missing")
+                }
+                try require(!text.contains("This is retained original-operation data"), "iOS historical original status refused")
+                try fixture.finishIOSArchiveObservation(pair) { _ = try self.remaining(5) }
+                _ = try clock.remaining(1, before: successCutoff)
+                successBeforeCutoff = true // Only here; neither Quit nor cleanup can create success.
+            }
+            journeyDeadline = clock.deadline // Remaining original reserve, never a new deadline.
+            try stage("ios-unsigned-close") {
+                try require(successBeforeCutoff, "iOS successful observation missed original cutoff")
+                try fixture.assertIOSArchiveClosure(pair) { _ = try self.remaining(5) }
+                let sheet = try quitSheet(app, window)
+                try click(sheet.buttons.matching(identifier: "Quit"), "iOS ordinary Quit unavailable")
+                try completeNormalQuit(app)
+                try fixture.closeIOSArchiveOriginals(pair) { _ = try self.remaining(5) }
+                ownedFixture = nil
+            }
+            guard let observed else { throw Refusal.condition("iOS typed original result missing") }
+            try require(successBeforeCutoff, "iOS original cutoff acceptance missing")
+            try acceptFinalScenario()
+            let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-unsigned-ios-archive",
+                "sourceCommit": ProcessInfo.processInfo.environment["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "",
+                "operationId": pair.operationID, "ownerGeneration": pair.ownerGeneration,
+                "savedVersion": "1.2.3", "savedBuild": 7, "originalEntries": observed.0, "originalBytes": observed.1,
+                "inputFiles": 9, "inputBytes": 7264, "topLevelDirectories": 4,
+                "archiveDescendantsObserved": false, "nativeResultDisplayed": true, "outputPostMatched": true,
+                "originalsClosed": true, "normalQuitObserved": true, "successBeforeCutoff": true,
+                "signed": false, "ipaExported": false, "releaseQualified": false, "parentReturncodeRequired": 0]
+            let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, .withoutEscapingSlashes])
+            try require(raw.count <= 16 * 1024, "iOS closed public result bound")
+            _ = try remaining(1)
+            print("MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI=" + String(decoding: raw, as: UTF8.self))
+        } catch {
+            let primary = error
+            _ = clock.fail("unsigned iOS observation failed") // Never clear/replace a prior original failure.
+            if let (app, window, _) = launched, let panel = selected, let pair = identity, !normalQuitObserved {
+                do { try settleFailedIOSArchive(app, window: window, panel: panel, identity: pair) }
+                catch { /* Same-original failure/unknown retained; teardown still consumes its originals. */ }
+            }
+            throw primary
+        }
     }
 
     @MainActor func testSyntheticProjectAndroidSignedBuild() throws {

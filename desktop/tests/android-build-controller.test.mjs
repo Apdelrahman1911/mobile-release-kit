@@ -457,7 +457,7 @@ test('actual native bridge sends four raw copied Android bodies, rejects bad cal
   assert.equal(invoked, 0); assert.equal(listened, 0);
 });
 
-test('component shares native-terminal-only output with Artifacts and provides real input/output/cancel help, not a file action', () => {
+test('component shares native-terminal-only output with Artifacts and provides real input/output/cancel help, not a file action', async (t) => {
   const source = readFileSync(new URL('../src/components/AndroidBuild.tsx', import.meta.url), 'utf8');
   assert.match(source, /export function AndroidBuildResultView/);
   assert.match(source, /state\.mode !== 'native' \|\| op\?\.phase !== 'terminal' \|\| op\.outcome !== 'complete'/);
@@ -473,6 +473,63 @@ test('component shares native-terminal-only output with Artifacts and provides r
   assert.match(androidBuildOutputHelp.failure, /Ordinary inspection completion may contain FAIL/);
   assert.match(androidBuildOutputHelp.failure, /local signing requires all final checks to pass/);
   assert.match(androidBuildCancelHelp.failure, /Unknown cleanup is sticky/);
+
+  // The ordinary visible identity comes only from the controller's parsed
+  // current Status, not the displayed project, a result field or test props.
+  const details = source.slice(source.indexOf('function AndroidBuildDetails('), source.indexOf('// Shared by Releases'));
+  assert.match(details, /const op = state\.status\?\.operation, consent = state\.consent/);
+  assert.match(details, /state\.mode !== 'native' \|\| !op \|\| state\.historical \|\| state\.integrityFailed \|\| state\.nativeBlocked/);
+  assert.match(details, /\|\| state\.originalUnconfirmed\) return null/);
+  assert.match(details, /review && \(op\.phase !== 'awaiting-consent' \|\| !op\.intentUsable \|\| !consent/);
+  assert.match(details, /consent\.operationId !== op\.operationId \|\| consent\.ownerGeneration !== op\.ownerGeneration/);
+  assert.match(details, /role="group" aria-label="Build details"/);
+  assert.ok(details.includes('<p>{`Build operation ID: ${op.operationId}`}</p>'));
+  assert.ok(details.includes('<p>{`Build owner generation: ${op.ownerGeneration}`}</p>'));
+  assert.doesNotMatch(details, /(?:controller\.|result\.|project\.|operationId:|ownerGeneration:|aria-hidden|data-testid)/);
+  assert.equal((source.match(/<AndroidBuildDetails state=\{state\}(?: review)? \/>/g) ?? []).length, 3);
+  const resultView = source.slice(source.indexOf('export function AndroidBuildResultView'), source.indexOf('export function AndroidBuild({'));
+  assert.equal((resultView.match(/<AndroidBuildDetails state=\{state\} \/>/g) ?? []).length, 1);
+  const review = source.slice(source.indexOf('aria-label="Confirm this saved Android-build intent"'), source.indexOf('{state.error &&'));
+  assert.equal((review.match(/<AndroidBuildDetails state=\{state\} review \/>/g) ?? []).length, 1);
+  const originalStatus = source.slice(source.indexOf('aria-label="Original Android build status"'), source.indexOf('Leaving Releases keeps a started run'));
+  assert.equal((originalStatus.match(/<AndroidBuildDetails state=\{state\} \/>/g) ?? []).length, 1);
+
+  // Existing real controller and protocol, with inert native replies. Review,
+  // running and terminal data preserve the same pair; foreign IDs/generations
+  // and saved-context changes cannot be presented as a current identity.
+  for (const fault of [null, 'operation', 'generation', 'saved-context']) {
+    const h = harness(t); await h.ready;
+    assert.equal(h.state.status.operation, null);
+    const original = await reviewed(h), reviewedState = h.state;
+    assert.deepEqual([reviewedState.status.operation.operationId, reviewedState.status.operation.ownerGeneration], [OP, OWNER]);
+    assert.deepEqual([reviewedState.consent.operationId, reviewedState.consent.ownerGeneration], [OP, OWNER]);
+    assert.equal(reviewedState.status.operation.phase, 'awaiting-consent');
+    assert.equal(reviewedState.status.operation.intentUsable, true);
+    for (const key of ['historical', 'integrityFailed', 'nativeBlocked', 'originalUnconfirmed']) assert.equal(reviewedState[key], false);
+    const sent = start(h, original);
+    assert.equal(h.state.consent, null); assert.equal(h.state.originalUnconfirmed, true);
+    h.reply(sent.call, status(2, running(original))); await sent.done;
+    assert.equal(h.state.originalUnconfirmed, false);
+    assert.deepEqual([h.state.status.operation.operationId, h.state.status.operation.ownerGeneration], [OP, OWNER]);
+    if (fault === 'operation' || fault === 'generation') {
+      const changed = completed(original); changed[fault === 'operation' ? 'operationId' : 'ownerGeneration'] = OTHER;
+      h.emit(status(3, changed));
+      assert.equal(h.state.nativeBlocked, true); assert.equal(h.state.integrityFailed, true);
+      assert.equal(h.state.status.operation.result, null);
+      assert.deepEqual([h.state.status.operation.operationId, h.state.status.operation.ownerGeneration], [OP, OWNER]);
+    } else {
+      h.emit(status(3, completed(original)));
+      assert.equal(h.state.status.operation.outcome, 'complete'); assert.ok(h.state.status.operation.result);
+      assert.deepEqual([h.state.status.operation.operationId, h.state.status.operation.ownerGeneration], [OP, OWNER]);
+      assert.equal(h.state.historical, false);
+      if (fault === 'saved-context') {
+        h.dispatch({ type: 'snapshot-start', projectId: 'p1', requestId: 2 });
+        assert.equal(h.state.historical, true);
+        assert.ok(h.state.status.operation.result, 'Retain the original result, without relabelling it current.');
+      }
+    }
+    assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+  }
 });
 
 

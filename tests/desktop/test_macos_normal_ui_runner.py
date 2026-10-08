@@ -126,7 +126,24 @@ ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
  (4698, 4980, 'e6c45d863e0f73cacaff298621176cc7b6ba90026d01f2a6acd536323396f824', ''),
  (5002, 5012, '1370af131a521e62e1f81d1a2a8ecc3e595711ec9bd8c754b6d9ad212d982dbc', ''))
 
+IOS_UNSIGNED_SWIFT_INVERSE = [(70, 71, '9bac829257dc5bfc3a439aac882d2dd08d941c3f649245b3d7a768774a240fb6', '        init(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (72, 73, '66f825502f9177249fae4721b875432bc67fb64cb82913b6316d1774c5a49dfd', '            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),\n'), (213, 214, '6cd754f487e73847150b083af7e63e879a8dbac5ad665697097f9ec96855aa0e', '        func healthy() throws {\n'), (216, 218, '6a92da92d5532c709c9f3120362f8254966396700c0466f327c01b0ab76b5dfa', '            _ = try clock.remaining(1)\n'), (367, 368, 'fd8a6b3740680e236e8d1b7230c780d1b2047a08811daf14f32e2a626a9bbca2', '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (369, 370, '3e8ede215cecb56df70dc3f608cc5f1cee333b9789c9dc3c9dad5490f8a90700', '        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)\n'), (1057, 1058, 'fe1a506227717451d1ea704c49f67707355cf944c26b23254692342734be093f', '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }\n'), (1717, 1815, '8207c234f1e8514a6fc76d5ce60326720330a45af6f3d21a939a9c241306c9fc', ''), (2169, 2172, 'dcf34ab30490e5e6f7018fc3909338186a496fd715c7f6dcc02f3b100cbbb33e', '                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {\n'), (2299, 2386, 'b6ebcf146b2dff8f0aad636bf67b3dda1162b9a7dd958e017a298ee8b7610e59', ''), (2511, 2512, '24e72c6479ac7bc1e357f0db0edc814203f1521b12a87159a84c81f83cd3e3b0', ''), (2517, 2518, '206f1b83b020317dd90a1fe16c65d22dc46b4f99d00d66327b63ec35596f83d2', ''), (2719, 2720, 'df6605ab7490f24679c4a978e7c5b13f93f85210ea6444e2e2e9efcfcae013d6', '                let expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in\n'), (2724, 2727, 'c960cb683f36e92409c4c587c97282b29c14f0ae014559e7ee26c650e4b95da0', ''), (2743, 2745, 'b73ca4989daede170caf6b6b1a0998e75ea6ebba25d2f8d1a6fe0156cdd7d1ae', '            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"\n'), (2776, 2782, '1107bb850d890130bbb52690bf0a0cb605709f74d8472036002b6a5a015cc10c', ''), (2783, 2784, 'ea2d11d0ac471ad6c10e11edf0f41fed2d107ed6d1e06de7711e25de619a9398', '            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [\n'), (2787, 2788, '2498cc74fb404e00c579acc48e5cfdd4a0960767e13892af10381bc785c3fbc5', '            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals\n'), (2790, 2791, '1a888d6908be38a47f83ceeb92e6a3bf14a2a1a3aeb4652e02395e1b491f385b', '                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'), (2803, 2809, '49b024bd18a645445fbd6b19e3fe2cbad35bf22b7bc08bcde6f5579952779f55', ''), (3149, 3150, '419b3fec90b5f9f9cab66658f88de15a911c551aeb16763ab01e151d74198a49', ''), (3157, 3158, '6849ff7af4e41318c8523669ea36515c7f32c00a1e67b3ef51f7f9e9a490a51e', ''), (3183, 3185, '649cb7eca7a5aa1accb59bfe7e5ae11533ec19478cee237ef8c4c35cb2e98be4', '    // Explicit DATA-only native selection; not an Android-positive application case.\n'), (4951, 5171, 'daf86c7067443724d660940776c521e0d1655f9cc3701f3579faa2c0fbecd1b7', '')]
+
+
+def without_ios_unsigned_source(source):
+    rows = source.splitlines(keepends=True)
+    for start, end, expected, original in reversed(IOS_UNSIGNED_SWIFT_INVERSE):
+        observed = ''.join(rows[start:end])
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('unsigned iOS exact SOURCE region differs')
+        rows[start:end] = original.splitlines(keepends=True)
+    value = ''.join(rows)
+    if hashlib.sha256(value.encode()).hexdigest() != 'baa5731b9a25910affe6019ace6db58cccb35267a028a7034e70997ed96156eb':
+        raise AssertionError('unsigned iOS inverse changed prior SOURCE')
+    return value
+
+
 def without_positive_android_source(source):
+    source = without_ios_unsigned_source(source)
     rows = source.splitlines(keepends=True)
     for start, end, expected, original in reversed(ANDROID_POSITIVE_SWIFT_INVERSE):
         observed = ''.join(rows[start:end])
@@ -585,6 +602,82 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertNotIn(MODULE.OUTPUT_DATA_RESULT, MODULE.NORMAL_SELECTIONS)
         for methods, _, _ in MODULE.NORMAL_SELECTIONS.values():
             self.assertNotIn('testPositiveAndroidOutputCustodyData', methods)
+        # Actual native filesystem DATA remains a separate fixed selector. This
+        # local group verifies SOURCE and exact historical inverses, not an
+        # independently reimplemented archive scanner or a native pass.
+        import base64
+        current = SWIFT.read_text(encoding="utf-8")
+        self.assertEqual(hashlib.sha256(without_ios_unsigned_source(current).encode()).hexdigest(),
+                         "baa5731b9a25910affe6019ace6db58cccb35267a028a7034e70997ed96156eb")
+        with self.assertRaises(AssertionError):
+            without_ios_unsigned_source(current.replace("iOS original identity shape", "changed iOS identity shape", 1))
+        ios_begin = "        // One ordinary unsigned archive's post-terminal namespace observation."
+        ios = current.split(ios_begin, 1)[1].split("        // Fixed positive Android output custody;", 1)[0]
+        for literal in ('struct IOSArchiveIdentity: Equatable', '^[0-9a-f]{32}$', 'iosIdentity == identity',
+                        'iosDirectories.count == 4', '[Set(["desktop-ios-archive"]), Set([identity.operationID]), Set(["archive.xcarchive"])]',
+                        'children(iosDirectories[index]) == names',
+                        'original.facts.uid == getuid()', 'original.facts.device == device',
+                        'original.facts.mode & 0o7777 == 0o700', 'original.facts.mode & 0o7022 == 0',
+                        'O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC',
+                        'iosDirectories.append(original)', 'iosClosing = true', 'try assertUnchanged()',
+                        'do { try closeOriginals() } catch { if primary == nil { primary = error } }',
+                        'do { try check() } catch { if primary == nil { primary = error } }'):
+            self.assertIn(literal, ios)
+        self.assertLess(ios.index('try adoptDirectory(openat('), ios.index('iosDirectories.append(original)'))
+        self.assertLess(ios.index('iosDirectories.append(original)'), ios.index('original.facts.uid == getuid()'))
+        self.assertEqual(ios.count('children(iosDirectories['), 1)
+        self.assertNotIn('children(iosDirectories[3])', ios)
+        for forbidden in ('FileManager', 'removeItem', 'unlinkat(', 'mkdirat(', 'Data(contentsOf:',
+                          'androidOutputWalk(', 'fchmod(', 'Process(', 'readdir('):
+            self.assertNotIn(forbidden, ios)
+        self.assertIn('if path == "project" && iosUnsignedProfile && iosCompleted && iosIdentity != nil && iosDirectories.count == 4', current)
+        for name in ('ios-valid', 'ios-work', 'ios-extra-operation', 'ios-foreign-output', 'ios-symlink',
+                     'ios-replacement', 'ios-partial-open', 'ios-late-close', 'ios-input'):
+            self.assertIn('"' + name + '"', current)
+        for literal in ('fixture.iosDirectories.count == 3', 'fixture.descriptors.count == 12',
+                        'fixture.iosDirectories.count == 4', 'fixture.descriptors.count == 13',
+                        '"/opaque-data"', '"retained-archive"', 'iOS DATA production observation deleted archive',
+                        'iOS DATA consuming close and late refusal'):
+            self.assertIn(literal, current)
+        journey = current.split('    @MainActor func testSyntheticProjectUnsignedIOSArchive()', 1)[1].split(
+            '    @MainActor func testSyntheticProjectAndroidSignedBuild()', 1)[0]
+        self.assertEqual(journey.count('"Create unsigned archive"'), 1)
+        for literal in ('beginCase(seconds: 900, iosUnsigned: true)', 'clock.deadline - 150',
+                        'journeyDeadline = successCutoff', 'successBeforeCutoff = true',
+                        'fixture.beginIOSArchiveObservation(pair)', 'fixture.confirmIOSArchiveStart(pair)',
+                        'fixture.finishIOSArchiveObservation(pair)', 'fixture.closeIOSArchiveOriginals(pair)',
+                        'try completeNormalQuit(app)', 'try acceptFinalScenario()', 'MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI=',
+                        'signed": false', 'ipaExported": false', 'releaseQualified": false'):
+            self.assertIn(literal, journey)
+        settling = current.split('    @MainActor private func settleFailedIOSArchive(', 1)[1].split(
+            '    @MainActor func testSyntheticProjectUnsignedIOSArchive()', 1)[0]
+        self.assertIn('clock.firstFailure != nil', settling)
+        self.assertIn('owner.healthy(cleanup: true)', settling)
+        self.assertIn('cancelRequested = true', settling)
+        self.assertNotIn('"Create unsigned archive"', settling)
+        self.assertNotIn('normalQuitObserved = true', settling)
+        self.assertNotIn('CaseClock(', settling)
+        fixture_path = SWIFT.parent / "Fixtures/normal-ios-unsigned-v1.json"
+        body = fixture_path.read_bytes()
+        self.assertEqual((len(body), hashlib.sha256(body).hexdigest()),
+                         (10237, "999a48f946b2a26164d250086d5ece7588f3ff9b2b88824e596168b82faa8daf"))
+        fixture = json.loads(body)
+        self.assertEqual(set(fixture), {"schemaVersion", "files", "stages"})
+        self.assertEqual(fixture["stages"], {})
+        decoded = {key: base64.b64decode(value, validate=True) for key, value in fixture["files"].items()}
+        self.assertEqual((len(decoded), sum(map(len, decoded.values())), max(map(len, decoded.values()))), (9, 7264, 3903))
+        self.assertEqual(set(decoded), {"project/.gitignore", "project/keep.txt", "project/release/mobile-release.json",
+            "project/release/version.properties", "project/ios/MRKObserved.xcodeproj/project.pbxproj",
+            "project/ios/MRKObserved.xcodeproj/xcshareddata/xcschemes/MRKObserved.xcscheme",
+            "project/ios/MRKObserved.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+            "project/ios/MRKObserved/main.m", "project/ios/MRKObserved/Info.plist"})
+        pbx = (SWIFT.parent.parent / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        self.assertEqual(pbx.count('path = "Fixtures/normal-ios-unsigned-v1.json"'), 1)
+        self.assertIn('A10000000000000000000018 = {isa = PBXBuildFile; fileRef = A10000000000000000000019;', pbx)
+        self.assertIn('A10000000000000000000017, A10000000000000000000019); path = MRKNormalAppUITests;', pbx)
+        self.assertIn('A10000000000000000000016, A10000000000000000000018); runOnlyForDeploymentPostprocessing = 0;', pbx)
+        self.assertIn('SWIFT_STRICT_CONCURRENCY = complete;', pbx)
+        self.assertNotIn(MODULE.IOS_UNSIGNED_RESULT, MODULE.NORMAL_SELECTIONS)
 
     def test_ui_target_requests_boolean_false_sandbox_at_build_time(self):
         # Source intent only; the actual generated signature is admitted separately.
@@ -653,6 +746,56 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         for allowance in (True, 300, 600):
             with self.assertRaises(MODULE.Refused):
                 MODULE.xcode_test_arguments("/fixed.xctestrun", "/fresh.xcresult", (MODULE.PACKAGED_METHOD,), allowance)
+        # One separately selected unsigned iOS original; it is not part of the
+        # seven ordinary groups and cannot borrow an arbitrary 900s allowance.
+        temporary = "/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/"
+        normal = Path(temporary).parent
+        selected = MODULE.CLASS + "testSyntheticProjectUnsignedIOSArchive"
+        self.assertEqual(MODULE.IOS_UNSIGNED_METHOD, "testSyntheticProjectUnsignedIOSArchive")
+        self.assertNotIn(MODULE.IOS_UNSIGNED_RESULT, MODULE.NORMAL_SELECTIONS)
+        self.assertEqual(len(MODULE.NORMAL_SELECTIONS), 7)
+        for target, machine in ((MODULE.ARM_TARGET, "arm64"), (MODULE.INTEL_TARGET, "x86_64")):
+            request = MODULE.normal_request(["--target", target, "--normal-ios-unsigned-archive-test"], temporary)
+            self.assertEqual(request, dict(phase="test", derived=normal / "DerivedData",
+                result=normal / "ios-unsigned-archive-test.xcresult", methods=(selected,), allowance=900,
+                timeout=1020, phaseSeconds=1245, iosUnsigned=True, target=target))
+            summary = MODULE.normal_request(["--target", target, "--normal-ios-unsigned-archive-summary"], temporary)
+            self.assertEqual(summary, dict(request, phase="summary", methods=(), allowance=None,
+                                           timeout=30, phaseSeconds=90))
+            command = MODULE.xcode_test_arguments(Path("fixed.xctestrun"), request["result"],
+                                                  (selected,), 900, target=target, ios_unsigned=True)
+            self.assertEqual(command, ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", "fixed.xctestrun",
+                "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
+                "-resultBundlePath", str(request["result"]), "-only-testing:" + selected,
+                "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                "-default-test-execution-time-allowance", "900", "-maximum-test-execution-time-allowance", "900",
+                "-disableAutomaticPackageResolution"])
+        for arguments in (["--normal-ios-unsigned-archive-test", "extra"],
+                          ["--normal-ios-unsigned-archive-summary", "ios-unsigned-archive-test.xcresult"],
+                          ["--normal-ios-unsigned-archive-test", "--retry"],
+                          ["--normal-ios-unsigned-archive-test", "--target", MODULE.ARM_TARGET]):
+            with self.subTest(ios_arguments=arguments), self.assertRaises(MODULE.Refused):
+                MODULE.normal_request(arguments, temporary)
+        for changed in (dict(ios_unsigned=False), dict(ios_unsigned=1), dict(engineering=True),
+                        dict(output_data=True), dict(android_positive=True), dict(allowance=300),
+                        dict(allowance=True), dict(methods=(MODULE.OUTPUT_DATA_METHOD,)),
+                        dict(methods=(selected, selected)), dict(result=normal / "test.xcresult")):
+            values = dict(methods=(selected,), allowance=900, result=normal / MODULE.IOS_UNSIGNED_RESULT,
+                          ios_unsigned=True)
+            values.update(changed)
+            with self.subTest(ios_arguments=changed), self.assertRaises(MODULE.Refused):
+                MODULE.xcode_test_arguments(Path("fixed.xctestrun"), **values)
+        for changed in (dict(ios_unsigned=1), dict(engineering=True), dict(output_data=True),
+                        dict(android_positive=True), dict(allowance=300), dict(timeout=900),
+                        dict(methods=(MODULE.OUTPUT_DATA_METHOD,)), dict(result=normal / "test.xcresult")):
+            values = dict(methods=(selected,), allowance=900, timeout=1020, result=normal / MODULE.IOS_UNSIGNED_RESULT,
+                          ios_unsigned=True)
+            values.update(changed)
+            with self.subTest(ios_owner=changed), patch.object(MODULE, "RunnerProducts") as unopened:
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.run_admitted_test(lambda *_: self.fail("invalid iOS original dispatched"),
+                                             normal / "DerivedData", **values)
+                unopened.assert_not_called()
 
     def test_project_batch_is_exactly_two_methods_with_existing_finite_deadlines(self):
         expected = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
@@ -2809,6 +2952,193 @@ class NormalPhaseDataTests(unittest.TestCase):
                     else:
                         self.assertEqual(failure["commands"], [])
                         self.assertEqual(failure["stage"], "context" if fault == "context" else "loader" if fault == "loader" else "execute")
+        # Fixed unsigned iOS result grammar. These are inert original-return
+        # DATA tests, not a native archive, and do not reimplement core inspection.
+        ios_source = "a" * 40
+        ios_facts = dict(schemaVersion=1, scope="one-ordinary-local-unsigned-ios-archive", sourceCommit=ios_source,
+            operationId="b" * 32, ownerGeneration="c" * 32, savedVersion="1.2.3", savedBuild=7,
+            originalEntries=3, originalBytes=1024, inputFiles=9, inputBytes=7264, topLevelDirectories=4,
+            archiveDescendantsObserved=False, nativeResultDisplayed=True, outputPostMatched=True,
+            originalsClosed=True, normalQuitObserved=True, successBeforeCutoff=True, signed=False,
+            ipaExported=False, releaseQualified=False, parentReturncodeRequired=0)
+        ios_case = b"-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectUnsignedIOSArchive]"
+        def ios_stdout(value):
+            return (b"Test Case '" + ios_case + b"' started.\n" + MODULE.ORIGINAL_MARKER.encode() + b"\n"
+                    + MODULE.IOS_UNSIGNED_PREFIX + MODULE.encoded(value) + b"\nTest Case '" + ios_case
+                    + b"' passed (12.000 seconds).\n")
+        ios_output = ios_stdout(ios_facts)
+        self.assertIs(MODULE.ios_unsigned_facts(ios_facts, source=ios_source), ios_facts)
+        self.assertEqual(MODULE.ios_unsigned_marker(ios_output, source=ios_source), ios_facts)
+        for key, value in ios_facts.items():
+            bad = dict(ios_facts)
+            del bad[key]
+            with self.subTest(ios_missing=key), self.assertRaises(MODULE.Refused):
+                MODULE.ios_unsigned_facts(bad, source=ios_source)
+            bad[key] = not value if type(value) is bool else True if type(value) is int else "wrong"
+            with self.subTest(ios_changed=key), self.assertRaises(MODULE.Refused):
+                MODULE.ios_unsigned_facts(bad, source=ios_source)
+        for changed in (dict(ios_facts, extra=True), dict(ios_facts, originalEntries=0),
+                        dict(ios_facts, originalEntries=100001), dict(ios_facts, originalBytes=0),
+                        dict(ios_facts, originalBytes=(8 << 30) + 1)):
+            with self.assertRaises(MODULE.Refused): MODULE.ios_unsigned_facts(changed, source=ios_source)
+        self.assertEqual(MODULE.ios_unsigned_facts(dict(ios_facts, originalEntries=100000, originalBytes=8 << 30),
+                                                  source=ios_source)["originalBytes"], 8 << 30)
+        for changed in (b"", b"x" * 1048577, ios_output + ios_output,
+                ios_output.replace(MODULE.ORIGINAL_MARKER.encode(), b""),
+                ios_output.replace(MODULE.IOS_UNSIGNED_PREFIX, b"not-the-marker="),
+                ios_output.replace(b" passed ", b" failed "),
+                ios_output.replace(ios_case, b"-[MRKNormalAppUITests.NormalAppUITests testLaunchCancelAndQuit]"),
+                ios_output.replace(MODULE.encoded(ios_facts), json.dumps(ios_facts).encode()),
+                ios_output.replace(b'"schemaVersion":1', b'"schemaVersion":1,"schemaVersion":1'),
+                ios_output + b"MRK_MACOS_UI_ORIGINAL=unqualified\n",
+                ios_output + b"MRK_MACOS_UI_FAILURE_CLEANUP=attempted\n",
+                MODULE.IOS_UNSIGNED_PREFIX + MODULE.encoded(ios_facts) + b"\n" + ios_output.replace(
+                    MODULE.IOS_UNSIGNED_PREFIX + MODULE.encoded(ios_facts) + b"\n", b"")):
+            with self.assertRaises(MODULE.Refused): MODULE.ios_unsigned_marker(changed, source=ios_source)
+        with self.assertRaises(MODULE.Refused): MODULE.ios_unsigned_marker(ios_output, source="d" * 40)
+        ios_counts = dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0, expectedFailures=0)
+        self.assertEqual(MODULE.ios_unsigned_summary(MODULE.encoded(ios_counts)), ios_counts)
+        for key, value in ios_counts.items():
+            for wrong in (True, value + 1):
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.ios_unsigned_summary(MODULE.encoded(dict(ios_counts, **{key: wrong})))
+        with self.assertRaises(MODULE.Refused):
+            MODULE.ios_unsigned_summary(b'{"totalTestCount":1,"passedTests":1,"passedTests":1}')
+
+        ios_temporary = "/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/tmp/"
+        ios_requests = {name: MODULE.normal_request(["--normal-ios-unsigned-archive-" + name], ios_temporary)
+                        for name in ("test", "summary")}
+        ios_limits = (1024**3,) * 2
+        ios_stat = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=501)
+        ios_inert_os = SimpleNamespace(path=SimpleNamespace(lexists=lambda _: False),
+                                      stat=lambda *_a, **_k: ios_stat, getuid=lambda: 501)
+        # The actual NormalPhase/run_admitted_test/executor run against a finite
+        # generated-product adapter and inert original owner. No filesystem or
+        # process is used; every adapted product close is still observed.
+        for mode, code, fault in (("test", 0, None), ("summary", 0, None), ("test", 65, None),
+                ("summary", 75, None), ("test", 0, "marker"), ("summary", 0, "counts"),
+                ("test", 0, "post"), ("test", 0, "close"), ("test", 65, "close"),
+                ("test", 0, "source"), ("test", 0, "publication")):
+            with self.subTest(ios_execute=(mode, code, fault)), ExitStack() as stack:
+                events, originals, publications = [], [], []
+                request = ios_requests[mode]
+                class IOSProducts:
+                    def __init__(self, derived):
+                        self.products, self.manifest = Path("/inert-products"), "fixed.xctestrun"
+                        self.checks = 0
+                    def __enter__(self): events.append("entered"); return self
+                    def admit(self, _call): events.append("admitted"); return {"generatedRunner": True}
+                    def check(self):
+                        self.checks += 1; events.append("post")
+                        if fault == "post" and self.checks == 2: raise OSError("inert product POST refusal")
+                    def __exit__(self, _kind, _error, _tb):
+                        events.append("closed")
+                        if fault == "close": raise OSError("inert consuming product close refusal")
+                        return False
+                def ios_owned(arguments, **kwargs):
+                    body = ios_output if mode == "test" else MODULE.encoded(ios_counts)
+                    if fault in ("marker", "counts"): body = b"{}"
+                    value = subprocess.CompletedProcess(list(arguments), code, body, b"")
+                    originals.append((value, kwargs)); return value
+                def ios_source_state(_phase, _source):
+                    events.append("source")
+                    return {"source": "changed" if fault == "source" and events.count("source") == 2 else ios_source}
+                def ios_publish(path, body, limit):
+                    if fault == "publication": raise OSError("inert receipt consuming close refusal")
+                    publications.append((path, MODULE.document(body), limit))
+                for context in (patch.object(MODULE, "os", ios_inert_os), patch.object(MODULE, "RunnerProducts", IOSProducts),
+                        patch.object(MODULE, "normal_source_state", side_effect=ios_source_state),
+                        patch.object(MODULE, "exclusive_output", side_effect=ios_publish)):
+                    stack.enter_context(context)
+                phase = MODULE.NormalPhase(SimpleNamespace(run_owned=ios_owned), {}, Path("/inert-source"),
+                    MODULE.PhaseClock(request["phaseSeconds"], now=lambda: 0), retain_nonzero=True)
+                if fault is not None:
+                    with self.assertRaises((MODULE.Refused, OSError)):
+                        MODULE.execute_normal_phase(phase, request, ios_source, ios_limits)
+                    self.assertEqual(publications, [])
+                else:
+                    original = MODULE.execute_normal_phase(phase, request, ios_source, ios_limits)
+                    self.assertIs(original, originals[0][0])
+                    self.assertEqual(len(publications), 2 if mode == "test" and code == 0 else 1)
+                    receipt = publications[0][1]
+                    self.assertTrue(receipt["sourcePrePostMatched"])
+                    self.assertEqual(receipt["commands"][0]["returncode"], code)
+                    self.assertEqual(receipt["fileLimitBytes"], list(ios_limits))
+                    if mode == "test" and code == 0:
+                        self.assertEqual(receipt["iosUnsignedObservation"], ios_facts)
+                        self.assertTrue(receipt["originalProductsPrePostMatched"])
+                        self.assertTrue(receipt["originalClosesCompleted"])
+                        self.assertEqual(publications[1], (request["derived"].parent / "ios-unsigned-archive.facts.json", ios_facts, 16384))
+                    elif mode == "summary" and code == 0:
+                        self.assertEqual(receipt["iosUnsignedTestCounts"], ios_counts)
+                    else:
+                        self.assertNotIn("iosUnsignedObservation", receipt)
+                        self.assertNotIn("iosUnsignedTestCounts", receipt)
+                self.assertEqual(len(originals), 1)
+                self.assertEqual((originals[0][1]["timeout"], originals[0][1]["output_limit"]),
+                                 (1020, 1048576) if mode == "test" else (30, 262144))
+                self.assertEqual(events.count("closed"), 1 if mode == "test" else 0)
+                self.assertIs(phase.first_nonzero, originals[0][0] if code else None)
+
+        # Real main + real executor + real NormalPhase retain the FIRST admitted
+        # return before a late clock, receipt-close, or interrupted diagnostic.
+        # Both standard streams are scoped and restored; no private text escapes.
+        actual_execute = MODULE.execute_normal_phase
+        for mode, code, fault in (("test", 0, None), ("summary", 0, None), ("test", 65, None),
+                ("test", 0, "late"), ("test", 65, "late"), ("test", 0, "close"), ("test", 65, "close"),
+                ("test", 65, "diagnostic-interrupt"), ("test", 65, "diagnostic-exit"),
+                ("summary", 75, "diagnostic-interrupt"), ("test", 0, "context")):
+            with self.subTest(ios_main=(mode, code, fault)), ExitStack() as stack:
+                tick, phases, originals, published, events = [0], [], [], [], []
+                output, errors = io.BytesIO(), io.BytesIO()
+                request = ios_requests[mode]
+                class IOSMainProducts:
+                    def __init__(self, _derived): self.products, self.manifest = Path("/inert-products"), "fixed.xctestrun"
+                    def __enter__(self): return self
+                    def admit(self, _call): return {"generatedRunner": True}
+                    def check(self): pass
+                    def __exit__(self, _kind, _error, _tb): events.append("closed"); return False
+                def ios_main_owned(arguments, **kwargs):
+                    body = ios_output if mode == "test" else MODULE.encoded(ios_counts)
+                    value = subprocess.CompletedProcess(list(arguments), code, body, b"private inert diagnostic")
+                    originals.append(value)
+                    if fault == "late": tick[0] = request["phaseSeconds"] * 10**9
+                    return value
+                def ios_main_execute(phase, *args): phases.append(phase); return actual_execute(phase, *args)
+                def ios_main_publish(path, body, limit):
+                    if fault == "close" and path.name.endswith("admission.json"):
+                        raise OSError("inert consuming publication close refusal")
+                    published.append((path, MODULE.document(body), limit))
+                def ios_main_diagnostic(*_a, **_k):
+                    if fault == "diagnostic-interrupt": raise KeyboardInterrupt()
+                    if fault == "diagnostic-exit": raise SystemExit(99)
+                stream = lambda buffer: SimpleNamespace(buffer=buffer, write=lambda value: buffer.write(value.encode()), flush=lambda: None)
+                owner = SimpleNamespace(run_owned=ios_main_owned, ProcessError=OSError, ProcessInterrupted=InterruptedError)
+                main_os = SimpleNamespace(environ={"TMPDIR": ios_temporary}, path=ios_inert_os.path,
+                                          stat=ios_inert_os.stat, getuid=ios_inert_os.getuid)
+                for context in (patch.object(MODULE.sys, "argv", ["helper", "--normal-ios-unsigned-archive-" + mode]),
+                        patch.object(MODULE, "os", main_os), patch.object(MODULE.time, "monotonic_ns", side_effect=lambda: tick[0]),
+                        patch.object(MODULE, "normal_context", side_effect=MODULE.Refused("inert context refusal") if fault == "context" else None,
+                                     return_value=(Path("/inert-source"), ios_source, {}, ios_limits)),
+                        patch.object(MODULE, "load_normal_owner", return_value=owner),
+                        patch.object(MODULE, "RunnerProducts", IOSMainProducts),
+                        patch.object(MODULE, "normal_source_state", return_value={"source": ios_source}),
+                        patch.object(MODULE, "execute_normal_phase", side_effect=ios_main_execute),
+                        patch.object(MODULE, "exclusive_output", side_effect=ios_main_publish),
+                        patch.object(MODULE, "publish_failure_diagnostics", side_effect=ios_main_diagnostic),
+                        patch.object(MODULE.sys, "stdout", stream(output)), patch.object(MODULE.sys, "stderr", stream(errors))):
+                    stack.enter_context(context)
+                self.assertEqual(MODULE.main(), code if code else 0 if fault is None else 1)
+                if fault == "context":
+                    self.assertEqual((originals, phases, published, events), ([], [], [], []))
+                    continue
+                self.assertEqual(len(originals), 1)
+                self.assertIs(phases[0].first_nonzero, originals[0] if code else None)
+                self.assertEqual(events.count("closed"), 1 if mode == "test" else 0)
+                if fault is not None:
+                    self.assertTrue(phases[0].clock.failed)
+                    self.assertFalse(any(path.name == "ios-unsigned-archive.facts.json" for path, _, _ in published))
+                    self.assertTrue(all(b"private inert diagnostic" not in MODULE.encoded(value) for _, value, _ in published))
 
     def test_normal_phase_deadlines_file_limits_source_and_receipt_finality(self):
         for phase, limit in (("build", 32 * 1024**3), ("test", 1024**3), ("summary", 1024**3)):
