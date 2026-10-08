@@ -1201,6 +1201,627 @@ mod installer {
         use transaction::{AppIdentityData, CapsuleData, CorrespondenceData, GenerationCostData,
             GenerationData, IntentData, ProgressData, ProgressOutcomeData, ReturnedData, StateData, StepData};
 
+        // Readonly expected bytes for a recorded retry, NOT an update grant.
+        // The existing current-input admission and final whole-census matching
+        // remain required. No payload code is executed and no new owner exists.
+        pub(super) const ORIGINAL_PREFIX_INSTALL_REQUIRED:&str="partial-fresh-original-install-required";
+        const COMPLETE_PREFIX_PRELUDE_ORIGINALS:usize=204;
+        const COMPLETE_PREFIX_INTENT_WORK:usize=128*1024;
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) enum CompleteGenerationPrefixOutcome { Ready,OriginalInstallRequired }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum CompletePrefixState { New,Entered,Ready,Required,Refused,Retired }
+        struct CompletePrefixContext {
+            role:worker::PrefixReadRole,root:usize,source:[usize;3],
+            identities:[Identity;4],selection:[u8;32],controls:[[u8;32];2],
+        }
+        impl CompletePrefixContext {
+            fn capture(book:&Install,read:&worker::ReinstallInputRead<'_>)->Result<Self> {
+                read.post_source(book)?;
+                let source=read.prefix_source_originals(book)?;let root=read.root_original();
+                let (input,_,_)=read.incoming(book)?;
+                check(source[2]==input && source.iter().all(|n|*n!=root)
+                    && source[0]!=source[1] && source[0]!=source[2] && source[1]!=source[2],"complete-prefix-current-originals")?;
+                let selected=read.new_selection(book)?.encode_data().map_err(|_|"complete-prefix-current-selection")?;
+                check(selected.len()<=16*1024,"complete-prefix-current-selection")?;
+                let pair=read.incoming_controls(book)?;
+                let out=Self{role:read.prefix_read_role(book)?,root,source,
+                    identities:[book.identity(root)?,book.identity(source[0])?,book.identity(source[1])?,book.identity(source[2])?],
+                    selection:Sha256::digest(&selected).into(),controls:[Sha256::digest(pair.0).into(),Sha256::digest(pair.1).into()]};
+                read.post_source(book)?;Ok(out)
+            }
+            fn post(&self,book:&Install,read:&worker::ReinstallInputRead<'_>)->Result<()> {
+                read.post_source(book)?;
+                check(read.root_original()==self.root && read.prefix_source_originals(book)?==self.source
+                    && read.prefix_read_role(book)?==self.role,"complete-prefix-current-originals")?;
+                for (n,expected) in std::iter::once(self.root).chain(self.source).zip(self.identities) {
+                    check(book.identity(n)?==expected,"complete-prefix-current-replaced")?;book.check_name(n,true)?;
+                }
+                let selected=read.new_selection(book)?.encode_data().map_err(|_|"complete-prefix-current-selection")?;
+                let pair=read.incoming_controls(book)?;
+                check(selected.len()<=16*1024 && <[u8;32]>::from(Sha256::digest(&selected))==self.selection
+                    && <[u8;32]>::from(Sha256::digest(pair.0))==self.controls[0]
+                    && <[u8;32]>::from(Sha256::digest(pair.1))==self.controls[1],"complete-prefix-current-binding")?;
+                read.post_source(book)
+            }
+        }
+        // This cell is installed in the existing Parent BEFORE admit. Unknown
+        // or an unwound call keeps this SAME allocation and its raw operands.
+        pub(super) struct CompleteGenerationPrefixSource {
+            state:CompletePrefixState,returned:bool,settlement_entered:bool,
+            context:Option<CompletePrefixContext>,expected:Option<ReleaseData>,history:Option<History>,generation:Option<usize>,
+            controls:Option<ProducerControls>,descriptor:Option<mobile_release_desktop::macos_install_producer::ProducerData>,
+            verifier:native::install_producer::ProducerVerifier,native_attempted:bool,native_returned:bool,
+            first:Option<&'static str>,inventory:Option<Inventory>,metadata:Option<([usize;2],[Vec<u8>;2])>,
+            versions:Option<usize>,metadata_parent:Option<usize>,app:Option<usize>,release:Option<usize>,
+            app_leaf:String,index:Option<(usize,usize,usize)>,original_start:Option<usize>,original_end:Option<usize>,
+            charged:u64,original_quote:usize,
+        }
+        pub(super) struct CompleteGenerationPrefixView<'a,'source> {
+            backing:&'a CompleteGenerationPrefixSource,read:&'a worker::ReinstallInputRead<'source>,
+        }
+        fn complete_prefix_ready_data(state:CompletePrefixState,returned:bool,first:bool,unknown:bool,
+            parent:bool,native_attempted:bool,native_returned:bool,matched:bool,settled:bool)->bool {
+            state==CompletePrefixState::Ready && returned && !first && !unknown
+                && if parent {native_attempted && native_returned && matched && settled}
+                    else {!native_attempted && !native_returned}
+        }
+        fn complete_prefix_pending_data(state:CompletePrefixState,returned:bool,settlement_entered:bool,
+            native_attempted:bool,native_returned:bool,native_settled:bool,native_unknown:bool)->bool {
+            state!=CompletePrefixState::New && (!returned || settlement_entered && state!=CompletePrefixState::Retired)
+                || native_attempted && (!native_returned || !native_settled) || native_unknown
+        }
+        fn complete_prefix_cost_data(used:usize,files:usize,dirs:usize,live:usize,index:usize)->Result<(usize,usize)> {
+            // audit_generation normal path: F + 2D +4. The adapter retains a
+            // separate metadata parent/pair; its two roots stay alongside the
+            // existing <=17-deep traversal, not inside an invented flat input.
+            let opens=files.checked_add(dirs.checked_mul(2).ok_or("complete-prefix-original-budget")?)
+                .and_then(|n|n.checked_add(4)).ok_or("complete-prefix-original-budget")?;
+            let rows=used.checked_add(opens).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+            check(live.checked_add(22).is_some_and(|n|n<=96),"complete-prefix-live-budget")?;
+            let work=index.checked_mul(2).and_then(|n|n.checked_add(256*1024))
+                .ok_or("complete-prefix-memory")?;Ok((rows,work))
+        }
+        fn complete_prefix_generation_data(state:&StateData,expected:&ReleaseData)->Result<Option<usize>> {
+            let mut found=None;
+            for (i,generation) in std::iter::once(state.current_data())
+                .chain(state.retained_data()).enumerate() {
+                if generation.release_data()==expected {
+                    check(found.is_none(),"complete-prefix-generation-ambiguous")?;found=Some(i);
+                }
+            }
+            Ok(found)
+        }
+        fn complete_prefix_native_point(book:&Install,read:&worker::ReinstallInputRead<'_>,context:&CompletePrefixContext,
+            history:&History,controls:&ProducerControls,first:&mut Option<&'static str>,
+            point:native::install_producer::ProducerCheckpoint)->native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            use native::install_producer::ProducerCheckpoint::{Before,Returned};
+            let (phase,custody)=match point {Before{phase,custody}|Returned{phase,custody,..}=>(phase,custody)};
+            // Actual returned custody is retained by the verifier before this
+            // source veto. No Instant is converted into a historical raw clock.
+            if custody.unknown {first.get_or_insert("complete-prefix-native-unknown");return Decision::Unknown;}
+            if phase.is_cleanup() {
+                return match book.shared_deadline() {
+                    Ok(clock) if clock.check_total().is_ok()=>Decision::Proceed,
+                    Ok(clock) if !clock.is_unknown()=>Decision::Stop,_=>Decision::Unknown,
+                };
+            }
+            if first.is_some(){return Decision::Stop;}
+            let checked=context.post(book,read).and_then(|_|held_bytes(book,history.state_original,&history.state_bytes))
+                .and_then(|_|controls.post(book));
+            if let Err(why)=checked {first.get_or_insert(why);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown){Decision::Unknown}else{Decision::Stop};}
+            Decision::Proceed
+        }
+        impl CompleteGenerationPrefixSource {
+            pub(super) fn new()->Self {Self{state:CompletePrefixState::New,returned:false,settlement_entered:false,
+                context:None,expected:None,history:None,generation:None,controls:None,descriptor:None,
+                verifier:native::install_producer::ProducerVerifier::new(),native_attempted:false,native_returned:false,
+                first:None,inventory:None,metadata:None,versions:None,metadata_parent:None,app:None,release:None,
+                app_leaf:String::new(),index:None,original_start:None,original_end:None,charged:0,original_quote:0}}
+            fn charge(&mut self,book:&mut Install,bytes:usize)->Result<()> {
+                let bytes=u64::try_from(bytes).map_err(|_|"complete-prefix-memory")?;
+                complete_prefix_control_quote_data(removal_effective_control_bytes(book)?,
+                    usize::try_from(bytes).map_err(|_|"complete-prefix-memory")?)?;
+                let next=book.removal_control_reserved.checked_add(bytes).filter(|n|*n<=16*1024*1024)
+                    .ok_or("complete-prefix-memory")?;
+                self.charged=self.charged.checked_add(bytes).ok_or("complete-prefix-memory")?;
+                book.removal_control_reserved=next;Ok(())
+            }
+            fn generation(&self)->Result<GenerationData> {
+                let history=self.history.as_ref().ok_or("complete-prefix-history")?;
+                match self.generation.ok_or("complete-prefix-generation")? {
+                    0=>Ok(history.current.state.current_data()),n=>history.current.state.retained_data().nth(n-1)
+                        .ok_or("complete-prefix-generation"),
+                }
+            }
+            pub(super) fn admit(&mut self,book:&mut Install,read:&worker::ReinstallInputRead<'_>,expected:&ReleaseData)
+                ->Result<CompleteGenerationPrefixOutcome> {
+                check(self.state==CompletePrefixState::New && !self.returned && !self.native_attempted,
+                    "complete-prefix-once")?;
+                self.state=CompletePrefixState::Entered;self.original_start=Some(book.originals.len());
+                let result=self.admit_original(book,read,expected);
+                self.original_end=Some(book.originals.len());self.returned=true;
+                if book.originals.len().checked_sub(self.original_start.ok_or("complete-prefix-originals")?)
+                    .is_none_or(|n|n>self.original_quote) {
+                    self.first.get_or_insert("complete-prefix-original-budget");self.state=CompletePrefixState::Refused;
+                    return Err("complete-prefix-original-budget");
+                }
+                match result {
+                    Ok(outcome)=>{
+                        self.state=match outcome {CompleteGenerationPrefixOutcome::Ready=>CompletePrefixState::Ready,
+                            CompleteGenerationPrefixOutcome::OriginalInstallRequired=>CompletePrefixState::Required};
+                        let post=if outcome==CompleteGenerationPrefixOutcome::Ready {self.post_source(book,read)}
+                            else {self.context.as_ref().ok_or("complete-prefix-context")?.post(book,read)};
+                        if let Err(why)=post {self.first.get_or_insert(why);self.state=CompletePrefixState::Refused;return Err(why);}
+                        Ok(outcome)
+                    },Err(why)=>{self.first.get_or_insert(why);self.state=CompletePrefixState::Refused;Err(why)},
+                }
+            }
+            fn admit_original(&mut self,book:&mut Install,read:&worker::ReinstallInputRead<'_>,expected:&ReleaseData)
+                ->Result<CompleteGenerationPrefixOutcome> {
+                use mobile_release_desktop::macos_install_producer as producer;
+                read.post_source(book)?;
+                check(book.removal_payload_plan.is_none() && book.removal_snapshot_capture.is_none(),"complete-prefix-observation-role")?;
+                let selected=read.new_selection(book)?;
+                check(selected.contains_data(expected),"complete-prefix-unsupported-selection")?;
+                // The first reservation covers only bounded metadata/prelude,
+                // scalar/context copies and the actual native wrapper ceiling.
+                // Inventory and index-dependent peaks are added before entry.
+                let base=native::install_producer::ProducerVerifier::project_owned_upper_bound()
+                    .and_then(|n|n.checked_add(producer::DESCRIPTOR_LIMIT*4+producer::SIGNATURE_LIMIT))
+                    .and_then(|n|n.checked_add(512*1024+std::mem::size_of::<Self>()))
+                    .ok_or("complete-prefix-memory")?;
+                self.charge(book,base)?;
+                self.original_quote=COMPLETE_PREFIX_PRELUDE_ORIGINALS;
+                let end=book.originals.len().checked_add(self.original_quote).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                reserve_removal_original_storage(book,end)?;
+                check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(12)
+                    .is_some_and(|n|n<=96),"complete-prefix-live-budget")?;
+                self.context=Some(CompletePrefixContext::capture(book,read)?);self.expected=Some(expected.clone());
+                let root=read.root_original();
+                match book.named(Some(root),transaction::STATE_NAME) {
+                    Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                    Err(_)=>return Err("complete-prefix-state-name"),Ok(_)=>{},
+                }
+                let quote=removal_resume_history_quote(book,root,selected)?;
+                let history_delta=quote.checked_sub(book.removal_control_reserved).ok_or("complete-prefix-memory")?;
+                self.charge(book,usize::try_from(history_delta).map_err(|_|"complete-prefix-memory")?)?;
+                self.history=Some(read_history(book,root,selected)?);
+                self.generation=complete_prefix_generation_data(&self.history.as_ref().ok_or("complete-prefix-history")?.current.state,expected)?;
+                if self.generation.is_none(){return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired);}
+                let generation=self.generation()?;
+                let app_leaf=complete_prefix_app_leaf_data(generation.retained_invocation_data())?;
+                match book.named(Some(root),&app_leaf) {
+                    Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                    Err(_)=>return Err("complete-prefix-app-name"),Ok(_)=>{},
+                }
+                match book.named(Some(root),"versions") {
+                    Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                    Err(_)=>return Err("complete-prefix-versions-name"),Ok(_)=>{},
+                }
+                let versions=book.open(Some(root),"versions",true)?;removal_archive_stat(book,versions,true,0o755)?;
+                self.versions=Some(versions);
+                match book.named(Some(versions),expected.binding_data().release) {
+                    Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                    Err(_)=>return Err("complete-prefix-release-name"),Ok(_)=>{},
+                }
+                let metadata_parent=book.open(Some(versions),expected.binding_data().release,true)?;
+                self.metadata_parent=Some(metadata_parent);
+                check(book.recorded_directory(metadata_parent)?==self.generation()?.release_directory_data(),"complete-prefix-release-original")?;
+                match book.named(Some(metadata_parent),"runtime") {
+                    Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                    Err(_)=>return Err("complete-prefix-runtime-name"),Ok(_)=>{},
+                }
+                self.app_leaf=app_leaf;
+                let pair_names=control_names(selected,expected.binding_data().release)?;
+                for (parent,name) in [(root,pair_names.0.as_str()),(root,pair_names.1.as_str()),
+                    (metadata_parent,installation_record::INVENTORY_NAME),(metadata_parent,installation_record::RECORD_NAME)] {
+                    // Only genuine ENOENT says no complete witness. Malformed
+                    // present objects and uncertain lookups remain refusals.
+                    book.clock()?;
+                    match book.named(Some(parent),name) {
+                        Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
+                        Err(_)=>return Err("complete-prefix-control-name"),Ok(_)=>{},
+                    }
+                    book.clock()?;
+                }
+                let mut names=BTreeSet::new();
+                let (controls,_)=generation_controls(book,root,&self.generation()?,selected,&mut names,true)?;
+                self.controls=controls;
+                let controls=self.controls.as_ref().ok_or("complete-prefix-pair")?;
+                self.descriptor=Some(producer::ProducerData::parse_data(&controls.bytes[0],selected.target_data())
+                    .map_err(|_|"complete-prefix-producer")?);
+                let signer=native::install_producer::source_signer_data().ok_or("complete-prefix-source-signer")?;
+                let descriptor=self.descriptor.as_ref().ok_or("complete-prefix-producer")?;
+                check(descriptor.release_set_data().current_data()==expected
+                    && worker::producer_policy_matches_data(descriptor.signing_policy_data(),signer.team_data(),
+                        signer.leaf_sha1_data(),signer.leaf_sha256_data()),"complete-prefix-source-policy")?;
+                let raw_stat=book.named(Some(metadata_parent),installation_record::INVENTORY_NAME).map_err(|_|"complete-prefix-inventory-name")?;
+                let raw_limit=usize::try_from(raw_stat.st_size).map_err(|_|"complete-prefix-inventory-size")?;
+                check(raw_limit>0 && raw_limit<=installation_record::INVENTORY_LIMIT,"complete-prefix-inventory-size")?;
+                // Duplicate raw/strict-JSON/typed inventory during the reused
+                // full auditor is included; no borrowed buffer is counted free.
+                let inventory_work=raw_limit.checked_mul(8).and_then(|n|n.checked_add(installation_record::RECORD_LIMIT*4))
+                    .ok_or("complete-prefix-memory")?;
+                self.charge(book,inventory_work)?;
+                let (inv,raw)=metadata_original(book,metadata_parent,installation_record::INVENTORY_NAME,raw_limit)?;
+                check(Identity::of(&raw_stat)==book.identity(inv)? && raw.len()==raw_limit,"complete-prefix-inventory-original")?;
+                let (record,record_raw)=metadata_original(book,metadata_parent,installation_record::RECORD_NAME,installation_record::RECORD_LIMIT)?;
+                self.metadata=Some(([inv,record],[raw,record_raw]));
+                let raw=&self.metadata.as_ref().ok_or("complete-prefix-metadata")?.1;
+                let binding=expected.binding_data();
+                check(hash(&raw[0])==binding.inventory_sha256,"complete-prefix-signed-inventory")?;
+                let record_expected=installation_record::Expected{kind:installation_record::Kind::Ordinary,
+                    source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
+                    install_root:book.recorded_directory(root)?,release_directory:self.generation()?.release_directory_data()};
+                let record=installation_record::Record::parse_for_release_data(&raw[1],&raw[0],&record_expected,expected)?;
+                check(record.instance()==self.generation()?.instance_data(),"complete-prefix-instance")?;
+                self.inventory=Some(Inventory::parse_for_release(&raw[0],binding.runtime_manifest_sha256,binding.release)?);
+                self.index=Some(worker::reinstall_index_quote_data(self.inventory.as_ref().ok_or("complete-prefix-inventory")?)?);
+                let (files,dirs,index)=self.index.ok_or("complete-prefix-index")?;
+                let (future,workspace)=complete_prefix_cost_data(book.originals.len(),files,dirs,
+                    book.originals.iter().filter(|r|r.fd.is_some()).count(),index)?;
+                self.charge(book,workspace)?;
+                self.original_quote=self.original_quote.checked_add(future.checked_sub(book.originals.len())
+                    .ok_or("complete-prefix-original-budget")?).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                // Reserve the SAME full prefix pass before entering native B
+                // admission. Its actual B-derived Q is not the incoming C Q.
+                let prefix=partial_fresh_retry_original_quote_data(files,dirs)?;
+                let end=self.original_start.ok_or("complete-prefix-originals")?.checked_add(self.original_quote)
+                    .and_then(|n|n.checked_add(prefix)).filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+                reserve_removal_original_storage(book,end)?;
+                if self.context.as_ref().ok_or("complete-prefix-context")?.role==worker::PrefixReadRole::ParentSignature {
+                    self.native_attempted=true;
+                    let returned={let Self{context,history,controls,verifier,first,..}=self;
+                        let pair=controls.as_ref().ok_or("complete-prefix-pair")?;
+                        let context=context.as_ref().ok_or("complete-prefix-context")?;
+                        let history=history.as_ref().ok_or("complete-prefix-history")?;
+                        verifier.verify_and_close(&pair.bytes[0],&pair.bytes[1],&mut|point|
+                            complete_prefix_native_point(book,read,context,history,pair,first,point))};
+                    self.native_returned=true;
+                    check(returned==native::install_producer::SignatureResult::SignatureVerified && self.verifier.settled(),
+                        self.first.unwrap_or("complete-prefix-signature"))?;
+                }
+                // For OriginalWorkerCensus this remains provisional readonly
+                // comparison until the original Parent's WHOLE commitment is
+                // matched. The private read origin, not a bool, selects it.
+                let (app,release,_,_)=audit_generation(book,root,versions,&self.generation()?,false,true)?;
+                self.app=Some(app.ok_or("complete-prefix-app-missing")?);self.release=Some(release);
+                check(book.identity(release)?==book.identity(metadata_parent)?,"complete-prefix-release-alias")?;
+                Ok(CompleteGenerationPrefixOutcome::Ready)
+            }
+            pub(super) fn post_source(&self,book:&Install,read:&worker::ReinstallInputRead<'_>)->Result<()> {
+                let context=self.context.as_ref().ok_or("complete-prefix-context")?;
+                let custody=self.verifier.custody();
+                check(complete_prefix_ready_data(self.state,self.returned,self.first.is_some(),book.unknown||custody.unknown,
+                    context.role==worker::PrefixReadRole::ParentSignature,self.native_attempted,self.native_returned,
+                    custody.signature_matched,self.verifier.settled()),"complete-prefix-not-ready")?;
+                context.post(book,read)?;
+                let history=self.history.as_ref().ok_or("complete-prefix-history")?;
+                held_bytes(book,history.state_original,&history.state_bytes)?;
+                let expected=self.expected.as_ref().ok_or("complete-prefix-expected")?;
+                check(read.new_selection(book)?.contains_data(expected) && self.generation()?.release_data()==expected
+                    && self.descriptor.as_ref().ok_or("complete-prefix-producer")?.release_set_data().current_data()==expected,
+                    "complete-prefix-generation-binding")?;
+                self.controls.as_ref().ok_or("complete-prefix-pair")?.post(book)?;
+                let (originals,raw)=self.metadata.as_ref().ok_or("complete-prefix-metadata")?;
+                held_inventory(book,originals[0],&raw[0])?;held_bytes(book,originals[1],&raw[1])?;
+                for n in [self.versions,self.metadata_parent,self.app,self.release] {
+                    book.check_name(n.ok_or("complete-prefix-source-original")?,true)?;
+                }
+                check(app_identity(book,self.app.ok_or("complete-prefix-app")?)?==self.generation()?.app_identity_data()
+                    && book.recorded_directory(self.release.ok_or("complete-prefix-release")?)?==self.generation()?.release_directory_data(),
+                    "complete-prefix-source-original")?;
+                context.post(book,read)
+            }
+            pub(super) fn quoted_originals_data(&self)->Result<usize> {
+                check(self.returned && self.original_quote<=24576,"complete-prefix-original-budget")?;Ok(self.original_quote)
+            }
+            pub(super) fn settled_data(&self)->bool {self.state==CompletePrefixState::Retired && !self.pending_native_data()}
+            pub(super) fn view<'a,'source>(&'a self,book:&Install,read:&'a worker::ReinstallInputRead<'source>)
+                ->Result<CompleteGenerationPrefixView<'a,'source>> {
+                self.post_source(book,read)?;Ok(CompleteGenerationPrefixView{backing:self,read})
+            }
+            pub(super) fn original_install_required_data(&self)->Option<(&'static str,&ReleaseData)> {
+                if self.state==CompletePrefixState::Required && self.returned && self.first.is_none() {
+                    self.expected.as_ref().map(|expected|(ORIGINAL_PREFIX_INSTALL_REQUIRED,expected))
+                }else{None}
+            }
+            pub(super) fn pending_native_data(&self)->bool {
+                complete_prefix_pending_data(self.state,self.returned,self.settlement_entered,self.native_attempted,
+                    self.native_returned,self.verifier.settled(),self.verifier.custody().unknown)
+            }
+            pub(super) fn settle(&mut self,book:&mut Install)->Result<()> {
+                check(!self.settlement_entered && self.returned && self.state!=CompletePrefixState::Retired,
+                    "complete-prefix-settlement-once")?;
+                let pending=self.pending_native_data();self.settlement_entered=true;
+                // Unknown means no retry, no implicit destructor and no backing
+                // release. The existing Parent retains this exact slot/Book.
+                check(!pending && !book.unknown,"complete-prefix-unsettled")?;
+                let start=self.original_start.ok_or("complete-prefix-originals")?;
+                let end=self.original_end.ok_or("complete-prefix-originals")?;
+                check(start<=end && end<=book.originals.len(),"complete-prefix-originals")?;
+                for n in (start..end).rev() {
+                    book.shared_deadline()?.check_total()?;
+                    check(book.close(n),"complete-prefix-close-unknown")?;
+                }
+                let timely=book.shared_deadline()?.check_total().is_ok();
+                let next=book.removal_control_reserved.checked_sub(self.charged).ok_or("complete-prefix-memory")?;
+                check(book.removal_observation_control.is_none() || next>=book.removal_observation_reserved,
+                    "complete-prefix-reservation-overlap")?;
+                // Only the actual consumed originals release these owned raw
+                // allocations. Original-vector/name reservation is NOT refunded.
+                self.context=None;self.expected=None;self.history=None;self.generation=None;
+                self.controls=None;self.descriptor=None;self.inventory=None;self.metadata=None;
+                self.app_leaf=String::new();self.index=None;
+                book.removal_control_reserved=next;self.charged=0;self.state=CompletePrefixState::Retired;
+                check(timely,"complete-prefix-final-deadline")
+            }
+        }
+        impl CompleteGenerationPrefixView<'_,'_> {
+            pub(super) fn post_source(&self,book:&Install)->Result<()> {self.backing.post_source(book,self.read)}
+            pub(super) fn post_input(&self,book:&Install,read:&worker::ReinstallInputRead<'_>)->Result<()> {
+                check(complete_prefix_same_read_data(self.read,read),"complete-prefix-current-input")?;self.post_source(book)
+            }
+            pub(super) fn new_selection(&self,book:&Install)->Result<&ReleaseSetData> {
+                self.post_source(book)?;Ok(self.backing.descriptor.as_ref().ok_or("complete-prefix-producer")?.release_set_data())
+            }
+            pub(super) fn incoming(&self,book:&Install)->Result<(usize,&Inventory,&[u8])> {
+                self.post_source(book)?;Ok((self.read.root_original(),self.backing.inventory.as_ref().ok_or("complete-prefix-inventory")?,
+                    &self.backing.metadata.as_ref().ok_or("complete-prefix-metadata")?.1[0]))
+            }
+            pub(super) fn incoming_controls(&self,book:&Install)->Result<(&[u8],&[u8])> {
+                self.post_source(book)?;let pair=&self.backing.controls.as_ref().ok_or("complete-prefix-pair")?.bytes;Ok((&pair[0],&pair[1]))
+            }
+            pub(super) fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)> {
+                self.post_source(book)?;self.backing.index.ok_or("complete-prefix-index")
+            }
+            pub(super) fn payload_origin(&self,book:&Install,kind:PartialFreshPayloadKind)->Result<(usize,&str)> {
+                self.post_source(book)?;complete_prefix_payload_origin_data(self.read.root_original(),
+                    self.backing.release.ok_or("complete-prefix-release")?,self.backing.app_leaf.as_str(),kind)
+            }
+        }
+
+        fn complete_prefix_same_read_data(left:*const worker::ReinstallInputRead<'_>,right:*const worker::ReinstallInputRead<'_>)->bool {
+            !left.is_null() && !right.is_null() && std::ptr::eq(left,right)
+        }
+        fn complete_prefix_app_leaf_data(invocation:Option<&str>)->Result<String> {
+            match invocation {None=>Ok(paths::APP_NAME.to_owned()),Some(id)=>data(transaction::retained_app_name_data(id))}
+        }
+        fn complete_prefix_payload_origin_data(root:usize,release:usize,app_leaf:&str,kind:PartialFreshPayloadKind)
+            ->Result<(usize,&str)> {
+            check(root!=release && (app_leaf==paths::APP_NAME || app_leaf.strip_prefix(".retained-app-")
+                .is_some_and(worker::invocation_valid)),"complete-prefix-payload-origin")?;
+            Ok(match kind {PartialFreshPayloadKind::App=>(root,app_leaf),PartialFreshPayloadKind::Runtime=>(release,"runtime")})
+        }
+        fn complete_prefix_control_quote_data(effective:u64,bytes:usize)->Result<u64> {
+            effective.checked_add(u64::try_from(bytes).map_err(|_|"complete-prefix-memory")?)
+                .filter(|n|*n<=16*1024*1024).ok_or("complete-prefix-memory")
+        }
+        fn complete_prefix_total_quote_data(start:usize,prelude:usize,source:usize,content:usize)->Result<usize> {
+            check(prelude==1,"complete-prefix-original-budget")?;
+            let total=prelude.checked_add(source).and_then(|n|n.checked_add(content))
+                .filter(|n|*n<=24576).ok_or("complete-prefix-original-budget")?;
+            check(start.checked_add(total).is_some_and(|n|n<=24576),"complete-prefix-original-budget")?;Ok(total)
+        }
+        fn complete_prefix_intent_data(raw:&[u8],invocation:&str,selected:&ReleaseSetData)->Result<IntentData> {
+            check(worker::invocation_valid(invocation),"complete-prefix-intent-invocation")?;
+            let intent=data(IntentData::parse_recorded_data(raw,selected))?;
+            check(intent.action_data()==ActionData::FreshInstall && intent.previous_data().is_none()
+                && intent.previous_state_data().is_none() && intent.invocation_data()==invocation
+                && intent.request_id_data()!=invocation,"complete-prefix-intent-binding")?;Ok(intent)
+        }
+        fn complete_prefix_intent(book:&mut Install,read:&worker::ReinstallInputRead<'_>,child:usize,retry:usize,
+            invocation:&str,role:PartialFreshRetryAuditRole)->Result<(ReleaseData,[u8;32])> {
+            read.post_source(book)?;
+            check(worker::invocation_valid(invocation) && book.originals.get(retry).is_some_and(|r|
+                r.parent==Some(child) && r.name==format!("fresh-retry-{invocation}")),"complete-prefix-retry-original")?;
+            book.check_name(child,true)?;let before=removal_archive_stat(book,retry,true,0o700)?;
+            let selected=read.new_selection(book)?;let name=data(transaction::intent_name_data(invocation))?;
+            book.clock()?;let preserved=book.named(Some(retry),&name);book.clock()?;
+            let parent=if role==PartialFreshRetryAuditRole::PreservedOnly {
+                preserved.map_err(|_|"complete-prefix-intent-required")?;retry
+            }else{
+                book.clock()?;let current=book.named(Some(read.root_original()),&name);book.clock()?;
+                match (preserved,current) {
+                    (Ok(_),Err(Errno::ENOENT))=>retry,(Err(Errno::ENOENT),Ok(_))=>read.root_original(),
+                    _=>return Err("complete-prefix-intent-original"),
+                }
+            };
+            let result=removal_archive_scope(book,|book|{
+                // Existing complete-body reader, not a second schema/parser.
+                // This selection remains DATA until the B source is admitted.
+                let (_,raw,_)=partial_fresh_writer_bytes(book,parent,&name,transaction::INTENT_LIMIT)?;
+                let intent=complete_prefix_intent_data(&raw,invocation,selected)?;
+                let out=(intent.next_data().clone(),<[u8;32]>::from(Sha256::digest(&raw)));
+                read.post_source(book)?;Ok(out)
+            })?;
+            check(removal_archive_stat(book,retry,true,0o700)?==before,"complete-prefix-retry-post")?;
+            read.post_source(book)?;Ok(result)
+        }
+        // Outer readonly observation accounting, NOT a new journal/capability.
+        // Consumer persists these two values with its original whole-census
+        // comparison; the inner Gradle content/Q representation is unchanged.
+        pub(super) struct CompleteGenerationPrefixAuditData {
+            pub reference:PartialFreshRetryReferenceData,pub observed_originals:usize,pub quoted_originals:usize,
+        }
+        pub(super) fn audit_partial_fresh_retry_with_sources<'a>(book:&mut Install,read:&'a worker::ReinstallInputRead<'a>,
+            source:&mut CompleteGenerationPrefixSource,child:usize,archives:&'a[(String,u64)],retry:usize,
+            invocation:&str,role:PartialFreshRetryAuditRole)->Result<CompleteGenerationPrefixAuditData> {
+            read.post_source(book)?;
+            check(!source.pending_native_data() && !book.unknown,"complete-prefix-unsettled")?;
+            if source.settled_data(){*source=CompleteGenerationPrefixSource::new();}
+            check(source.state==CompletePrefixState::New && !source.returned,"complete-prefix-once")?;
+            let start=book.originals.len();
+            let initial=complete_prefix_total_quote_data(start,1,0,0)?;
+            reserve_removal_original_storage(book,start+initial)?;
+            complete_prefix_control_quote_data(removal_effective_control_bytes(book)?,COMPLETE_PREFIX_INTENT_WORK)?;
+            book.removal_control_reserved=book.removal_control_reserved.checked_add(COMPLETE_PREFIX_INTENT_WORK as u64)
+                .filter(|n|*n<=16*1024*1024).ok_or("complete-prefix-memory")?;
+            let result:Result<CompleteGenerationPrefixAuditData>=(|| {
+                let (expected,intent_digest)=complete_prefix_intent(book,read,child,retry,invocation,role)?;
+                check(book.originals.len().checked_sub(start)==Some(1),"complete-prefix-prelude-originals")?;
+                let (reference,quoted)=if &expected==read.new_selection(book)?.current_data() {
+                    let q=partial_fresh_retry_quote(book,read)?;
+                    let quoted=complete_prefix_total_quote_data(start,1,0,q)?;
+                    reserve_removal_original_storage(book,start+quoted)?;
+                    (audit_partial_fresh_retry(book,read,child,archives,retry,invocation,role)?,quoted)
+                }else{
+                    match source.admit(book,read,&expected)? {
+                        CompleteGenerationPrefixOutcome::OriginalInstallRequired=>return Err(ORIGINAL_PREFIX_INSTALL_REQUIRED),
+                        CompleteGenerationPrefixOutcome::Ready=>{},
+                    }
+                    let view=source.view(book,read)?;
+                    let q=partial_fresh_retry_quote_against_generation(book,read,&view)?;
+                    let quoted=complete_prefix_total_quote_data(start,1,source.quoted_originals_data()?,q)?;
+                    reserve_removal_original_storage(book,start+quoted)?;
+                    let reference=audit_partial_fresh_retry_against_generation(book,read,&view,child,archives,retry,invocation,role)?;
+                    view.post_input(book,read)?;(reference,quoted)
+                };
+                // Prelude did not freeze a new interpretation of a subsequently
+                // replaced intent. The real canonical evaluator saw SAME bytes.
+                check(reference.intent_sha256_data()==&intent_digest,"complete-prefix-intent-changed")?;
+                let observed=book.originals.len().checked_sub(start).ok_or("complete-prefix-original-budget")?;
+                check(reference.observed_originals_data()<=observed && observed<=quoted
+                    && reference.post_originals_data()<=quoted,"complete-prefix-original-budget")?;
+                Ok(CompleteGenerationPrefixAuditData{reference,observed_originals:observed,quoted_originals:quoted})
+            })();
+            // Do not overwrite a real earlier failure or retry a consuming
+            // close. An unwound/Unknown admission retains the SAME source cell.
+            let settled:Result<()>=if source.state==CompletePrefixState::New {Ok(())}else{source.settle(book)};
+            let released:Result<()>=(|| {
+                check(!source.pending_native_data() && !book.unknown,"complete-prefix-unsettled")?;
+                let next=book.removal_control_reserved.checked_sub(COMPLETE_PREFIX_INTENT_WORK as u64)
+                    .ok_or("complete-prefix-memory")?;
+                check(book.removal_observation_control.is_none() || next>=book.removal_observation_reserved,
+                    "complete-prefix-reservation-overlap")?;
+                book.removal_control_reserved=next;Ok(())
+            })();
+            let value=match result {Err(why)=>return Err(why),Ok(value)=>value};
+            settled?;released?;
+            check(book.originals.len().checked_sub(start)==Some(value.observed_originals),"complete-prefix-final-originals")?;
+            read.post_source(book)?;Ok(value)
+        }
+
+        #[cfg(test)]
+        pub(super) fn complete_generation_prefix_data_checks() {
+            use serde_json::json;
+            // Real closed DATA parsers/encoders and production reducers. These
+            // unsigned fixture bytes do NOT create a live Source, verifier or
+            // view, nor prove a filesystem/worker/outer Installer result.
+            let (_,b,state_b,intent_b)=rehome_test_fixture();
+            assert_eq!(complete_prefix_generation_data(&state_b,b.current_data()).unwrap(),Some(0));
+            assert_eq!(complete_prefix_app_leaf_data(None).unwrap(),paths::APP_NAME);
+            let mut c_json:serde_json::Value=serde_json::from_slice(&b.encode_data().unwrap()).unwrap();
+            c_json["acceptedPredecessors"]=json!([c_json["current"].clone()]);
+            c_json["current"]["packageVersion"]=json!("0.4.0");
+            c_json["current"]["release"]=json!("macos26-arm64-data-4");
+            c_json["current"]["sourceCommit"]=json!("4".repeat(40));
+            c_json["current"]["packageSha256"]=json!("d".repeat(64));
+            let c=ReleaseSetData::parse_for_target_data(&serde_json::to_vec(&c_json).unwrap(),b.target_data()).unwrap();
+            assert!(c.contains_data(b.current_data()));
+            assert_eq!(complete_prefix_generation_data(&state_b,c.current_data()).unwrap(),None);
+            let raw_b=IntentData::encode_data(intent_b.invocation_data(),intent_b.request_id_data(),
+                ActionData::FreshInstall,None,&b).unwrap();
+            assert!(IntentData::parse_data(&raw_b,&c).is_err());
+            assert_eq!(complete_prefix_intent_data(&raw_b,intent_b.invocation_data(),&c).unwrap().next_data(),b.current_data());
+            assert!(complete_prefix_intent_data(&raw_b,&"a".repeat(32),&c).is_err());
+            let mut unsupported=c_json.clone();unsupported["acceptedPredecessors"]=json!([]);
+            let unsupported=ReleaseSetData::parse_for_target_data(&serde_json::to_vec(&unsupported).unwrap(),b.target_data()).unwrap();
+            assert!(complete_prefix_intent_data(&raw_b,intent_b.invocation_data(),&unsupported).is_err());
+
+            // Build a real strict DATA update so B is now a retained generation,
+            // not a forged app path or a copied full-file hash used as prefix proof.
+            let capsule_raw=CapsuleData::encode_data(&intent_b,None,Some(&state_b),Some(b.current_data()),
+                transaction::RecordedOutcomeData::Applied,transaction::WriterObservationData{
+                    returned:true,exit_code:Some(0),original_joined:true,result_eof:true,original_closes_known:true,
+                    within_original_deadline:true,payload_write_count:1,payload_write_bytes:1},&b).unwrap();
+            let capsule=CapsuleData::parse_data(&capsule_raw,&b).unwrap();
+            let update_raw=IntentData::encode_data(&"e".repeat(32),&"f".repeat(32),ActionData::Update,
+                Some((&state_b,&capsule)),&c).unwrap();
+            let update=IntentData::parse_data(&update_raw,&c).unwrap();
+            assert!(complete_prefix_intent_data(&update_raw,update.invocation_data(),&c).is_err());
+            let generation_c=GenerationData::from_original_fields_data(&c,c.current_data(),&"a".repeat(32),
+                installation_record::DirectoryIdentity{device:1,inode:92,mode:0o040755,uid:0,gid:0,flags:0},
+                AppIdentityData::from_original_fields_data(1,93,0o040555,0,0,0).unwrap()).unwrap();
+            let state_c_raw=StateData::encode_applied_data(&update,Some((&state_b,&capsule)),&generation_c,&c).unwrap();
+            let state_c=StateData::parse_data(&state_c_raw,&c).unwrap();
+            assert_eq!(complete_prefix_generation_data(&state_c,b.current_data()).unwrap(),Some(1));
+            assert_eq!(complete_prefix_generation_data(&state_c,c.current_data()).unwrap(),Some(0));
+            let retained=state_c.retained_data().next().unwrap();
+            let retained_leaf=complete_prefix_app_leaf_data(retained.retained_invocation_data()).unwrap();
+            assert_eq!(retained_leaf,format!(".retained-app-{}",update.invocation_data()));
+            for leaf in [paths::APP_NAME,retained_leaf.as_str()] {
+                assert_eq!(complete_prefix_payload_origin_data(3,10,leaf,PartialFreshPayloadKind::App).unwrap(),(3,leaf));
+                assert_eq!(complete_prefix_payload_origin_data(3,10,leaf,PartialFreshPayloadKind::Runtime).unwrap(),(10,"runtime"));
+            }
+            assert!(complete_prefix_payload_origin_data(3,3,paths::APP_NAME,PartialFreshPayloadKind::App).is_err());
+            for leaf in ["app","runtime","../app",".retained-app-x"] {
+                assert!(complete_prefix_payload_origin_data(3,10,leaf,PartialFreshPayloadKind::App).is_err());
+            }
+            // Compare addresses only. No uninitialized value is read and no
+            // ReinstallInputRead authority is fabricated by this DATA control.
+            let one=std::mem::MaybeUninit::<worker::ReinstallInputRead<'static>>::uninit();
+            let other=std::mem::MaybeUninit::<worker::ReinstallInputRead<'static>>::uninit();
+            assert!(complete_prefix_same_read_data(one.as_ptr(),one.as_ptr()));
+            assert!(!complete_prefix_same_read_data(one.as_ptr(),other.as_ptr()));
+            assert!(!complete_prefix_same_read_data(std::ptr::null(),std::ptr::null()));
+
+            // C's Q cannot stand in for B's full admission+content cost. The
+            // containing caller additionally charges its one retry-directory.
+            let (rows,work)=complete_prefix_cost_data(10,17,6,74,4096).unwrap();
+            assert_eq!(rows,43);assert_eq!(work,2*4096+256*1024);
+            let source=COMPLETE_PREFIX_PRELUDE_ORIGINALS+(rows-10);
+            let content=partial_fresh_retry_original_quote_data(17,6).unwrap();
+            assert_eq!(source,237);assert_eq!(content,250);
+            let total=complete_prefix_total_quote_data(0,1,source,content).unwrap();
+            assert_eq!(total,488);
+            assert_eq!(complete_prefix_total_quote_data(24576-total,1,source,content).unwrap(),total);
+            assert!(complete_prefix_total_quote_data(24577-total,1,source,content).is_err());
+            assert!(complete_prefix_total_quote_data(0,0,source,content).is_err());
+            assert!(complete_prefix_total_quote_data(0,1,usize::MAX,content).is_err());
+            assert!(partial_fresh_retry_original_quote_data(1,2).unwrap()<content);
+            assert!(complete_prefix_cost_data(10,17,6,75,4096).is_err());
+            assert!(complete_prefix_cost_data(24544,17,6,0,4096).is_err());
+            assert!(complete_prefix_cost_data(0,1,usize::MAX,0,4096).is_err());
+            assert!(complete_prefix_cost_data(0,1,1,0,usize::MAX).is_err());
+            let pool=16*1024*1024;
+            assert_eq!(complete_prefix_control_quote_data(pool-32768,32768).unwrap(),pool);
+            assert!(complete_prefix_control_quote_data(pool-32768,32769).is_err());
+            assert!(complete_prefix_control_quote_data(pool,usize::MAX).is_err());
+            let current_content=partial_fresh_retry_original_quote_data(1,2).unwrap();
+            assert_eq!(complete_prefix_total_quote_data(0,1,0,current_content).unwrap(),current_content+1);
+
+            // Known no-witness/refusal may consume its own originals; an
+            // unreturned native call, native Unknown, or incomplete consuming
+            // settlement is never a reusable slot or success.
+            assert!(!complete_prefix_pending_data(CompletePrefixState::New,false,false,false,false,false,false));
+            for state in [CompletePrefixState::Required,CompletePrefixState::Refused] {
+                assert!(!complete_prefix_pending_data(state,true,false,false,false,false,false));
+                assert!(complete_prefix_pending_data(state,true,true,false,false,false,false));
+            }
+            assert!(complete_prefix_pending_data(CompletePrefixState::Entered,false,false,false,false,false,false));
+            assert!(complete_prefix_pending_data(CompletePrefixState::Refused,true,false,true,false,false,false));
+            assert!(complete_prefix_pending_data(CompletePrefixState::Refused,true,false,true,true,false,false));
+            assert!(complete_prefix_pending_data(CompletePrefixState::Retired,true,true,true,true,true,true));
+            assert!(!complete_prefix_pending_data(CompletePrefixState::Retired,true,true,true,true,true,false));
+            assert!(complete_prefix_ready_data(CompletePrefixState::Ready,true,false,false,true,true,true,true,true));
+            assert!(complete_prefix_ready_data(CompletePrefixState::Ready,true,false,false,false,false,false,false,false));
+            for bad in 0..5 {
+                let mut facts=[true;5];facts[bad]=false;
+                assert!(!complete_prefix_ready_data(CompletePrefixState::Ready,facts[0],false,false,true,
+                    facts[1],facts[2],facts[3],facts[4]));
+            }
+            for state in [CompletePrefixState::New,CompletePrefixState::Entered,CompletePrefixState::Required,
+                CompletePrefixState::Refused,CompletePrefixState::Retired] {
+                assert!(!complete_prefix_ready_data(state,true,false,false,true,true,true,true,true));
+            }
+            assert!(!complete_prefix_ready_data(CompletePrefixState::Ready,true,true,false,true,true,true,true,true));
+            assert!(!complete_prefix_ready_data(CompletePrefixState::Ready,true,false,true,true,true,true,true,true));
+        }
+
         pub(super) struct Effects {
             pub action: ActionData, pub progress: ProgressData,
             pub state: Option<StateData>, pub state_bytes: Option<Vec<u8>>,
@@ -1591,6 +2212,121 @@ mod installer {
                     && self.rows.len().checked_add(out.len).is_some_and(|n|n<transaction::INVOCATION_LIMIT),
                     "removal-prior-reused-request")
             }
+        }
+        fn removal_archive_storage_sum_data(before:u64,bytes:u64)->Result<u64> {
+            before.checked_add(bytes).filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-prior-storage")
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        enum RemovalArchivePhase { FirstReading,FirstComplete,SecondReading,SecondComplete,Taken,PostReading,PostComplete,Refused }
+        pub(super) struct RemovalArchiveScan {
+            root:usize,phase:RemovalArchivePhase,first:Option<RemovalArchiveCensus>,current:Option<RemovalArchiveCensus>,
+        }
+        impl RemovalArchiveScan {
+            fn first(root:usize)->Self { Self {root,phase:RemovalArchivePhase::FirstReading,first:None,current:None} }
+            fn second(&mut self)->Result<()> {
+                if self.phase!=RemovalArchivePhase::FirstComplete || self.first.is_some() || self.current.is_none() {
+                    self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");
+                }
+                self.first=self.current.take();self.phase=RemovalArchivePhase::SecondReading;Ok(())
+            }
+            fn install(&mut self,value:RemovalArchiveCensus)->Result<()> {
+                let result=(|| {
+                    check(matches!(self.phase,RemovalArchivePhase::FirstReading|RemovalArchivePhase::SecondReading)
+                        && self.current.is_none() && value.root==self.root,"removal-prior-stage")?;
+                    let incoming=value.owned_bytes()?;
+                    let retained=self.first.as_ref().map(RemovalArchiveCensus::owned_bytes).transpose()?.unwrap_or(0);
+                    check(incoming.checked_add(retained).and_then(|n|n.checked_add(std::mem::size_of::<Self>()))
+                        .is_some_and(|n|n<=2*REMOVAL_ARCHIVE_TABLE),"removal-prior-memory")?;
+                    if self.phase==RemovalArchivePhase::SecondReading {
+                        check(self.first.as_ref().is_some_and(|first|first==&value),"removal-prior-changed")?;
+                    } Ok(())
+                })();
+                if let Err(why)=result {self.phase=RemovalArchivePhase::Refused;return Err(why);}
+                self.current=Some(value);Ok(())
+            }
+            fn complete(&mut self)->Result<()> {
+                if self.current.is_none() {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
+                self.phase=match self.phase { RemovalArchivePhase::FirstReading=>RemovalArchivePhase::FirstComplete,
+                    RemovalArchivePhase::SecondReading=>RemovalArchivePhase::SecondComplete,_=>{
+                        self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");} };
+                Ok(())
+            }
+            fn begin_post(&mut self,root:usize,initial:bool)->Result<()> {
+                let expected=if initial {RemovalArchivePhase::Taken}else{RemovalArchivePhase::PostComplete};
+                if self.root!=root || self.phase!=expected {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
+                self.phase=RemovalArchivePhase::PostReading;Ok(())
+            }
+            fn complete_post(&mut self,result:Result<()>)->Result<()> {
+                if let Err(why)=result {self.phase=RemovalArchivePhase::Refused;return Err(why);}
+                if self.phase!=RemovalArchivePhase::PostReading {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
+                self.phase=RemovalArchivePhase::PostComplete;Ok(())
+            }
+            fn take(&mut self)->Result<RemovalArchiveCensus> {
+                if self.phase!=RemovalArchivePhase::SecondComplete || self.first.is_none() || self.current.is_none() {
+                    self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");
+                }
+                // The snapshot capture charges both tables while !complete.
+                // Drop the first before moving the SAME second, once only.
+                drop(self.first.take());self.phase=RemovalArchivePhase::Taken;
+                self.current.take().ok_or("removal-prior-stage")
+            }
+        }
+        fn archive_admission_chunk_data(expected:&[u8],offset:usize,bytes:&[u8])->bool {
+            offset.checked_add(bytes.len()).filter(|end|*end<=expected.len())
+                .is_some_and(|end|expected.get(offset..end)==Some(bytes))
+        }
+        fn archive_hex_data<const N:usize>(value:&str)->Result<[u8;N]> {
+            check(value.len()==N*2 && value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))
+                && value.bytes().any(|b|b!=b'0'),"removal-prior-hex")?;
+            let mut out=[0;N];for (i,byte) in out.iter_mut().enumerate() {
+                *byte=u8::from_str_radix(&value[i*2..i*2+2],16).map_err(|_|"removal-prior-hex")?;
+            } Ok(out)
+        }
+        fn archive_directory_data(id:Identity,flags:u32,private:bool)->bool {
+            id.ino!=0 && id.mode==(if private {0o040700}else{0o040755}) && id.uid==0 && id.gid==0
+                && id.links>0 && id.size>=0 && flags==0
+        }
+        fn archive_file_data(id:Identity,flags:u32,slot:usize)->bool {
+            slot<6 && id.ino!=0 && id.uid==0 && id.gid==0 && id.links==1 && flags==0
+                && matches!(id.mode,0o100600|0o100444) && id.size>=0
+                && (id.size as u64)<=(if slot==0 {REMOVAL_SNAPSHOT_LIMIT}else{mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64})
+                && (id.mode==0o100600 || id.size>0)
+        }
+        fn archive_preadmission_shape_data(snapshot:Option<(u32,bool)>,admission:Option<u32>)->bool {
+            match (snapshot,admission) {
+                (None,None)=>true,(Some((0o100600,_)),None)=>true,
+                (Some((0o100444,true)),None|Some(0o100600))=>true,_=>false,
+            }
+        }
+        // Fixed linked-history comparison DATA. No shape, digest, index or
+        // record returned here is a signature, EX, peer, or payload authority.
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        pub(super) struct RemovalHistoryBindingData {
+            target:mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData,
+            source:[u8;20],digests:[[u8;32];5],
+        }
+        impl RemovalHistoryBindingData {
+            fn from_record_binding(value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<Self> {
+                Ok(Self {target:value.target,source:archive_hex_data(value.source_commit)?,digests:[
+                    archive_hex_data(value.removal_descriptor_sha256)?,archive_hex_data(value.installed_producer_sha256)?,
+                    archive_hex_data(value.installed_inventory_sha256)?,archive_hex_data(value.installation_state_sha256)?,
+                    archive_hex_data(value.payload_roster_sha256)?]})
+            }
+            pub(super) fn target_data(&self)->mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData {self.target}
+            pub(super) fn source_data(&self)->&[u8;20] {&self.source}
+            pub(super) fn digests_data(&self)->&[[u8;32];5] {&self.digests}
+            pub(super) fn matches_data(&self,value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->bool {
+                Self::from_record_binding(value).is_ok_and(|other|other==*self)
+            }
+            pub(super) fn with_binding<T>(&self,call:impl FnOnce(mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<T>)->Result<T> {
+                let source=archive_hex_text_data(&self.source);let digests=self.digests.map(|sha|archive_hex_text_data(&sha));
+                call(mobile_release_desktop::macos_remove_record::RemovalBindingData {target:self.target,source_commit:&source,
+                    removal_descriptor_sha256:&digests[0],installed_producer_sha256:&digests[1],installed_inventory_sha256:&digests[2],
+                    installation_state_sha256:&digests[3],payload_roster_sha256:&digests[4]})
+            }
+        }
+        fn archive_hex_text_data(bytes:&[u8])->String {
+            let mut out=String::with_capacity(bytes.len()*2);for byte in bytes {use std::fmt::Write;let _=write!(&mut out,"{byte:02x}");}out
         }
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
         struct RemovalPreviousData {request:[u8;16],nonce:[u8;16],tip:[u8;32]}
@@ -2487,17 +3223,25 @@ mod installer {
         // The caller separately holds its live-source or recovery-source and R/M
         // capability. No returned comparison row manufactures that authority.
         pub(super) fn read_removal_archive_census(book:&mut Install,root:usize,wanted:&BTreeSet<String>)->Result<RemovalArchiveCensus> {
-            read_removal_archive_census_inner(book,root,wanted,None)
+            read_removal_archive_census_inner(book,root,wanted,None,&mut RehomeRetrySource::SameInput)
         }
         pub(super) fn read_removal_archive_census_with_retries(book:&mut Install,root:usize,wanted:&BTreeSet<String>,
             input:&worker::ReinstallInputRead<'_>)->Result<RemovalArchiveCensus> {
             input.post_source(book)?;check(input.root_original()==root,"rehome-retry-source-root")?;
-            let result=read_removal_archive_census_inner(book,root,wanted,Some(input));
+            let result=read_removal_archive_census_inner(book,root,wanted,Some(input),&mut RehomeRetrySource::SameInput);
+            let post=input.post_source(book);let value=result?;post?;Ok(value)
+        }
+        pub(super) fn read_removal_archive_census_with_retry_sources(book:&mut Install,root:usize,wanted:&BTreeSet<String>,
+            input:&worker::ReinstallInputRead<'_>,holder:&mut CompleteGenerationPrefixSource)->Result<RemovalArchiveCensus> {
+            let mut source=RehomeRetrySource::CompleteGeneration(holder);source.ready()?;
+            input.post_source(book)?;check(input.root_original()==root,"rehome-retry-source-root")?;
+            let result=read_removal_archive_census_inner(book,root,wanted,Some(input),&mut source);
+            if source.pending_native_data(){return rehome_retry_source_result(&source,result);}
             let post=input.post_source(book);let value=result?;post?;Ok(value)
         }
         fn read_removal_archive_census_inner(book:&mut Install,root:usize,wanted:&BTreeSet<String>,
-            input:Option<&worker::ReinstallInputRead<'_>>)->Result<RemovalArchiveCensus> {
-            book.clock()?;check(book.gate.parent==Some(root) && wanted.len()<=286
+            input:Option<&worker::ReinstallInputRead<'_>>,source:&mut RehomeRetrySource<'_>)->Result<RemovalArchiveCensus> {
+            source.ready()?;book.clock()?;check(book.gate.parent==Some(root) && wanted.len()<=286
                 && wanted.iter().all(|name|!name.starts_with(".remove-")),"removal-prior-root-original")?;
             reserve_removal_snapshot_work(book)?;
             let actual=removal_archive_roster(book,root,false,350)?;
@@ -2514,7 +3258,7 @@ mod installer {
             }
             drop(actual);
             table.resolve_history_data()?;removal_archive_pending_admissions(book,&mut table)?;
-            read_rehome_children(book,&mut table,input)?;table.invocation_union()?;book.clock()?;Ok(table)
+            read_rehome_children(book,&mut table,input,source)?;table.invocation_union()?;book.clock()?;Ok(table)
         }
         fn removal_archive_root_names(book:&mut Install,root:usize,wanted:&mut BTreeSet<String>)->Result<()> {
             let Some(scan)=book.removal_archive_scan.as_ref() else {return Ok(());};
@@ -2543,24 +3287,32 @@ mod installer {
         // signature authority, arbitrary path descent or app-directory open.
         pub(super) fn post_removal_archive_references(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
             check(census.retry_count()?==0,"rehome-retry-source-required")?;
-            post_removal_archive_references_inner(book,census,None)
+            post_removal_archive_references_inner(book,census,None,&mut RehomeRetrySource::SameInput)
         }
         pub(super) fn post_removal_archive_references_with_retries(book:&mut Install,census:&RemovalArchiveCensus,
             input:&worker::ReinstallInputRead<'_>)->Result<()> {
             input.post_source(book)?;check(input.root_original()==census.root,"rehome-retry-source-root")?;
-            let result=post_removal_archive_references_inner(book,census,Some(input));
+            let result=post_removal_archive_references_inner(book,census,Some(input),&mut RehomeRetrySource::SameInput);
+            let post=input.post_source(book);result?;post
+        }
+        pub(super) fn post_removal_archive_references_with_retry_sources(book:&mut Install,census:&RemovalArchiveCensus,
+            input:&worker::ReinstallInputRead<'_>,holder:&mut CompleteGenerationPrefixSource)->Result<()> {
+            let mut source=RehomeRetrySource::CompleteGeneration(holder);source.ready()?;
+            input.post_source(book)?;check(input.root_original()==census.root,"rehome-retry-source-root")?;
+            let result=post_removal_archive_references_inner(book,census,Some(input),&mut source);
+            if source.pending_native_data(){return rehome_retry_source_result(&source,result);}
             let post=input.post_source(book);result?;post
         }
         fn post_removal_archive_references_inner(book:&mut Install,census:&RemovalArchiveCensus,
-            input:Option<&worker::ReinstallInputRead<'_>>)->Result<()> {
-            book.clock()?;census.invocation_union()?;check(book.gate.parent==Some(census.root),"removal-prior-root-original")?;
+            input:Option<&worker::ReinstallInputRead<'_>>,source:&mut RehomeRetrySource<'_>)->Result<()> {
+            source.ready()?;book.clock()?;census.invocation_union()?;check(book.gate.parent==Some(census.root),"removal-prior-root-original")?;
             let quote=census.post_originals_data()?;
             reserve_removal_original_storage(book,book.originals.len().checked_add(quote).ok_or("removal-history-original-bound")?)?;
             removal_archive_memory(book,128*1024)?;
             let names=if input.is_some(){Some(rehome_archive_names(census)?)}else{None};
             let mut observed_invocations=InstallInvocationSetData::empty();
             for (index,row) in census.rows().iter().enumerate() {
-                removal_archive_scope(book,|book| {
+                rehome_retry_source_scope(book,source,|book,source| {
                     let directory=book.open(Some(census.root),row.name(),true)?;
                     check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-prior-post-directory")?;
                     let roster=removal_archive_roster(book,directory,true,7)?;
@@ -2587,7 +3339,7 @@ mod installer {
                     if let Some(child)=&row.rehome {
                         let context=input.map(|input|RehomeRetryRead{input,archives:names.as_deref().unwrap_or(&[]),
                             limit:child.retries.len(),heap_limit:REMOVAL_ARCHIVE_TABLE});
-                        let (_,keys)=rehome_audit_census_child(book,census,index,directory,child.root_data(),Some(child),context)?;
+                        let (_,keys)=rehome_audit_census_child(book,census,index,directory,child.root_data(),Some(child),context,source)?;
                         observed_invocations.merge(&keys)?;
                         check(rehome_pending_stat(book,directory,child.root_data().0.ino)?==child.root_data(),"rehome-prior-child-post")?;
                     }
@@ -3202,7 +3954,10 @@ mod installer {
             // allocator/RSS credit, and no increase to the containing2MiB.
             let scalars=4usize.checked_mul(std::mem::size_of::<InstallInvocationSetData>())
                 .and_then(|n|n.checked_add(2*std::mem::size_of::<RehomeRetryReferenceData>()))
-                .and_then(|n|n.checked_add(2*std::mem::size_of::<PartialFreshRetryFieldsData>())).ok_or("rehome-retry-memory")?;
+                .and_then(|n|n.checked_add(2*std::mem::size_of::<PartialFreshRetryFieldsData>()))
+                .and_then(|n|n.checked_add(std::mem::size_of::<CompleteGenerationPrefixAuditData>()))
+                .and_then(|n|n.checked_add(std::mem::size_of::<RehomeRetrySource<'static>>()))
+                .and_then(|n|n.checked_add(5*std::mem::size_of::<RehomeRetryScopeData>())).ok_or("rehome-retry-memory")?;
             check(scalars<=REHOME_RETRY_SCALAR_WORK,"rehome-retry-memory")?;
             let future=kind.limit().checked_mul(std::mem::size_of::<(String,u64)>()+255).ok_or("rehome-audit-memory")?;
             check(retained.checked_add(future).and_then(|n|n.checked_add(65536+8192+REHOME_RETRY_NAMES_WORK+REHOME_RETRY_SCALAR_WORK)).is_some_and(|n|n<=REHOME_WORK),
@@ -3342,6 +4097,92 @@ mod installer {
         struct RehomeRetryRead<'a,'source> {
             input:&'a worker::ReinstallInputRead<'source>,archives:&'a[(String,u64)],limit:usize,heap_limit:usize,
         }
+        // Fixed SOURCE-selected dispatch, not a caller-selected verifier or a
+        // DATA authority. The enclosing Parent/original worker owns the SAME
+        // complete-generation cell before entry and retains it with its Book
+        // on pending/unwind. This borrowed enum never replaces that cell.
+        enum RehomeRetrySource<'a> {
+            SameInput,
+            CompleteGeneration(&'a mut CompleteGenerationPrefixSource),
+        }
+        impl RehomeRetrySource<'_> {
+            fn same_input_data(&self)->bool {matches!(self,Self::SameInput)}
+            fn pending_native_data(&self)->bool {
+                match self {Self::SameInput=>false,Self::CompleteGeneration(source)=>source.pending_native_data()}
+            }
+            fn ready(&self)->Result<()> {check(!self.pending_native_data(),"rehome-retry-source-pending")}
+        }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum RehomeRetryScopeDispositionData { Consume,Retain }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        struct RehomeRetryScopeData {
+            disposition:RehomeRetryScopeDispositionData,first:Option<&'static str>,
+        }
+        // Pure error routing only. Production obtains `pending` immediately
+        // from the actual borrowed native-holder state, never from a request,
+        // a hash, Book::unknown, or a test-created capability.
+        fn rehome_retry_scope_data(pending:bool,first:Option<&'static str>)->RehomeRetryScopeData {
+            if pending {RehomeRetryScopeData{disposition:RehomeRetryScopeDispositionData::Retain,
+                first:first.or(Some("rehome-retry-source-pending"))}}
+            else {RehomeRetryScopeData{disposition:RehomeRetryScopeDispositionData::Consume,first}}
+        }
+        fn rehome_retry_first_failure_data(first:Option<&'static str>,later:Option<&'static str>)->Option<&'static str> {
+            first.or(later)
+        }
+        fn rehome_retry_source_result<T>(source:&RehomeRetrySource<'_>,result:Result<T>)->Result<T> {
+            let decision=rehome_retry_scope_data(source.pending_native_data(),result.as_ref().err().copied());
+            match decision.disposition {
+                RehomeRetryScopeDispositionData::Retain=>Err(decision.first.unwrap_or("rehome-retry-source-pending")),
+                RehomeRetryScopeDispositionData::Consume=>result,
+            }
+        }
+        fn rehome_retry_source_scope<'holder,T>(book:&mut Install,source:&mut RehomeRetrySource<'holder>,
+            call:impl FnOnce(&mut Install,&mut RehomeRetrySource<'holder>)->Result<T>)->Result<T> {
+            if source.same_input_data() {
+                // Preserve the previously accepted direct-C owner exactly.
+                return removal_archive_scope(book,|book|call(book,source));
+            }
+            source.ready()?;
+            let first=book.originals.len();let result=call(book,source);
+            let decision=rehome_retry_scope_data(source.pending_native_data(),result.as_ref().err().copied());
+            if decision.disposition==RehomeRetryScopeDispositionData::Retain {
+                // No check/clock/consuming close or second native call here.
+                // Every enclosing fixed scope observes this SAME holder. The
+                // caller's retain-on-unwind/settle guard must preserve all its
+                // original Book, input and source backing, not just raw bytes.
+                return Err(decision.first.unwrap_or("rehome-retry-source-pending"));
+            }
+            // Known returned state uses the original consuming-close policy;
+            // Source::settle may already have consumed some of these rows.
+            // Book::close never retries an already consumed descriptor.
+            let mut failure=decision.first;
+            for index in (first..book.originals.len()).rev() {
+                if book.originals[index].state==State::Owned {
+                    failure=rehome_retry_first_failure_data(failure,book.check_name(index,true).err());
+                }
+                if !book.close(index) {
+                    failure=rehome_retry_first_failure_data(failure,Some("removal-prior-close-unknown"));
+                }
+            }
+            failure=rehome_retry_first_failure_data(failure,book.clock().err());
+            match failure {Some(why)=>Err(why),None=>result}
+        }
+        fn rehome_retry_evaluate(book:&mut Install,read:RehomeRetryRead<'_,'_>,source:&mut RehomeRetrySource<'_>,
+            child:usize,retry:usize,invocation:&str,role:PartialFreshRetryAuditRole)->Result<RehomeRetryReferenceData> {
+            source.ready()?;
+            let result=match source {
+                RehomeRetrySource::SameInput=>audit_partial_fresh_retry(book,read.input,child,read.archives,retry,invocation,role)
+                    .and_then(RehomeRetryReferenceData::same_input_data),
+                RehomeRetrySource::CompleteGeneration(holder)=>{
+                    let returned=audit_partial_fresh_retry_with_sources(book,read.input,holder,child,read.archives,retry,invocation,role);
+                    returned.and_then(|value|RehomeRetryReferenceData::new_data(value.reference,
+                        value.observed_originals,value.quoted_originals))
+                },
+            };
+            // No descriptive row can escape an unresolved actual source cell,
+            // even if a future provider accidentally returns Ok in that state.
+            rehome_retry_source_result(source,result)
+        }
         fn rehome_archive_names(census:&RemovalArchiveCensus)->Result<Vec<(String,u64)>> {
             let quote=std::mem::size_of::<Vec<(String,u64)>>().checked_add(census.rows.len()
                 .checked_mul(std::mem::size_of::<(String,u64)>()+40).ok_or("rehome-retry-memory")?)
@@ -3374,21 +4215,26 @@ mod installer {
             check(removal_archive_stat(book,retry,true,0o700)?==before,"rehome-retry-original-post")?;Ok(role)
         }
         fn read_rehome_retry_cohort(book:&mut Install,root:usize,roster:&[(String,u64)],plan:&RehomeMoveSetData<'_>,
-            read:RehomeRetryRead<'_,'_>,count:usize)->Result<Vec<RehomeRetryReferenceData>> {
-            rehome_retry_read_post(book,read)?;
+            read:RehomeRetryRead<'_,'_>,count:usize,source:&mut RehomeRetrySource<'_>)->Result<Vec<RehomeRetryReferenceData>> {
+            source.ready()?;rehome_retry_read_post(book,read)?;
             check(count<=read.limit && count<=REHOME_RETRY_LIMIT,"rehome-retry-count")?;
             let heap=rehome_retry_heap_data(count)?;check(heap<=read.heap_limit,"rehome-retry-memory")?;
             // The pending vector is part of the next128KiB census, not a
             // third table. Old/next table overlap was charged before scanning.
             check(heap.checked_add(std::mem::size_of::<RehomeReferenceData>()).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),
                 "rehome-retry-memory")?;
-            let q=if count==0{0}else{partial_fresh_retry_quote(book,read.input)?};
-            let quote=q.checked_add(1).and_then(|n|n.checked_mul(count)).ok_or("rehome-retry-original-budget")?;
+            // Only the direct-C path may quote from C's payload index. For a
+            // source-selecting pass, reserve the fixed retry roots now, then
+            // each provider stage reserves its actual B-derived read/index/
+            // native backing before acquiring it. No C-Q substitute for B.
+            let direct_q=if source.same_input_data() {Some(if count==0{0}else{partial_fresh_retry_quote(book,read.input)?})}else{None};
+            let quote=direct_q.unwrap_or(0).checked_add(1).and_then(|n|n.checked_mul(count))
+                .ok_or("rehome-retry-original-budget")?;
             let end=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("rehome-retry-original-budget")?;
             reserve_removal_original_storage(book,end)?;
-            // Reservation changes the effective pool; recheck the evaluator's
-            // actual SOURCE work quote after that debit, still before opens.
-            if count!=0 {check(partial_fresh_retry_quote(book,read.input)?==q,"rehome-retry-source-quote")?;}
+            if let Some(q)=direct_q {if count!=0 {
+                check(partial_fresh_retry_quote(book,read.input)?==q,"rehome-retry-source-quote")?;
+            }}
             let before=removal_archive_stat(book,root,true,0o700)?;
             let mut rows=Vec::new();rows.try_reserve_exact(count).map_err(|_|"rehome-retry-allocation")?;
             check(rehome_retry_heap_data(rows.capacity())?<=read.heap_limit,"rehome-retry-memory")?;
@@ -3397,21 +4243,32 @@ mod installer {
                 let invocation=rehome_retry_invocation_data(name)?;
                 check(rows.len()<count && rows.len()<rows.capacity(),"rehome-retry-count")?;
                 let start=book.originals.len();
-                check(start.checked_add(1+q).is_some_and(|n|n<=end),"rehome-retry-original-budget")?;
-                let reference=removal_archive_scope(book,|book| {
+                if let Some(q)=direct_q {
+                    check(q.checked_add(1).and_then(|n|start.checked_add(n)).is_some_and(|n|n<=end),
+                        "rehome-retry-original-budget")?;
+                }else{
+                    // The last wrapper may have raised the absolute highwater.
+                    // Reserve this next component BEFORE Book::open, not from
+                    // the stale initial retry-root-only allowance.
+                    rehome_originals_before(book,1)?;
+                }
+                let reference=rehome_retry_source_scope(book,source,|book,source| {
                     let retry=book.open(Some(root),name,true)?;
                     let identity=removal_archive_stat(book,retry,true,0o700)?;
                     check(identity.0.ino==*inode && identity.0.dev==before.0.dev,"rehome-retry-original")?;
                     let role=rehome_retry_role(book,retry)?;
-                    let value=audit_partial_fresh_retry(book,read.input,root,read.archives,retry,invocation,role)?;
-                    check(value.root_data()==identity.0 && value.role_data()==role && value.post_originals_data()==q
+                    let value=rehome_retry_evaluate(book,read,source,root,retry,invocation,role)?;
+                    check(value.root_data()==identity.0 && value.reference_data().role_data()==role
+                        && direct_q.is_none_or(|q|value.post_originals_data()==q)
                         && value.invocation_data()==&archive_hex_data::<16>(invocation)?
-                        && book.originals.len().checked_sub(start)==Some(1+value.observed_originals_data()),
+                        && value.observed_originals_data().checked_add(1)==book.originals.len().checked_sub(start),
                         "rehome-retry-original-budget")?;
                     check(removal_archive_stat(book,retry,true,0o700)?==identity,"rehome-retry-original-post")?;
-                    RehomeRetryReferenceData::same_input_data(value)
+                    Ok(value)
                 })?;
-                check(book.originals.len().checked_sub(start).is_some_and(|n|n<=1+q)
+                let actual=book.originals.len().checked_sub(start).ok_or("rehome-retry-original-budget")?;
+                let quoted=reference.post_originals_data().checked_add(1).ok_or("rehome-retry-original-budget")?;
+                check(actual<=quoted && start.checked_add(quoted).is_some_and(|n|n<=24576)
                     && book.originals[start..].iter().all(|o|o.name.len()<=255 && o.name.capacity()<=255),
                     "rehome-retry-original-budget")?;
                 rows.push(reference);
@@ -3427,8 +4284,8 @@ mod installer {
             removal_archive_stat(book,archive,true,0o700)?;Ok(())
         }
         fn rehome_audit_inner(book:&mut Install,location:RehomeAuditLocation,plan:&RehomeMoveSetData<'_>,
-            selected:Option<RehomeAuditSideData>,context:Option<RehomeRetryRead<'_,'_>>)->Result<RehomeAuditData> {
-            if let Some(read)=context {rehome_retry_read_post(book,read)?;}
+            selected:Option<RehomeAuditSideData>,context:Option<RehomeRetryRead<'_,'_>>,source:&mut RehomeRetrySource<'_>)->Result<RehomeAuditData> {
+            source.ready()?;if let Some(read)=context {rehome_retry_read_post(book,read)?;}
             book.clock()?;rehome_plan_work(book,plan.genesis,plan.owned_bytes_data()?,REHOME_WORK)?;
             // None is private inferred ArchivedPrefix only, never a public
             // bypass or sentinel integer. Its fresh exact roster selects k.
@@ -3450,7 +4307,7 @@ mod installer {
             };
             check(component(&name) && name.len()<=255,"rehome-audit-source-name")?;
             let start=rehome_originals_before(book,2)?;
-            let result=removal_archive_scope(book,|book| {
+            let result=rehome_retry_source_scope(book,source,|book,source| {
                 let root=book.open(parent,&name,true)?;let mode=if archived{0o700}else{0o755};
                 let before=removal_archive_stat(book,root,true,mode)?;check(before==expected,"rehome-audit-root-original")?;
                 let old_root=rehome_directory_span(plan,"")?;
@@ -3494,18 +4351,19 @@ mod installer {
                     if let Some(read)=context {
                         let retries=shape.ok_or("rehome-audit-location")?.1;
                         check(retries==0 || end==plan.moves.len(),"rehome-retry-before-old-complete")?;
-                        observed.retries=read_rehome_retry_cohort(book,root,&roster,plan,read,retries)?;
+                        observed.retries=read_rehome_retry_cohort(book,root,&roster,plan,read,retries,source)?;
                     }
                 }
                 check(removal_archive_stat(book,root,true,mode)?==before,"rehome-audit-root-post")?;Ok(observed)
             });
-            // Scope closes all newly adopted originals before any result can
-            // reach the caller. An error/unknown close cannot mint a reference.
+            // Only known source state permits consuming the adopted originals.
+            // Pending B propagates the first error through every enclosing
+            // typed scope; no reference escapes and the caller retains Book.
             let value=result?;if let Some(read)=context {rehome_retry_read_post(book,read)?;}book.clock()?;Ok(value)
         }
         pub(super) fn audit_rehome_controls(book:&mut Install,parent:usize,plan:&RehomeMoveSetData<'_>,
             side:RehomeAuditSideData)->Result<RehomeAuditData> {
-            side.range(plan.moves.len())?;rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),None)
+            side.range(plan.moves.len())?;rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),None,&mut RehomeRetrySource::SameInput)
         }
         pub(super) fn audit_rehome_controls_with_retries(book:&mut Install,parent:usize,plan:&RehomeMoveSetData<'_>,
             side:RehomeAuditSideData,input:&worker::ReinstallInputRead<'_>,census:&RemovalArchiveCensus)->Result<RehomeAuditData> {
@@ -3513,7 +4371,19 @@ mod installer {
             check(input.root_original()==census.root && book.gate.parent==Some(census.root),"rehome-retry-source-root")?;
             census.invocation_union()?;let names=rehome_archive_names(census)?;
             let read=RehomeRetryRead{input,archives:&names,limit:REHOME_RETRY_LIMIT,heap_limit:REMOVAL_ARCHIVE_TABLE};
-            let result=rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),Some(read));
+            let result=rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),Some(read),&mut RehomeRetrySource::SameInput);
+            let post=input.post_source(book);let value=result?;post?;Ok(value)
+        }
+        pub(super) fn audit_rehome_controls_with_retry_sources(book:&mut Install,parent:usize,plan:&RehomeMoveSetData<'_>,
+            side:RehomeAuditSideData,input:&worker::ReinstallInputRead<'_>,census:&RemovalArchiveCensus,
+            holder:&mut CompleteGenerationPrefixSource)->Result<RehomeAuditData> {
+            let mut source=RehomeRetrySource::CompleteGeneration(holder);source.ready()?;
+            side.range(plan.moves.len())?;input.post_source(book)?;
+            check(input.root_original()==census.root && book.gate.parent==Some(census.root),"rehome-retry-source-root")?;
+            census.invocation_union()?;let names=rehome_archive_names(census)?;
+            let read=RehomeRetryRead{input,archives:&names,limit:REHOME_RETRY_LIMIT,heap_limit:REMOVAL_ARCHIVE_TABLE};
+            let result=rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),Some(read),&mut source);
+            if source.pending_native_data(){return rehome_retry_source_result(&source,result);}
             let post=input.post_source(book);let value=result?;post?;Ok(value)
         }
 
@@ -3533,14 +4403,14 @@ mod installer {
                 && row.files[3].as_ref().is_some_and(|file|file.shape==RemovalArchiveShape::SealedBody),"rehome-prior-terminal")?;
             Ok(genesis)
         }
-        fn with_rehome_census_genesis<T>(book:&mut Install,census:&RemovalArchiveCensus,index:usize,
-            call:impl FnOnce(&mut Install,usize,&RemovalGenesisData)->Result<T>)->Result<T> {
-            let genesis=rehome_history_node_data(census,index)?;
+        fn with_rehome_census_genesis<'holder,T>(book:&mut Install,census:&RemovalArchiveCensus,index:usize,
+            source:&mut RehomeRetrySource<'holder>,call:impl FnOnce(&mut Install,usize,&RemovalGenesisData,&mut RehomeRetrySource<'holder>)->Result<T>)->Result<T> {
+            source.ready()?;let genesis=rehome_history_node_data(census,index)?;
             let row=census.rows.get(genesis).ok_or("rehome-prior-genesis")?;
             let expected=row.files[0].as_ref().filter(|file|file.shape==RemovalArchiveShape::SealedBody)
                 .ok_or("rehome-prior-genesis")?;
             let start=rehome_originals_before(book,2)?;
-            removal_archive_scope(book,|book| {
+            rehome_retry_source_scope(book,source,|book,source| {
                 let archive=book.open(Some(census.root),row.name(),true)?;
                 check(removal_archive_stat(book,archive,true,0o700)?==(row.identity,row.flags),"rehome-prior-genesis-original")?;
                 let snapshot=book.open(Some(archive),REMOVAL_ARCHIVE_NAMES[0],false)?;
@@ -3552,7 +4422,8 @@ mod installer {
                 check(decoded.whole_sha256_data()==expected.digest() && decoded.binding_data()?==census.rows[index].attempt.as_ref()
                     .ok_or("rehome-prior-node")?.binding,"rehome-prior-genesis-binding")?;
                 rehome_originals_after(book,start,2)?;
-                let result=call(book,snapshot,&decoded);
+                let result=call(book,snapshot,&decoded,source);
+                if source.pending_native_data(){return rehome_retry_source_result(source,result);}
                 // The caller may perform nested read-only audits. The fixed
                 // archive/snapshot originals remain unchanged through them.
                 let post=(|| {check(removal_archive_stat(book,snapshot,false,0o444)?==(expected.identity,expected.flags)
@@ -3561,21 +4432,23 @@ mod installer {
             })
         }
         fn rehome_audit_census_child(book:&mut Install,census:&RemovalArchiveCensus,index:usize,archive:usize,
-            expected:(Identity,u32),prior:Option<&RehomeReferenceData>,context:Option<RehomeRetryRead<'_,'_>>)
+            expected:(Identity,u32),prior:Option<&RehomeReferenceData>,context:Option<RehomeRetryRead<'_,'_>>,source:&mut RehomeRetrySource<'_>)
             ->Result<(RehomeReferenceData,InstallInvocationSetData)> {
             check(book.originals.get(archive).is_some_and(|original|original.parent==Some(census.root)
                 && original.name==census.rows[index].name),"rehome-prior-child-location")?;
-            let value=with_rehome_census_genesis(book,census,index,|book,snapshot,genesis| {
+            let value=with_rehome_census_genesis(book,census,index,source,|book,snapshot,genesis,source| {
                 with_rehome_plan(book,snapshot,genesis,|book,_,_,plan| {
                     let side=prior.map(|reference|RehomeAuditSideData::ArchivedPrefix(reference.prefix_data()));
-                    let audit=rehome_audit_inner(book,RehomeAuditLocation::Child{archive,expected},plan,side,context)?;
+                    let audit=rehome_audit_inner(book,RehomeAuditLocation::Child{archive,expected},plan,side,context,source)?;
                     let keys=audit.invocations;Ok((audit.into_reference_data(plan)?,keys))
                 })
             })?;
             if let Some(prior)=prior {check(value.0.matches_data(prior),"rehome-prior-child-changed")?;}
             Ok(value)
         }
-        fn read_rehome_children(book:&mut Install,census:&mut RemovalArchiveCensus,input:Option<&worker::ReinstallInputRead<'_>>)->Result<()> {
+        fn read_rehome_children(book:&mut Install,census:&mut RemovalArchiveCensus,input:Option<&worker::ReinstallInputRead<'_>>,
+            source:&mut RehomeRetrySource<'_>)->Result<()> {
+            source.ready()?;
             let names=if input.is_some(){Some(rehome_archive_names(census)?)}else{None};
             let count=census.rows.iter().filter(|row|row.pending_rehome.is_some()).count();
             let pending=census.rows.iter().filter(|row|row.files[0].is_none() && row.files[1].as_ref()
@@ -3592,12 +4465,12 @@ mod installer {
                 let remaining=REHOME_RETRY_LIMIT.checked_sub(census.retry_count()?).ok_or("rehome-retry-count")?;
                 let heap_limit=REMOVAL_ARCHIVE_TABLE.checked_sub(census.owned_bytes()?).ok_or("rehome-retry-memory")?;
                 let context=input.map(|input|RehomeRetryRead{input,archives:names.as_deref().unwrap_or(&[]),limit:remaining,heap_limit});
-                let (value,keys)=removal_archive_scope(book,|book| {
+                let (value,keys)=rehome_retry_source_scope(book,source,|book,source| {
                     let row=&census.rows[index];let archive=book.open(Some(census.root),row.name(),true)?;
                     check(removal_archive_stat(book,archive,true,0o700)?==(row.identity,row.flags)
                         && rehome_pending_stat(book,archive,expected.0.ino)?==expected,"rehome-prior-child-original")?;
                     rehome_originals_after(book,start,1)?;
-                    let value=rehome_audit_census_child(book,census,index,archive,expected,None,context)?;
+                    let value=rehome_audit_census_child(book,census,index,archive,expected,None,context,source)?;
                     check(removal_archive_stat(book,archive,true,0o700)?==(row.identity,row.flags)
                         && rehome_pending_stat(book,archive,expected.0.ino)?==expected,"rehome-prior-child-post")?;Ok(value)
                 })?;
@@ -4639,7 +5512,13 @@ mod installer {
                             let expected=installation_record::Expected{kind:installation_record::Kind::Ordinary,
                                 source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
                                 install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(current)?};
-                            let raw=installation_record::Record::encode(invocation,raw_inventory,&expected)?;
+                            // The output instance/root/release remain the
+                            // actual torn attempt. Only a separately admitted
+                            // complete-generation source selects historical
+                            // release bytes; the same-package path is unchanged.
+                            let raw=if old.generation_backed() {
+                                installation_record::Record::encode_for_release_data(invocation,raw_inventory,&expected,selected.current_data())?
+                            }else{installation_record::Record::encode(invocation,raw_inventory,&expected)?};
                             let file=partial_fresh_expected_file(book,current,installation_record::RECORD_NAME,&raw)?;
                             top_counts[PartialFreshTop::Versions as usize].add(file.identity.size as u64,1,0)?;
                     top_counts[PartialFreshTop::Versions as usize].control(file.identity.size as u64)?;
@@ -4931,8 +5810,19 @@ mod installer {
         pub(super) enum PartialFreshRetryAuditRole { PreservedOnly,CurrentUnion }
         struct PartialFreshCensusInput<'a> {
             read:&'a worker::ReinstallInputRead<'a>,child:usize,archives:&'a[(String,u64)],role:PartialFreshRetryAuditRole,
+            generation:Option<&'a CompleteGenerationPrefixView<'a,'a>>,
+        }
+        impl PartialFreshCensusInput<'_> {
+            fn post(&self,book:&Install)->Result<()> {
+                self.read.post_source(book)?;
+                if let Some(value)=self.generation {value.post_input(book,self.read)?;}
+                Ok(())
+            }
         }
         // Three caller-owned views, not a third owner or an authority factory.
+        // Historical expected bytes are borrowed ONLY from the separately
+        // admitted complete-generation backing tied to this SAME current
+        // input. They never replace the current installed root or child.
         // Early full-child observation is used only before effects; during a
         // known own-effect sequence the SAME Parent supplies source-only POST.
         enum PartialFreshSource<'a> {
@@ -4941,21 +5831,25 @@ mod installer {
             Census(PartialFreshCensusInput<'a>),
         }
         impl PartialFreshSource<'_> {
-            fn post(&self,book:&Install)->Result<()> {match self {Self::Early(v)=>v.post(book),Self::Effect(v)=>v.post_source(book),Self::Census(v)=>v.read.post_source(book)}}
+            fn post(&self,book:&Install)->Result<()> {match self {Self::Early(v)=>v.post(book),Self::Effect(v)=>v.post_source(book),Self::Census(v)=>v.post(book)}}
             fn root_original(&self)->usize{match self{Self::Early(v)=>v.root_original(),Self::Effect(v)=>v.root_original(),Self::Census(v)=>v.read.root_original()}}
             fn child_original(&self)->Result<usize>{match self{Self::Early(v)=>v.child_original(),Self::Effect(v)=>v.child_original(),Self::Census(v)=>Ok(v.child)}}
             fn new_selection<'a>(&'a self,book:&Install)->Result<&'a ReleaseSetData>{match self{
-                Self::Early(v)=>v.new_selection(book),Self::Effect(v)=>v.new_selection(book),Self::Census(v)=>v.read.new_selection(book)}}
+                Self::Early(v)=>v.new_selection(book),Self::Effect(v)=>v.new_selection(book),Self::Census(v)=>match v.generation {Some(value)=>{v.post(book)?;value.new_selection(book)},None=>v.read.new_selection(book)}}}
             fn incoming<'a>(&'a self,book:&Install)->Result<(usize,&'a Inventory,&'a[u8])>{match self{
-                Self::Early(v)=>v.incoming(book),Self::Effect(v)=>v.incoming(book),Self::Census(v)=>v.read.incoming(book)}}
+                Self::Early(v)=>v.incoming(book),Self::Effect(v)=>v.incoming(book),Self::Census(v)=>match v.generation {Some(value)=>{v.post(book)?;value.incoming(book)},None=>v.read.incoming(book)}}}
             fn payload_origin(&self,book:&Install,kind:PartialFreshPayloadKind)->Result<(usize,&str)> {
+                if let Self::Census(v)=self {
+                    if let Some(value)=v.generation {v.post(book)?;return value.payload_origin(book,kind);}
+                }
                 let (root,_,_)=self.incoming(book)?;
                 Ok((root,match kind{PartialFreshPayloadKind::App=>"app",PartialFreshPayloadKind::Runtime=>"runtime"}))
             }
             fn incoming_controls<'a>(&'a self,book:&Install)->Result<(&'a[u8],&'a[u8])>{match self{
-                Self::Early(v)=>v.incoming_controls(book),Self::Effect(v)=>v.incoming_controls(book),Self::Census(v)=>v.read.incoming_controls(book)}}
+                Self::Early(v)=>v.incoming_controls(book),Self::Effect(v)=>v.incoming_controls(book),Self::Census(v)=>match v.generation {Some(value)=>{v.post(book)?;value.incoming_controls(book)},None=>v.read.incoming_controls(book)}}}
             fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)>{match self{
-                Self::Early(v)=>v.incoming_index_peak(book),Self::Effect(v)=>v.incoming_index_peak(book),Self::Census(v)=>v.read.incoming_index_peak(book)}}
+                Self::Early(v)=>v.incoming_index_peak(book),Self::Effect(v)=>v.incoming_index_peak(book),Self::Census(v)=>match v.generation {Some(value)=>{v.post(book)?;value.incoming_index_peak(book)},None=>v.read.incoming_index_peak(book)}}}
+            fn generation_backed(&self)->bool {matches!(self,Self::Census(v) if v.generation.is_some())}
             fn preserved_only(&self)->bool {matches!(self,Self::Census(v) if v.role==PartialFreshRetryAuditRole::PreservedOnly)}
             fn root_archives(&self,book:&Install,rows:&[(String,u64)],names:&[&str])->Result<()> {
                 self.post(book)?;
@@ -5288,7 +6182,20 @@ mod installer {
             source.post(book)
         }
         pub(super) fn partial_fresh_retry_quote(book:&Install,input:&worker::ReinstallInputRead<'_>)->Result<usize> {
-            input.post_source(book)?;let (files,dirs,peak)=input.incoming_index_peak(book)?;
+            input.post_source(book)?;let index=input.incoming_index_peak(book)?;
+            partial_fresh_retry_quote_for_index(book,index)
+        }
+        pub(super) fn partial_fresh_retry_quote_against_generation(book:&Install,input:&worker::ReinstallInputRead<'_>,
+            generation:&CompleteGenerationPrefixView<'_,'_>)->Result<usize> {
+            input.post_source(book)?;generation.post_input(book,input)?;
+            // Producer has already charged the SAME retained B backing into
+            // removal_effective_control_bytes. This inner quote is B's actual
+            // index plus the common prefix evaluator only. The enclosing
+            // census separately reserves/persists B admission+retirement cost.
+            let index=generation.incoming_index_peak(book)?;
+            partial_fresh_retry_quote_for_index(book,index)
+        }
+        fn partial_fresh_retry_quote_for_index(book:&Install,(files,dirs,peak):(usize,usize,usize))->Result<usize> {
             let originals=partial_fresh_retry_original_quote_data(files,dirs)?;
             let concurrent=peak.checked_add(PARTIAL_FRESH_WORK)
                 .and_then(|n|n.checked_add(2*transaction::INTENT_LIMIT+2*transaction::STATE_LIMIT+2*transaction::CAPSULE_LIMIT))
@@ -5301,14 +6208,26 @@ mod installer {
         pub(super) fn audit_partial_fresh_retry<'a>(book:&mut Install,input:&'a worker::ReinstallInputRead<'a>,
             child:usize,archives:&'a[(String,u64)],retry:usize,invocation:&str,role:PartialFreshRetryAuditRole)
             ->Result<PartialFreshRetryReferenceData> {
+            audit_partial_fresh_retry_source(book,input,None,child,archives,retry,invocation,role)
+        }
+        pub(super) fn audit_partial_fresh_retry_against_generation<'a>(book:&mut Install,input:&'a worker::ReinstallInputRead<'a>,
+            generation:&'a CompleteGenerationPrefixView<'a,'a>,child:usize,archives:&'a[(String,u64)],retry:usize,
+            invocation:&str,role:PartialFreshRetryAuditRole)->Result<PartialFreshRetryReferenceData> {
+            audit_partial_fresh_retry_source(book,input,Some(generation),child,archives,retry,invocation,role)
+        }
+        fn audit_partial_fresh_retry_source<'a>(book:&mut Install,input:&'a worker::ReinstallInputRead<'a>,
+            generation:Option<&'a CompleteGenerationPrefixView<'a,'a>>,child:usize,archives:&'a[(String,u64)],retry:usize,
+            invocation:&str,role:PartialFreshRetryAuditRole)->Result<PartialFreshRetryReferenceData> {
             input.post_source(book)?;
+            if let Some(value)=generation {value.post_input(book,input)?;}
             check(worker::invocation_valid(invocation) && archives.len()<=transaction::INVOCATION_LIMIT,
                 "partial-fresh-cohort-bound")?;
             let before=removal_archive_stat(book,retry,true,0o700)?.0;
-            let quote=partial_fresh_retry_quote(book,input)?;
+            let quote=match generation {Some(value)=>partial_fresh_retry_quote_against_generation(book,input,value)?,
+                None=>partial_fresh_retry_quote(book,input)?};
             let bound=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")?;
             reserve_removal_original_storage(book,bound)?;let start=book.originals.len();
-            let source=PartialFreshSource::Census(PartialFreshCensusInput{read:input,child,archives,role});
+            let source=PartialFreshSource::Census(PartialFreshCensusInput{read:input,child,archives,role,generation});
             let actual=partial_fresh_attempt(book,source,invocation,Some(retry))?;
             let mut archived=PartialFreshTopCounts::default();let mut current=PartialFreshTopCounts::default();
             for top in &actual.slots {
@@ -5317,11 +6236,14 @@ mod installer {
             }
             let prefix=partial_fresh_prefix_data(&actual.slots.iter().map(|v|v.side).collect::<Vec<_>>())?;
             check(role!=PartialFreshRetryAuditRole::PreservedOnly || prefix==actual.slots.len(),"partial-fresh-complete-cohort")?;
-            let selection=input.new_selection(book)?.encode_data().map_err(|_|"partial-fresh-selection")?;
+            // Same immutable borrowed source after the common actual audit;
+            // reconstructing this view neither readmits nor releases backing.
+            let source=PartialFreshSource::Census(PartialFreshCensusInput{read:input,child,archives,role,generation});
+            let selection=source.new_selection(book)?.encode_data().map_err(|_|"partial-fresh-selection")?;
             check(selection.capacity()<=mobile_release_desktop::macos_install_maintenance::INPUT_LIMIT,"partial-fresh-selection-bound")?;
-            let (_,_,inventory)=input.incoming(book)?;let (producer,signature)=input.incoming_controls(book)?;
+            let (_,_,inventory)=source.incoming(book)?;let (producer,signature)=source.incoming_controls(book)?;
             check(removal_archive_stat(book,retry,true,0o700)?.0==before,"partial-fresh-cohort-post")?;
-            input.post_source(book)?;
+            source.post(book)?;
             let result=PartialFreshRetryReferenceData{root:before,invocation:archive_hex_data(invocation)?,
                 request:archive_hex_data(&actual.request)?,intent:archive_hex_data(actual.intent.digest_data())?,
                 selection:Sha256::digest(&selection).into(),producer:Sha256::digest(producer).into(),
@@ -5603,6 +6525,7 @@ mod installer {
         }
         #[cfg(test)]
         fn rehome_retry_cohort_data_checks() {
+            rehome_retry_source_scope_data_checks();
             // Existing real fixed encoders/parsers/reducers only, inert DATA.
             // No filesystem/source signature/close/Ready claim from this group.
             let (genesis,selected,state,intent)=rehome_test_fixture();
@@ -5776,6 +6699,52 @@ mod installer {
             assert_eq!(ceiling.install_invocation_union_data(std::iter::empty(),None).unwrap(),64);
             assert!(ceiling.fresh(&"e".repeat(32),&"d".repeat(32)).is_err());
             ceiling.rows.pop();assert!(ceiling.fresh(&"e".repeat(32),&"d".repeat(32)).is_ok());
+        }
+        #[cfg(test)]
+        fn rehome_retry_source_scope_data_checks() {
+            use RehomeRetryScopeDispositionData::{Consume,Retain};
+            // Actual cleanup uses this exact reducer after querying the SAME
+            // typed holder. These are DATA routing cases, not fake native
+            // constructors or claims that a filesystem/CF close occurred.
+            for (pending,returned,disposition,first) in [
+                (false,None,Consume,None),
+                (false,Some("original-read"),Consume,Some("original-read")),
+                (true,None,Retain,Some("rehome-retry-source-pending")),
+                (true,Some("original-native"),Retain,Some("original-native")),
+            ] {
+                let routed=rehome_retry_scope_data(pending,returned);
+                assert_eq!(routed.disposition,disposition);assert_eq!(routed.first,first);
+                if pending {
+                    // Every outer returned scope retains the same first error;
+                    // a later pending observation cannot manufacture success.
+                    for _ in 0..5 {assert_eq!(rehome_retry_scope_data(true,routed.first),routed);}
+                }
+            }
+            let first=rehome_retry_scope_data(false,Some("original-read")).first;
+            assert_eq!(rehome_retry_first_failure_data(first,Some("named-post")),first);
+            assert_eq!(rehome_retry_first_failure_data(first,Some("removal-prior-close-unknown")),first);
+            assert_eq!(rehome_retry_first_failure_data(first,Some("late-clock")),first);
+            let close=rehome_retry_first_failure_data(None,Some("removal-prior-close-unknown"));
+            assert_eq!(close,Some("removal-prior-close-unknown"));
+            assert_eq!(rehome_retry_first_failure_data(close,Some("late-clock")),close);
+            assert_eq!(rehome_retry_first_failure_data(None,None),None);
+            // The unchanged direct-C branch is the only source-free route.
+            // It has no prelude. The source-selecting wrapper has a REAL Intent
+            // open even when that Intent selects C; B adds its full admission.
+            let direct=rehome_retry_test_reference(10,false);let inner=*direct.reference_data();
+            let current=RehomeRetryReferenceData::new_data(inner,
+                inner.observed_originals_data()+1,inner.post_originals_data()+1).unwrap();
+            let previous=RehomeRetryReferenceData::new_data(inner,
+                inner.observed_originals_data()+325,inner.post_originals_data()+385).unwrap();
+            for (row,extra_actual,extra_quote) in [(direct,0,0),(current,1,1),(previous,325,385)] {
+                assert_eq!(row.observed_originals_data(),inner.observed_originals_data()+extra_actual);
+                assert_eq!(row.post_originals_data(),inner.post_originals_data()+extra_quote);
+                let mut bytes=Vec::new();rehome_retry_wire_data(&row,|b|bytes.extend_from_slice(b));
+                assert_eq!(bytes.len(),389);assert!(rehome_retry_test_decode(&bytes).unwrap().matches_data(&row));
+                // Exactly one caller-held retry root is outside BOTH tuples.
+                assert_eq!(1+row.post_originals_data(),1+inner.post_originals_data()+extra_quote);
+            }
+            assert!(!current.matches_data(&direct));assert!(!previous.matches_data(&current));
         }
         #[cfg(test)]
         fn removal_archive_test_row(number:u64)->RemovalArchiveReference {
@@ -14730,6 +15699,7 @@ mod installer {
                     (true,true,true,1),(true,true,false,0)] {
                     assert!(!outcome_data(0,"installed",closed,true,true,"confirmed","confirmed",timely,unknown,writes,1));
                 }
+                maintenance::complete_generation_prefix_data_checks();
             }
         }
     }

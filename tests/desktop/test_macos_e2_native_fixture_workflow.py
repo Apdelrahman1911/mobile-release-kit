@@ -13,14 +13,14 @@ STEP_NAMES = (
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
     "Prepare only the locked fixture graphs through the original command owner",
-    "Compile and test changed Parent2 DATA groups",
+    "Compile and test changed Parent2 and Record1 DATA groups",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
     "Require closed scoped qualification without full E2 acceptance",
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # One existing Cargo original within990s: changed Parent2 DATA only.\n          # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Two existing Cargo originals within990s: changed Parent2 and Record1 DATA only.\n          # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -328,7 +328,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                  "integration_native_rust_test_record", "integration_native_rust_tests_result",
                  "integration_app_rust_test_record", "integration_app_rust_tests_result",
                  "integration_parent_rust_test_record", "integration_parent_rust_tests_result", "removal_integration_data_result",
-                 "parent_rust_test_record", "parent_rust_tests_result", "removal_parent_data_result",
+                 "parent_rust_test_record", "parent_rust_tests_result", "record_rust_test_record", "record_rust_tests_result", "removal_parent_data_result",
                  "changes_rust_test_record", "changes_rust_tests_result", "removal_changes_data_result",
                  "recovery_rust_test_record", "recovery_rust_tests_result", "removal_recovery_data_result"}
         available = {node.name: node for node in owner_tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
@@ -346,7 +346,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     "INSTALLED_READER_RUST_TESTS", "REGISTRATION_APP_RUST_TESTS", "REMOVAL_ROLES", "REMOVAL_SOURCES",
                     "REMOVAL_NATIVE_RUST_TESTS", "REMOVAL_APP_RUST_TESTS", "HELPER", "INTEGRATION_ROLES",
                     "INTEGRATION_NATIVE_RUST_TESTS", "INTEGRATION_APP_RUST_TESTS", "INTEGRATION_PARENT_RUST_TESTS", "INTEGRATION_SOURCES",
-                    "PARENT_ROLES", "PARENT_RUST_TESTS", "CHANGES_ROLES", "CHANGES_RUST_TESTS", "CHANGES_SOURCES", "RECOVERY_ROLES", "RECOVERY_NATIVE_RUST_TESTS"}:
+                    "PARENT_ROLES", "PARENT_RUST_TESTS", "RECORD_RUST_TESTS", "CHANGES_ROLES", "CHANGES_RUST_TESTS", "CHANGES_SOURCES", "RECOVERY_ROLES", "RECOVERY_NATIVE_RUST_TESTS"}:
                     ns[node.targets[0].id] = ast.literal_eval(node.value)
         self.assertIn("PARENT_SOURCES = CHANGES_SOURCES", self.owner)
         ns["PARENT_SOURCES"] = ns["CHANGES_SOURCES"]
@@ -558,7 +558,9 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             'installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality',
         ))
         self.assertEqual(len(ns["INTEGRATION_SOURCES"]), 30)
-        self.assertEqual(ns["PARENT_ROLES"], ("removal-parent-rust-tests",))
+        self.assertEqual(ns["PARENT_ROLES"], ("removal-parent-rust-tests", "removal-record-rust-tests"))
+        self.assertEqual(ns["RECORD_RUST_TESTS"], ("macos_install_record::tests::full_inventory_and_stable_directory_identity",))
+        self.assertIn("desktop/src-tauri/src/macos_install_record.rs", ns["PARENT_SOURCES"])
         self.assertEqual(ns["PARENT_RUST_TESTS"], (
             "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
             "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources"))
@@ -593,7 +595,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 roles, sources = ns["PARENT_ROLES"], ns["PARENT_SOURCES"]
                 projection_parser = ns["removal_parent_data_result"]
                 artifact, parser_prefix = "removal-parent-data", ""
-                selected_batches = (("parent", ns["PARENT_RUST_TESTS"]),)
+                selected_batches = (("parent", ns["PARENT_RUST_TESTS"]), ("record", ns["RECORD_RUST_TESTS"]))
             if changes:
                 roles, sources = ns["CHANGES_ROLES"], ns["CHANGES_SOURCES"]
                 projection_parser = ns["removal_changes_data_result"]
@@ -616,7 +618,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             faults = (None, "nonzero", "optional-interrupt", "unknown", "malformed", "source-post", "late-close", "close-throw", "late-publication")
             if integration:
                 faults += ("parent-nonzero", "parent-unknown", "parent-malformed")
-            if changes or recovery:
+            if changes or recovery or parent_only:
                 faults += tuple("changed-" + str(index) + "-" + kind for index in range(1, len(roles))
                                 for kind in ("nonzero", "unknown", "malformed"))
             for fault in faults:
@@ -650,7 +652,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                         index = roles.index(role)
                         expected = selected_batches[index][1]
                         flags = ["--features", "package-producer-signing", "--lib"] if index == 0 and not integration else ["--lib"]
-                        if parent_only or integration and index == 2:
+                        if parent_only and index == 0 or integration and index == 2:
                             flags = ["--features", "macos-installed-remover", "--bin", "mrk-macos-remove"]
                         directory = ns["NATIVE"] if index == 0 and not parent_only else ns["INSTALLER"]
                         if changes:
@@ -720,7 +722,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     if fault in (None, "late-publication"):
                         self.assertTrue(result["passed"])
                         projection = projection_parser(result, "a" * 40, op.source.rows)
-                        self.assertEqual(projection["scope"], "removal-recovery-compiled-data-only" if recovery else "removal-changes-compiled-data-only" if changes else "removal-parent-compiled-data-only" if parent_only else "removal-integration-compiled-data-only" if integration else "removal-compiled-data-only")
+                        self.assertEqual(projection["scope"], "removal-recovery-compiled-data-only" if recovery else "removal-changes-compiled-data-only" if changes else "removal-parent-record-compiled-data-only" if parent_only else "removal-integration-compiled-data-only" if integration else "removal-compiled-data-only")
                         opposite = ns["removal_data_result" if integration else "removal_integration_data_result"]
                         with self.assertRaises(ns["Refused"]): opposite(result, "a" * 40, op.source.rows)
                         self.assertFalse(projection["liveRemovalQualified"] or projection["fullE2Qualified"])
@@ -746,9 +748,21 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                                     altered = json.loads(json.dumps(result)); altered["artifacts"][artifact][extra] = None
                                     with self.assertRaises(ns["Refused"]): projection_parser(altered, "a" * 40, op.source.rows)
                         if parent_only:
-                            self.assertEqual(set(result["artifacts"][artifact]), {"clock", "parentRustTests", "sourceHashes"})
+                            self.assertEqual(set(result["artifacts"][artifact]), {"clock", "parentRustTests", "recordRustTests", "sourceHashes"})
                             self.assertEqual(projection["parentRustTests"], ns["parent_rust_test_record"]())
-                            self.assertEqual(len(projection["originalCalls"]), 1)
+                            self.assertEqual(projection["recordRustTests"], ns["record_rust_test_record"]())
+                            self.assertEqual(len(projection["originalCalls"]), 2)
+                            for problem in ("missing-record", "cross-record", "ignored", "one-call", "extra-call", "old-phase"):
+                                changed = json.loads(json.dumps(result))
+                                data = changed["artifacts"][artifact]
+                                if problem == "missing-record": del data["recordRustTests"]
+                                elif problem == "cross-record": data["recordRustTests"] = data["parentRustTests"]
+                                elif problem == "ignored": data["recordRustTests"]["ignored"] = 1
+                                elif problem == "one-call": changed["originalCalls"].pop()
+                                elif problem == "extra-call": changed["originalCalls"].append(dict(changed["originalCalls"][-1]))
+                                else: changed["phase"] = roles[0]
+                                with self.subTest(parent_record=problem), self.assertRaises(ns["Refused"]):
+                                    projection_parser(changed, "a" * 40, op.source.rows)
                             for key in ("nativeRustTests", "appRustTests"):
                                 changed = json.loads(json.dumps(result))
                                 changed["artifacts"][artifact][key] = None
@@ -796,6 +810,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                         if recovery and (fault == "malformed" or changed_fault and changed_fault[2] == "malformed"):
                             expected_reason = "removal-recovery-rust-test-framing"
                         if parent_only and fault == "malformed": expected_reason = "installer-worker-rust-test-framing"
+                        if parent_only and changed_fault and changed_fault[2] == "malformed":
+                            expected_reason = "removal-record-rust-test-framing"
                         self.assertEqual(result["failure"], expected_reason)
                         self.assertFalse(result["artifacts"][artifact]["clock"]["closed"])
                         if fault == "unknown": self.assertFalse(any(event.startswith("retire:") for event in events))
@@ -820,6 +836,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                                (ns["INTEGRATION_ROLES"][1], ns["INTEGRATION_APP_RUST_TESTS"]),
                                (ns["INTEGRATION_ROLES"][2], ns["INTEGRATION_PARENT_RUST_TESTS"]),
                                (ns["PARENT_ROLES"][0], ns["PARENT_RUST_TESTS"]),
+                               (ns["PARENT_ROLES"][1], ns["RECORD_RUST_TESTS"]),
                                *zip(ns["CHANGES_ROLES"], ns["CHANGES_RUST_TESTS"]),
                                *zip(ns["RECOVERY_ROLES"], ns["RECOVERY_RUST_TESTS"]),
                                (None, ns["INSTALLER_WORKER_RUST_TESTS"])):
@@ -836,6 +853,40 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                 self.assertIsNone(ns["installer_worker_diagnostic_data"](diag, dict(original, **change), rows, removal_role=role))
             if role is None:
                 self.assertIsNone(ns["installer_worker_diagnostic_data"](diag, dict(original, workTimeoutSeconds=479), rows))
+        # Actual parser: repeated E0425 must not hide first E0308/E0609 sites.
+        def compiler_lines(codes):
+            return b"".join(("src/macos_remove_protocol.rs:%d:3: error[%s]: private-text\n" % (i + 1, code)).encode()
+                            for i, code in enumerate(codes))
+        def projected(codes):
+            raw = compiler_lines(codes)
+            value = ns["installer_worker_diagnostic_result"](raw, b"", rows, removal_role=ns["PARENT_ROLES"][0])
+            original = {"role": ns["PARENT_ROLES"][0], "entered": True, "returned": True, "returncode": 101,
+                        "workTimeoutSeconds": 479, "outputLimitBytes": 4194304,
+                        "stdoutSha256": hashlib.sha256(raw).hexdigest(), "stderrSha256": hashlib.sha256(b"").hexdigest()}
+            self.assertEqual(ns["installer_worker_diagnostic_data"](value, original, rows,
+                             removal_role=ns["PARENT_ROLES"][0]), value)
+            self.assertNotIn("private-text", repr(value))
+            return value
+        exact = projected(["E0425"] * 12)
+        self.assertEqual(len(exact["errorLocations"]), 12)
+        self.assertFalse(exact["truncated"])
+        repeated = projected(["E0425"] * 13)
+        self.assertEqual(repeated["errorLocations"], exact["errorLocations"])
+        self.assertTrue(repeated["truncated"])
+        diverse = projected(["E0425"] * 13 + ["E0308", "E0609", "E0308"])
+        self.assertEqual(diverse["errorCodes"], ["E0425", "E0308", "E0609"])
+        self.assertEqual(len(diverse["errorLocations"]), 12)
+        self.assertTrue(diverse["truncated"])
+        self.assertEqual([(row["code"], row["line"]) for row in diverse["errorLocations"][-2:]],
+                         [("E0609", 15), ("E0308", 14)])
+        unique = ["E%04d" % i for i in range(12)]
+        full = projected(unique + ["E0609"])
+        self.assertEqual([row["code"] for row in full["errorLocations"]], unique)
+        self.assertTrue(full["truncated"])  # No sole representative is ever evicted.
+        capped = projected(["E%04d" % i for i in range(33)])
+        self.assertEqual(len(capped["errorCodes"]), 32)
+        self.assertEqual(len(capped["errorLocations"]), 12)
+        self.assertTrue(capped["truncated"])
         selected_source = ast.get_source_segment(self.owner, next(node for node in selected.body
             if isinstance(node, ast.FunctionDef) and node.name == "execute_removal_data"))
         for excluded in ("sudo", "observe_btm_logs", "compile_facades", "run_native", "observe_installer_context", "sign("):
@@ -1459,6 +1510,12 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(worker_diagnostic, {
             "diagnosticOnly": True, "phase": "installer-worker-rust-tests", "failure": "installer-worker-rust-test-roster",
             "lastOriginalCall": {"role": "installer-worker-rust-tests", "returned": True, "returncode": 0}})
+        for suffix in ("bound", "framing", "record", "result", "roster"):
+            reason = "removal-record-rust-test-" + suffix
+            observed = report("removal-record-rust-tests", reason,
+                              [dict(successful, role="removal-record-rust-tests")])
+            self.assertEqual(observed, {"diagnosticOnly": True, "phase": "removal-record-rust-tests", "failure": reason,
+                "lastOriginalCall": {"role": "removal-record-rust-tests", "returned": True, "returncode": 0}})
         for code, reason in ((78, "cocoa-graphic-session-unavailable"), (79, "cocoa-security-session-query-failed")):
             observed = report("service-cocoa-startup", reason,
                               [dict(call, role="service-cocoa-startup", returncode=code)])
@@ -1518,7 +1575,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     self.assertEqual(node.keywords, [])
                     self.assertIsInstance(node.args[-1], ast.Constant)
                     prefixes.append(node.args[-1].value)
-            self.assertEqual(sorted(prefixes), ["installed-reader-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "native-rust-test", "package-producer-rust-test", "producer-signing-rust-test", "registration-app-rust-test", "registration-rust-test", "removal-app-rust-test", "removal-app-rust-test", "removal-changes-rust-test", "removal-native-rust-test", "removal-native-rust-test", "removal-recovery-rust-test"])
+            self.assertEqual(sorted(prefixes), ["installed-reader-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "installer-worker-rust-test", "native-rust-test", "package-producer-rust-test", "producer-signing-rust-test", "registration-app-rust-test", "registration-rust-test", "removal-app-rust-test", "removal-app-rust-test", "removal-changes-rust-test", "removal-native-rust-test", "removal-native-rust-test", "removal-record-rust-test", "removal-recovery-rust-test"])
             labels.update(prefix + suffix for prefix in prefixes for suffix in actual_suffixes)
         self.assertEqual(labels, set(tables["OWNER_DIAGNOSTIC_REFUSALS"]))
         # Owner output is sanitized before this workflow sees it. A listed

@@ -70,12 +70,12 @@ if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
 REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
-REMOVAL_PARENT_SELECTED = True  # One existing original: changed Parent2 DATA only.
+REMOVAL_PARENT_SELECTED = True  # Two existing originals: changed Parent2 and selected-B Record1 DATA only.
 REMOVAL_CHANGES_SELECTED = False  # Historical changed11 scope remains independently validated.
 REMOVAL_RECOVERY_SELECTED = False  # NativeRecovery4 unchanged; no overlapping rerun.
 OWNER_DIAGNOSTIC_ROLES = (
     "removal-native-rust-tests", "removal-app-rust-tests",
-    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests", "removal-changes-parent-rust-tests", "removal-changes-app-rust-tests", "removal-changes-native-rust-tests", "removal-changes-emitter-rust-tests", "removal-recovery-parent-rust-tests", "removal-recovery-native-rust-tests",
+    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests", "removal-record-rust-tests", "removal-changes-parent-rust-tests", "removal-changes-app-rust-tests", "removal-changes-native-rust-tests", "removal-changes-emitter-rust-tests", "removal-recovery-parent-rust-tests", "removal-recovery-native-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -102,7 +102,7 @@ OWNER_DIAGNOSTIC_ROLES = (
 
 OWNER_DIAGNOSTIC_PHASES = (
     "removal-native-rust-tests", "removal-app-rust-tests",
-    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests", "removal-changes-parent-rust-tests", "removal-changes-app-rust-tests", "removal-changes-native-rust-tests", "removal-changes-emitter-rust-tests", "removal-recovery-parent-rust-tests", "removal-recovery-native-rust-tests",
+    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests", "removal-record-rust-tests", "removal-changes-parent-rust-tests", "removal-changes-app-rust-tests", "removal-changes-native-rust-tests", "removal-changes-emitter-rust-tests", "removal-recovery-parent-rust-tests", "removal-recovery-native-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -146,6 +146,11 @@ OWNER_DIAGNOSTIC_REFUSALS = (
     'removal-changes-rust-test-record',
     'removal-changes-rust-test-result',
     'removal-changes-rust-test-roster',
+    'removal-record-rust-test-bound',
+    'removal-record-rust-test-framing',
+    'removal-record-rust-test-record',
+    'removal-record-rust-test-result',
+    'removal-record-rust-test-roster',
     'removal-recovery-role',
     'removal-recovery-rust-test-bound',
     'removal-recovery-rust-test-framing',
