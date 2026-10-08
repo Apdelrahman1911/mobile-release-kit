@@ -104,7 +104,7 @@ impl ReleaseData {
 }
 
 /// An explicit finite allow-list, not a destination-derived upgrade policy.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReleaseSetData {
     target: MaintenanceTargetData,
     current: ReleaseData, accepted_predecessors: Vec<ReleaseData>,

@@ -13801,7 +13801,7 @@ mod installer {
                 .checked_add(files.checked_mul(4)?)?.checked_add(dirs.checked_mul(6)?)?
                 .checked_add(512).filter(|n|*n<=24576)
         }
-        #[derive(Clone,Copy)]
+        #[derive(Clone,Copy,PartialEq,Eq)]
         enum ArchivedInstallMode { RehomedFresh, CurrentState }
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
         enum ArchivedInstallPhase { Observed, RClosedUnderM, WorkerPending, WorkerJoined, Refused }

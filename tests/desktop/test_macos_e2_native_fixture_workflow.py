@@ -348,9 +348,16 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                     "INTEGRATION_NATIVE_RUST_TESTS", "INTEGRATION_APP_RUST_TESTS", "INTEGRATION_PARENT_RUST_TESTS", "INTEGRATION_SOURCES",
                     "PARENT_ROLES", "PARENT_RUST_TESTS", "RECORD_RUST_TESTS", "CHANGES_ROLES", "CHANGES_RUST_TESTS", "CHANGES_SOURCES", "RECOVERY_ROLES", "RECOVERY_NATIVE_RUST_TESTS"}:
                     ns[node.targets[0].id] = ast.literal_eval(node.value)
-        self.assertIn("PARENT_SOURCES = CHANGES_SOURCES", self.owner)
-        ns["PARENT_SOURCES"] = ns["CHANGES_SOURCES"]
-        self.assertEqual(len(ns["PARENT_SOURCES"]), 39)
+        parent_sources = next(node.value for node in owner_tree.body if isinstance(node, ast.Assign)
+                              and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                              and node.targets[0].id == "PARENT_SOURCES")
+        expected_parent_sources = ast.parse("CHANGES_SOURCES + ('desktop/src-tauri/src/macos_install_maintenance.rs',)", mode="eval").body
+        self.assertEqual(ast.dump(parent_sources), ast.dump(expected_parent_sources))
+        ns["PARENT_SOURCES"] = ns["CHANGES_SOURCES"] + ast.literal_eval(parent_sources.right)
+        core_source = "desktop/src-tauri/src/macos_install_maintenance.rs"
+        self.assertNotIn(core_source, ns["CHANGES_SOURCES"])
+        self.assertEqual(len(ns["PARENT_SOURCES"]), 40)
+        self.assertEqual(set(ns["PARENT_SOURCES"]), set(ns["CHANGES_SOURCES"]) | {core_source})
         ns["RECOVERY_SOURCES"] = ns["CHANGES_SOURCES"]
         ns["RECOVERY_RUST_TESTS"] = (ns["PARENT_RUST_TESTS"], ns["RECOVERY_NATIVE_RUST_TESTS"])
         ns.update(WORK_SECONDS=990, MAX_RAW=(1 << 61)-1, CHECKOUT=Path("/fixed-source"),
@@ -752,6 +759,16 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                             self.assertEqual(projection["parentRustTests"], ns["parent_rust_test_record"]())
                             self.assertEqual(projection["recordRustTests"], ns["record_rust_test_record"]())
                             self.assertEqual(len(projection["originalCalls"]), 2)
+                            self.assertEqual(set(projection["sourceHashes"]), set(ns["PARENT_SOURCES"]))
+                            for source_problem in ("missing-core", "mismatched-core"):
+                                changed = json.loads(json.dumps(result))
+                                hashes = changed["artifacts"][artifact]["sourceHashes"]
+                                if source_problem == "missing-core": del hashes[core_source]
+                                else:
+                                    hashes[core_source] = "e" * 64
+                                    self.assertNotEqual(hashes[core_source], op.source.rows[core_source]["sha256"])
+                                with self.subTest(parent_source=source_problem), self.assertRaisesRegex(ns["Refused"], "^removal-source-binding$"):
+                                    projection_parser(changed, "a" * 40, op.source.rows)
                             for problem in ("missing-record", "cross-record", "ignored", "one-call", "extra-call", "old-phase"):
                                 changed = json.loads(json.dumps(result))
                                 data = changed["artifacts"][artifact]
