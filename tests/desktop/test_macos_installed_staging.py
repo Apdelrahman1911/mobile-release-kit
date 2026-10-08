@@ -46,7 +46,7 @@ def workflow_step(workflow, name):
 
 # Exact independent shipping-compile job only. All prior installed/source
 # assertions receive their unchanged bytes; a partial or altered job refuses.
-SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 40003, 'c6b8290f85b44f87eacc3bf151b5de66acb10be49ae397342927c9d6e88d9461', ''))
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 70172, '3afa3893694784c7d00e6682c9947b5304184b93599cb3a3dece9ec1722e3479', ''))
 
 
 def without_shipping_compile_workflow(source):
@@ -8058,13 +8058,16 @@ class MacCurrentRuntimeData(unittest.TestCase):
         program = ''.join(line[10:] if line.startswith('          ') else line for line in body.splitlines(keepends=True))
         tree = ast.parse(program)
         pure_names = {"need", "pairs", "finite_float", "document", "identity", "tool_shape_data", "returned_data", "commands_data",
-                      "artifact_data", "cleanup_allowed_data", "passed_data"}
-        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT"}
+                      "artifact_data", "cleanup_allowed_data", "passed_data", "controller_config_data",
+                      "controller_audit_data", "controller_record_data", "controller_runtime_data"}
+        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT",
+                     "CONTROLLER_BASE", "CONTROLLER_DIRS", "CONTROLLER_EXES", "CONTROLLER_SCRIPTS", "CONTROLLER_FILES", "CONTROLLER_REASONS"}
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
                     or isinstance(node, ast.Assign) and len(node.targets) == 1
                     and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants]
         self.assertEqual({node.name for node in selected if isinstance(node, ast.FunctionDef)}, pure_names)
-        ns = {"json": json, "math": math, "stat": stat, "Path": Path, "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
+        ns = {"json": json, "math": math, "stat": stat, "Path": Path, "hashlib": hashlib, "re": re,
+              "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
         exec(compile(ast.Module(body=selected, type_ignores=[]), "<fixed-shipping-pure-DATA>", "exec"), ns)
         self.assertIn("work_end, hard_end = start + 1320, start + 1440", program)
         self.assertIn("timeout=timeout,", program)
@@ -8197,10 +8200,11 @@ class MacCurrentRuntimeData(unittest.TestCase):
         command_rows = [dict(role=role, returned=True, capturesSettled=True, returncode=0) for role in ns['ROLES']]
         good = dict(commands=command_rows, originalPending=False, sourcePost=True, toolsPost=True, inputOriginalsKnown=True,
                     frontendGenerated=True, facadeArtifactVerified=True, toolOriginalsClosed=True, generatedOutputsRetired=True,
-                    installedQualified=False, runtimeQualified=False, launched=False, signed=False, failure=None)
+                    installedQualified=False, runtimeQualified=False, launched=False, signed=False, failure=None,
+                    pythonControllerPrepared=True, pythonControllerPost=True, pythonControllerRetired=True)
         self.assertTrue(ns['passed_data'](good))
         for key in ('sourcePost', 'toolsPost', 'inputOriginalsKnown', 'frontendGenerated', 'facadeArtifactVerified',
-                    'toolOriginalsClosed', 'generatedOutputsRetired'):
+                    'toolOriginalsClosed', 'generatedOutputsRetired', 'pythonControllerPrepared', 'pythonControllerPost', 'pythonControllerRetired'):
             self.assertFalse(ns['passed_data'](dict(good, **{key: False})), key)
         for key in ('originalPending', 'installedQualified', 'runtimeQualified', 'launched', 'signed'):
             self.assertFalse(ns['passed_data'](dict(good, **{key: True})), key)
@@ -8237,6 +8241,163 @@ class MacCurrentRuntimeData(unittest.TestCase):
                      actual_shipping.replace("timeout-minutes: 35", "timeout-minutes: 36", 1),
                      actual_shipping.replace("  shipping-image-compile:\n", "  wrong-compile:\n", 1)):
             with self.assertRaises(AssertionError): without_shipping_compile_workflow(text)
+
+        # The vendor bootstrap may be 0775; the actual compile controller may
+        # not. Exercise the exact new record/runtime validators on tiny DATA,
+        # never create an environment or import/execute vendor venv here.
+        controller_work = Path('/synthetic-controller-work')
+        work_identity = (7, 10, stat.S_IFDIR | 0o700, 501, 20, 2, 64, 100, 200)
+        base_identity = [1, 11, stat.S_IFREG | 0o775, 0, 80, 1, 135696, 100, 200]
+        config = ns['controller_config_data'](controller_work)
+        source_hash = 'a' * 64
+        controller_rows = []
+        for index, name in enumerate(ns['CONTROLLER_DIRS'] + ns['CONTROLLER_FILES']):
+            directory = name in ns['CONTROLLER_DIRS']
+            executable = name in ns['CONTROLLER_EXES']
+            mode = (stat.S_IFDIR | 0o700) if directory else stat.S_IFREG | (0o755 if executable else 0o600)
+            size = 64 if directory else base_identity[6] if executable else len(config) if name == 'pyvenv.cfg' else 64
+            digest = None if directory else source_hash if executable else hashlib.sha256(config).hexdigest() if name == 'pyvenv.cfg' else 'b' * 64
+            controller_rows.append(dict(path=name, identity=[7, 100 + index, mode, 501, 20, 2 if directory else 1, size, 100, 200], sha256=digest))
+        controller_record = dict(schemaVersion=1, baseExecutable=ns['CONTROLLER_BASE'], baseIdentity=base_identity,
+                                 baseSha256=source_hash, baseOriginalClosed=True, relativeExecutable='bin/python3.14',
+                                 rows=controller_rows, totalBytes=sum(row['identity'][6] for row in controller_rows if row['path'] in ns['CONTROLLER_FILES']))
+        self.assertIs(ns['controller_record_data'](controller_record, controller_work, work_identity), controller_record)
+        self.assertFalse(ns['tool_shape_data'](SimpleNamespace(**dict(valid_info, st_mode=base_identity[2], st_uid=0, st_gid=80)), 501, True)['writeProtected'])
+        self.assertTrue(ns['tool_shape_data'](SimpleNamespace(**valid_info), 501, True)['writeProtected'])
+        self.assertEqual(len(controller_rows), 15)
+        self.assertEqual(ns['CONTROLLER_EXES'], ('bin/python3.14', 'bin/python3', 'bin/python', 'bin/𝜋thon'))
+        self.assertEqual(len(config.splitlines()), 5)
+        self.assertIn(b'--copies --without-pip --without-scm-ignore-files /synthetic-controller-work/python-controller\n', config)
+        mutations = [lambda v: v.update(baseOriginalClosed=False), lambda v: v.update(schemaVersion=True),
+                     lambda v: v.update(relativeExecutable='bin/python3'), lambda v: v.update(baseExecutable='/another/python'),
+                     lambda v: v['baseIdentity'].__setitem__(2, stat.S_IFREG | 0o777),
+                     lambda v: v['baseIdentity'].__setitem__(3, 501), lambda v: v['baseIdentity'].__setitem__(5, 2),
+                     lambda v: v['rows'].pop(), lambda v: v['rows'].append(copy.deepcopy(v['rows'][0])),
+                     lambda v: v['rows'][5].update(path='lib64'), lambda v: v['rows'][6].update(sha256='b' * 64),
+                     lambda v: v['rows'][7].update(sha256='b' * 64),
+                     lambda v: v['rows'][7]['identity'].__setitem__(2, stat.S_IFREG | 0o775),
+                     lambda v: v['rows'][7]['identity'].__setitem__(2, stat.S_IFLNK | 0o755),
+                     lambda v: v['rows'][7]['identity'].__setitem__(5, 2),
+                     lambda v: v['rows'][7]['identity'].__setitem__(1, v['rows'][8]['identity'][1]),
+                     lambda v: v['rows'][6]['identity'].__setitem__(2, stat.S_IFREG | 0o644),
+                     lambda v: v['rows'][0]['identity'].__setitem__(2, stat.S_IFDIR | 0o775),
+                     lambda v: v.update(totalBytes=v['totalBytes'] + 1)]
+        for change in mutations:
+            value = copy.deepcopy(controller_record); change(value)
+            with self.assertRaises(ValueError): ns['controller_record_data'](value, controller_work, work_identity)
+        runtime = dict(executable='/synthetic-controller-work/python-controller/bin/python3.14',
+                       prefix='/synthetic-controller-work/python-controller', execPrefix='/synthetic-controller-work/python-controller',
+                       basePrefix='/Library/Frameworks/Python.framework/Versions/3.14',
+                       baseExecPrefix='/Library/Frameworks/Python.framework/Versions/3.14', version=[3, 14, 7],
+                       isolated=True, noSite=True, dontWriteBytecode=True, filesystemEncoding='utf-8')
+        self.assertTrue(ns['controller_runtime_data'](runtime, controller_work))
+        for key, value in [('executable', ns['CONTROLLER_BASE']), ('prefix', runtime['basePrefix']),
+                           ('execPrefix', runtime['basePrefix']), ('basePrefix', '/other/base'), ('version', [3, 14, 6]),
+                           ('isolated', False), ('noSite', False), ('dontWriteBytecode', False), ('filesystemEncoding', 'ascii')]:
+            with self.assertRaisesRegex(ValueError, '^controller-runtime$'):
+                ns['controller_runtime_data'](dict(runtime, **{key: value}), controller_work)
+        for event in ('subprocess.Popen', 'os.system', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.exec',
+                      'socket.__new__', 'socket.connect', 'socket.getaddrinfo'):
+            self.assertFalse(ns['controller_audit_data'](event), event)
+        for event in ('open', 'os.scandir', 'os.mkdir', 'os.chmod', 'shutil.copyfile', 'import'):
+            self.assertTrue(ns['controller_audit_data'](event), event)
+        admission = workflow_step(actual_shipping, 'Admit the exact nonroot ARM compile-only route and fresh work')
+        self.assertIn('/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 -I -S -B -', admission)
+        admission_body = admission.split("<<'PY_SHIPPING_COMPILE_ADMIT'\n", 1)[1].split('          PY_SHIPPING_COMPILE_ADMIT\n', 1)[0]
+        admission_program = ''.join(line[10:] if line.startswith('          ') else line for line in admission_body.splitlines(keepends=True))
+        admission_tree = ast.parse(admission_program)
+        # The two processes share exact SOURCE validators, not a serialized
+        # executable or a caller-supplied bootstrap module.
+        for name in ('controller_config_data', 'controller_audit_data', 'controller_record_data', 'controller_runtime_data'):
+            original = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            prepared = next(node for node in admission_tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            self.assertEqual(ast.dump(original, include_attributes=False), ast.dump(prepared, include_attributes=False))
+        creations = [node for node in ast.walk(admission_tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == 'create'
+                     and isinstance(node.func.value, ast.Call)
+                     and ast.unparse(node.func.value.func) == 'venv.EnvBuilder']
+        self.assertEqual(len(creations), 1)
+        self.assertEqual([ast.unparse(argument) for argument in creations[0].args], ['controller_root'])
+        options = {keyword.arg: keyword.value for keyword in creations[0].func.value.keywords}
+        self.assertEqual(set(options), {'system_site_packages', 'clear', 'symlinks', 'upgrade', 'with_pip', 'upgrade_deps', 'scm_ignore_files'})
+        for key in set(options) - {'scm_ignore_files'}: self.assertIs(ast.literal_eval(options[key]), False)
+        self.assertEqual(ast.unparse(options['scm_ignore_files']), 'frozenset()')
+        self.assertEqual(admission_program.count('sys.addaudithook(preparation_audit)'), 1)
+        self.assertIn("need(controller_audit_data(event), 'controller-unexpected-process')", admission_program)
+        self.assertIn('prep_work_end, prep_hard_end = prep_start + 45, prep_start + 60', admission_program)
+        self.assertLess(admission_program.index('prep_start = time.monotonic()'), admission_program.index('tempfile.mkdtemp('))
+        self.assertIn('for relative in CONTROLLER_SCRIPTS:', admission_program)
+        self.assertEqual(admission_program.count('os.fchmod(fd, 0o600)'), 1)
+        for forbidden in ('os.chmod(', 'subprocess.run(', 'subprocess.Popen(', 'ensurepip', 'shutil.rmtree(', '--upgrade-deps'):
+            self.assertNotIn(forbidden, admission_program)
+        self.assertIn("python = str(controller_root / 'bin/python3.14')", admission_program)
+        self.assertIn("MRK_PYTHON=' + python", admission_program)
+        self.assertIn("need(os.environ.get('MRK_PYTHON') == runtime['executable'], 'controller-runtime')", program)
+        self.assertIn("tools[-1]['sha256'] == controller['baseSha256']", program)
+        self.assertLess(program.index('controller_runtime_data(runtime, work)'), program.index('tool(Path(sys.executable)'))
+        self.assertLess(program.index("roots.append((work / 'python-controller'"), program.index("for name in ('npm-cache'"))
+        self.assertIn('for path, before in reversed(roots):', program)  # private controller is last.
+        self.assertIn("if path == work / 'python-controller': receipt['pythonControllerRetired'] = True", program)
+        cleanup_gates = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                         for node in parent.finalbody if isinstance(node, ast.If)
+                         and "receipt['pythonControllerPrepared']" in ast.unparse(node.test)]
+        self.assertEqual(len(cleanup_gates), 1)
+        cleanup_code = compile(ast.Expression(cleanup_gates[0].test), '<fixed-controller-cleanup-DATA>', 'eval')
+        cleanup_inputs = dict(ns, receipt=good, pending=False, close_ok=True, input_originals_known=True)
+        self.assertTrue(eval(cleanup_code, cleanup_inputs))
+        for key in ('pythonControllerPrepared', 'pythonControllerPost', 'sourcePost', 'toolsPost'):
+            self.assertFalse(eval(cleanup_code, dict(cleanup_inputs, receipt=dict(good, **{key: False}))), key)
+        for key, value in (('pending', True), ('close_ok', False), ('input_originals_known', False)):
+            self.assertFalse(eval(cleanup_code, dict(cleanup_inputs, **{key: value})), key)
+
+        # Execute the exact new directory-original close and the subsequent
+        # production guards on inert ports. An exceptional close must not be
+        # repaired by another census, even when the completed commands permit
+        # cleanup and every later POST could otherwise be successful.
+        controller_node = next(node for node in main_node.body
+                               if isinstance(node, ast.FunctionDef) and node.name == 'controller_post')
+        directory_finalizers = [node.finalbody for node in ast.walk(controller_node)
+                                if isinstance(node, ast.Try) and node.finalbody]
+        self.assertEqual(len(directory_finalizers), 1)
+        directory_close = compile(ast.Module(body=directory_finalizers[0], type_ignores=[]),
+                                  '<fixed-controller-original-close-DATA>', 'exec')
+        post_guards = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                       for final in parent.finalbody if isinstance(final, ast.Try)
+                       for node in final.body if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == 'not pending and input_originals_known']
+        self.assertEqual(len(post_guards), 1)
+        post_guard_code = compile(ast.Module(body=post_guards, type_ignores=[]),
+                                  '<fixed-controller-final-post-DATA>', 'exec')
+        for close_error in (None, OSError('inert consuming close'),
+                            KeyboardInterrupt('inert consuming close'), SystemExit('inert consuming close')):
+            ports = SimpleNamespace(close=mock.Mock(side_effect=close_error))
+            local = dict(cleanup_inputs, os=ports, fd=73,
+                         receipt=dict(good, commands=good['commands'][:1]))
+            if close_error is None:
+                exec(directory_close, local)
+            else:
+                with self.assertRaises(type(close_error)) as caught:
+                    exec(directory_close, local)
+                self.assertIs(caught.exception, close_error)
+            ports.close.assert_called_once_with(73)
+            self.assertIs(local['input_originals_known'], close_error is None)
+            self.assertIs(eval(cleanup_code, local), close_error is None)
+            if close_error is not None:
+                first_failure = dict(stage='command-boundary', kind=type(close_error).__name__)
+                local['receipt'].update(failure=first_failure, pythonControllerPost=False,
+                                        toolsPost=False, toolOriginalsClosed=False)
+                probes = {name: mock.Mock() for name in ('read', 'source_post', 'tools_post', 'configs_post', 'controller_post')}
+                local.update(probes, controller=object(), tools=[dict(fd=41)])
+                exec(post_guard_code, local)
+                exec(retire_code, local)
+                for probe in probes.values(): probe.assert_not_called()
+                ports.close.assert_called_once_with(73)  # no retry or unrelated original consumption.
+                self.assertEqual(local['tools'], [dict(fd=41)])
+                self.assertIs(local['receipt']['failure'], first_failure)
+                self.assertFalse(local['receipt']['pythonControllerPost'])
+                self.assertFalse(local['receipt']['toolOriginalsClosed'])
+                local['receipt'].update(pythonControllerPost=True, toolsPost=True)
+                self.assertFalse(eval(cleanup_code, local))  # a later good census cannot clear unknown.
 
 
 
