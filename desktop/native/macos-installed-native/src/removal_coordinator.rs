@@ -433,8 +433,8 @@ mod peer {
                 else{RemovalPeerCheckpoint::Returned{phase,at,custody}})));
             self.in_gate=false;
             match decision{Ok(Decision::Proceed) if current||phase.cleanup()=>true,
-                Ok(Decision::Stop|Decision::Defer)=>{self.note(at,false);false;},
-                Ok(Decision::Proceed)=>false,_=>{self.note(at,true);false;}}
+                Ok(Decision::Stop|Decision::Defer)=>{self.note(at,false);false},
+                Ok(Decision::Proceed)=>false,_=>{self.note(at,true);false}}
         }
         fn authenticated(&self)->bool{let r=self.report;
             !self.failed&&!self.unknown&&r.failed==0&&r.unknown==0&&r.stage==4&&r.token_ready==1&&r.watch_ready==1
