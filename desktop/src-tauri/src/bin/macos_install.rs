@@ -3031,7 +3031,13 @@ mod installer {
                 for row in &table.rows {if row.attempt.unwrap().previous.is_some(){assert!(row.files[0].is_none() && row.app.is_none());}}
                 assert!(table.owned_bytes().unwrap()<=REMOVAL_ARCHIVE_TABLE);
             }
-            let mut full=removal_history_test_chain(64);assert!(full.add(removal_archive_test_row(u64::MAX)).is_err());
+            let mut full=removal_history_test_chain(64);
+            // Valid sixty-fifth row: fixture inode arithmetic must not overflow,
+            // and the name must follow the genesis that deliberately sorts last.
+            let mut extra=removal_archive_test_row(99);
+            extra.name=".remove-ffffffffffffffffffffffffffffffff".into();
+            assert!(full.rows.last().unwrap().name<extra.name);
+            assert!(full.add(extra).is_err());
             // Fresh exact tables per mutation avoid Clone/DTO authority and
             // deliberately exercise the ACTUAL production graph reducer.
             for change in 0..9 {
