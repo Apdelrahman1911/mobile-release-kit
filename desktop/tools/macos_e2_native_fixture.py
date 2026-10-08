@@ -170,6 +170,15 @@ INTEGRATION_SOURCES = (
     'desktop/native/macos-installed-native/src/install_producer.m',
     'desktop/native/macos-installed-native/src/install_producer.h',
 )
+# One fixed successor original for the changed Parent groups only. Old17 remains closed.
+PARENT_ARGUMENT = "--qualify-removal-parent-data"
+PARENT_ROLES = ("removal-parent-rust-tests",)
+PARENT_RUST_TESTS = (
+    "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
+    "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
+)
+# The same compiled remover/app/native graph still needs its fixed SOURCE closure.
+PARENT_SOURCES = INTEGRATION_SOURCES
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 REGISTRATION_ARGUMENT = "--qualify-registration-reservation"
 REGISTRATION_SOURCE = "desktop/native/macos-installed-entry/registration_fixture.c"
@@ -650,7 +659,7 @@ def installer_worker_diagnostic_result(stdout, stderr, rows, *, removal_role=Non
     _names, aliases = source
     selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
     if removal_role is not None:
-        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES:
+        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES + PARENT_ROLES:
             return None
         selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
         selected_type = "mrk-macos-removal-data-diagnostic-v1"
@@ -658,6 +667,9 @@ def installer_worker_diagnostic_result(stdout, stderr, rows, *, removal_role=Non
             selected_names = (INTEGRATION_NATIVE_RUST_TESTS, INTEGRATION_APP_RUST_TESTS,
                               INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
+        if removal_role in PARENT_ROLES:
+            selected_names = PARENT_RUST_TESTS
+            selected_type = "mrk-macos-removal-parent-data-diagnostic-v1"
     result = {
         "schemaVersion": 1, "type": selected_type, "diagnosticOnly": True,
         "classification": "unrecognized", "stdoutSha256": digest(stdout), "stderrSha256": digest(stderr),
@@ -725,7 +737,7 @@ def installer_worker_diagnostic_data(value, call, rows, *, removal_role=None):
     selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
     selected_role = "installer-worker-rust-tests"
     if removal_role is not None:
-        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES:
+        if removal_role not in REMOVAL_ROLES + INTEGRATION_ROLES + PARENT_ROLES:
             return None
         selected_role = removal_role
         selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
@@ -734,6 +746,9 @@ def installer_worker_diagnostic_data(value, call, rows, *, removal_role=None):
             selected_names = (INTEGRATION_NATIVE_RUST_TESTS, INTEGRATION_APP_RUST_TESTS,
                               INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
+        if removal_role in PARENT_ROLES:
+            selected_names = PARENT_RUST_TESTS
+            selected_type = "mrk-macos-removal-parent-data-diagnostic-v1"
     source = installer_worker_diagnostic_sources(rows)
     if (source is None or type(value) is not dict or set(value) != keys or type(call) is not dict
             or call.get("role") != selected_role or call.get("entered") is not True
@@ -2766,6 +2781,61 @@ def removal_integration_data_result(result, source, rows):
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
 
 
+def parent_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-parent-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(PARENT_RUST_TESTS),
+            "passed": 2, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def parent_rust_tests_result(stdout):
+    _rust_test_output(stdout, PARENT_RUST_TESTS, "installer-worker-rust-test")
+    return parent_rust_test_record()
+
+
+def removal_parent_data_result(result, source, rows):
+    """Only this returned one-original Parent DATA scope; never removal or installer authority."""
+    need(type(result) is dict and identity(source, 40) and result.get("source") == source
+         and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
+         and result.get("outcome") == "passed" and result.get("passed") is True
+         and result.get("failure") is None and result.get("phase") == PARENT_ROLES[-1], "removal-owner-result")
+    need(all(result.get(key) is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown", "scratchRetired"))
+         and result.get("cleanupErrors") == []
+         and all(result.get(key) is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
+             "nativeOwnerReturned", "protectedRetentionRequired", "exactReceiptRetired", "protectedRootRetired",
+             "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified"))
+         and all(result.get(key) is None for key in ("native", "nativeRustTests", "package", "producerSigningRustTests",
+             "packageProducerRustTests", "contextReceiptDiagnostic", "installedReaderRustTests", "installerWorkerRustTests"))
+         and result.get("installedArtifactRoster") is None and result.get("receiptOriginals") == []
+         and result.get("protectedMetadataObservations") == [], "removal-owner-finality")
+    need(result["installerContext"]["started"] is False and result["installerContext"]["completed"] is False
+         and result["serviceLayoutObservation"]["selected"] is False and result["serviceLayoutObservation"]["started"] is False
+         and result["btmLogObservation"]["state"] == "not-requested", "removal-owner-scope")
+    artifacts = result.get("artifacts")
+    need(type(artifacts) is dict and set(artifacts) == {"removal-parent-data"}, "removal-artifacts")
+    data = artifacts["removal-parent-data"]
+    need(type(data) is dict and set(data) == {"clock", "parentRustTests", "sourceHashes"}, "removal-record")
+    registration_clock_data(data["clock"])
+    _rust_tests_data(data["parentRustTests"], parent_rust_test_record(), "installer-worker-rust-test")
+    need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(PARENT_SOURCES)
+         and all(identity(data["sourceHashes"][name], 64) and data["sourceHashes"][name] == rows[name]["sha256"]
+                 for name in PARENT_SOURCES), "removal-source-binding")
+    calls = result.get("originalCalls")
+    need(type(calls) is list and len(calls) == 1 and all(type(call) is dict for call in calls)
+         and [call.get("role") for call in calls] == list(PARENT_ROLES), "removal-call-roster")
+    for call in calls:
+        need(set(call) == {"role", "entered", "returned", "workTimeoutSeconds", "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
+             and call["entered"] is True and call["returned"] is True
+             and type(call["returncode"]) is int and call["returncode"] == 0
+             and type(call["workTimeoutSeconds"]) is int and 0 < call["workTimeoutSeconds"] <= 480
+             and type(call["outputLimitBytes"]) is int and call["outputLimitBytes"] == 4194304
+             and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
+    return {"scope": "removal-parent-compiled-data-only", "clock": data["clock"],
+            "parentRustTests": data["parentRustTests"],
+            "sourceHashes": data["sourceHashes"], "originalCalls": calls,
+            "liveRemovalQualified": False, "installerTransactionQualified": False,
+            "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
+
+
 def cargo_artifact(messages, role, checkout, target):
     """Require the actual compiler roster, not an executable found by basename."""
     need(role in ("client", "resident") and type(messages) is bytes
@@ -3440,7 +3510,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -3629,14 +3699,15 @@ class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
     def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
-                 service_cocoa=False, registration_reservation=False, removal_data=False, removal_integration=False):
+                 service_cocoa=False, registration_reservation=False, removal_data=False, removal_integration=False, removal_parent=False):
         need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
-             and type(registration_reservation) is bool and type(removal_data) is bool and type(removal_integration) is bool
-             and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data, removal_integration)) <= 1,
+             and type(registration_reservation) is bool and type(removal_data) is bool and type(removal_integration) is bool and type(removal_parent) is bool
+             and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data, removal_integration, removal_parent)) <= 1,
              "layout-operation-selector")
         self.registration_selected = registration_reservation
-        self.removal_selected = removal_data or removal_integration
+        self.removal_selected = removal_data or removal_integration or removal_parent
         self.removal_integration_selected = removal_integration
+        self.removal_parent_selected = removal_parent
         self.registration_deadline = self.registration_last = None
         self.registration_clock_failed = False
         self.service_cocoa_selected = service_cocoa
@@ -5275,10 +5346,15 @@ class Operation:
                           "deadlineNs": str(self.registration_deadline), "lastNs": str(origin), "closed": False},
                 "nativeRustTests": None, "appRustTests": None, "sourceHashes": {}}
         integration = getattr(self, "removal_integration_selected", False)
+        parent_only = getattr(self, "removal_parent_selected", False)
         if integration:
             data["parentRustTests"] = None
-        artifact = "removal-integration-data" if integration else "removal-data"
-        sources = INTEGRATION_SOURCES if integration else REMOVAL_SOURCES
+        if parent_only:
+            data.pop("nativeRustTests")
+            data.pop("appRustTests")
+            data["parentRustTests"] = None
+        artifact = "removal-parent-data" if parent_only else "removal-integration-data" if integration else "removal-data"
+        sources = PARENT_SOURCES if parent_only else INTEGRATION_SOURCES if integration else REMOVAL_SOURCES
         self.artifacts[artifact] = data
         try:
             self.registration_tick()
@@ -5300,6 +5376,10 @@ class Operation:
                     (INTEGRATION_ROLES[2], INSTALLER, ("--features", "macos-installed-remover", "--bin", "mrk-macos-remove"),
                      INTEGRATION_PARENT_RUST_TESTS, integration_parent_rust_tests_result, "parentRustTests"),
                 )
+            if parent_only:
+                batches = ((PARENT_ROLES[0], INSTALLER,
+                    ("--features", "macos-installed-remover", "--bin", "mrk-macos-remove"),
+                    PARENT_RUST_TESTS, parent_rust_tests_result, "parentRustTests"),)
             for role, directory, flags, names, parser, key in batches:
                 self.registration_tick()
                 target = self.scratch / (role + "-target")
@@ -5446,7 +5526,8 @@ def main():
                               service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT],
                               registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT],
                               removal_data=sys.argv[1:] == [REMOVAL_ARGUMENT],
-                              removal_integration=sys.argv[1:] == [INTEGRATION_ARGUMENT])
+                              removal_integration=sys.argv[1:] == [INTEGRATION_ARGUMENT],
+                              removal_parent=sys.argv[1:] == [PARENT_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -5474,7 +5555,9 @@ def main():
             registration_reservation_result(value, os.environ["GITHUB_SHA"], source.rows)
             operation.registration_tick()
         if operation.removal_selected and value["passed"]:
-            if operation.removal_integration_selected:
+            if operation.removal_parent_selected:
+                removal_parent_data_result(value, os.environ["GITHUB_SHA"], source.rows)
+            elif operation.removal_integration_selected:
                 removal_integration_data_result(value, os.environ["GITHUB_SHA"], source.rows)
             else:
                 removal_data_result(value, os.environ["GITHUB_SHA"], source.rows)

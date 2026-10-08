@@ -47,7 +47,10 @@ PACKAGE_SCOPES = (
     "installation-inspection", "vault-helper-shipping-installation-inspection",
     "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
 )
-PHASES = ("prepare", "verify-before", "verify-after", "package-install")
+PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove")
+REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
+REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
+                        "distribution-verify-signature", "distribution-verify-image")
 PRODUCER_PROFILE = "desktop/packaging/macos-install-producer-signing.profile"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
@@ -68,7 +71,7 @@ PYTHON_SUPPLIERS = {
 }
 
 
-SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer")
+SIGNING_PHASES = ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover")
 CREDENTIAL_VARIABLES = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD")
 CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import",
                     "partitions", "identity", "certificates", "search-admit", "restrict", "search-restricted",
@@ -154,7 +157,7 @@ def notary_text(value, bound):
 
 
 def notary_submit_data(body, *, archive_name=NOTARY_ZIP_NAME):
-    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg"), "notary-fixed-archive-name")
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"), "notary-fixed-archive-name")
     value = notary_json(body, 65536)
     need({"id", "status"} <= set(value) <= {"id", "status", "message", "name", "createdDate"}
          and value["status"] in ("Accepted", "Invalid"), "notary-submit-terminal")
@@ -167,7 +170,7 @@ def notary_submit_data(body, *, archive_name=NOTARY_ZIP_NAME):
 
 
 def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP_NAME):
-    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg"), "notary-fixed-archive-name")
+    need(archive_name in (NOTARY_ZIP_NAME, "MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg"), "notary-fixed-archive-name")
     value = notary_json(body, 1024 * 1024)
     required = {"logFormatVersion", "jobId", "status", "archiveFilename", "issues", "ticketContents"}
     need(required <= set(value) <= required | {"statusSummary", "statusCode", "uploadDate", "sha256"}
@@ -205,19 +208,19 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
         need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg")
+             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
                   and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
 
 
-FINAL_IMAGE_PHASES = ("finalize-image",)
+FINAL_IMAGE_PHASES = ("finalize-image", "finalize-remove-image")
 FINAL_IMAGE_ROLES = ("final-image-resolve-notarytool", "final-image-resolve-stapler", "final-image-signature-before",
                      "final-image-submit", "final-image-log", "final-image-staple", "final-image-validate",
                      "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach")
 
-FINAL_PACKAGE_PHASES = ("finalize-package",)
+FINAL_PACKAGE_PHASES = ("finalize-package", "finalize-remove-package")
 INSTALLER_PROFILE = "desktop/packaging/macos-installer-signing.json"
 INSTALLER_CREDENTIAL_VARIABLES = ("MRK_MACOS_INSTALLER_P12_BASE64", "MRK_MACOS_INSTALLER_P12_PASSWORD")
 FINAL_PACKAGE_ROLES = ("final-package-resolve-notarytool", "final-package-resolve-stapler",
@@ -386,13 +389,14 @@ INSTALLER_CREDENTIAL_ROSTER = (
 
 
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
-                          image_release, release_sha):
+                          image_release, release_sha, *, remove=False):
     """Closed preceding original observation AND the current immutable P.
 
     This is not a stand-alone cryptographic authority. The fixed workflow also
     requires the actual earlier helper0 and its held status original; this
     consumer repeats the complete Scripts audit before invoking the producer.
     """
+    need(type(remove) is bool, "final-package-receipt-purpose")
     value = final_package_json(body, 16384, "final-package-receipt-json")
     keys = {"schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
             "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired",
@@ -400,7 +404,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
             "androidBuildQualified", "developerIdOrNotarizationQualified", "productReady", "notaryAuthentication", "notarySubmission",
             "finalPackage", "directStagerIOPending", "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"}
     need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
-         and value["phase"] == "finalize-package" and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
+         and value["phase"] == ("finalize-remove-package" if remove else "finalize-package") and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
          and value["source"] == environment["GITHUB_SHA"] == value["workflowSource"]
          and value["workflow"] == environment["GITHUB_WORKFLOW_REF"]
          and value["runId"] == environment["GITHUB_RUN_ID"] and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"]
@@ -442,7 +446,7 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
               "trustedSignatureBeforeAndAfter", "trustedTimestampBeforeAndAfter", "actualStaplerValidation", "signedPrefixUnchanged",
               "completeScriptsAudited", "assurance"}
     need(type(final) is dict and set(final) == fields and type(final["schemaVersion"]) is int and final["schemaVersion"] == 1
-         and final["kind"] == "mrk-final-installer-package" and final["teamId"] == selection["teamId"]
+         and final["kind"] == ("mrk-final-remover-package" if remove else "mrk-final-installer-package") and final["teamId"] == selection["teamId"]
          and final["certificateSha256"] == [selection[key] for key in ("leafSha256", "issuerSha256", "rootSha256")]
          and final["installerProfileSha256"] == profile_sha and final["notaryProfileSha256"] == notary_sha,
          "final-package-receipt-signing-source")
@@ -450,7 +454,8 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
          and final["signedBytes"] < final["packageBytes"] <= final["signedBytes"] + 1024 * 1024
          and final["packageBytes"] == package_size and final["packageSha256"] == package_sha
          and type(final["packageMode"]) is int and final["packageMode"] == 0o444
-         and type(final["scriptFileCount"]) is int and 0 < final["scriptFileCount"] <= 4096
+         and type(final["scriptFileCount"]) is int
+         and (final["scriptFileCount"] == 2 if remove else 0 < final["scriptFileCount"] <= 4096)
          and all(sha(final[key]) for key in ("unsignedSha256", "signedSha256", "packageSha256", "originalPackageSha256",
                                            "packageInfoSha256", "installerProfileSha256", "notaryProfileSha256", "logSha256")),
          "final-package-receipt-byte-correspondence")
@@ -846,8 +851,9 @@ def signing_requirement(identity, identifier):
          and re.fullmatch(r"[A-Z0-9]{10}", identity[0])
          and re.fullmatch(r"[0-9a-f]{40}", identity[1]) and identity[1] != "0" * 40
          and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
-                            "dev.mobile-release-kit.desktop.observation", PYTHON_IDENTIFIER,
-                             "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry"), "fixed-signing-requirement")
+                            "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
+                             "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
+                             "dev.mobile-release-kit.desktop.remove"), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -855,8 +861,9 @@ def signing_requirement(identity, identifier):
             ' and certificate leaf = H"' + identity[1] + '"')
 
 
-def producer_artifact(messages, checkout, target_root, target):
+def producer_artifact(messages, checkout, target_root, target, *, remove=False):
     """One explicit nonshipping example graph; no packaged code is rebuilt."""
+    need(type(remove) is bool, "producer-compiler-purpose")
     build_profile(target)
     need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
          and messages.endswith(b"\n"), "producer-compiler-bound")
@@ -882,11 +889,13 @@ def producer_artifact(messages, checkout, target_root, target):
             need(type(row.get("target")) is dict and type(row.get("filenames")) is list
                  and all(type(name) is str for name in row["filenames"]), "producer-compiler-artifact")
             artifacts.append(row)
-    binary = target_root / target / "release/examples/macos_package_producer"
-    specs = (("desktop/src-tauri", "mobile-release-kit-desktop", "macos_package_producer", "examples/macos_package_producer.rs",
-              ["example"], ["bin"], ["macos-package-producer"], str(binary)),
+    example = "macos_remove_producer" if remove else "macos_package_producer"
+    feature = "macos-remove-producer" if remove else "macos-package-producer"
+    binary = target_root / target / "release/examples" / example
+    specs = (("desktop/src-tauri", "mobile-release-kit-desktop", example, "examples/" + example + ".rs",
+              ["example"], ["bin"], [feature], str(binary)),
              ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", "src/lib.rs",
-              ["lib"], ["lib"], ["macos-package-producer"], None),
+              ["lib"], ["lib"], [feature], None),
              ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", "src/lib.rs",
               ["lib"], ["lib"], ["default", "package-producer-signing"], None))
     chosen = []
@@ -920,6 +929,20 @@ class Operation:
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
         self.phase, self.environment, self.stager = phase, environment, stager
+        # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
+        self.removal = phase in REMOVE_PHASES
+        self.package_filename = "Remove.pkg" if self.removal else "MobileReleaseKit.pkg"
+        self.scripts_name = "remove-scripts" if self.removal else "scripts"
+        self.packager_filename = "Remove-original.pkg" if self.removal else "MobileReleaseKit-original.pkg"
+        self.unsigned_package_name = "remove-package-unsigned" if self.removal else "package-unsigned"
+        self.final_package_name = "remove-package-final" if self.removal else "package-final"
+        self.package_status_name = "remove-package-finalization.status" if self.removal else "package-finalization.status"
+        self.package_receipt_name = "android-helper-finalize-remove-package.json" if self.removal else "android-helper-finalize-package.json"
+        self.image_filename = "MobileReleaseKit-Remove.dmg" if self.removal else "MobileReleaseKit.dmg"
+        self.image_directory = "remove-distribution" if self.removal else "distribution"
+        self.final_image_directory = "remove-distribution-final" if self.removal else "distribution-final"
+        self.image_identifier = "dev.mobile-release-kit.desktop.remove-distribution" if self.removal else "dev.mobile-release-kit.desktop.distribution"
+        self.producer_filename = "macos-remove-producer" if self.removal else "macos-package-producer"
         self.entries, self.calls, self.errors = [], [], []
         self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
@@ -955,6 +978,7 @@ class Operation:
         self.mount_entry = self.mount_placeholder = self.mount_device = None
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
+        self.removal_package_complete = False
         self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
         self.image_release = self.image_source = self.release_entry = None
         self.receipt = {"schemaVersion": 1, "phase": phase, "target": target, "source": environment["GITHUB_SHA"],
@@ -1086,7 +1110,7 @@ class Operation:
     def call(self, role, argv, environment, *, cwd, timeout, limit):
         need(self.credential_known() and not self.credential_failed, "credential-dispatch-unknown")
         image_purpose = {"distribution-sign": "distribution-image", "observation-sign": "observation-image"}.get(role)
-        if self.phase == "package-install" and image_purpose is not None:
+        if self.phase in ("package-install", "package-remove") and image_purpose is not None:
             need(self.credential_active is not None and self.credential_active.get("purpose") == image_purpose
                  and self.credential_active["ready"] and self.credential_active["roles"] == IMAGE_CREDENTIAL_ROLES[image_purpose],
                  "package-image-credential-required")
@@ -1174,7 +1198,7 @@ class Operation:
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
-        prefix = "android-helper-" + role
+        prefix = "android-helper-" + ((self.phase + "-") if self.removal else "") + role
         self.publish(prefix + (".jsonl" if role == "build" else ".stdout"), result.stdout)
         self.publish(prefix + ".stderr", result.stderr)
         self.publish(prefix + ".status", (str(result.returncode) + "\n").encode("ascii"))
@@ -1430,6 +1454,7 @@ class Operation:
                  **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
+              or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
               or purpose in SIGNING_PHASES and self.phase == purpose)
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
@@ -1479,7 +1504,7 @@ class Operation:
                      "credential-producer-admission")
                 copied, copied_body, code_hash = producer
                 need(self.read(copied) == copied_body, "credential-producer-original")
-                trusted = str(self.work / "macos-package-producer")
+                trusted = str(self.work / self.producer_filename)
                 partitions = "apple-tool:,cdhash:" + code_hash
             else:
                 need(producer is None, "credential-code-purpose")
@@ -1619,7 +1644,7 @@ class Operation:
         return matcher
 
     def fixed_sign(self):
-        """Five fixed existing workflow roles, never a user-selected path/argv."""
+        """Six fixed workflow roles, never a user-selected path/argv."""
         need(self.phase in SIGNING_PHASES and self.signing is not None, "fixed-signing-purpose")
         base = "app/Mobile Release Kit.app"
         payload = base + "/Contents/Helpers/MobileReleaseKitPayload.app"
@@ -1629,6 +1654,7 @@ class Operation:
             "sign-desktop-payload": payload,
             "sign-root-app": base,
             "sign-root-installer": "cargo-target/" + self.target + "/release/mrk-macos-install",
+            "sign-remover": "remover-target/" + self.target + "/release/mrk-macos-remove",
         }[self.phase]
         if self.phase == "sign-desktop-image":
             need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image", "fixed-desktop-image-role")
@@ -1653,6 +1679,10 @@ class Operation:
         self.package_sources.append((entitlements, empty))
         arguments = ["--options", "runtime", "--entitlements",
             str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
+        if self.phase == "sign-remover":
+            arguments += ["--identifier", "dev.mobile-release-kit.desktop.remove"]
+        verify_arguments = (["-R", signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove")]
+                            if self.phase == "sign-remover" else [])
         with self.credential_scope(self.phase):
             self.stage = self.phase
             self.signing_mutation_pending = True
@@ -1668,7 +1698,7 @@ class Operation:
             self.close(old)
             need(old["closed"] and not self.errors, "fixed-sign-input-close-unknown")
             self.signing_mutation_pending = False
-            verified = self.call(self.phase + "-verify", ["/usr/bin/codesign", "--verify", "--strict", str(path)],
+            verified = self.call(self.phase + "-verify", ["/usr/bin/codesign", "--verify", "--strict", *verify_arguments, str(path)],
                                  self.native_environment(), cwd=self.work, timeout=30, limit=65536)
             need(not verified.stdout and not verified.stderr and self.read(signed) == body, "fixed-sign-original-verification")
             if root is not None:
@@ -1680,9 +1710,9 @@ class Operation:
 
     def producer_signing_copy(self, executable, executable_body):
         """Give only the final compiler-derived copy an exact ad-hoc CDHash ACL."""
-        self.publish("macos-package-producer", executable_body, mode=0o755)
+        self.publish(self.producer_filename, executable_body, mode=0o755)
         need(self.read(executable) == executable_body, "producer-compiler-copy-post")
-        old = self.original(self.work_entry, "macos-package-producer", "producer-unsigned-copy", 64 * 1024 * 1024, (0o755,))
+        old = self.original(self.work_entry, self.producer_filename, "producer-unsigned-copy", 64 * 1024 * 1024, (0o755,))
         need(self.read(old) == executable_body, "producer-copy-original")
         matcher = self.signing_matcher()
         context = self.credential_new_clock()
@@ -1693,18 +1723,18 @@ class Operation:
             self.stage = "producer-private-copy-sealing"
             self.signing_mutation_pending = True
             self.credential_call(context, "producer-adhoc", ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none",
-                                 str(self.work / "macos-package-producer")], timeout=30)
-            copied = self.original(self.work_entry, "macos-package-producer", "producer-sealed-copy", 64 * 1024 * 1024, (0o755,))
+                                 str(self.work / self.producer_filename)], timeout=30)
+            copied = self.original(self.work_entry, self.producer_filename, "producer-sealed-copy", 64 * 1024 * 1024, (0o755,))
             body = self.read(copied)
             matcher.macho_content_valid(executable_body, body, self.arch, signing=True)
             self.close(old)
             need(old["closed"] and not self.errors, "producer-copy-close-unknown")
             self.signing_mutation_pending = False
             verified = self.credential_call(context, "producer-adhoc-verify", ["/usr/bin/codesign", "--verify", "--strict",
-                str(self.work / "macos-package-producer")], timeout=30)
+                str(self.work / self.producer_filename)], timeout=30)
             need(not verified.stdout and not verified.stderr, "producer-seal-verification")
             display = self.credential_call(context, "producer-cdhash", ["/usr/bin/codesign", "--display", "--verbose=4",
-                str(self.work / "macos-package-producer")], timeout=30)
+                str(self.work / self.producer_filename)], timeout=30)
             need(not display.stdout and self.read(copied) == body and self.read(executable) == executable_body,
                  "producer-seal-post")
             code_hash = credential_cdhash(display.stderr)
@@ -2119,7 +2149,8 @@ class Operation:
         self.package_sources.append((capsule, capsule_body))
         arguments = argparse.Namespace(target=self.target, package_role=self.environment["MRK_MACOS_PACKAGE_ROLE"], current_runtime=True,
             expected_entry=self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256"), expected_app_binary=self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
-            expected_vault_helper=self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256"), expected_android_helper=self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256"),
+            expected_vault_helper=self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256"),
+            expected_remover=self.environment.get("MRK_MACOS_REMOVER_SHA256"), expected_android_helper=self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256"),
             expected_resident_image=self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"),
             expected_desktop_image=self.environment.get("MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256") if self.environment["MRK_MACOS_PACKAGE_ROLE"] == "ordinary-image" else None,
             expected_manifest=selected["runtimeManifestSha256"], app=app_path, runtime=self.work / "runtime",
@@ -2277,6 +2308,67 @@ class Operation:
             self.directory(self.target_entry, "tmp", "final-image-tmp")
         self.notary_clock(work=work)
 
+    def final_removal_image_input(self):
+        """Only Remove inputs; never fabricate the separate Install readback witnesses."""
+        selection = self.stager.BuildSelection(self.target,
+            self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
+        def retained(parent, name, limit, modes=(0o444, 0o600, 0o644, 0o400)):
+            entry = self.original(parent, name, "final-removal-input-" + name, limit, modes)
+            body = self.read(entry)
+            self.final_image_inputs.append((entry, digest(body)))
+            self.notary_clock()
+            return entry, body
+        need(retained(self.work_entry, "package-remove.status", 4)[1] == b"0\n", "final-removal-original-status")
+        root = self.directory(self.work_entry, self.final_package_name, "final-removal-package")
+        need(os.listdir(root["fd"]) == [self.package_filename], "final-removal-package-roster")
+        self.final_image_roots.append((root, {self.package_filename}))
+        entry, package = retained(root, self.package_filename, self.stager.MAX_BYTES, (0o444,))
+        self.package_finalization_input(entry, package)
+        self.final_image_inputs.extend(self.package_outputs)
+        root = self.directory(self.work_entry, "remove-producer-root", "final-removal-producer")
+        names = {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}
+        need(set(os.listdir(root["fd"])) == names, "final-removal-producer-roster")
+        self.final_image_roots.append((root, names))
+        need(retained(root, "Remove.pkg", self.stager.MAX_BYTES, (0o444,))[1] == package, "final-removal-package-copy")
+        _, descriptor = retained(root, "remove-producer.json", self.stager.REMOVE_DESCRIPTOR_BYTES, (0o444,))
+        _, signed = retained(root, "remove-producer.sig", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
+        input_root = self.directory(self.work_entry, "remove-emitter-input", "final-removal-emitter-input")
+        input_values = {}
+        names = {"remove-descriptor-input.json", "producer.json", "producer.sig", "install-inventory.json", self.stager.REMOVER_NAME}
+        need(set(os.listdir(input_root["fd"])) == names, "final-removal-input-roster")
+        self.final_image_roots.append((input_root, names))
+        for name in sorted(names):
+            maximum = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (1024 * 1024 if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
+            input_values[name] = retained(input_root, name, maximum, (0o555,) if name == self.stager.REMOVER_NAME else (0o444,))[1]
+        source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
+        expected = self.stager.packaging_removal_descriptor_data(input_values["producer.json"], input_values["install-inventory.json"],
+            input_values[self.stager.REMOVER_NAME], package, source, selection, source_commit=self.image_source,
+            manifest=self.environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"))
+        need(input_values["remove-descriptor-input.json"] == expected == descriptor
+             and digest(input_values["install-inventory.json"]) == self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+             and digest(input_values[self.stager.REMOVER_NAME]) == self.environment.get("MRK_MACOS_REMOVER_SHA256"), "final-removal-source-originals")
+        _, owner_body = retained(self.work_entry, "android-helper-package-remove.json", 16384, (0o600,))
+        binding = {"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"], "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}
+        distribution = self.stager.removal_package_receipt_data(owner_body, selection=selection, binding=binding,
+            package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
+            final_package_sha=self.receipt["finalPackageReceiptSha256"], release_body=self.read(self.release_entry),
+            profiles=(self.producer_profile, self.service_profile))
+        image_root = self.directory(self.work_entry, self.image_directory, "final-removal-distribution")
+        need(os.listdir(image_root["fd"]) == [self.image_filename], "final-removal-image-roster")
+        self.final_image_roots.append((image_root, {self.image_filename}))
+        original = self.original(image_root, self.image_filename, "final-removal-original", self.stager.MAX_BYTES, (0o444,))
+        sha = self.notary_stream(original)
+        self.final_image_inputs.append((original, sha))
+        need(distribution["userImage"] == {"file": self.image_filename, "bytes": original["identity"][6], "sha256": sha},
+             "final-removal-original-image")
+        self.final_image_original = original
+        binding = {"target": self.target, "release": selection.release, "packageVersion": selection.package_version,
+            "packageRemoveReceiptSha256": digest(owner_body), "finalPackageReceiptSha256": self.receipt["finalPackageReceiptSha256"],
+            "packageBytes": len(package), "packageSha256": digest(package), "descriptorBytes": len(descriptor), "descriptorSha256": digest(descriptor),
+            "signatureBytes": len(signed), "signatureSha256": digest(signed), "producerProfileSha256": source.producer_sha256,
+            "serviceProfileSha256": source.service_sha256, "originalImageBytes": original["identity"][6], "originalImageSha256": sha}
+        return {"Remove.pkg": package, "remove-producer.json": descriptor, "remove-producer.sig": signed}, binding
+
     def final_image_input(self):
         """Keep the preceding original statuses, receipts and final P distinct."""
         selection = self.stager.BuildSelection(self.target,
@@ -2410,8 +2502,8 @@ class Operation:
         root = self.directory(self.target_entry, "final-image", "final-image-copy-root")
         self.final_image_output_root = root
         need(stat.S_IMODE(root["identity"][2]) == 0o700 and not os.listdir(root["fd"]), "final-image-copy-directory")
-        fd = os.open("MobileReleaseKit.dmg", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root["fd"])
-        entry = self.register(fd, "final-image-copy", "file", root["fd"], "MobileReleaseKit.dmg")
+        fd = os.open(self.image_filename, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=root["fd"])
+        entry = self.register(fd, "final-image-copy", "file", root["fd"], self.image_filename)
         entry["parent_entry"] = root
         self.final_image_output = entry
         original = self.final_image_original
@@ -2438,7 +2530,7 @@ class Operation:
         entry["identity"] = signature(info)
         self.final_image_sha = self.notary_stream(entry)
         need(self.final_image_sha == original_sha, "final-image-copy-digest")
-        self.final_image_roots.append((root, {"MobileReleaseKit.dmg"}))
+        self.final_image_roots.append((root, {self.image_filename}))
 
     def final_image_mutated(self, before):
         # Apple DiskImageRep rewrites a signature SuperBlob AND trailing UDIF
@@ -2505,8 +2597,8 @@ class Operation:
         entry["identity"] = after
         need(self.notary_stream(entry) == sha, "final-image-mode-bytes")
         self.recheck_directory(self.work_entry)
-        os.mkdir("distribution-final", 0o700, dir_fd=self.work_entry["fd"])
-        parent = self.directory(self.work_entry, "distribution-final", "final-image-publication")
+        os.mkdir(self.final_image_directory, 0o700, dir_fd=self.work_entry["fd"])
+        parent = self.directory(self.work_entry, self.final_image_directory, "final-image-publication")
         need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]), "final-image-exclusive-publication")
         self.recheck_directory(old_parent)
         need(os.listdir(old_parent["fd"]) == [entry["name"]], "final-image-publication-input")
@@ -2538,7 +2630,7 @@ class Operation:
         for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
             entry = self.source_original("desktop/tools/" + filename, "source-final-image-driver", 512 * 1024)
             self.package_sources.append((entry, self.read(entry)))
-        expected, binding = self.final_image_input()
+        expected, binding = self.final_removal_image_input() if self.removal else self.final_image_input()
         self.final_image_io("final-image-owned-copy", self.final_image_copy)
         self.notary_post()
         for name in ("notarytool", "stapler"):
@@ -2547,20 +2639,20 @@ class Operation:
             need(result.stdout in ((str(tool["fixed"]) + "\n").encode(), (str(tool["path"]) + "\n").encode())
                  and not result.stderr, "final-image-tool-original")
             self.notary_tool_post(tool)
-        path = self.work / self.target_name / "final-image/MobileReleaseKit.dmg"
-        requirement = signing_requirement(self.signing, "dev.mobile-release-kit.desktop.distribution")
+        path = self.work / self.target_name / "final-image" / self.image_filename
+        requirement = signing_requirement(self.signing, self.image_identifier)
         self.final_image_call("final-image-signature-before", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
         submitted_sha = self.final_image_sha
         tool = str(self.notary_tools["notarytool"]["path"])
         with self.notary_key_scope() as key_arguments:
             result = self.final_image_call("final-image-submit", [tool, "submit", str(path), "--wait", "--output-format", "json", *key_arguments],
                                            maximum=1200, developer=True)
-            submission = notary_submit_data(result.stdout, archive_name="MobileReleaseKit.dmg")
+            submission = notary_submit_data(result.stdout, archive_name=self.image_filename)
             self.receipt["notarySubmission"] = dict(submission)
             invalid = Refused("final-image-notary-invalid") if submission["status"] == "Invalid" else None
             try:
                 result = self.final_image_call("final-image-log", [tool, "log", submission["id"], *key_arguments], limit=1024 * 1024, developer=True)
-                log = notary_log_data(result.stdout, submission, submitted_sha, archive_name="MobileReleaseKit.dmg")
+                log = notary_log_data(result.stdout, submission, submitted_sha, archive_name=self.image_filename)
             except BaseException as error:
                 if invalid is not None:
                     self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
@@ -2575,7 +2667,7 @@ class Operation:
         self.final_image_call("final-image-validate", [tool, "validate", str(path)], developer=True)
         self.final_image_call("final-image-signature-after", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
         self.final_image_call("final-image-verify", ["/usr/bin/hdiutil", "verify", str(path)], maximum=120)
-        self.package_name = "Install.pkg"  # Actual mounted_post fixed roster, never the observation request alias.
+        self.package_name = "Remove.pkg" if self.removal else "Install.pkg"  # Actual mounted_post fixed roster, never the observation request alias.
         self.mount_placeholder = self.final_image_io("final-image-mount-placeholder", self.package_directory, "package-mount")
         attached = self.final_image_call("final-image-attach", ["/usr/bin/hdiutil", "attach", str(path), "-readonly", "-nobrowse",
             "-noautoopen", "-mountpoint", str(self.work / "package-mount"), "-plist"], maximum=60)
@@ -2593,7 +2685,7 @@ class Operation:
         self.final_image_publish()
         self.notary_post()
         self.sha256 = self.final_image_sha
-        self.receipt["finalImage"] = {"schemaVersion": 1, "kind": "mrk-final-user-image", **binding,
+        self.receipt["finalImage"] = {"schemaVersion": 1, "kind": "mrk-final-removal-image" if self.removal else "mrk-final-user-image", **binding,
             "submittedSha256": submitted_sha, "imageBytes": self.final_image_output["identity"][6], "imageSha256": self.sha256,
             "imageMode": 0o444, "notaryProfileSha256": digest(profile_body), "submissionId": submission["id"], "status": submission["status"], **log,
             "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
@@ -2670,8 +2762,9 @@ class Operation:
         self.notary_post()
         size, sha = entry["identity"][6], self.notary_stream(entry)
         result = self.final_package_io("final-package-original-audit", self.stager.audit_command,
-            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / "scripts", package=path,
-                               original_package=self.work / "MobileReleaseKit-original.pkg"))
+            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
+                               original_package=self.work / self.packager_filename,
+                               **({"remove": True, "expected_remover": self.environment.get("MRK_MACOS_REMOVER_SHA256")} if self.removal else {})))
         need(type(result) is dict and result.get("packageSize") == size and type(result["packageSize"]) is int
              and result.get("packageSha256") == sha and self.notary_stream(entry) == sha,
              "final-package-audit-original")
@@ -2684,12 +2777,12 @@ class Operation:
         self.stage = self.stager_io_pending = "final-package-signed-output"
         parent = self.final_package_output_root
         self.recheck_directory(parent)
-        need(os.listdir(parent["fd"]) == ["MobileReleaseKit.pkg"], "final-package-signed-roster")
-        entry = self.original(parent, "MobileReleaseKit.pkg", "final-package-signed-original", self.stager.MAX_BYTES,
+        need(os.listdir(parent["fd"]) == [self.package_filename], "final-package-signed-roster")
+        entry = self.original(parent, self.package_filename, "final-package-signed-original", self.stager.MAX_BYTES,
                               (0o400, 0o444, 0o600, 0o644))
         self.final_package_output = entry
         self.final_package_sha = self.notary_stream(entry)
-        self.final_package_roots.append((parent, {"MobileReleaseKit.pkg"}))
+        self.final_package_roots.append((parent, {self.package_filename}))
         self.notary_clock()
         self.stager_io_pending = None
         self.signing_mutation_pending = False
@@ -2780,8 +2873,8 @@ class Operation:
         entry["identity"] = after
         need(self.notary_stream(entry) == sha, "final-package-mode-bytes")
         self.recheck_directory(self.work_entry)
-        os.mkdir("package-final", 0o700, dir_fd=self.work_entry["fd"])
-        parent = self.directory(self.work_entry, "package-final", "final-package-publication")
+        os.mkdir(self.final_package_name, 0o700, dir_fd=self.work_entry["fd"])
+        parent = self.directory(self.work_entry, self.final_package_name, "final-package-publication")
         need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]), "final-package-fresh-publication")
         self.recheck_directory(old_parent)
         need(os.listdir(old_parent["fd"]) == [entry["name"]], "final-package-move-input")
@@ -2813,18 +2906,18 @@ class Operation:
         for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
             source = self.source_original("desktop/tools/" + filename, "source-final-package-driver", 512 * 1024)
             self.package_sources.append((source, self.read(source)))
-        scripts = self.directory(self.work_entry, "scripts", "final-package-scripts")
-        self.notary_roots.append({"entry": scripts, "path": self.work / "scripts",
-                                  "snapshot": self.notary_snapshot(scripts, self.work / "scripts")})
-        parent = self.directory(self.work_entry, "package-unsigned", "final-package-unsigned")
-        need(os.listdir(parent["fd"]) == ["MobileReleaseKit.pkg"], "final-package-unsigned-roster")
-        self.final_package_roots.append((parent, {"MobileReleaseKit.pkg"}))
-        unsigned = self.original(parent, "MobileReleaseKit.pkg", "final-package-unsigned-original", self.stager.MAX_BYTES, (0o444, 0o600, 0o644))
-        packager = self.original(self.work_entry, "MobileReleaseKit-original.pkg", "final-package-packager-original", self.stager.MAX_BYTES,
+        scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
+        self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
+                                  "snapshot": self.notary_snapshot(scripts, self.work / self.scripts_name)})
+        parent = self.directory(self.work_entry, self.unsigned_package_name, "final-package-unsigned")
+        need(os.listdir(parent["fd"]) == [self.package_filename], "final-package-unsigned-roster")
+        self.final_package_roots.append((parent, {self.package_filename}))
+        unsigned = self.original(parent, self.package_filename, "final-package-unsigned-original", self.stager.MAX_BYTES, (0o444, 0o600, 0o644))
+        packager = self.original(self.work_entry, self.packager_filename, "final-package-packager-original", self.stager.MAX_BYTES,
                                 (0o444, 0o600, 0o644))
         for entry in (unsigned, packager):
             self.final_package_inputs.append((entry, self.notary_stream(entry)))
-        unsigned_audit = self.final_package_audit(unsigned, self.work / "package-unsigned/MobileReleaseKit.pkg")
+        unsigned_audit = self.final_package_audit(unsigned, self.work / self.unsigned_package_name / self.package_filename)
         def output_directory():
             self.recheck_directory(self.target_entry)
             os.mkdir("signed-package", 0o700, dir_fd=self.target_entry["fd"])
@@ -2838,12 +2931,12 @@ class Operation:
             need(result.stdout in ((str(tool["fixed"]) + "\n").encode(), (str(tool["path"]) + "\n").encode())
                  and not result.stderr, "final-package-tool-discovery-original")
             self.notary_tool_post(tool)
-        path = self.work / self.target_name / "signed-package/MobileReleaseKit.pkg"
+        path = self.work / self.target_name / "signed-package" / self.package_filename
         with self.credential_scope("installer"):
             need(self.final_package_output is None and not os.listdir(self.final_package_output_root["fd"]), "final-package-sign-output-absent")
             self.final_package_call("final-package-sign", ["/usr/bin/productsign", "--sign", self.installer_selection["identityCommonName"],
                 "--keychain", str(self.credential_active["path"] / "identity.keychain-db"), "--timestamp",
-                str(self.work / "package-unsigned/MobileReleaseKit.pkg"), str(path)], maximum=60)
+                str(self.work / self.unsigned_package_name / self.package_filename), str(path)], maximum=60)
         need(self.credential_active is None and self.credential_known() and len(self.credential_calls) == 20,
              "final-package-installer-context-not-retired")
         signed_audit = self.final_package_audit(self.final_package_output, path)
@@ -2858,13 +2951,13 @@ class Operation:
         with self.notary_key_scope() as key_arguments:
             result = self.final_package_call("final-package-submit", [tool, "submit", str(path), "--wait", "--output-format", "json", *key_arguments],
                                              maximum=1200, developer=True)
-            submission = notary_submit_data(result.stdout, archive_name="MobileReleaseKit.pkg")
+            submission = notary_submit_data(result.stdout, archive_name=self.package_filename)
             self.receipt["notarySubmission"] = dict(submission)
             invalid = Refused("final-package-notary-invalid") if submission["status"] == "Invalid" else None
             try:
                 result = self.final_package_call("final-package-log", [tool, "log", submission["id"], *key_arguments],
                                                  limit=1024 * 1024, developer=True)
-                log = notary_log_data(result.stdout, submission, signed_sha, archive_name="MobileReleaseKit.pkg")
+                log = notary_log_data(result.stdout, submission, signed_sha, archive_name=self.package_filename)
             except BaseException as error:
                 if invalid is not None:
                     self.receipt["notaryLogFailure"] = {"type": type(error).__name__}
@@ -2887,7 +2980,7 @@ class Operation:
              "final-package-stapled-audit-changed")
         self.final_package_publish()
         self.sha256 = self.final_package_sha
-        self.receipt["finalPackage"] = {"schemaVersion": 1, "kind": "mrk-final-installer-package",
+        self.receipt["finalPackage"] = {"schemaVersion": 1, "kind": "mrk-final-remover-package" if self.removal else "mrk-final-installer-package",
             "unsignedBytes": unsigned["identity"][6], "unsignedSha256": unsigned_audit["packageSha256"],
             "signedBytes": signed_size, "signedSha256": signed_sha, "packageBytes": self.final_package_output["identity"][6],
             "packageSha256": self.sha256, "packageMode": 0o444, "originalPackageSha256": unsigned_audit["originalPackageSha256"],
@@ -2909,14 +3002,14 @@ class Operation:
         profile_body = self.read(profile)
         notary_service(profile_body, self.signing)
         self.package_sources.append((profile, profile_body))
-        status = self.original(self.work_entry, "package-finalization.status", "final-package-status", 8, (0o400, 0o444, 0o600, 0o644))
+        status = self.original(self.work_entry, self.package_status_name, "final-package-status", 8, (0o400, 0o444, 0o600, 0o644))
         status_body = self.read(status)
         need(status_body == b"0\n", "package-finalization-original-status")
-        receipt = self.original(self.work_entry, "android-helper-finalize-package.json", "final-package-receipt", 16384, (0o600,))
+        receipt = self.original(self.work_entry, self.package_receipt_name, "final-package-receipt", 16384, (0o600,))
         receipt_body = self.read(receipt)
         value = final_package_receipt(receipt_body, self.environment, self.target, self.installer_selection,
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
-                                      self.image_release, digest(self.read(self.release_entry)))
+                                      self.image_release, digest(self.read(self.release_entry)), remove=self.removal)
         need(self.read(original) == body, "package-finalization-package-post")
         self.package_outputs.extend(((status, digest(status_body)), (receipt, digest(receipt_body))))
         self.receipt["finalPackageReceiptSha256"] = digest(receipt_body)
@@ -3501,13 +3594,16 @@ class Operation:
         # Only the three existing direct stager I/O boundaries. A thrown parse
         # refusal can mask that stager's local finally/close uncertainty; only a
         # normal return proves completion. Never infer it from an error token.
-        need(operation in ("final-audit", "result-absence", "v2-readback"), "closed-stager-io")
+        need(operation in ("final-audit", "result-absence", "v2-readback")
+             or operation == "remove-input" and self.phase == "package-remove", "closed-stager-io")
         need(self.package_settled(), "package-io-finality-unknown")
         self.package_clock()
         self.stager_io_pending = operation
         try:
             if operation == "final-audit":
                 result = self.stager.audit_command(args)
+            elif operation == "remove-input":
+                result = self.stager.remove_input_command(args)
             elif operation == "result-absence":
                 result = self.stager.installer_result_absent_command(args)
             else:
@@ -3578,9 +3674,9 @@ class Operation:
         self.package_clock()
 
     def package_image(self, root, label):
-        need(label in ("distribution", "observation"), "package-image-fixed-label")
-        path = self.work / "distribution" / ("MobileReleaseKit.dmg" if label == "distribution" else "MobileReleaseKit-Observation.dmg")
-        identifier = "dev.mobile-release-kit.desktop." + label
+        need(label in ("distribution", "observation") and (not self.removal or label == "distribution"), "package-image-fixed-label")
+        path = self.work / self.image_directory / (self.image_filename if label == "distribution" else "MobileReleaseKit-Observation.dmg")
+        identifier = self.image_identifier if label == "distribution" else "dev.mobile-release-kit.desktop.observation"
         self.package_call(label + "-create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(self.work / root["name"]),
             "-fs", "HFS+", "-format", "UDZO", "-volname", "MobileReleaseKit", str(path)], timeout=180)
         self.package_post()
@@ -3625,9 +3721,11 @@ class Operation:
     def mount_inputs(self, expected, package_name):
         self.recheck_mount()
         actual = {}
-        for name in (package_name, "producer.json", "producer.sig"):
+        descriptor_name = "remove-producer.json" if self.removal else "producer.json"
+        signature_name = "remove-producer.sig" if self.removal else "producer.sig"
+        for name in (package_name, descriptor_name, signature_name):
             limit = self.stager.MAX_BYTES if name == package_name else (
-                self.stager.PRODUCER_DESCRIPTOR_BYTES if name == "producer.json" else self.stager.PRODUCER_SIGNATURE_BYTES)
+                self.stager.PRODUCER_DESCRIPTOR_BYTES if name == descriptor_name else self.stager.PRODUCER_SIGNATURE_BYTES)
             fd = os.open(name, READ_FLAGS, dir_fd=self.mount_entry["fd"])
             entry = self.register(fd, "mounted-" + name, "mounted-file", self.mount_entry["fd"], name)
             info = os.fstat(fd)
@@ -3640,7 +3738,11 @@ class Operation:
                  == signature(os.stat(name, dir_fd=self.mount_entry["fd"], follow_symlinks=False)), "package-mounted-file-original")
             entry["sha256"] = digest(body)
             actual[name] = (body, 0o444)
-        self.stager.distribution_layout_data(os.listdir(self.mount_entry["fd"]), package_name, expected, actual)
+        if self.removal:
+            need(package_name == "Remove.pkg", "final-removal-mount-package")
+            self.stager.removal_distribution_layout_data(os.listdir(self.mount_entry["fd"]), expected, actual)
+        else:
+            self.stager.distribution_layout_data(os.listdir(self.mount_entry["fd"]), package_name, expected, actual)
         self.recheck_mount()
 
     def mounted_post(self):
@@ -3653,7 +3755,8 @@ class Operation:
                 need(len(body) == entry["identity"][6] and digest(body) == entry["sha256"]
                      and signature(os.fstat(entry["fd"])) == entry["identity"]
                      == signature(os.stat(entry["name"], dir_fd=self.mount_entry["fd"], follow_symlinks=False)), "package-mounted-post-bytes")
-        need(set(os.listdir(self.mount_entry["fd"])) == {self.package_name, "producer.json", "producer.sig"}, "package-mounted-post-roster")
+        need(set(os.listdir(self.mount_entry["fd"])) == {self.package_name, "remove-producer.json" if self.removal else "producer.json",
+             "remove-producer.sig" if self.removal else "producer.sig"}, "package-mounted-post-roster")
         self.recheck_mount()
 
     def detach_package_mount(self):
@@ -3821,6 +3924,119 @@ class Operation:
         self.sha256 = user_image["sha256"]
         self.package_clock()
 
+    def package_remove(self):
+        need(self.phase == "package-remove" and self.removal and self.signing is not None,
+             "remove-package-configured-purpose")
+        self.stage = "remove-package-final-inputs"
+        self.package_started = self.package_observed = time.monotonic_ns()
+        self.package_endpoint = self.package_started + 990_000_000_000
+        self.package_clock()
+        manifest_hash = self.environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+        inventory_hash = self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+        expected_remover = self.environment.get("MRK_MACOS_REMOVER_SHA256")
+        need(all(self.stager.maintenance_hex(value, 64) for value in (manifest_hash, inventory_hash, expected_remover)),
+             "remove-package-source-bindings")
+        selection = self.stager.BuildSelection(self.target,
+            self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
+        source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
+        need(self.signing == (source.team, source.leaf_sha1), "remove-package-source-signing")
+        final_root = self.directory(self.work_entry, self.final_package_name, "remove-final-package")
+        need(os.listdir(final_root["fd"]) == [self.package_filename], "remove-final-package-roster")
+        self.package_roots.append((final_root, {self.package_filename}))
+        original = self.original(final_root, self.package_filename, "remove-final-package-original", self.stager.MAX_BYTES, (0o444,))
+        package = self.read(original)
+        self.package_finalization_input(original, package)
+        self.package_outputs.append((original, digest(package)))
+        installed_root = self.directory(self.work_entry, "producer-root", "remove-installed-producer")
+        need(set(os.listdir(installed_root["fd"])) == {"Install.pkg", "producer.json", "producer.sig"},
+             "remove-installed-producer-roster")
+        self.package_roots.append((installed_root, {"Install.pkg", "producer.json", "producer.sig"}))
+        installed_entry = self.original(installed_root, "producer.json", "remove-installed-descriptor", self.stager.PRODUCER_DESCRIPTOR_BYTES, (0o444,))
+        signature_entry = self.original(installed_root, "producer.sig", "remove-installed-signature", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
+        installed, signature = self.read(installed_entry), self.read(signature_entry)
+        self.package_outputs.extend(((installed_entry, digest(installed)), (signature_entry, digest(signature))))
+        input_root = self.directory(self.work_entry, "input", "remove-installed-input")
+        inventory_entry = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "remove-installed-inventory", 1024 * 1024, (0o444,))
+        inventory = self.read(inventory_entry)
+        remover_path = self.work / "input/app" / self.stager.REMOVER
+        parts = ("app/" + self.stager.REMOVER).split("/")
+        remover_root = self.descend(input_root, tuple(parts[:-1]))
+        remover_entry = self.original(remover_root, parts[-1], "remove-signed-installed-program", self.stager.REMOVER_BYTES, (0o555,))
+        program = self.read(remover_entry)
+        need(digest(program) == expected_remover and digest(inventory) == inventory_hash, "remove-original-source-digests")
+        self.package_outputs.extend(((inventory_entry, digest(inventory)), (remover_entry, digest(program))))
+        descriptor = self.stager.packaging_removal_descriptor_data(installed, inventory, program, package, source, selection,
+            source_commit=self.image_source, manifest=manifest_hash)
+        self.package_post()
+        self.stage = "remove-package-five-input-preparation"
+        prepared = self.package_stager_io("remove-input", argparse.Namespace(target=self.target,
+            installed_producer=self.work / "producer-root/producer.json", installed_signature=self.work / "producer-root/producer.sig",
+            inventory=self.work / "input" / self.stager.INSTALLATION_INVENTORY_NAME, remover=remover_path,
+            package=self.work / self.final_package_name / self.package_filename, output=self.work / "remove-emitter-input",
+            expected_source=self.image_source, expected_manifest=manifest_hash))
+        need(type(prepared) is dict and prepared == {"schemaVersion": 1, "kind": "remove-emitter-input-data", "target": self.target,
+             "descriptorSha256": digest(descriptor), "installedProducerSha256": digest(installed), "inventorySha256": digest(inventory),
+             "removerSha256": digest(program), "packageSha256": digest(package), "inputFiles": 5,
+             "qualification": "remove-input-data-not-signature-or-removal-authority"}, "remove-input-original-result")
+        input_copy = self.directory(self.work_entry, "remove-emitter-input", "remove-emitter-input")
+        input_values = {"remove-descriptor-input.json": descriptor, "producer.json": installed, "producer.sig": signature,
+                        "install-inventory.json": inventory, self.stager.REMOVER_NAME: program}
+        need(set(os.listdir(input_copy["fd"])) == set(input_values), "remove-emitter-five-inputs")
+        self.package_roots.append((input_copy, set(input_values)))
+        for name, value in input_values.items():
+            limit = self.stager.REMOVER_BYTES if name == self.stager.REMOVER_NAME else (1024 * 1024 if name == "install-inventory.json" else self.stager.PRODUCER_DESCRIPTOR_BYTES)
+            entry = self.original(input_copy, name, "remove-emitter-input-" + name, limit,
+                                  (0o555,) if name == self.stager.REMOVER_NAME else (0o444,))
+            need(self.read(entry) == value, "remove-input-exact-original-copy")
+            self.package_outputs.append((entry, digest(value)))
+        root = self.package_directory("remove-producer-root")
+        self.package_file(root, "Remove.pkg", package)
+        self.package_post()
+        self.stage = "remove-explicit-producer-compiler"
+        environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
+        environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
+                           MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash)
+        compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / "desktop/src-tauri/Cargo.toml"),
+            "--locked", "--offline", "--release", "--jobs", "1", "--target", self.target, "--no-default-features",
+            "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
+            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target, remove=True)
+        binary_dir = self.descend(self.target_entry, (self.target, "release", "examples"))
+        executable = self.original(binary_dir, binary.name, "remove-producer-compiled-example", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
+        executable_body = self.read(executable)
+        self.stager.macho(executable_body, system_only=True, target=self.target)
+        producer = self.producer_signing_copy(executable, executable_body)
+        with self.credential_scope("producer", producer=producer):
+            self.stage = "remove-producer-emission"
+            need(package_timeout_data(self.package_clock(), self.package_endpoint, 123) == 123, "remove-producer-original-clock-reserve")
+            emitted = self.package_call("producer-emitter", [str(self.work / self.producer_filename), "--package-root", str(self.work / "remove-producer-root"),
+                "--input-root", str(self.work / "remove-emitter-input")], timeout=123, limit=4096)
+            descriptor_entry = self.original(root, "remove-producer.json", "remove-original-descriptor", self.stager.REMOVE_DESCRIPTOR_BYTES, (0o444,))
+            signed_entry = self.original(root, "remove-producer.sig", "remove-original-signature", self.stager.PRODUCER_SIGNATURE_BYTES, (0o444,))
+            actual_descriptor, signed = self.read(descriptor_entry), self.read(signed_entry)
+            summary = self.stager.emitted_removal_data(emitted.stdout, emitted.stderr, emitted.returncode,
+                package, actual_descriptor, signed, descriptor)
+            self.package_outputs.extend(((descriptor_entry, digest(actual_descriptor)), (signed_entry, digest(signed))))
+        expected = {"Remove.pkg": package, "remove-producer.json": descriptor, "remove-producer.sig": signed}
+        self.stager.removal_distribution_layout_data(os.listdir(root["fd"]), expected,
+            {name: (value, 0o444) for name, value in expected.items()})
+        self.package_roots.append((root, set(expected)))
+        self.distribution_entry = self.package_directory(self.image_directory)
+        self.package_post()
+        image, _path = self.package_image(root, "distribution")
+        self.package_post()
+        need(not self.installer_entered and not self.mount_entered, "remove-no-installed-operation")
+        self.receipt["removalDistribution"] = {"schemaVersion": 1, "kind": "mrk-remove-package-emitted-image-v1", "target": self.target,
+            "packageVersion": selection.package_version, "release": selection.release, "packageSha256": digest(package), "packageBytes": len(package),
+            "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed), "producerSummary": summary, "userImage": image,
+            "installedProducerSha256": digest(installed), "inventorySha256": digest(inventory), "removerExecutableSha256": digest(program),
+            "sourceProducerProfileSha256": source.producer_sha256, "sourceServiceProfileSha256": source.service_sha256,
+            "finalPackageReceiptSha256": self.receipt["finalPackageReceiptSha256"], "groupEndpointMet": True, "originalOuterReturnRequired": True,
+            "installerEntered": False, "applicationLaunched": False, "removalExecuted": False, "productReady": False}
+        self.sha256 = image["sha256"]
+        self.removal_package_complete = True
+        self.package_clock()
+
     def package_diagnostic(self, args, *, capture):
         need(self.package_settled(), "package-io-finality-unknown")
         self.package_clock()
@@ -3867,7 +4083,7 @@ class Operation:
                      and directory_identity(os.fstat(target_fd)) == self.target_entry["identity"]
                      and directory_identity(os.stat(self.target_name, dir_fd=work_fd, follow_symlinks=False)) == self.target_entry["identity"],
                      "cleanup-original-directory-changed")
-                if self.phase == "package-install" and self.package_endpoint is not None:
+                if self.phase in ("package-install", "package-remove") and self.package_endpoint is not None:
                     self.package_clock()
                 if self.phase in PYTHON_PHASES:
                     need(self.python_retiring, "python-retirement-not-admitted")
@@ -3879,7 +4095,7 @@ class Operation:
                     self.notary_clock(work=False)
                 if self.phase in PYTHON_PHASES:
                     self.python_clock(work=False)
-                if self.phase == "package-install" and self.package_endpoint is not None:
+                if self.phase in ("package-install", "package-remove") and self.package_endpoint is not None:
                     self.package_clock()
                 try:
                     os.stat(self.target_name, dir_fd=work_fd, follow_symlinks=False)
@@ -3930,7 +4146,7 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
@@ -3943,6 +4159,8 @@ class Operation:
                     self.prepare()
                 elif self.phase == "package-install":
                     self.package_install()
+                elif self.phase == "package-remove":
+                    self.package_remove()
                 elif self.phase in SIGNING_PHASES:
                     self.fixed_sign()
                 elif self.phase in NOTARY_PHASES:
@@ -3978,6 +4196,7 @@ class Operation:
                  NOTARY_ROLES if self.phase in NOTARY_PHASES else
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
+                 REMOVE_PACKAGE_ROLES if self.phase == "package-remove" else
                  PREPARE_ROLES if self.phase == "prepare" else
                  (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES else (self.phase, self.phase + "-resident-image"))
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors and self.credential_known()
@@ -4005,11 +4224,19 @@ class Operation:
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
                                   and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase not in PYTHON_PHASES
-                                            and (self.phase == "package-install" or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                            and (self.phase in ("package-install", "package-remove") or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
+        if self.phase == "package-remove":
+            self.receipt["passed"] = (self.receipt["passed"] and self.removal_package_complete
+                and not self.installer_entered and not self.mount_entered and not self.installation_readback
+                and tuple(row["role"] for row in self.credential_calls) == ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
+                    + (CREDENTIAL_ROLES[:17] + ("search-final", "default-after")) * 2
+                and tuple(row["purpose"] for row in self.credential_contexts) == ("producer", "distribution-image"))
+            if self.receipt["passed"]:
+                self.package_clock()
         # This receipt remains provisional until its own write/readback/close
         # and the original Python caller's zero exit. No output digest on error.
         if self.phase == "package-install" and self.receipt["passed"]:
@@ -4028,7 +4255,7 @@ class Operation:
             self.notary_clock(work=False)
         if self.phase in PYTHON_PHASES and self.receipt["passed"]:
             self.python_clock(work=False)
-        if self.phase == "package-install" and self.receipt["passed"]:
+        if self.phase in ("package-install", "package-remove") and self.receipt["passed"]:
             self.package_clock()  # Receipt write/readback/closes are inside the SAME original group.
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
@@ -4071,7 +4298,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
-    if phase in FINAL_IMAGE_PHASES:
+    if phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
     python_phase = phase in PYTHON_PHASES
     if python_phase:
@@ -4111,7 +4338,7 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
         if phase in FINAL_PACKAGE_PHASES:
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
@@ -4124,6 +4351,13 @@ def main():
             print("resident-image-sha256=" + operation.resident_image_sha256, flush=True)
             print("desktop-facade-sha256=" + operation.desktop_facade_sha256, flush=True)
             print("image-release-id=" + operation.image_release, flush=True)
+        if phase == "sign-remover":
+            # Only the same completed fixed-sign owner may publish this digest;
+            # no caller reopens/rehashes a replacement to infer success.
+            need(type(result) is str and re.fullmatch(r"[0-9a-f]{64}", result), "fixed-remover-result")
+            body = "sha256=" + result + "\n"
+            need(sys.stdout.write(body) == len(body), "fixed-remover-result-short-write")
+            sys.stdout.flush()
         if phase in NOTARY_PHASES:
             operation.notary_clock(work=False)
             body = operation.notary_result.decode("ascii")

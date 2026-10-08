@@ -165,8 +165,52 @@ IOS_UNSIGNED_WORKFLOW_INVERSE = ((22,
  (3865, 3872, '7d7de67e8395eda8fa407f0be71c16173855972af274c03bca09c465e0f9d562', ''))
 
 
+# Later fixed-remover packaging wiring only; recover the exact pre-wiring
+# workflow before applying the unchanged iOS inverse and its old whole pin.
+REMOVE_PACKAGE_WORKFLOW_INVERSE = ((73519, 1623, '77826b06c51c25de52bc2f44acf44886e64d2cc894dd821deb15b882dffec294', ''),
+ (80606, 690, '91d5cae889e0e34d2420e279840145199b3bec4b71fd32e84f4c12e53699e0af', ''),
+ (81786, 312, '8f535e5014c5e559a5ba869d8ba04bd6bc60be306060e8ee7935e2aa98946dcc', ''),
+ (85351, 91, 'af795ceaa3d69b9d62dae7408df6ea452734b13405243f36576d42a596b8f966', ''),
+ (303397, 159, '386c2bc8bde635a7272a9f46bc584558ef40248cfc665ae6f3321e6857199c7d', ''),
+ (314552,
+  185,
+  'de92f8700678e9723fc66ee7c45cf110feaef2a1bbb1c19ef67c71ba87494f43',
+  '          for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace '
+  '/ "desktop/node_modules", workspace / "desktop/dist",\n'))
+
+
+# Exact Remove-output successor only. No original Install/instrumented workflow
+# safety assertion is weakened by the independent, fixed preview-only route.
+REMOVE_OUTPUT_WORKFLOW_INVERSE = ((629, 328, '11cd9e875296bd66a7fe4932b8774e3152110f531eec148ab376851c3f918b67', '    # Timed-step union445min; SOURCE scopes select disjoint UI work.\n    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.\n    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.\n    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.\n'), (150120, 9028, '9d50426024c5a0b7935ae93ee5c06be69221dce04aff47f27c4b8a4b610cada1', ''), (159699, 296, '757619f49bf177bc5404bec36b927f406b9ca1ddc8bbc79609c4ad7981e8105d', ''), (160791, 225, 'adbb7994c243addb230dcff883b114ded25035ee8931a15b6bb6aca2238a89fd', ''), (315226, 521, 'b37eab9482c0d97fa90e1f37e948849a9b3f7d8cfc3bda939e630b8bb07a0726', ''))
+
+
+def without_remove_output_workflow(source):
+    marker = "      - name: Prepare the fixed two-file removal package without executing it\n"
+    if marker not in source:
+        if "finalize-remove-package --target" in source or "finalize-remove-image --target" in source or "package-remove --target" in source:
+            raise AssertionError("partial Remove output workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(REMOVE_OUTPUT_WORKFLOW_INVERSE):
+        actual = value[start:start + length]
+        if hashlib.sha256(actual).hexdigest() != expected:
+            raise AssertionError("Remove output workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "dd0ca6b4e80d05f276a129049b9600a9e9eccbc26a881b515accceefadcafcca":
+        raise AssertionError("Remove output workflow inverse changed prior source")
+    return value.decode()
+
+
 def without_ios_unsigned_workflow(source):
-    rows = source.splitlines(keepends=True)
+    original = without_remove_output_workflow(source).encode()
+    for start, length, expected, prior in reversed(REMOVE_PACKAGE_WORKFLOW_INVERSE):
+        observed = original[start:start + length]
+        if hashlib.sha256(observed).hexdigest() != expected:
+            raise AssertionError('unsigned iOS workflow remover region differs')
+        original = original[:start] + prior.encode() + original[start + length:]
+    if hashlib.sha256(original).hexdigest() != 'ec46e521444b1c350cee7d31dddcd3afe4fd8e8ec0775dd95be0d4423749b99d':
+        raise AssertionError('unsigned iOS workflow remover inverse changed prior SOURCE')
+    rows = original.decode().splitlines(keepends=True)
     for start, end, expected, original in reversed(IOS_UNSIGNED_WORKFLOW_INVERSE):
         observed = ''.join(rows[start:end])
         if hashlib.sha256(observed.encode()).hexdigest() != expected:
@@ -2041,10 +2085,12 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn('not a replacement Start', ios_steps[0])
         self.assertIn('never IPA/signing/distribution qualification', ios_steps[1])
 
-        # Use the earlier complete, pinned old-route census rather than assuming
-        # the new tail can be added to preview's350-minute job.
+        # Current all-route SOURCE census includes four Remove steps (90 total).
+        # Following iOS/previous-preview arithmetic uses the earlier pinned
+        # projection, not entitlement to all expanded-preview step maxima.
+        # The current hard job cap remains350; no expanded-route fit is claimed.
         full_caps = [int(n) for n in re.findall(r'^        timeout-minutes: ([0-9]+)$', ios_workflow, re.M)]
-        self.assertEqual((len(full_caps), sum(full_caps)), (47, 445))
+        self.assertEqual((len(full_caps), sum(full_caps)), (51, 535))
         ios_build_minutes = int(re.search(r'^        timeout-minutes: ([0-9]+)$', ios_blocks['normal_ui_build'], re.M)[1])
         ios_minutes = installed_minutes + ios_build_minutes + sum(
             int(re.search(r'^        timeout-minutes: ([0-9]+)$', block, re.M)[1]) for block in ios_steps)
@@ -2074,9 +2120,14 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         # hide a future semantic delta while keeping old SOURCE tests green.
         self.assertEqual(digest(without_ios_unsigned_workflow(ios_workflow).encode()),
                          'd7199d46c3292bca3f7f04a932a4cdde05513f91bbff5d2c859bee9451fcf8bb')
+        # Remove only the authenticated outer output layer before mutating the
+        # historical iOS/Wiring layer; each exact intended guard must reject it.
+        ios_projection = without_remove_output_workflow(ios_workflow)
         with self.assertRaisesRegex(AssertionError, 'unsigned iOS workflow'):
-            without_ios_unsigned_workflow(ios_workflow.replace('MRK_MACOS_IOS_UI_SCOPE: disabled',
+            without_ios_unsigned_workflow(ios_projection.replace('MRK_MACOS_IOS_UI_SCOPE: disabled',
                                                                'MRK_MACOS_IOS_UI_SCOPE: other', 1))
+        with self.assertRaisesRegex(AssertionError, 'unsigned iOS workflow remover'):
+            without_ios_unsigned_workflow(ios_projection.replace('sign-remover --target', 'sign-other --target', 1))
 
 
 if __name__ == '__main__':

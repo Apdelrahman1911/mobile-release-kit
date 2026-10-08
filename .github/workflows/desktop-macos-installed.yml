@@ -20,10 +20,10 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    # Timed-step union445min; SOURCE scopes select disjoint UI work.
-    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.
-    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.
-    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.
+    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.
+    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.
+    # Remove preview adds90 nominal step maxima; this sum establishes no fit.
+    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.
     timeout-minutes: 350
     strategy:
       fail-fast: false
@@ -1084,6 +1084,25 @@ jobs:
           image_sha=${image_sha%% *}
           [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
           printf 'MRK_MACOS_DESKTOP_IMAGE_SHA256=%s\n' "$image_sha" >> "$GITHUB_ENV"
+          # Same24-minute app-build budget; no independent timeout entitlement.
+          # This current SOURCE role cannot embed its not-yet-created inventory.
+          set +e
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+            --locked --offline --release --jobs 1 --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
+            --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
+            > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"
+          remover_status=$?
+          printf '%s\n' "$remover_status" > "$MRK_MACOS_WORK/remover-build.status"
+          remover_status_saved=$?
+          set -e
+          if [[ "$remover_status" != 0 ]]; then
+            # Optional diagnostics cannot replace the original compiler status.
+            set +e
+            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\n' "$remover_status" >&2
+            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2
+            exit "$remover_status"
+          fi
+          [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
       - name: Record the effective pinned compiler from the successful build context
         timeout-minutes: 1
         shell: bash
@@ -1164,12 +1183,24 @@ jobs:
           export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
+          # Current compiler-derived program, not an installer alias. The
+          # same fixed signing owner returns a digest only after known finality.
+          remover_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
+          [[ "$remover_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+          MRK_MACOS_REMOVER_SHA256=${remover_result#sha256=}
+          printf 'MRK_MACOS_REMOVER_SHA256=%s\n' "$MRK_MACOS_REMOVER_SHA256" >> "$GITHUB_ENV"
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" \
             --package-role ordinary-image \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --remover "$MRK_MACOS_WORK/remover-target/$MRK_MACOS_TARGET/release/mrk-macos-remove" \
+            --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+            --remover-cargo-messages "$MRK_MACOS_WORK/remover-build.jsonl" \
+            --remover-cargo-target-dir "$MRK_MACOS_WORK/remover-target" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
@@ -1209,6 +1240,7 @@ jobs:
           # verify-after independently rebinds the unchanged signed resident image.
           /usr/bin/codesign --verify --strict "$desktop_image"
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
+          /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-macos-remove"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
@@ -2091,6 +2123,153 @@ jobs:
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
+      - name: Prepare the fixed two-file removal package without executing it
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target "$MRK_MACOS_TARGET" \
+            --remover "$MRK_MACOS_WORK/input/app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove" \
+            --expected-remover "$MRK_MACOS_REMOVER_SHA256" --output "$MRK_MACOS_WORK/remove-scripts" \
+            > "$MRK_MACOS_WORK/remove-scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/Remove-original.pkg" && ! -L "$MRK_MACOS_WORK/Remove-original.pkg" ]] || exit 1
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/remove-scripts" \
+            --identifier dev.mobile-release-kit.desktop.remove --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/Remove-original.pkg"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target "$MRK_MACOS_TARGET" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+            --scripts "$MRK_MACOS_WORK/remove-scripts" --package "$MRK_MACOS_WORK/Remove-original.pkg" \
+            --output "$MRK_MACOS_WORK/remove-package-parts" > "$MRK_MACOS_WORK/remove-package-prepare.json"
+          # Native tools only write fresh outputs as this nonroot account.
+          # Preparation is not final0:0 acceptance; preserve the original pkg.
+          # BSD tar pads stdout even when compressed; use the fresh private file.
+          [[ ! -e "$MRK_MACOS_WORK/remove-package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/remove-package-parts/Scripts" ]] || exit 1
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/remove-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/remove-package-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          tar_status=$?
+          set -e
+          printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/remove-package-tar.status"
+          [[ $tar_status == 0 ]] || exit "$tar_status"
+          # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/remove-package-unsigned"
+          [[ ! -e "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" && ! -L "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" ]] || exit 1
+          set +e
+          (
+            cd "$MRK_MACOS_WORK/remove-package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          xar_status=$?
+          set -e
+          printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/remove-package-xar.status"
+          [[ $xar_status == 0 ]] || exit "$xar_status"
+          # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.
+      - name: Sign and notarize the completed removal package without executing it
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_INSTALLER_P12_BASE64: ${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}
+          MRK_MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # A separate Installer identity signs the completed Scripts XAR.
+          # Its private keychain closes before the bounded P8 notary wait;
+          # Accepted, append-prefix POST, native validation and full audit all
+          # precede final444 publication, P, the producer signature and Installer.
+          set +e
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py finalize-remove-package --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/remove-package-finalization.stdout" 2> "$MRK_MACOS_WORK/remove-package-finalization.stderr"
+          finalization_status=$?
+          printf '%s\n' "$finalization_status" > "$MRK_MACOS_WORK/remove-package-finalization.status"
+          finalization_status_saved=$?
+          unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi
+          [[ "$finalization_status_saved" == 0 ]] || exit "$finalization_status_saved"
+          # The separate package-remove owner requires this original0/status
+          # plus the retained purpose-specific receipt; no removal is executed.
+
+      - name: Emit the genuine removal descriptor and readonly carrier without Installer
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The same bounded owner compiles only the fixed nonshipping signer,
+          # emits genuine Remove-domain sidecars and creates one signed image.
+          # No Installer, application launch or payload removal occurs.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-remove --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/package-remove.stdout" 2> "$MRK_MACOS_WORK/package-remove.stderr"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-remove.status"
+          package_status_saved=$?
+          set -e
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+          # Actual original0 and the exact Remove-purpose receipt are both
+          # required by finalization. Unknown resources remain retained.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Notarize staple and verify the separate readonly removal carrier
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The old signed image and package receipt remain immutable. The
+          # fixed phase finalizes only its own copy; the final readonly mount
+          # must contain exactly the already-bound P and two producer files.
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py finalize-remove-image --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/remove-image-finalization.stdout" 2> "$MRK_MACOS_WORK/remove-image-finalization.stderr"
+          image_status=$?
+          printf '%s\n' "$image_status" > "$MRK_MACOS_WORK/remove-image-finalization.status"
+          image_status_saved=$?
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi
+          [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
+          # Neither a provisional file nor its receipt substitutes for this
+          # actual original0. Preview has no fallback to the old image.
       - name: Stage only the audited normal early-preview deliverables
         id: preview
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
@@ -2102,6 +2281,9 @@ jobs:
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py preview --target "$MRK_MACOS_TARGET" \
             --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
             --output "$MRK_MACOS_WORK/preview" > "$MRK_MACOS_WORK/preview-result.json"
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-preview --target "$MRK_MACOS_TARGET" \
+            --work "$MRK_MACOS_WORK" --expected-source "$MRK_EXPECTED_SHA" \
+            --output "$MRK_MACOS_WORK/remove-preview" > "$MRK_MACOS_WORK/remove-preview-result.json"
           printf '%s\n' 'Normal preview built/installed/read back; automatic open and normal Quit unexecuted; manual UI acceptance pending.'
       - name: Upload only the normal user preview package and guide
         id: preview_upload
@@ -2113,6 +2295,9 @@ jobs:
             ${{ steps.work.outputs.root }}/preview/MobileReleaseKit.dmg
             ${{ steps.work.outputs.root }}/preview/README.md
             ${{ steps.work.outputs.root }}/preview/PREVIEW.json
+            ${{ steps.work.outputs.root }}/remove-preview/MobileReleaseKit-Remove.dmg
+            ${{ steps.work.outputs.root }}/remove-preview/REMOVE.md
+            ${{ steps.work.outputs.root }}/remove-preview/REMOVAL.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -4029,6 +4214,10 @@ jobs:
             {0}/android-helper-sign-desktop-payload.json
             {0}/android-helper-sign-root-app.json
             {0}/android-helper-sign-root-installer.json
+            {0}/remover-build.jsonl
+            {0}/remover-build.stderr
+            {0}/remover-build.status
+            {0}/android-helper-sign-remover.json
             {0}/app-result.json
             {0}/input-result.json
             {0}/dialog-regressions.log
@@ -4076,6 +4265,17 @@ jobs:
             {0}/distribution/MobileReleaseKit-Observation.dmg
             {0}/package-request-id.txt
             {0}/android-helper-package-install.json
+            {0}/remove-scripts-result.json
+            {0}/remove-package-prepare.json
+            {0}/remove-package-tar.status
+            {0}/remove-package-xar.status
+            {0}/remove-package-finalization.status
+            {0}/package-remove.status
+            {0}/remove-image-finalization.status
+            {0}/android-helper-finalize-remove-package.json
+            {0}/android-helper-package-remove.json
+            {0}/android-helper-finalize-remove-image.json
+            {0}/remove-preview-result.json
             {0}/android-helper-notarize-payload.json
             {0}/android-helper-finalize-package.json
             {0}/package-finalization.status
@@ -4213,7 +4413,7 @@ jobs:
           # The skipped cohort supplies no finality or cleanup authority.
           saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")
           saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")
-          for path in (root / "cargo-target", root / "vault-helper-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
+          for path in (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "npm-cache", workspace / "desktop/node_modules", workspace / "desktop/dist",
                        root / "normal-ui/DerivedData", root / "normal-ui/test.xcresult", root / "normal-ui/persistence-test.xcresult", root / "normal-ui/project-test.xcresult", root / "normal-ui/diagnostics-test.xcresult", saved_directory, root / "normal-ui/tmp",
                        root / "data-contracts/tmp"):
               try: selected = os.lstat(path)

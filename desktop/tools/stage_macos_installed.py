@@ -65,6 +65,11 @@ IMAGE_INSTALL_NAMES = {
 }
 PAYLOAD_INFO = PAYLOAD_CONTENTS + "Info.plist"
 VAULT_HELPER = PAYLOAD_CONTENTS + "Helpers/mrk-vault-keychain"
+REMOVER_NAME = "mrk-macos-remove"
+REMOVER = PAYLOAD_CONTENTS + "Helpers/" + REMOVER_NAME
+REMOVE_PACKAGE_ID = "dev.mobile-release-kit.desktop.remove"
+REMOVE_DESCRIPTOR_BYTES = 16 * 1024
+REMOVER_BYTES = 64 * 1024 * 1024
 ANDROID_HELPER_BUNDLE_PROGRAM = "Contents/Helpers/mrk-android-register"
 ANDROID_HELPER = PAYLOAD_RELATIVE + "/" + ANDROID_HELPER_BUNDLE_PROGRAM
 ANDROID_SERVICE_PLIST = PAYLOAD_CONTENTS + "Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist"
@@ -528,7 +533,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             for path, (body, mode) in sorted(files.items()):
                 # Signed resident image/helpers are copied unchanged/read-only.
                 # The raw desktop image is executable code for inside-out signing.
-                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE)
+                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER)
                                   else (0o755,) if path == DESKTOP_IMAGE else (0o644, 0o755))
                                  if app_signing else (0o444, 0o555))
                 need(mode in allowed_modes, "output-mode")
@@ -1550,14 +1555,124 @@ def observer_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TA
             "instrumented": True, "qualification": "observer-executable-data-not-image-or-launched"}
 
 
+def remover_cargo_artifact(messages, binary, target_dir, body, *, target=ARM_TARGET):
+    """Actual fixed remover graph DATA; not signing, execution or install authority."""
+    target = mac_target(target)
+    root = DESKTOP / "src-tauri"
+    binary, target_dir = Path(binary), Path(target_dir)
+    need(binary.is_absolute() and target_dir.is_absolute()
+         and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
+         and binary == target_dir / target / "release" / REMOVER_NAME
+         and type(body) is bytes and 32 <= len(body) <= REMOVER_BYTES, "remover-cargo-fixed-output")
+    records = cargo_records(messages)
+    selected = [row for row in records if row["target"].get("name") == REMOVER_NAME
+                or str(binary) in row.get("filenames", []) or row.get("executable") == str(binary)]
+    need(len(selected) == 1, "remover-cargo-one-binary")
+    row = selected[0]
+    role = row["target"]
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+         and row.get("manifest_path") == str(root / "Cargo.toml") and role.get("name") == REMOVER_NAME
+         and role.get("kind") == ["bin"] and role.get("crate_types") == ["bin"]
+         and role.get("src_path") == str(root / "src/bin/macos_install.rs") and role.get("edition") == "2021"
+         and row.get("executable") == str(binary) and row.get("filenames") == [str(binary)], "remover-cargo-source")
+    cargo_profile(row, test=False)
+    cargo_features(row, ["macos-installed-remover"])
+    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", ["macos-installed-remover"], test=False)
+    cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
+                  "mrk_macos_installed_native", ["default"], test=False)
+    need(not any(item is not row and item["target"].get("kind") in
+                 (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "remover-cargo-no-mixed-role")
+    macho(body, target=target)
+    return {"schemaVersion": 1, "entrypoint": "src/bin/macos_install.rs", "targetKind": "bin",
+            "binaryRole": REMOVER_NAME, "target": target, "features": ["macos-installed-remover"],
+            "cargoMessagesSha256": digest(messages), "binarySha256": digest(body), "binarySize": len(body),
+            "qualification": "actual-remover-data-not-signed-or-launched"}
+
+
+def removal_package_receipt_data(body, *, selection, binding, package, descriptor, signed, expected_descriptor,
+                                 final_package_sha, release_body, profiles):
+    """Closed prior Remove emission correspondence. Caller retains original0 separately."""
+    selection = selected_build(selection)
+    source = packaging_signing_data(*profiles)
+    need(source is not None and type(final_package_sha) is str and maintenance_hex(final_package_sha, 64),
+         "remove-owner-source")
+    value = maintenance_json(body, 16384)
+    maintenance_map(value, ("schemaVersion", "phase", "target", "source", "packageRole", "workflowSource", "workflow", "runId", "runAttempt",
+        "toolchain", "helperIdentifier", "originalCalls", "credentialOriginals", "credentialContexts", "targetRetired", "originalClosesKnown",
+        "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified", "androidBuildQualified",
+        "developerIdOrNotarizationQualified", "productReady", "finalPackageReceiptSha256", "removalDistribution", "directStagerIOPending",
+        "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
+    workflow = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview"
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "package-remove"
+         and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
+         and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
+         and value["runId"] == binding["runId"] and value["runAttempt"] == binding["runAttempt"]
+         and all(type(value[key]) is str and re.fullmatch(r"[1-9][0-9]{0,19}", value[key]) for key in ("runId", "runAttempt"))
+         and value["packageRole"] == "ordinary-image" and value["imageSourceCommit"] == value["source"]
+         and value["imageReleaseId"] == selection.release and value["imageReleaseSourceSha256"] == digest(release_body)
+         and value["toolchain"] == ("1.98.0" if selection.target == INTEL_TARGET else "1.98.1")
+         and value["helperIdentifier"] == "dev.mobile-release-kit.desktop.android-register", "remove-owner-current-source")
+    need(all(value[key] is True for key in ("targetRetired", "originalClosesKnown", "passed", "outerFinalityRequired"))
+         and all(value[key] is False for key in ("androidServiceAuthenticated", "androidRegisteredCopyQualified", "androidBuildQualified",
+                                                "developerIdOrNotarizationQualified", "productReady"))
+         and value["directStagerIOPending"] is None and value["cleanupErrors"] == []
+         and value["finalPackageReceiptSha256"] == final_package_sha, "remove-owner-finality")
+    roles = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
+    calls = value["originalCalls"]
+    need(type(calls) is list and len(calls) == len(roles), "remove-owner-call-count")
+    for row, role in zip(calls, roles):
+        maintenance_map(row, ("role", "entered", "returned", "capturesSettled", "returncode", "stdoutSha256", "stderrSha256"), "remove-owner-call-fields")
+        need(row["role"] == role and all(row[k] is True for k in ("entered", "returned", "capturesSettled"))
+             and type(row["returncode"]) is int and row["returncode"] == 0
+             and all(maintenance_hex(row[k], 64) for k in ("stdoutSha256", "stderrSha256")), "remove-owner-call-finality")
+    credential_roles = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import", "partitions", "identity",
+        "certificates", "search-admit", "restrict", "search-restricted", "search-after-callback", "restore", "search-restored", "delete", "search-final", "default-after")
+    credentials = value["credentialOriginals"]
+    ordered = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + credential_roles * 2
+    need(type(credentials) is list and len(credentials) == len(ordered), "remove-owner-credential-count")
+    for row, role in zip(credentials, ordered):
+        maintenance_map(row, ("role", "entered", "returned", "settled", "status"), "remove-owner-credential-fields")
+        need(row["role"] == role and all(row[k] is True for k in ("entered", "returned", "settled"))
+             and type(row["status"]) is int and row["status"] == 0, "remove-owner-credential-finality")
+    contexts = value["credentialContexts"]
+    need(type(contexts) is list and len(contexts) == 2, "remove-owner-context-count")
+    for row, purpose in zip(contexts, ("producer", "distribution-image")):
+        maintenance_map(row, ("purpose", "searchRestored", "defaultUnchanged", "retired", "closed"), "remove-owner-context-fields")
+        need(row["purpose"] == purpose and all(row[k] is True for k in ("searchRestored", "defaultUnchanged", "retired", "closed")),
+             "remove-owner-context-finality")
+    distribution = maintenance_map(value["removalDistribution"], ("schemaVersion", "kind", "target", "packageVersion", "release", "packageSha256", "packageBytes",
+        "descriptorSha256", "signatureSha256", "producerSummary", "userImage", "installedProducerSha256", "inventorySha256", "removerExecutableSha256",
+        "sourceProducerProfileSha256", "sourceServiceProfileSha256", "finalPackageReceiptSha256", "groupEndpointMet", "originalOuterReturnRequired",
+        "installerEntered", "applicationLaunched", "removalExecuted", "productReady"), "remove-distribution-fields")
+    emitted_removal_data(canonical(distribution["producerSummary"]) + b"\n", b"", 0, package, descriptor, signed, expected_descriptor)
+    planned = maintenance_json(expected_descriptor, REMOVE_DESCRIPTOR_BYTES)
+    need(type(distribution["schemaVersion"]) is int and distribution["schemaVersion"] == 1
+         and distribution["kind"] == "mrk-remove-package-emitted-image-v1"
+         and (distribution["target"], distribution["release"], distribution["packageVersion"]) == (selection.target, selection.release, selection.package_version)
+         and type(distribution["packageBytes"]) is int and distribution["packageBytes"] == len(package)
+         and (distribution["packageSha256"], distribution["descriptorSha256"], distribution["signatureSha256"]) == (digest(package), digest(descriptor), digest(signed))
+         and all(distribution[k] is True for k in ("groupEndpointMet", "originalOuterReturnRequired"))
+         and all(distribution[k] is False for k in ("installerEntered", "applicationLaunched", "removalExecuted", "productReady"))
+         and distribution["finalPackageReceiptSha256"] == final_package_sha
+         and distribution["sourceProducerProfileSha256"] == source.producer_sha256 and distribution["sourceServiceProfileSha256"] == source.service_sha256
+         and distribution["installedProducerSha256"] == planned["installedProducerSha256"]
+         and distribution["inventorySha256"] == planned["installedInventorySha256"]
+         and distribution["removerExecutableSha256"] == planned["removerExecutableSha256"], "remove-distribution-current-binding")
+    image = maintenance_map(distribution["userImage"], ("file", "bytes", "sha256"), "remove-image-fields")
+    need(image["file"] == "MobileReleaseKit-Remove.dmg" and type(image["bytes"]) is int and 0 < image["bytes"] <= MAX_BYTES
+         and maintenance_hex(image["sha256"], 64), "remove-image-bound")
+    return distribution
+
+
 def final_image_receipt_data(body, *, selection, binding, request, package, descriptor, signed,
-                             original_image, package_owner, final_package, release_body, profiles):
+                             original_image, package_owner, final_package, release_body, profiles, remove=False):
     """Correspondence with original0/status inputs, not new native authority.
 
     The fixed phase consumed the actual S3 parser/signing chain and final P.
     Preserve its raw receipt hash here; never hash a reserialized substitute.
     Existing preview checks still bind Installer/readback/current producer DATA.
     """
+    need(type(remove) is bool, "final-image-receipt-purpose")
     selection = selected_build(selection)
     release = build_release_data(release_body, target=selection.target)
     need((release["packageVersion"], release["release"]) == (selection.package_version, selection.release)
@@ -1573,7 +1688,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
         "notarySubmission", "finalImage", "finalImageMount", "finalPackageReceiptSha256", "directStagerIOPending", "cleanupErrors",
         "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "final-image-receipt-fields")
     workflow = "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview"
-    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "finalize-image"
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == ("finalize-remove-image" if remove else "finalize-image")
          and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
          and maintenance_hex(value["source"], 40) and value["workflow"] == workflow
          and value["runId"] == binding["runId"] and value["runAttempt"] == binding["runAttempt"]
@@ -1602,22 +1717,22 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
         need(row["role"] == "final-image-" + role and all(row[key] is True for key in ("entered", "returned", "capturesSettled"))
              and type(row["returncode"]) is int and row["returncode"] == 0
              and maintenance_hex(row["stdoutSha256"], 64) and maintenance_hex(row["stderrSha256"], 64), "final-image-original-result")
-    final = maintenance_map(value["finalImage"], ("schemaVersion", "kind", "target", "release", "packageVersion", "requestId",
-        "packageInstallReceiptSha256", "finalPackageReceiptSha256", "packageBytes", "packageSha256", "descriptorBytes", "descriptorSha256",
+    final = maintenance_map(value["finalImage"], ("schemaVersion", "kind", "target", "release", "packageVersion",
+        *( () if remove else ("requestId",) ), "packageRemoveReceiptSha256" if remove else "packageInstallReceiptSha256", "finalPackageReceiptSha256", "packageBytes", "packageSha256", "descriptorBytes", "descriptorSha256",
         "signatureBytes", "signatureSha256", "producerProfileSha256", "serviceProfileSha256", "originalImageBytes", "originalImageSha256",
         "submittedSha256", "imageBytes", "imageSha256", "imageMode", "notaryProfileSha256", "submissionId", "status", "sha256Compared",
         "errorCount", "warningCount", "ticketRowCount", "logSha256", "strictSignatureBeforeAndAfter", "actualStaplerValidation",
         "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached", "assurance"), "final-image-fields")
-    need(type(final["schemaVersion"]) is int and final["schemaVersion"] == 1 and final["kind"] == "mrk-final-user-image"
+    need(type(final["schemaVersion"]) is int and final["schemaVersion"] == 1 and final["kind"] == ("mrk-final-removal-image" if remove else "mrk-final-user-image")
          and (final["target"], final["release"], final["packageVersion"]) == (selection.target, selection.release, selection.package_version)
-         and maintenance_hex(request, 32) and final["requestId"] == request, "final-image-current-binding")
+         and (request is None if remove else maintenance_hex(request, 32) and final["requestId"] == request), "final-image-current-binding")
     for label, contents, maximum in (("package", package, MAX_BYTES), ("descriptor", descriptor, PRODUCER_DESCRIPTOR_BYTES),
                                     ("signature", signed, PRODUCER_SIGNATURE_BYTES)):
         need(type(contents) is bytes and 0 < len(contents) <= maximum
              and type(final[label + "Bytes"]) is int and final[label + "Bytes"] == len(contents)
              and final[label + "Sha256"] == digest(contents), "final-image-current-bytes")
     old = maintenance_map(original_image, ("file", "bytes", "sha256"), "final-image-original-shape")
-    need(old["file"] == "MobileReleaseKit.dmg" and type(old["bytes"]) is int and 0 < old["bytes"] <= MAX_BYTES
+    need(old["file"] == ("MobileReleaseKit-Remove.dmg" if remove else "MobileReleaseKit.dmg") and type(old["bytes"]) is int and 0 < old["bytes"] <= MAX_BYTES
          and maintenance_hex(old["sha256"], 64) and type(final["originalImageBytes"]) is int
          and final["originalImageBytes"] == old["bytes"] and final["originalImageSha256"] == final["submittedSha256"] == old["sha256"]
          and type(final["imageBytes"]) is int and 0 < final["imageBytes"] <= MAX_BYTES
@@ -1626,7 +1741,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
          and maintenance_hex(final["imageSha256"], 64), "final-image-carrier-binding")
     need(type(package_owner) is bytes and 0 < len(package_owner) <= 16384
          and type(final_package) is bytes and 0 < len(final_package) <= 16384
-         and final["packageInstallReceiptSha256"] == digest(package_owner)
+         and final["packageRemoveReceiptSha256" if remove else "packageInstallReceiptSha256"] == digest(package_owner)
          and final["finalPackageReceiptSha256"] == value["finalPackageReceiptSha256"] == digest(final_package)
          and final["producerProfileSha256"] == source.producer_sha256 and final["serviceProfileSha256"] == source.service_sha256
          and final["notaryProfileSha256"] == digest(profiles[2]), "final-image-raw-predecessors")
@@ -1800,6 +1915,74 @@ def preview_command(args):
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "packageSha256": digest(package),
             "distributionSha256": digest(image), "fileCount": 3, "qualification": "normal-early-preview-not-launched-or-product-qualified"}
 
+def remove_preview_command(args):
+    """Stage only the separately completed Remove carrier; never execute removal."""
+    selection = source_build_selection(command_target(args))
+    need(maintenance_hex(args.expected_source, 40) and Path(args.work).is_absolute(), "remove-preview-source")
+    work = Path(args.work)
+    binding = maintenance_json(read(work / "source-binding.json", 65536), 65536)
+    source_inventory = maintenance_json(read(work / "source-inventory.json", 1024 * 1024), 1024 * 1024)
+    need(type(binding) is dict and type(source_inventory) is dict
+         and binding.get("source") == source_inventory.get("source") == args.expected_source
+         and binding.get("workflowSource") == args.expected_source
+         and source_inventory.get("tree") == binding.get("tree") and maintenance_hex(source_inventory.get("tree"), 40)
+         and binding.get("scope") == "normal-macos-early-preview" and binding.get("instrumented") is False
+         and binding.get("packageRole") == "ordinary-image", "remove-preview-source-binding")
+    need(all(type(binding.get(k)) is str and re.fullmatch(r"[1-9][0-9]{0,19}", binding[k])
+             for k in ("runId", "runAttempt")), "remove-preview-run-binding")
+    for name in ("remove-package-finalization.status", "package-remove.status", "remove-image-finalization.status"):
+        need(read(work / name, 4) == b"0\n", "remove-preview-original-statuses")
+    package = read(work / "remove-package-final/Remove.pkg", MAX_BYTES)
+    need(read(work / "remove-producer-root/Remove.pkg", MAX_BYTES) == package, "remove-preview-package-copy")
+    descriptor = read(work / "remove-producer-root/remove-producer.json", REMOVE_DESCRIPTOR_BYTES)
+    signed = read(work / "remove-producer-root/remove-producer.sig", PRODUCER_SIGNATURE_BYTES)
+    input_root = work / "remove-emitter-input"
+    installed = read(input_root / "producer.json", PRODUCER_DESCRIPTOR_BYTES)
+    inventory = read(input_root / "install-inventory.json", 1024 * 1024)
+    with parent(input_root / REMOVER_NAME) as (fd, name):
+        program, info = read_at(fd, name, REMOVER_BYTES)
+        need(stat.S_IMODE(info.st_mode) == 0o555, "remove-preview-program-mode")
+    producer_profile, service_profile = read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 1024)
+    signing = packaging_signing_data(producer_profile, service_profile)
+    expected = packaging_removal_descriptor_data(installed, inventory, program, package, signing, selection,
+        source_commit=args.expected_source, manifest=binding.get("runtimeManifestSha256"))
+    need(read(input_root / "remove-descriptor-input.json", REMOVE_DESCRIPTOR_BYTES) == expected == descriptor,
+         "remove-preview-exact-descriptor")
+    release_path = BUILD_RELEASE_INPUT if selection.target == ARM_TARGET else DESKTOP / "macos-installed-inputs/build-release-intel.json"
+    release_body = read(release_path, BUILD_RELEASE_LIMIT)
+    owner_body = read(work / "android-helper-package-remove.json", 16384)
+    final_package_body = read(work / "android-helper-finalize-remove-package.json", 16384)
+    distribution = removal_package_receipt_data(owner_body, selection=selection, binding=binding,
+        package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
+        final_package_sha=digest(final_package_body), release_body=release_body, profiles=(producer_profile, service_profile))
+    original_image = read(work / "remove-distribution/MobileReleaseKit-Remove.dmg", MAX_BYTES)
+    need(distribution["userImage"] == {"file": "MobileReleaseKit-Remove.dmg", "bytes": len(original_image), "sha256": digest(original_image)},
+         "remove-preview-original-image")
+    del original_image
+    receipt_body = read(work / "android-helper-finalize-remove-image.json", 16384)
+    final = final_image_receipt_data(receipt_body, selection=selection, binding=binding, request=None,
+        package=package, descriptor=descriptor, signed=signed, original_image=distribution["userImage"], package_owner=owner_body,
+        final_package=final_package_body, release_body=release_body,
+        profiles=(producer_profile, service_profile, read(DESKTOP / "packaging/macos-notary-service.json", 1024)), remove=True)
+    image = read(work / "remove-distribution-final/MobileReleaseKit-Remove.dmg", MAX_BYTES)
+    need(len(image) == final["imageBytes"] and digest(image) == final["imageSha256"], "remove-preview-final-image")
+    summary = {"schemaVersion": 1, "kind": "mrk-removal-carrier-preview-v1", "sourceCommit": args.expected_source,
+        "sourceTree": source_inventory["tree"], "target": selection.target, "release": selection.release, "packageVersion": selection.package_version,
+        "runId": binding["runId"], "runAttempt": binding["runAttempt"], "packageSha256": digest(package), "packageBytes": len(package),
+        "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed), "installedProducerSha256": digest(installed),
+        "inventorySha256": digest(inventory), "removerExecutableSha256": digest(program), "distributionSha256": digest(image), "distributionBytes": len(image),
+        "finalPackageReceiptSha256": digest(final_package_body), "packageRemoveReceiptSha256": digest(owner_body),
+        "finalImageReceiptSha256": digest(receipt_body), "originalPackageFinalizationReturnedZero": True, "originalPackageRemoveReturnedZero": True,
+        "originalImageFinalizationReturnedZero": True, "originalFinalImageMountDetached": True,
+        "status": "packaged-and-image-verified", "removalExecuted": False, "installedAppLaunchedByRemovalRoute": False,
+        "initialRemovalQualified": False, "interruptedRemovalQualified": False, "distributionQualified": False, "productReady": False}
+    guide = read(DESKTOP / "packaging/macos-removal.md", 32768)
+    write_tree(args.output, {"MobileReleaseKit-Remove.dmg": (image, 0o444), "REMOVE.md": (guide, 0o444),
+                            "REMOVAL.json": (canonical(summary) + b"\n", 0o444)})
+    return {"schemaVersion": 1, "sourceCommit": args.expected_source, "distributionSha256": digest(image), "fileCount": 3,
+            "qualification": "separate-removal-carrier-not-removal-or-recovery-qualified"}
+
+
 def android_support_manifest():
     # Reviewed source DATA, not a user recipe, runtime network grant or sidecar.
     body = read(ANDROID_SUPPORT_MANIFEST, 16384)
@@ -1971,6 +2154,12 @@ def app_command(args):
     else:
         compiled = observer_cargo_artifact(read(args.observer_cargo_messages, 8 * 1024 * 1024),
                                           args.binary, args.observer_cargo_target_dir, body, target=target)
+    need(all(getattr(args, key, None) is not None for key in
+             ("remover", "expected_remover", "remover_cargo_messages", "remover_cargo_target_dir")), "package-role-remover-required")
+    remover = read(args.remover, REMOVER_BYTES)
+    need(sha(args.expected_remover) and digest(remover) == args.expected_remover, "remover-final-signed-digest")
+    remover_compiled = remover_cargo_artifact(read(args.remover_cargo_messages, 8 * 1024 * 1024),
+                                            args.remover, args.remover_cargo_target_dir, remover, target=target)
     helper = read(args.vault_helper, 32 * 1024 * 1024)
     need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
          "helper-final-signed-digest")
@@ -1979,7 +2168,7 @@ def app_command(args):
     need(sha(args.expected_entry) and digest(entry) == args.expected_entry, "entry-original-compiler-digest")
     entry_macho(entry, target=target)
     icon = read(DESKTOP / "src-tauri/icons/icon.png", 1024 * 1024)
-    files = {ENTRY_BINARY: (entry, 0o755), APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555),
+    files = {ENTRY_BINARY: (entry, 0o755), APP_BINARY: (body, 0o755), VAULT_HELPER: (helper, 0o555), REMOVER: (remover, 0o555),
              "Contents/Info.plist": (source_entry_info(selection=selection), 0o644), PAYLOAD_INFO: (source_app_info(selection=selection), 0o644),
              "Contents/PkgInfo": (b"APPL????", 0o644), PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
              "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
@@ -1995,6 +2184,7 @@ def app_command(args):
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
     result = {"schemaVersion": 1, "packageRole": role,
               "appBinarySha256BeforeSigning": digest(body), "vaultHelperSha256": digest(helper),
+              "removerSha256": digest(remover), "removerCargoArtifact": remover_compiled,
               "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
               "payloadBundleIdentifier": BUNDLE_ID, "androidSupportManifestSha256": support_sha,
               "androidHelperSha256": digest(android_service[ANDROID_HELPER][0]),
@@ -2061,7 +2251,7 @@ def input_command(args, *, ticket_expectations=None):
     _support_sha, support_rows = android_support_manifest()
     support = {PAYLOAD_RELATIVE + "/" + row["resourcePath"] for row in support_rows}
     support.update(PAYLOAD_RELATIVE + "/" + notice["resourcePath"] for row in support_rows for notice in row["notices"])
-    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE,
+    expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE, REMOVER,
                       "Contents/Info.plist", PAYLOAD_INFO, "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo",
                       "Contents/Resources/icon.png", PAYLOAD_CONTENTS + "Resources/icon.png",
                       "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
@@ -2084,6 +2274,9 @@ def input_command(args, *, ticket_expectations=None):
     macho(app[VAULT_HELPER][0], system_only=True, target=target)
     need(sha(args.expected_vault_helper) and digest(app[VAULT_HELPER][0]) == args.expected_vault_helper,
          "nested-helper-signature-bytes-changed")
+    need(sha(getattr(args, "expected_remover", None)) and digest(app[REMOVER][0]) == args.expected_remover
+         and app[REMOVER][1] == 0o555, "remover-signature-bytes-or-mode-changed")
+    macho(app[REMOVER][0], target=target)
     android_service_input(app, args.expected_android_helper, expected_resident, target=target)
     support_sha = android_support_input(app)
     files = {}
@@ -2091,7 +2284,7 @@ def input_command(args, *, ticket_expectations=None):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
             code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "runtime/python/bin/python3")
+                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "runtime/python/bin/python3")
             expected_mode = 0o555 if prefix + name in code else 0o444
             # Normalize only the fresh copy, never the signed original.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -2106,7 +2299,7 @@ def input_command(args, *, ticket_expectations=None):
     write_tree(args.output, files)
     result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
               "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
-              "residentImageSha256": expected_resident, "fileCount": len(rows),
+              "residentImageSha256": expected_resident, "removerSha256": args.expected_remover, "fileCount": len(rows),
               "qualification": "fresh-install-input-not-installed"}
     if role == "ordinary-image":
         result["desktopImageSha256"] = expected_desktop
@@ -2229,10 +2422,10 @@ def cpio_members(body):
     return _cpio_members(body, (0, 0))
 
 
-def package_info(body, *, fixture=False, selection=None):
+def package_info(body, *, fixture=False, selection=None, remove=False):
     selection = selected_build(selection)
-    need(type(fixture) is bool, "fixed-package-kind")
-    identifier = PACKAGE_ID + ("-fixture" if fixture else "")
+    need(type(fixture) is bool and type(remove) is bool and not (fixture and remove), "fixed-package-kind")
+    identifier = REMOVE_PACKAGE_ID if remove else PACKAGE_ID + ("-fixture" if fixture else "")
     info = ET.fromstring(body)
     need(info.tag == "pkg-info" and info.get("identifier") == identifier
          and info.get("version") == selection.package_version and info.get("install-location") == "/" and info.get("auth") == "root", "scripts-package-identity")
@@ -2245,16 +2438,27 @@ def package_info(body, *, fixture=False, selection=None):
     return identifier
 
 
-def original_package(scripts_path, package_path, *, fixture=False, selection=None):
+def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None):
     selection = selected_build(selection)
     owner = packager_ids()
     scripts = tree(scripts_path, packager=True)
+    if remove:
+        need(sha(expected_remover), "remove-program-anchor")
+        need(set(scripts) == {"postinstall", REMOVER_NAME}
+             and scripts["postinstall"] == (read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192), 0o555),
+             "remove-fixed-scripts-only")
+        program, mode = scripts[REMOVER_NAME]
+        need(mode == 0o555 and 0 < len(program) <= REMOVER_BYTES and digest(program) == expected_remover,
+             "remove-program-correspondence")
+        macho(program, target=selection.target)
+    else:
+        need(expected_remover is None, "remove-program-purpose")
     with parent(package_path) as (fd, name):
         package, info = read_at(fd, name, MAX_BYTES)
         need((info.st_uid, info.st_gid) == owner, "original-package-owner")
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"}, "original-package-roster")
-    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection)
+    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection, remove=remove)
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
@@ -2266,7 +2470,8 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
 
 def prepare_package_command(args):
     selection = source_build_selection(command_target(args))
-    scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection)
+    removal = {"expected_remover": getattr(args, "expected_remover", None)} if getattr(args, "remove", False) else {}
+    scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
     # This is not archive extraction: only validated, unchanged PackageInfo
     # DATA is copied to a fixed literal name in an exclusively-created root.
     write_tree(args.output, {"PackageInfo": (members["PackageInfo"], 0o444)}, root_mode=0o700)
@@ -2285,12 +2490,13 @@ def package_format_input_command(args):
 
 def audit_command(args):
     selection = source_build_selection(command_target(args))
-    scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection)
+    removal = {"expected_remover": getattr(args, "expected_remover", None)} if getattr(args, "remove", False) else {}
+    scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
     package = read(args.package)
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"}, "final-package-roster")
     need(members["PackageInfo"] == original_members["PackageInfo"], "package-info-bytes-changed")
-    package_info(members["PackageInfo"], fixture=args.fixture, selection=selection)
+    package_info(members["PackageInfo"], fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False))
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
@@ -2301,6 +2507,21 @@ def audit_command(args):
             "originalPackageSha256": digest(original), "packageInfoSha256": digest(members["PackageInfo"]),
             "packageIdentifier": identifier, "scriptFileCount": len(scripts), "finalDestinationPayloadEntries": 0,
             "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}
+
+
+def remove_scripts_command(args):
+    selection = source_build_selection(command_target(args))
+    need(sha(args.expected_remover), "remove-program-anchor")
+    body = read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192)
+    with parent(args.remover) as (fd, name):
+        program, info = read_at(fd, name, REMOVER_BYTES)
+        need(stat.S_IMODE(info.st_mode) == 0o555 and digest(program) == args.expected_remover,
+             "remove-program-correspondence")
+        macho(program, target=selection.target)
+    write_tree(args.output, {"postinstall": (body, 0o555), REMOVER_NAME: (program, 0o555)}, root_mode=0o755)
+    return {"schemaVersion": 1, "packageIdentifier": REMOVE_PACKAGE_ID, "packageVersion": selection.package_version,
+            "postinstallSha256": digest(body), "removerSha256": digest(program), "scriptFileCount": 2,
+            "destinationPayloadEntries": 0, "qualification": "remove-scripts-staged-not-executed"}
 
 
 def observation_inventory(args, *, selection=None):
@@ -2325,7 +2546,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
              and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "runtime/python/bin/python3")), "observation-inventory-row")
+                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
     need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows)
          == ("app/" + RESIDENT_IMAGE in rows)
@@ -2757,6 +2978,57 @@ def packaging_descriptor_data(history_body, source, selection, *, source_commit,
     return body
 
 
+def packaging_removal_descriptor_data(installed, inventory, program, package, source, selection, *, source_commit, manifest):
+    """New remove domain from exact current Install DATA; no live/removal authority."""
+    selection = selected_build(selection)
+    need(type(source) is ProducerSelection and maintenance_hex(source_commit, 40) and maintenance_hex(manifest, 64)
+         and type(program) is bytes and 0 < len(program) <= REMOVER_BYTES
+         and type(package) is bytes and 0 < len(package) <= MAX_BYTES and package[:4] == b"xar!", "remove-descriptor-input")
+    install = maintenance_producer_data(installed, target=selection.target)
+    current = install["releaseSet"]["current"]
+    need((current["sourceCommit"], current["release"], current["packageVersion"], current["protocolSha256"], current["runtimeManifestSha256"])
+         == (source_commit, selection.release, selection.package_version, CURRENT_PROTOCOL, manifest), "remove-current-install-source")
+    policies = [row["policy"] for row in install["signingPolicies"] if row["sha256"] == current["signingPolicySha256"]]
+    need(len(policies) == 1 and (policies[0]["teamIdentifier"], policies[0]["leafCertificateSha1"], policies[0]["leafCertificateSha256"])
+         == (source.team, source.leaf_sha1, source.leaf_sha256), "remove-current-install-signer")
+    rows = observation_inventory_bytes(inventory, current["inventorySha256"], manifest, selection=selection)
+    name = "app/" + REMOVER
+    need(name in rows and rows[name]["executable"] is True
+         and (rows[name]["size"], rows[name]["sha256"]) == (len(program), digest(program)), "remove-current-program-inventory")
+    macho(program, target=selection.target)
+    document = {"schemaVersion": 1, "kind": "mrk-macos-remove-producer-v1", "domain": "MobileReleaseKit-remove-producer-v1",
+                "target": selection.target, "sourceCommit": source_commit, "release": selection.release,
+                "protocolSha256": CURRENT_PROTOCOL, "installedProducerSha256": digest(installed),
+                "installedInventorySha256": digest(inventory), "signingPolicySha256": current["signingPolicySha256"],
+                "packageIdentifier": REMOVE_PACKAGE_ID, "packageVersion": selection.package_version,
+                "packageSha256": digest(package), "removerExecutableSha256": digest(program)}
+    body = canonical(document) + b"\n"
+    need(len(body) <= REMOVE_DESCRIPTOR_BYTES, "remove-descriptor-bound")
+    return body
+
+
+def remove_input_command(args):
+    selection = source_build_selection(command_target(args))
+    source = packaging_signing_data(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 512))
+    installed = read(args.installed_producer, PRODUCER_DESCRIPTOR_BYTES)
+    signature = read(args.installed_signature, PRODUCER_SIGNATURE_BYTES)
+    need(len(signature) == source.rsa_bits // 8, "remove-installed-signature-size")
+    inventory = read(args.inventory, 1024 * 1024)
+    with parent(args.remover) as (fd, name):
+        program, info = read_at(fd, name, REMOVER_BYTES)
+        need(stat.S_IMODE(info.st_mode) == 0o555, "remove-program-signed-mode")
+    package = read(args.package, MAX_BYTES)
+    body = packaging_removal_descriptor_data(installed, inventory, program, package, source, selection,
+                                            source_commit=args.expected_source, manifest=args.expected_manifest)
+    files = {"remove-descriptor-input.json": (body, 0o444), "producer.json": (installed, 0o444),
+             "producer.sig": (signature, 0o444), "install-inventory.json": (inventory, 0o444), REMOVER_NAME: (program, 0o555)}
+    write_tree(args.output, files, root_mode=0o700, current_owned=True)
+    return {"schemaVersion": 1, "kind": "remove-emitter-input-data", "target": selection.target,
+            "descriptorSha256": digest(body), "installedProducerSha256": digest(installed),
+            "inventorySha256": digest(inventory), "removerSha256": digest(program), "packageSha256": digest(package),
+            "inputFiles": 5, "qualification": "remove-input-data-not-signature-or-removal-authority"}
+
+
 def emitted_package_data(stdout, stderr, returncode, package, descriptor, signed, *, target):
     """Original child status AND retained exact output bytes; no receipt authority."""
     need(type(returncode) is int and returncode == 0 and type(stdout) is bytes and 0 < len(stdout) <= 512
@@ -2776,6 +3048,36 @@ def emitted_package_data(stdout, stderr, returncode, package, descriptor, signed
     producer = maintenance_producer_data(descriptor, target=target)
     need(producer["releaseSet"]["current"]["packageSha256"] == digest(package), "producer-emitter-package-binding")
     return result
+
+
+def emitted_removal_data(stdout, stderr, returncode, package, descriptor, signed, expected_descriptor):
+    """Actual closed Remove emitter result, never native-signature authority by itself."""
+    need(type(returncode) is int and returncode == 0 and type(stdout) is bytes and 0 < len(stdout) <= 512
+         and stdout.endswith(b"\n") and type(stderr) is bytes and not stderr, "remove-emitter-original")
+    result = maintenance_json(stdout, 512)
+    maintenance_map(result, ("schemaVersion", "kind", "packageSha256", "descriptorSha256", "signatureSha256",
+                             "descriptorBytes", "signatureBytes"), "remove-emitter-summary")
+    need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1
+         and result["kind"] == "mrk-remove-producer-emitted"
+         and type(package) is bytes and 0 < len(package) <= MAX_BYTES
+         and type(descriptor) is bytes and 0 < len(descriptor) <= REMOVE_DESCRIPTOR_BYTES
+         and type(expected_descriptor) is bytes and descriptor == expected_descriptor
+         and type(signed) is bytes and 0 < len(signed) <= PRODUCER_SIGNATURE_BYTES
+         and type(result["descriptorBytes"]) is int and result["descriptorBytes"] == len(descriptor)
+         and type(result["signatureBytes"]) is int and result["signatureBytes"] == len(signed)
+         and (result["packageSha256"], result["descriptorSha256"], result["signatureSha256"])
+             == (digest(package), digest(descriptor), digest(signed)), "remove-emitter-summary")
+    return result
+
+
+def removal_distribution_layout_data(names, expected, actual):
+    """The separate fixed three-file Remove carrier; no arbitrary filename selector."""
+    roster = {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}
+    need(type(names) in (list, tuple, set) and len(names) == 3 and set(names) == roster
+         and type(expected) is dict and set(expected) == roster and type(actual) is dict and set(actual) == roster,
+         "remove-distribution-three-file-roster")
+    for name, original in expected.items():
+        need(type(original) is bytes and actual[name] == (original, 0o444), "remove-distribution-original-byte-mode")
 
 
 def distribution_request_name(request_id):
@@ -3811,6 +4113,10 @@ def main(argv=None):
     app.add_argument("--android-helper", required=True, type=Path,
                      help="Already-signed fixed resident facade; requires the resident image and exact signed digests")
     app.add_argument("--expected-android-helper", required=True)
+    app.add_argument("--remover", required=True, type=Path)
+    app.add_argument("--expected-remover", required=True)
+    app.add_argument("--remover-cargo-messages", required=True, type=Path)
+    app.add_argument("--remover-cargo-target-dir", required=True, type=Path)
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--bundletool-archive", required=True, type=Path)
     app.add_argument("--aapt2-archive", required=True, type=Path)
@@ -3821,6 +4127,10 @@ def main(argv=None):
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
     preview.add_argument("--output", required=True, type=Path)
+    remove_preview = commands.add_parser("remove-preview")
+    remove_preview.add_argument("--work", required=True, type=Path)
+    remove_preview.add_argument("--expected-source", required=True)
+    remove_preview.add_argument("--output", required=True, type=Path)
     inputs = commands.add_parser("input")
     inputs.add_argument("--package-role", required=True, choices=PACKAGE_ROLES)
     inputs.add_argument("--app", required=True, type=Path)
@@ -3835,6 +4145,7 @@ def main(argv=None):
     inputs.add_argument("--expected-manifest", required=True)
     inputs.add_argument("--current-runtime", action="store_true",
                         help="Select the fixed current protocol and bootstrap roster; default retains the historical profile")
+    inputs.add_argument("--expected-remover", required=True)
     inputs.add_argument("--output", required=True, type=Path)
     scripts = commands.add_parser("scripts")
     scripts.add_argument("--input", required=True, type=Path)
@@ -3854,6 +4165,25 @@ def main(argv=None):
             package.add_argument("--output", required=True, type=Path)
         else:
             package.add_argument("--original-package", required=True, type=Path)
+    remove_scripts = commands.add_parser("remove-scripts")
+    remove_scripts.add_argument("--output", required=True, type=Path)
+    remove_scripts.add_argument("--remover", required=True, type=Path)
+    remove_scripts.add_argument("--expected-remover", required=True)
+    for name in ("prepare-remove-package", "audit-remove-package"):
+        package = commands.add_parser(name)
+        package.set_defaults(fixture=False, remove=True)
+        package.add_argument("--expected-remover", required=True)
+        package.add_argument("--scripts", required=True, type=Path)
+        package.add_argument("--package", required=True, type=Path)
+        if name == "prepare-remove-package":
+            package.add_argument("--output", required=True, type=Path)
+        else:
+            package.add_argument("--original-package", required=True, type=Path)
+    remove_input = commands.add_parser("remove-input")
+    for name in ("installed-producer", "installed-signature", "inventory", "remover", "package", "output"):
+        remove_input.add_argument("--" + name, required=True, type=Path)
+    remove_input.add_argument("--expected-source", required=True)
+    remove_input.add_argument("--expected-manifest", required=True)
     for name in ("observe-installation", "observe-installer-fixture"):
         observation = commands.add_parser(name)
         observation.add_argument("--input", required=True, type=Path)
@@ -3896,9 +4226,11 @@ def main(argv=None):
         return status
     action = {"packaging-selection": packaging_selection_command, "runtime-signing-selection": runtime_signing_selection_command,
               "project-signed-python": project_signed_python_command, "describe-runtime": runtime_command, "runtime": runtime_command,
-              "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command,
+              "describe-current-runtime": current_runtime_command, "current-runtime": current_runtime_command, "app": app_command, "preview": preview_command, "remove-preview": remove_preview_command,
               "input": input_command, "android-support": android_support_command, "scripts": scripts_command, "package-format-input": package_format_input_command,
               "prepare-package": prepare_package_command, "audit-package": audit_command,
+              "remove-scripts": remove_scripts_command, "remove-input": remove_input_command,
+              "prepare-remove-package": prepare_package_command, "audit-remove-package": audit_command,
               "check-installer-result-absent": installer_result_absent_command,
               "observe-installation": observation_command, "observe-installer-fixture": fixture_observation_command}[args.command]
     try:

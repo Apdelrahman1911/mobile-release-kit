@@ -69,10 +69,11 @@ finally:
 if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
-REMOVAL_INTEGRATION_SELECTED = True  # Fixed reviewed SOURCE selection, never runtime input.
+REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
+REMOVAL_PARENT_SELECTED = True  # One original/two changed Parent groups; fixed SOURCE only.
 OWNER_DIAGNOSTIC_ROLES = (
     "removal-native-rust-tests", "removal-app-rust-tests",
-    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests",
+    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -99,7 +100,7 @@ OWNER_DIAGNOSTIC_ROLES = (
 
 OWNER_DIAGNOSTIC_PHASES = (
     "removal-native-rust-tests", "removal-app-rust-tests",
-    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests",
+    "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -412,6 +413,7 @@ summary = {
     "registrationReservation": None, "registrationReservationQualified": False, "registrationFailure": None,
     "removalData": None, "removalDataQualified": False, "removalDataDiagnostic": None,
     "removalIntegrationData": None, "removalIntegrationDataQualified": False, "removalIntegrationDataDiagnostic": None,
+    "removalParentData": None, "removalParentDataQualified": False, "removalParentDataDiagnostic": None,
     "failure": "owner-result-missing-or-refused", "accepted": False,
     "syntheticIdentity": True, "productionIdentityQualified": False,
     "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -513,7 +515,8 @@ try:
         # An unfinished/unknown phase can never qualify native acceptance.
         installer_context = context_record
     service_layout = None
-    selected_roles = (fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
+    selected_roles = (fixture.PARENT_ROLES if REMOVAL_PARENT_SELECTED else
+                      fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
                       fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES)
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
     fixture.need(layout_record["selected"] is False and layout_record["started"] is False
@@ -656,7 +659,7 @@ try:
     diagnostic_captured = False
     registration = None
     registration_last = None
-    if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED:
+    if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED:
         try:
             registration = fixture.registration_reservation_result(result, source, rows)
             registration_last = fixture.registration_publication_tick(
@@ -710,6 +713,23 @@ try:
             and not result["cleanupErrors"]):
         integration_diagnostic = fixture.installer_worker_diagnostic_data(
             failed_graphs[0]["removalDataDiagnostic"], failed_graphs[0], rows, removal_role=failed_graphs[0]["role"])
+    parent_data = None
+    parent_last = None
+    if outcome == "success" and REMOVAL_PARENT_SELECTED:
+        try:
+            parent_data = fixture.removal_parent_data_result(result, source, rows)
+            parent_last = fixture.registration_publication_tick(
+                parent_data, fixture.decimal(parent_data["clock"]["lastNs"]))
+        except BaseException:
+            parent_data = None
+    parent_qualified = parent_data is not None
+    parent_diagnostic = None
+    if (REMOVAL_PARENT_SELECTED and len(failed_graphs) == 1 and failed_graphs[0] is calls[-1]
+            and all(call["returned"] for call in calls)
+            and all(result[key] for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown"))
+            and not result["cleanupErrors"]):
+        parent_diagnostic = fixture.installer_worker_diagnostic_data(
+            failed_graphs[0]["removalDataDiagnostic"], failed_graphs[0], rows, removal_role=failed_graphs[0]["role"])
     context_completed = installer_context is not None and installer_context["completed"]
     known_pass = (
         outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
@@ -744,8 +764,9 @@ try:
         registrationReservation=registration, registrationReservationQualified=registration_qualified, registrationFailure=registration_failure,
         removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,
         removalIntegrationData=integration_data, removalIntegrationDataQualified=integration_qualified, removalIntegrationDataDiagnostic=integration_diagnostic,
+        removalParentData=parent_data, removalParentDataQualified=parent_qualified, removalParentDataDiagnostic=parent_diagnostic,
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
-        failure=None if (integration_qualified if REMOVAL_INTEGRATION_SELECTED else removal_qualified if REMOVAL_DATA_SELECTED else registration_qualified) else "native-step-or-owner-did-not-establish-acceptance")
+        failure=None if (parent_qualified if REMOVAL_PARENT_SELECTED else integration_qualified if REMOVAL_INTEGRATION_SELECTED else removal_qualified if REMOVAL_DATA_SELECTED else registration_qualified) else "native-step-or-owner-did-not-establish-acceptance")
     book.check()
 except BaseException:
     summary["accepted"] = False
@@ -758,6 +779,9 @@ except BaseException:
     summary['removalIntegrationData'] = None
     summary['removalIntegrationDataQualified'] = False
     summary['removalIntegrationDataDiagnostic'] = None
+    summary['removalParentData'] = None
+    summary['removalParentDataQualified'] = False
+    summary['removalParentDataDiagnostic'] = None
     summary["nativeRustTests"] = None
     summary["installerWorkerRustTests"] = None
     summary["installedReaderRustTests"] = None
@@ -786,6 +810,9 @@ finally:
         summary['removalIntegrationData'] = None
         summary['removalIntegrationDataQualified'] = False
         summary['removalIntegrationDataDiagnostic'] = None
+        summary['removalParentData'] = None
+        summary['removalParentDataQualified'] = False
+        summary['removalParentDataDiagnostic'] = None
         summary["nativeRustTests"] = None
         summary["installerWorkerRustTests"] = None
         summary["installedReaderRustTests"] = None
@@ -810,6 +837,8 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
+    if summary["removalParentDataQualified"]:
+        parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
     body = fixture.canonical(summary)
     fixture.need(len(body) <= 49152, "summary-output-bound")
     publisher.publish(work / "e2-workflow-result.json", body, 0o600)
@@ -820,6 +849,8 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
+    if summary["removalParentDataQualified"]:
+        parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
     output_path = Path(os.environ["GITHUB_OUTPUT"])
     fixture.need(output_path.parent == WORK_PARENT / "_runner_file_commands"
                  and re.fullmatch(r"set_output_[A-Za-z0-9-]+", output_path.name), "summary-step-output-route")
@@ -833,7 +864,8 @@ try:
                 + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n")
                 + (b"registration_qualified=true\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\n")
                 + (b"removal_data_qualified=true\n" if summary["removalDataQualified"] else b"removal_data_qualified=false\n")
-                + (b"removal_integration_data_qualified=true\n" if summary["removalIntegrationDataQualified"] else b"removal_integration_data_qualified=false\n"))
+                + (b"removal_integration_data_qualified=true\n" if summary["removalIntegrationDataQualified"] else b"removal_integration_data_qualified=false\n")
+                + (b"removal_parent_data_qualified=true\n" if summary["removalParentDataQualified"] else b"removal_parent_data_qualified=false\n"))
         fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
         os.fsync(fd)
         fixture.need(fixture.signature(os.fstat(fd)) == fixture.signature(os.stat(output_path, follow_symlinks=False)),
@@ -846,9 +878,11 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
+    if summary["removalParentDataQualified"]:
+        parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
 except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-print("Removal integration DATA compiled and selected tests completed; final Document and production-image qualification remain pending."
-      if summary["removalIntegrationDataQualified"] else "Removal integration DATA failed; retained summary is failure evidence only.")
+print("Parent-only DATA compiled and two selected groups completed; live removal and production-image qualification remain pending."
+      if summary["removalParentDataQualified"] else "Parent-only DATA failed; retained summary is failure evidence only.")
 PY_PUBLISH

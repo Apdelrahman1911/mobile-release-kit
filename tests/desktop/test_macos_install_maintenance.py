@@ -433,13 +433,13 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         examples = [row for row in cargo['example'] if row['name'] == 'macos_package_producer']
         self.assertEqual(examples, [{'name': 'macos_package_producer',
             'path': 'examples/macos_package_producer.rs', 'required-features': ['macos-package-producer'], 'bench': False}])
-        signer_guard = app_lib.split('#[cfg(all(feature = "macos-package-producer", any(', 1)[1].split('compile_error!', 1)[0]
+        signer_guard = app_lib.split('#[cfg(all(any(feature = "macos-package-producer", feature = "macos-remove-producer"), any(', 1)[1].split('compile_error!', 1)[0]
         for feature in ('desktop-shell', 'custom-protocol', 'development-runtime', 'ubuntu-runtime-publisher',
                         'windows-runtime-publisher', 'macos-installed-installer', 'macos-installed-installer-fixture',
                         'macos-android-registration-helper', 'macos-installed-resident-image',
                         'macos-installed-desktop-image', 'macos-installed-observation', 'windows-installed-observation'):
             self.assertIn('feature = "' + feature + '"', signer_guard)
-        self.assertIn('PACKAGE_PRODUCER_SIGNING_BUILD\n    == cfg!(feature = "macos-package-producer")', app_lib)
+        self.assertIn('PACKAGE_PRODUCER_SIGNING_BUILD\n    == cfg!(any(feature = "macos-package-producer", feature = "macos-remove-producer"))', app_lib)
         native_cargo = tomllib.loads((ROOT / 'desktop/native/macos-installed-native/Cargo.toml').read_text())
         self.assertEqual(native_cargo['features']['package-producer-signing'], [])
         self.assertNotIn('package-producer-signing', native_cargo['features']['default'])
@@ -466,6 +466,42 @@ class MacMaintenancePreparationTests(unittest.TestCase):
                       'MRK_MACOS_INSTALL_INVENTORY_SHA256'):
             self.assertIn('option_env!("' + field + '")', example)
         self.assertNotIn('mrk_install_producer_compile_only_', example)
+        remover = [row for row in cargo['bin'] if row['name'] == 'mrk-macos-remove']
+        self.assertEqual(remover, [{'name': 'mrk-macos-remove', 'path': 'src/bin/macos_install.rs',
+                                   'required-features': ['macos-installed-remover']}])
+        self.assertEqual(cargo['features']['macos-installed-remover'], [])
+        self.assertEqual(cargo['features']['macos-remove-producer'], ['mrk-macos-installed-native/package-producer-signing'])
+        self.assertNotIn('macos-remove-producer', cargo['features']['default'])
+        self.assertEqual([row for row in cargo['example'] if row['name'] == 'macos_remove_producer'], [{
+            'name': 'macos_remove_producer', 'path': 'examples/macos_remove_producer.rs',
+            'required-features': ['macos-remove-producer'], 'bench': False}])
+        remover_guard = app_lib.split('#[cfg(all(feature = "macos-installed-remover", any(', 1)[1].split('compile_error!', 1)[0]
+        for feature in ('macos-installed-installer', 'desktop-shell', 'macos-android-registration-helper',
+                        'macos-installed-observation', 'macos-package-producer', 'macos-remove-producer'):
+            self.assertIn('feature = "' + feature + '"', remover_guard)
+        common = (ROOT / 'desktop/src-tauri/examples/macos_producer_common/mod.rs').read_text()
+        removal = (ROOT / 'desktop/src-tauri/examples/macos_remove_producer.rs').read_text()
+        self.assertIn('#[path="macos_producer_common/mod.rs"]', example)
+        self.assertIn('#[path="macos_producer_common/mod.rs"]', removal)
+        self.assertEqual(common.count('struct Book {'), 1)
+        self.assertNotIn('struct Book {', example + removal)
+        self.assertIn('ORIGINAL_LIMIT:usize=80', common)
+        self.assertIn('READ_LIMIT:u64=2*1024*1024*1024', common)
+        self.assertIn('fn native_point(&self,point:ProducerCheckpoint)', common)
+        self.assertIn('if self.all().is_ok()', common)
+        self.assertNotIn('RefCell', common)
+        self.assertNotIn('try_clone', common + removal)
+        self.assertIn('current.inventory_sha256==inventory_hash', removal)
+        self.assertIn('Inventory::parse(&inventory_raw,runtime_manifest)', removal)
+        self.assertIn('paths::REMOVER_INVENTORY_PATH', removal)
+        self.assertIn('RemovalProgramVerifier::new()', removal)
+        self.assertIn('book.fd(input_root)?.as_fd(),book.fd(program)?.as_fd()', removal)
+        self.assertLess(removal.index('install_verifier.verify_and_close'), removal.index('RemovalData::parse_data'))
+        self.assertLess(removal.index('program_verifier.verify_and_close'), removal.index('signer.sign_and_close'))
+        self.assertLess(removal.index('verifier.verify_and_close(&descriptor'), removal.index('book.create(root,DESCRIPTOR_FILENAME'))
+        self.assertEqual(removal.count('book.roster('), 4)
+        self.assertNotIn('MRK_MACOS_INSTALL_INVENTORY_SHA256', removal)
+        self.assertIn('mrk-remove-producer-emitted', removal)
         guide = (ROOT / 'desktop/packaging/macos-maintenance-data.md').read_text()
         self.assertIn('B3 ordinary entry and result/export integration are mandatory', guide)
         self.assertIn('does not establish native acceptance', guide)

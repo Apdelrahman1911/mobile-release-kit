@@ -1002,6 +1002,7 @@ jobs:
         shell: bash
         env:
           npm_config_cache: ${{ steps.work.outputs.root }}/npm-cache
+          MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
         run: |
           set -euo pipefail
           set -o noclobber
@@ -1054,6 +1055,25 @@ jobs:
               stream.write("MRK_MACOS_OBSERVER_BINARY=" + str(binary) + "\n")
               stream.write("MRK_MACOS_OBSERVER_SHA256=" + h.hexdigest() + "\n")
           PY_BUILD
+          # Same24-minute app-build budget; no independent timeout entitlement.
+          # This current SOURCE role cannot embed its not-yet-created inventory.
+          set +e
+          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+            --locked --offline --release --jobs 1 --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
+            --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
+            > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"
+          remover_status=$?
+          printf '%s\n' "$remover_status" > "$MRK_MACOS_WORK/remover-build.status"
+          remover_status_saved=$?
+          set -e
+          if [[ "$remover_status" != 0 ]]; then
+            # Optional diagnostics cannot replace the original compiler status.
+            set +e
+            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\n' "$remover_status" >&2
+            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2
+            exit "$remover_status"
+          fi
+          [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
       - name: Assemble the instrumented observation app with SOURCE-selected signing
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 3
@@ -1071,6 +1091,14 @@ jobs:
           export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
+          # Current compiler-derived program, not an installer alias. The
+          # same fixed signing owner returns a digest only after known finality.
+          remover_result=$(MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-remover --target "$MRK_MACOS_TARGET")
+          [[ "$remover_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
+          MRK_MACOS_REMOVER_SHA256=${remover_result#sha256=}
+          printf 'MRK_MACOS_REMOVER_SHA256=%s\n' "$MRK_MACOS_REMOVER_SHA256" >> "$GITHUB_ENV"
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
           "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app \
             --target "$MRK_MACOS_TARGET" \
@@ -1078,6 +1106,10 @@ jobs:
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
             --expected-vault-helper "$MRK_MACOS_VAULT_HELPER_SHA256" \
+            --remover "$MRK_MACOS_WORK/remover-target/$MRK_MACOS_TARGET/release/mrk-macos-remove" \
+            --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+            --remover-cargo-messages "$MRK_MACOS_WORK/remover-build.jsonl" \
+            --remover-cargo-target-dir "$MRK_MACOS_WORK/remover-target" \
             --android-helper "$MRK_MACOS_WORK/mrk-android-register" \
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
@@ -1104,6 +1136,7 @@ jobs:
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-root-app --target "$MRK_MACOS_TARGET"
           "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py verify-after --target "$MRK_MACOS_TARGET"
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
+          /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-macos-remove"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"
           entry_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/app/Mobile Release Kit.app/Contents/MacOS/mrk-macos-entry")
@@ -1547,7 +1580,7 @@ jobs:
           # All compiler/Installer/original application calls returned; the
           # retained package, source/result records and synthetic fixtures are
           # verification evidence. Never delete a shared tool/dependency cache.
-          for path in "$CARGO_TARGET_DIR" "$MRK_MACOS_WORK/vault-helper-target" "$MRK_MACOS_WORK/npm-cache" "$GITHUB_WORKSPACE/desktop/node_modules" "$GITHUB_WORKSPACE/desktop/dist"; do
+          for path in "$CARGO_TARGET_DIR" "$MRK_MACOS_WORK/vault-helper-target" "$MRK_MACOS_WORK/remover-target" "$MRK_MACOS_WORK/npm-cache" "$GITHUB_WORKSPACE/desktop/node_modules" "$GITHUB_WORKSPACE/desktop/dist"; do
             [[ -d "$path" && ! -L "$path" && -O "$path" ]] || exit 1
             /bin/rm -rf -- "$path"
           done
@@ -1722,6 +1755,10 @@ jobs:
             ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json
             ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json
             ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json
+            ${{ steps.work.outputs.root }}/remover-build.jsonl
+            ${{ steps.work.outputs.root }}/remover-build.stderr
+            ${{ steps.work.outputs.root }}/remover-build.status
+            ${{ steps.work.outputs.root }}/android-helper-sign-remover.json
             ${{ steps.work.outputs.root }}/app-result.json
             ${{ steps.work.outputs.root }}/input-result.json
             ${{ steps.work.outputs.root }}/scripts-result.json

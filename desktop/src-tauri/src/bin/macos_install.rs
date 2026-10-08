@@ -1468,6 +1468,7 @@ mod installer {
         pub(super) fn observe_removal(book: &mut Install, source: &worker::RemovalAdmission) -> Result<RemovalObserved> {
             let selected=source.current_selection(book)?.clone();
             source.reservation_post(book)?;
+            source.existing_maintenance_post(book)?;
             let root=source.root_original();
             let versions=book.open(Some(root),"versions",true)?;
             book.protected(versions,true,Some(0o755))?;
@@ -1496,6 +1497,64 @@ mod installer {
             source.reservation_post(book)?;
             let value=RemovalObserved { inner:observed,inventory_original,record_original,record_bytes };
             value.post(book)?; Ok(value)
+        }
+        // Consumes the old observation, not a second overlapping 16MiB
+        // allowance. Reuse its inventory/record/versions originals; only the
+        // small current-state raw anchor overlaps the complete fresh walker.
+        pub(super) fn reobserve_removal_exclusive(book:&mut Install,source:&worker::RemovalAdmission,
+            exclusion:&worker::RemovalExclusion,old:RemovalObserved)->Result<RemovalObserved> {
+            exclusion.post(book,source)?; old.post(book)?;
+            let RemovalObserved { inner,inventory_original,record_original,record_bytes }=old;
+            let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls }=inner;
+            check(action==ActionData::SamePackageNoop && intent.is_none() && intent_original.is_none(),"removal-current-only")?;
+            let history=history.ok_or("removal-current-history")?;
+            let controls=controls.ok_or("removal-current-controls")?;
+            let redundant=[controls.originals[0],controls.originals[1],old_app.ok_or("removal-current-app")?,
+                old_release.ok_or("removal-current-release")?];
+            let anchors=[prepared.input,prepared.destination,prepared.versions,inventory_original,record_original,
+                history.state_original,book.originals[inventory_original].parent.ok_or("removal-inventory-parent")?,
+                book.originals[record_original].parent.ok_or("removal-record-parent")?,
+                book.registration.participant.ok_or("removal-original-reservation")?];
+            for (position,index) in redundant.iter().copied().enumerate() {
+                check(!anchors.contains(&index) && !source.retained_source_index(index)
+                    && !redundant[..position].contains(&index),"removal-observation-alias")?;
+                let original=book.originals.get(index).ok_or("removal-observation-original")?;
+                check(original.role==Role::Reader && original.state==State::Owned,"removal-observation-original")?;
+            }
+            // All remaining originals stay in the same Book if any known
+            // close or clock POST fails; no rollback/adoption by index.
+            for index in redundant { book.forward_close(index,"removal-observation-close")?; }
+            drop(controls);
+            let History { current,originals,state_original,state_bytes,bytes:_ }=history;
+            drop(current); drop(originals);
+            // Discard parsed history before calling the complete walker.
+            book.removal_control_reserved=worker::removal_reobserve_budget_data(book.removal_control_reserved,state_bytes.capacity())?;
+            exclusion.post(book,source)?;
+            let mut observed=observe_admitted(book,prepared,selected,None)?;
+            check(removal_current_only_data(observed.action,[observed.old_app.is_some(),observed.old_release.is_some()],
+                observed.intent.is_some(),observed.controls.is_some(),observed.history.as_ref().is_some_and(|history|
+                    history.current.state.current_data().release_data()==observed.selected.current_data())),"removal-current-only")?;
+            observed.incoming_controls(book,source.installed_bytes(),source.installed_signature_bytes())?;
+            let current=observed.history.as_mut().ok_or("removal-current-history")?;
+            held_bytes(book,state_original,&state_bytes)?;
+            check(current.state_original!=state_original && current.state_bytes==state_bytes
+                && book.identity(current.state_original)?==book.identity(state_original)?,"removal-state-changed")?;
+            book.forward_close(current.state_original,"removal-state-duplicate-close")?;
+            current.state_original=state_original;
+            current.state_bytes=state_bytes;
+            // Same original raw installation record must still correspond to
+            // the freshly audited current state, not merely the same release.
+            let binding=observed.selected.current_data().binding_data();
+            let release=book.originals[record_original].parent.ok_or("removal-record-parent")?;
+            let expected=installation_record::Expected { kind:installation_record::Kind::Ordinary,
+                source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
+                install_root:book.recorded_directory(observed.prepared.destination)?,release_directory:book.recorded_directory(release)? };
+            let record=installation_record::Record::parse_for_release_data(&record_bytes,&observed.prepared.inventory_bytes,
+                &expected,observed.selected.current_data())?;
+            check(observed.history.as_ref().is_some_and(|h|h.current.state.current_data().instance_data()==record.instance()),
+                "removal-current-record")?;
+            let value=RemovalObserved { inner:observed,inventory_original,record_original,record_bytes };
+            value.post(book)?; exclusion.post(book,source)?; Ok(value)
         }
         fn observe_admitted(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
             pending_intent: Option<&str>) -> Result<Observed> {
@@ -3051,6 +3110,7 @@ mod installer {
             removal: Option<mobile_release_desktop::macos_remove_producer::RemovalData>,
             inspected: bool, first: Option<&'static str>,
             code_sha256: Option<[[u8;32];3]>,
+            existing_maintenance: Option<usize>,
         }
         impl RemovalAdmission {
             fn new(book: &mut Install, completed_path: &str) -> Result<Self> {
@@ -3105,7 +3165,7 @@ mod installer {
                 originals.post(book)?;
                 Ok(Self { originals,signature:ProducerVerifier::new(),entry:CurrentProductVerifier::new(CurrentProductRole::EntryApp),
                     payload:CurrentProductVerifier::new(CurrentProductRole::PayloadApp),remove:RemovalProducerVerifier::new(),
-                    program:RemovalProgramVerifier::new(),descriptor:None,removal:None,inspected:false,first:None,code_sha256:None })
+                    program:RemovalProgramVerifier::new(),descriptor:None,removal:None,inspected:false,first:None,code_sha256:None,existing_maintenance:None })
             }
             fn inspect(&mut self, book: &Install) -> Result<()> {
                 use native::install_producer::{SignatureResult,CurrentProductResult,RemovalProgramResult};
@@ -3168,14 +3228,53 @@ mod installer {
                 self.originals.post(book)?;
                 self.descriptor.as_ref().map(|data|data.release_set_data()).ok_or("removal-current-descriptor")
             }
-            pub(super) fn reservation_post(&self, book: &Install) -> Result<()> {
+            fn reservation_held_post(&self, book: &Install) -> Result<()> {
                 self.current_selection(book)?;
-                check(!book.gate.entered && !book.worker_stderr_is_gate && book.registration.entered
+                check(!book.worker_stderr_is_gate && book.registration.entered
                     && book.registration.parent==Some(self.root_original()) && book.registration.verified
                     && book.registration.creation=="existing-not-modified" && book.registration.lock_attempted
                     && book.registration.exclusive_acquired && !book.registration.closed_under_maintenance,
                     "removal-original-reservation")?;
                 book.registration_protected(book.registration.participant.ok_or("removal-original-reservation")?)
+            }
+            pub(super) fn reservation_post(&self, book: &Install) -> Result<()> {
+                self.reservation_held_post(book)?;
+                check(!book.gate.entered && !book.gate.lock_attempted && !book.gate.exclusive_acquired,
+                    "removal-before-maintenance")
+            }
+            // Existing M is admitted while R remains held, BEFORE the first
+            // full observation. No mkdir/create/repair/ordinary gate helper.
+            fn admit_existing_maintenance(&mut self, book: &mut Install) -> Result<()> {
+                self.reservation_post(book)?;
+                check(self.existing_maintenance.is_none() && book.gate.participant.is_none()
+                    && book.gate.parent.is_none() && book.gate.writer.is_none(), "removal-maintenance-once")?;
+                book.gate.parent=Some(self.root_original());
+                book.gate.creation="existing-not-modified";
+                let reader=book.open_role(Some(self.root_original()),paths::MAINTENANCE_GATE_NAME,false,Role::GateParticipant)?;
+                self.existing_maintenance=Some(reader); // Actual custody precedes fallible POST.
+                book.gate_protected(reader)?;
+                maintenance::held_bytes(book,reader,paths::MAINTENANCE_GATE_BYTES)?;
+                book.gate.verified=true;
+                self.existing_maintenance_post(book)?;
+                self.reservation_post(book)
+            }
+            pub(super) fn existing_maintenance_post(&self, book: &Install) -> Result<()> {
+                self.reservation_held_post(book)?;
+                let reader=self.existing_maintenance.ok_or("removal-existing-maintenance")?;
+                let original=book.originals.get(reader).ok_or("removal-existing-maintenance")?;
+                check(book.gate.participant==Some(reader) && book.gate.parent==Some(self.root_original())
+                    && book.gate.creation=="existing-not-modified" && book.gate.writer.is_none()
+                    && book.gate.verified && original.state==State::Owned && original.role==Role::GateParticipant
+                    && original.parent==Some(self.root_original()) && original.name==paths::MAINTENANCE_GATE_NAME,
+                    "removal-existing-maintenance")?;
+                check(fcntl::fcntl(book.fd(reader)?,fcntl::FcntlArg::F_GETFL).map_err(|_|"removal-maintenance-flags")?
+                    & OFlag::O_ACCMODE.bits()==OFlag::O_RDONLY.bits(),"removal-maintenance-readonly")?;
+                book.gate_protected(reader)?;
+                maintenance::held_bytes(book,reader,paths::MAINTENANCE_GATE_BYTES)
+            }
+            pub(super) fn retained_source_index(&self,index:usize)->bool {
+                self.originals.code.contains(&index) || self.originals.installed_pair.contains(&index)
+                    || self.existing_maintenance==Some(index)
             }
             fn bind_inventory(&mut self, book: &Install, observed: &maintenance::RemovalObserved) -> Result<()> {
                 check(self.code_sha256.is_none(),"removal-inventory-once")?;
@@ -3197,6 +3296,31 @@ mod installer {
                 self.reservation_post(book)?; observed.post(book)?;
                 self.code_sha256=Some(digests); Ok(())
             }
+        }
+        // Private non-Clone phase capability. PeerCompletion comes only from
+        // the original native conversation/exit/retirement, not parsed DATA.
+        pub(super) struct RemovalExclusion {
+            peer: RemovalPeerCompletion, reservation: usize, maintenance: usize,
+        }
+        impl RemovalExclusion {
+            pub(super) fn post(&self,book:&Install,source:&RemovalAdmission)->Result<()> {
+                source.existing_maintenance_post(book)?;
+                let retired=self.peer.retired();
+                check(retired.role()==native::removal_coordinator::RemovalPeerRole::Parent
+                    && retired.original_peer_exit_observed() && retired.peer_pid_data()>0
+                    && book.registration.participant==Some(self.reservation)
+                    && source.existing_maintenance==Some(self.maintenance)
+                    && book.gate.entered && book.gate.lock_attempted && book.gate.exclusive_acquired,
+                    "removal-exclusive-originals")?;
+                // The unique private constructor below bound the exact request
+                // before M; shared clock and current source remain live checks.
+                book.clock()
+            }
+        }
+        pub(super) fn removal_reobserve_budget_data(reserved:u64,retained_capacity:usize)->Result<u64> {
+            check(retained_capacity>0 && retained_capacity<=transaction::STATE_LIMIT,"removal-state-overlap")?;
+            reserved.checked_add(retained_capacity as u64).filter(|n|*n<=16*1024*1024)
+                .ok_or("removal-control-bound")
         }
         // Held by the same Parent before publication. All fields come from
         // actual admitted originals and its one original deadline, never from
@@ -3494,6 +3618,581 @@ mod installer {
             else if published || writer_exit == Some(20) { 20 }
             else { 1 }
         }
+        use native::removal_coordinator as removal_peer_native;
+        use mobile_release_desktop::macos_remove_protocol as removal_protocol;
+
+        // Only this synchronous Parent scope borrows the original20. Nothing
+        // here can create a verifier, R participant, app Completion or M lease.
+        // The private returned native proof is not Clone/Serialize/Deserialize.
+        struct RemovalPeerCompletion {
+            retired: removal_peer_native::RemovalPeerRetired,
+            preparation: removal_protocol::PreparationData,
+            app_nonce: [u8;16],
+        }
+        impl RemovalPeerCompletion {
+            fn retired(&self)->&removal_peer_native::RemovalPeerRetired { &self.retired }
+            fn preparation_data(&self)->removal_protocol::PreparationData { self.preparation }
+            fn app_nonce_data(&self)->[u8;16] { self.app_nonce }
+        }
+
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum RemovalPeerOwnPhase { Unbound, Binding, Bound, Mode, Published }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        struct RemovalPeerOwnEffects {
+            directory: removal_peer_native::RemovalOriginalData,
+            socket: Option<removal_peer_native::RemovalOriginalData>,
+            phase: RemovalPeerOwnPhase,
+        }
+        fn removal_peer_directory_data(value:removal_peer_native::RemovalOriginalData)->bool {
+            value.inode!=0 && value.links!=0 && value.mode==0o40755
+                && value.uid==0 && value.gid==0 && value.flags==0
+                && value.modified_nanoseconds<1_000_000_000 && value.changed_nanoseconds<1_000_000_000
+        }
+        fn removal_peer_bind_data(before:removal_peer_native::RemovalOriginalData,
+            after:removal_peer_native::RemovalOriginalData,socket:removal_peer_native::RemovalOriginalData)->bool {
+            removal_peer_directory_data(before) && removal_peer_directory_data(after)
+                && (before.device,before.inode,before.mode,before.uid,before.gid,before.flags)
+                    ==(after.device,after.inode,after.mode,after.uid,after.gid,after.flags)
+                && socket.device==after.device && socket.inode!=0 && socket.links==1
+                && socket.mode&0o170000==0o140000 && socket.mode&0o7000==0
+                && socket.uid==0 && socket.gid==0 && socket.flags==0
+                && socket.modified_nanoseconds<1_000_000_000 && socket.changed_nanoseconds<1_000_000_000
+        }
+        fn removal_peer_mode_data(before:removal_peer_native::RemovalOriginalData,
+            after:removal_peer_native::RemovalOriginalData)->bool {
+            after.mode==0o140666 && after.modified_nanoseconds<1_000_000_000
+                && after.changed_nanoseconds<1_000_000_000
+                && after==(removal_peer_native::RemovalOriginalData {
+                    mode:0o140666,changed_seconds:after.changed_seconds,
+                    changed_nanoseconds:after.changed_nanoseconds,..before })
+        }
+        impl RemovalPeerOwnEffects {
+            fn new_data(directory:removal_peer_native::RemovalOriginalData)->Result<Self> {
+                check(removal_peer_directory_data(directory),"removal-peer-directory-shape")?;
+                Ok(Self { directory,socket:None,phase:RemovalPeerOwnPhase::Unbound })
+            }
+            // Only the actual typed callbacks call this reducer. Returned facts
+            // are recorded before a later clock veto, but are NOT committed to
+            // Book or accepted as current until full held/named POST succeeds.
+            fn transition_data(&mut self,phase:removal_peer_native::RemovalNativePhase,slot:Option<u8>,before:bool,
+                directory:removal_peer_native::RemovalOriginalData,socket:removal_peer_native::RemovalOriginalData)->Result<()> {
+                use removal_peer_native::RemovalNativePhase::{Bind,SocketMode};
+                check(slot==Some(0),"removal-peer-own-slot")?;
+                match (phase,before,self.phase) {
+                    (Bind,true,RemovalPeerOwnPhase::Unbound) => {
+                        check(directory==self.directory && socket==removal_peer_native::RemovalOriginalData::default(),
+                            "removal-peer-bind-before")?;
+                        self.phase=RemovalPeerOwnPhase::Binding;
+                    },
+                    (Bind,false,RemovalPeerOwnPhase::Binding) => {
+                        check(self.socket.is_none() && removal_peer_bind_data(self.directory,directory,socket),
+                            "removal-peer-bind-return")?;
+                        self.directory=directory;self.socket=Some(socket);self.phase=RemovalPeerOwnPhase::Bound;
+                    },
+                    (SocketMode,true,RemovalPeerOwnPhase::Bound) => {
+                        check(directory==self.directory && self.socket==Some(socket),"removal-peer-mode-before")?;
+                        self.phase=RemovalPeerOwnPhase::Mode;
+                    },
+                    (SocketMode,false,RemovalPeerOwnPhase::Mode) => {
+                        check(directory==self.directory && self.socket.is_some_and(|old|removal_peer_mode_data(old,socket)),
+                            "removal-peer-mode-return")?;
+                        self.socket=Some(socket);self.phase=RemovalPeerOwnPhase::Published;
+                    },
+                    _=>return Err("removal-peer-own-sequence"),
+                }
+                Ok(())
+            }
+        }
+        fn removal_peer_stat_data(value:&FileStat)->Result<removal_peer_native::RemovalOriginalData> {
+            check(value.st_size>=0 && (0..1_000_000_000).contains(&value.st_mtime_nsec)
+                && (0..1_000_000_000).contains(&value.st_ctime_nsec),"removal-peer-stat-shape")?;
+            Ok(removal_peer_native::RemovalOriginalData { device:value.st_dev as u64,inode:value.st_ino,
+                links:u64::from(value.st_nlink),size:value.st_size as u64,
+                modified_seconds:value.st_mtime,changed_seconds:value.st_ctime,
+                mode:u32::from(value.st_mode),uid:value.st_uid,gid:value.st_gid,flags:value.st_flags,
+                modified_nanoseconds:value.st_mtime_nsec as u32,changed_nanoseconds:value.st_ctime_nsec as u32 })
+        }
+        fn removal_peer_cleanup_data(phase:removal_peer_native::RemovalPeerPhase)->bool {
+            use removal_peer_native::{RemovalPeerPhase as Phase,RemovalPeerOperation as Operation};
+            matches!(phase,Phase::Call(Operation::WaitExit|Operation::Close)|Phase::Native{cleanup:true,..}|Phase::Retire)
+        }
+        fn removal_peer_begin_data(index:u32,custody:removal_peer_native::RemovalPeerCustody)->bool {
+            custody.role==removal_peer_native::RemovalPeerRole::Parent && index<4
+                && custody.frame_index==index && custody.frame_pending && custody.frames_bytes==0
+                && !custody.failed && !custody.unknown && !custody.native_closed
+        }
+        fn removal_peer_complete_data(index:u32,custody:removal_peer_native::RemovalPeerCustody)->bool {
+            custody.role==removal_peer_native::RemovalPeerRole::Parent && index<4
+                && custody.frame_index==index+1 && !custody.frame_pending
+                && (5..=removal_protocol::FRAME_LIMIT as u32).contains(&custody.frames_bytes)
+        }
+        fn removal_peer_known_retired_data(settled:bool,custody:removal_peer_native::RemovalPeerCustody)->bool {
+            use native::android_service_management::CellCustody;
+            // Known absence/consumption only, deliberately not a success test.
+            settled && !custody.in_call && !custody.in_gate
+                && matches!(custody.cell,CellCustody::Absent|CellCustody::Consumed)
+                && custody.fds.iter().chain(&custody.references).all(|state|matches!(*state,0|4))
+        }
+        fn removal_peer_roster_entry_data(seen:u8,inode:u64,kind:u8,name:&[u8],request_inode:u64,
+            socket:Option<removal_peer_native::RemovalOriginalData>)->Result<u8> {
+            check(seen<=3 && inode!=0,"removal-peer-census-shape")?;
+            let bit=match name {
+                b"request.json" if kind==nix::libc::DT_REG && inode==request_inode =>1,
+                b"s" if kind==nix::libc::DT_SOCK && socket.is_some_and(|socket|socket.inode==inode) =>2,
+                _=>return Err("removal-peer-census-entry"),
+            };
+            check(seen&bit==0,"removal-peer-census-duplicate")?;Ok(seen|bit)
+        }
+        struct RemovalPeerLocal {
+            effects:RemovalPeerOwnEffects,
+            first:Option<&'static str>, native_first:Option<(u32,u64)>,
+            last:Option<removal_peer_native::RemovalPeerCustody>,
+            hint_attempted:bool,ack_complete:bool,exit_started:bool,
+        }
+        impl RemovalPeerLocal {
+            fn new(effects:RemovalPeerOwnEffects)->Self { Self { effects,first:None,native_first:None,last:None,
+                hint_attempted:false,ack_complete:false,exit_started:false } }
+            fn note(&mut self,error:&'static str) { self.first.get_or_insert(error); }
+            fn observe(&mut self,custody:removal_peer_native::RemovalPeerCustody) {
+                // Preserve the actual native first code/raw sample BEFORE a
+                // subsequent Parent clock/source/formatting refusal. Do not
+                // turn an Instant into historical MONOTONIC provenance.
+                if custody.native_first_code!=0 {
+                    let returned=(custody.native_first_code,custody.native_first_failure);
+                    if self.native_first.is_some_and(|old|old!=returned) { self.note("removal-peer-first-drift"); }
+                    self.native_first.get_or_insert(returned);
+                }
+                if custody.unknown { self.note("removal-peer-native-unknown"); }
+                else if custody.failed { self.note("removal-peer-native-refused"); }
+                if custody.role!=removal_peer_native::RemovalPeerRole::Parent { self.note("removal-peer-role"); }
+                // Latch actual final bytes even when the enclosing POST has
+                // just failed. No intervening Recheck/Copy/Close may query a
+                // departed guest before the SAME original WaitExit operation.
+                if removal_peer_complete_data(3,custody) { self.ack_complete=true; }
+                self.last=Some(custody);
+            }
+            fn before_call_data(&mut self,operation:removal_peer_native::RemovalPeerOperation)->Result<()> {
+                use removal_peer_native::RemovalPeerOperation as Operation;
+                check(!self.ack_complete || operation==Operation::WaitExit
+                    || self.exit_started && operation==Operation::Close,"removal-peer-ack-next-exit")?;
+                if operation==Operation::WaitExit {
+                    check(self.ack_complete,"removal-peer-exit-before-ack")?;
+                    self.exit_started=true;
+                }
+                Ok(())
+            }
+        }
+        struct RemovalPeerContext<'a> {
+            book:&'a Install,source:&'a RemovalAdmission,observed:&'a maintenance::RemovalObserved,
+            request:&'a RemovalRequest,publication:&'a RemovalPublication,
+            originals:[usize;20],directory:usize,reader:usize,
+        }
+        impl<'a> RemovalPeerContext<'a> {
+            fn new(book:&'a Install,source:&'a RemovalAdmission,observed:&'a maintenance::RemovalObserved,
+                request:&'a RemovalRequest,publication:&'a RemovalPublication)->Result<(Self,RemovalPeerOwnEffects)> {
+                request.post(book,source,observed)?;
+                check(publication.attempted && publication.sealed && publication.file_persisted
+                    && publication.directory_persisted && publication.writer_closed && publication.readback
+                    && publication.written==request.encoded.len(),"removal-peer-publication-original")?;
+                let infrastructure=publication.infrastructure.ok_or("removal-peer-infrastructure")?;
+                let directory=publication.directory.ok_or("removal-peer-directory")?;
+                let reader=publication.reader.ok_or("removal-peer-reader")?;
+                let writer=publication.writer.ok_or("removal-peer-writer")?;
+                check(book.originals.get(writer).is_some_and(|original|original.fd.is_none() && original.state==State::Closed),
+                    "removal-peer-writer-not-closed")?;
+                check(book.originals[directory].parent==Some(infrastructure)
+                    && book.originals[directory].name.len()==34
+                    && book.originals[directory].name.strip_prefix("r-")==Some(request.data.binding_data().fields_data().request_id)
+                    && book.originals[infrastructure].parent==Some(source.originals.code[2])
+                    && book.originals[infrastructure].name==REMOVAL_REQUESTS_NAME
+                    && book.originals[reader].parent==Some(directory) && book.originals[reader].name=="request.json",
+                    "removal-peer-fixed-namespace")?;
+                let mut originals=[0usize;20];originals[..15].copy_from_slice(&source.originals.code);
+                originals[15..17].copy_from_slice(&source.originals.installed_pair);
+                originals[17]=infrastructure;originals[18]=directory;originals[19]=reader;
+                check(originals.iter().enumerate().all(|(i,n)|!originals[..i].contains(n)),"removal-peer-original-slots")?;
+                let actual=stat::fstat(book.fd(directory)?).map_err(|_|"removal-peer-directory-stat")?;
+                check(Identity::of(&actual)==book.identity(directory)?,"removal-peer-directory-before")?;
+                let effects=RemovalPeerOwnEffects::new_data(removal_peer_stat_data(&actual)?)?;
+                let context=Self {book,source,observed,request,publication,originals,directory,reader};
+                context.post(&effects)?;context.storage(None,None)?;
+                Ok((context,effects))
+            }
+            fn borrowed(&self)->Result<[BorrowedFd<'a>;20]> {
+                // Array of borrows, not duplicated OFDs or a second ledger.
+                let mut values=[self.book.fd(self.originals[0])?.as_fd();20];
+                for (slot,n) in self.originals.iter().enumerate() { values[slot]=self.book.fd(*n)?.as_fd(); }
+                Ok(values)
+            }
+            fn native_originals(&self)->Result<removal_peer_native::RemovalSourceOriginals<'a>> {
+                removal_peer_native::RemovalSourceOriginals::new(&self.source.signature,&self.source.entry,&self.source.payload,
+                    &self.source.remove,Some(&self.source.program),self.borrowed()?,
+                    [&self.source.originals.installed_raw[0],&self.source.originals.installed_raw[1],
+                        self.source.originals.input.descriptor_data(),self.source.originals.input.signature_data()],
+                    self.source.code_sha256.ok_or("removal-peer-code-binding")?,self.request.digest)
+                    .ok_or("removal-peer-verifier-originals")
+            }
+            fn storage(&self,transcript:Option<&removal_protocol::TranscriptData>,frame:Option<&removal_protocol::FrameData>)->Result<()> {
+                // Same precharged256KiB sub-reservation of the Parent16MiB.
+                // 96KiB includes the 64KiB closed-directory block, bounded
+                // 4KiB-frame serde/copy temporaries and ordinary positional
+                // source-read stack overlap. Native supplied storage is already
+                // charged by RemovalAdmission::new, not a second allowance.
+                let transcript=transcript.map_or(Some(0),|value|value.owned_bytes_data()).ok_or("removal-peer-storage")?;
+                let frame=frame.map_or(Some(0),|value|value.owned_bytes_data()).ok_or("removal-peer-storage")?;
+                let total=self.request.retained_bytes()?.checked_add(96*1024)
+                    .and_then(|n|n.checked_add(removal_protocol::FRAME_LIMIT))
+                    .and_then(|n|n.checked_add(std::mem::size_of::<Self>()+std::mem::size_of::<RemovalPublication>()
+                        +2*std::mem::size_of::<RemovalPeerLocal>()+std::mem::size_of::<RemovalPeerScope>()
+                        +std::mem::size_of::<RemovalPeerCompletion>()+20*std::mem::size_of::<BorrowedFd<'_>>()))
+                    .and_then(|n|n.checked_add(transcript)).and_then(|n|n.checked_add(frame)).ok_or("removal-peer-storage")?;
+                check(total<=REMOVAL_REQUEST_RESERVE && self.book.removal_live_reserved==3
+                    && self.book.removal_control_reserved<=16*1024*1024
+                    && self.book.removal_control_reserved>=REMOVAL_REQUEST_RESERVE as u64,"removal-peer-storage")
+            }
+            fn directory_post(&self,effects:&RemovalPeerOwnEffects)->Result<Identity> {
+                let actual=stat::fstat(self.book.fd(self.directory)?).map_err(|_|"removal-peer-directory-stat")?;
+                let original=&self.book.originals[self.directory];
+                let named=self.book.named(original.parent,&original.name).map_err(|_|"removal-peer-directory-name")?;
+                check(removal_peer_stat_data(&actual)?==effects.directory && removal_peer_stat_data(&named)?==effects.directory,
+                    "removal-peer-directory-post")?;
+                self.book.protected(self.directory,true,Some(0o755))?;
+                native::no_xattrs(self.book.fd(self.directory)?.as_fd()).map_err(|_|"removal-peer-directory-attributes")?;
+                self.book.clock()?;Ok(Identity::of(&actual))
+            }
+            fn census(&self,effects:&RemovalPeerOwnEffects)->Result<()> {
+                self.book.clock()?;self.directory_post(effects)?;
+                check(unistd::lseek(self.book.fd(self.directory)?,0,unistd::Whence::SeekSet)
+                    .map_err(|_|"removal-peer-census-seek")?==0,"removal-peer-census-seek")?;
+                let mut block=[0u8;65536];let mut seen=0u8;
+                loop {
+                    self.book.clock()?;
+                    let used=native::directory_block(self.book.fd(self.directory)?.as_fd(),&mut block)
+                        .map_err(|_|"removal-peer-census-read")?;
+                    if used==0 { break; }
+                    check(used<=block.len(),"removal-peer-census-bound")?;
+                    let mut offset=0;
+                    while offset<used {
+                        check(used-offset>=11,"removal-peer-census-shape")?;
+                        let inode=u64::from_ne_bytes(block[offset..offset+8].try_into().map_err(|_|"removal-peer-census-shape")?);
+                        let kind=block[offset+8];let length=usize::from(u16::from_ne_bytes([block[offset+9],block[offset+10]]));
+                        let end=offset.checked_add(11+length).filter(|end|*end<=used).ok_or("removal-peer-census-shape")?;
+                        let name=&block[offset+11..end];offset=end;
+                        if name==b"." || name==b".." { continue; }
+                        seen=removal_peer_roster_entry_data(seen,inode,kind,name,self.book.identity(self.reader)?.ino,effects.socket)?;
+                    }
+                }
+                check(seen==if effects.socket.is_some(){3}else{1},"removal-peer-census-roster")?;
+                self.directory_post(effects)?;self.book.clock()
+            }
+            fn post(&self,effects:&RemovalPeerOwnEffects)->Result<()> {
+                self.request.post(self.book,self.source,self.observed)?;
+                // No global relaxed-name policy. Exactly the requestdir's
+                // original own-effect baseline is local while native borrows
+                // Book; every other still-owned original stays full-exact.
+                for (n,original) in self.book.originals.iter().enumerate() {
+                    if original.fd.is_some() && n!=self.directory { self.book.check_name(n,true)?; }
+                }
+                self.directory_post(effects)?;
+                let named=stat::fstatat(self.book.fd(self.directory)?,"s",AtFlags::AT_SYMLINK_NOFOLLOW);
+                match (effects.socket,named) {
+                    (None,Err(Errno::ENOENT))=>(),
+                    (Some(expected),Ok(actual))=>check(removal_peer_stat_data(&actual)?==expected,"removal-peer-socket-post")?,
+                    _=>return Err("removal-peer-socket-post"),
+                }
+                maintenance::held_bytes(self.book,self.reader,&self.request.encoded)?;
+                self.census(effects)?;self.book.clock()
+            }
+            fn checkpoint(&self,local:&std::cell::RefCell<RemovalPeerLocal>,point:removal_peer_native::RemovalPeerCheckpoint)
+                ->native::android_service_management::Decision {
+                use native::android_service_management::Decision;
+                use removal_peer_native::{RemovalPeerCheckpoint as Point,RemovalPeerPhase as Phase,RemovalNativePhase as NativePhase};
+                let (phase,before,custody)=match point {
+                    Point::Before{phase,custody}=>(phase,true,custody),
+                    Point::Returned{phase,custody,..}=>(phase,false,custody),
+                };
+                let Ok(mut ledger)=local.try_borrow_mut() else { return Decision::Unknown; };
+                ledger.observe(custody);
+                if let Phase::Native{phase:own @ (NativePhase::Bind|NativePhase::SocketMode),slot,..}=phase {
+                    if let Err(error)=ledger.effects.transition_data(own,slot,before,custody.request_directory,custody.socket_name) {
+                        ledger.note(error);
+                    }
+                }
+                let cleanup=removal_peer_cleanup_data(phase);let effects=ledger.effects;let first=ledger.first;
+                drop(ledger);
+                // Known consuming cleanup is permitted under the SAME hard
+                // endpoint after a positive failure, not under a new budget.
+                // It never clears first failure or turns None into a proof.
+                let result=if cleanup { self.book.shared_deadline().and_then(Deadline::check_total).map(|_|()) }
+                    else if let Some(error)=first { Err(error) } else { self.post(&effects) };
+                if let Err(error)=result {
+                    if let Ok(mut ledger)=local.try_borrow_mut() { ledger.note(error); }
+                    return if self.book.shared_deadline().is_ok_and(Deadline::is_unknown) { Decision::Unknown } else { Decision::Stop };
+                }
+                Decision::Proceed
+            }
+        }
+        struct RemovalPeerScope {
+            proof:Option<removal_peer_native::RemovalPeerRetired>,
+            preparation:Option<removal_protocol::PreparationData>,app_nonce:Option<[u8;16]>,
+            effects:RemovalPeerOwnEffects,first:Option<&'static str>,native_first:Option<(u32,u64)>,
+            custody:Option<removal_peer_native::RemovalPeerCustody>,settled:bool,
+        }
+        impl RemovalPeerScope {
+            fn into_completion(self,expected:&removal_peer_native::RemovalChallengeData)
+                ->Result<(RemovalPeerCompletion,RemovalPeerOwnEffects)> {
+                if let Some(error)=self.first { return Err(error); }
+                check(self.settled,"removal-peer-not-retired")?;
+                // This must be the actual nonClone return, not a bool built
+                // from EOF, transcript state, known absence or copied stats.
+                let retired=self.proof.ok_or("removal-peer-success-proof-missing")?;
+                let custody=self.custody.ok_or("removal-peer-custody-missing")?;
+                check(retired.role()==removal_peer_native::RemovalPeerRole::Parent
+                    && retired.binding_data()==expected && retired.original_peer_exit_observed()
+                    && retired.peer_pid_data()>1 && retired.peer_pid_data()==custody.peer_pid
+                    && !custody.failed && !custody.unknown && custody.native_closed && custody.actual_exit_observed
+                    && custody.cell==native::android_service_management::CellCustody::Consumed
+                    && custody.native_calls==custody.native_returns && removal_peer_complete_data(3,custody)
+                    && removal_peer_known_retired_data(true,custody),"removal-peer-private-proof-current")?;
+                let preparation=self.preparation.ok_or("removal-peer-preparation-missing")?;
+                let app_nonce=self.app_nonce.ok_or("removal-peer-nonce-missing")?;
+                check(app_nonce!=[0;16] && app_nonce!=expected.request_id && app_nonce!=expected.root_nonce
+                    && self.effects.phase==RemovalPeerOwnPhase::Published,"removal-peer-transcript-current")?;
+                Ok((RemovalPeerCompletion {retired,preparation,app_nonce},self.effects))
+            }
+        }
+        fn removal_peer_returned(local:&std::cell::RefCell<RemovalPeerLocal>,peer:&removal_peer_native::RemovalPeer<'_>,
+            progress:removal_peer_native::RemovalPeerProgress)->Result<removal_peer_native::RemovalPeerCustody> {
+            let custody=peer.custody();let mut ledger=local.borrow_mut();ledger.observe(custody);
+            if matches!(progress,removal_peer_native::RemovalPeerProgress::Refused|removal_peer_native::RemovalPeerProgress::Unknown) {
+                ledger.note("removal-peer-original-return");
+            }
+            match ledger.first {Some(error)=>Err(error),None=>Ok(custody)}
+        }
+        fn removal_peer_pending_wait(context:&RemovalPeerContext<'_>,local:&std::cell::RefCell<RemovalPeerLocal>,work:bool)->Result<()> {
+            let deadline=context.book.shared_deadline()?;
+            let timeout=deadline.poll_ms(work)?;
+            // Existing bounded poll primitive, no extra descriptor, worker,
+            // channel, timeout epoch or retry of a failed native acquisition.
+            match poll(&mut [],timeout) { Ok(0)|Err(Errno::EINTR)=>(),_=>return Err("removal-peer-pending-poll") }
+            if work { context.post(&local.borrow().effects)?; } else { deadline.check_total()?; }
+            Ok(())
+        }
+        fn removal_peer_poll_frame(context:&RemovalPeerContext<'_>,local:&std::cell::RefCell<RemovalPeerLocal>,
+            peer:&mut removal_peer_native::RemovalPeer<'_>,index:u32,
+            gate:&mut dyn FnMut(removal_peer_native::RemovalPeerCheckpoint)->native::android_service_management::Decision)
+            ->Result<removal_peer_native::RemovalPeerCustody> {
+            use removal_peer_native::{RemovalPeerOperation as Operation,RemovalPeerProgress as Progress};
+            loop {
+                local.borrow_mut().before_call_data(Operation::PollFrame)?;
+                let progress=peer.poll_frame(gate);
+                // Record actual final Ack bytes even if a following POST
+                // refuses. Caller must next attempt the SAME original WaitExit.
+                let custody=removal_peer_returned(local,peer,progress)?;
+                if progress==Progress::Ready {
+                    check(removal_peer_complete_data(index,custody),"removal-peer-frame-completion")?;
+                    return Ok(custody);
+                }
+                check(progress==Progress::Pending && custody.frame_index==index && custody.frame_pending,
+                    "removal-peer-frame-pending")?;
+                removal_peer_pending_wait(context,local,true)?;
+            }
+        }
+        fn removal_peer_transcript(context:&RemovalPeerContext<'_>,local:&std::cell::RefCell<RemovalPeerLocal>,
+            transcript:&mut removal_protocol::TranscriptData,action:removal_protocol::ActionData,bytes:&[u8])->Result<()> {
+            context.storage(Some(transcript),None)?;context.post(&local.borrow().effects)?;
+            let now=context.book.shared_deadline()?.check_work()?;
+            // Only the actual completed bytes cross the one existing closed
+            // parser. No DTO or acknowledged intent stands in for this read.
+            let frame=transcript.advance_data(action,bytes,now).map_err(|_|"removal-peer-transcript")?;
+            context.storage(Some(transcript),Some(&frame))?;
+            drop(frame);context.post(&local.borrow().effects)
+        }
+        fn removal_peer_forward(context:&RemovalPeerContext<'_>,local:&std::cell::RefCell<RemovalPeerLocal>,
+            peer:&mut removal_peer_native::RemovalPeer<'_>,transcript:&mut removal_protocol::TranscriptData,
+            buffer:&mut [u8;removal_protocol::FRAME_LIMIT],ready_hint:fn(&str)->Result<()>,
+            gate:&mut dyn FnMut(removal_peer_native::RemovalPeerCheckpoint)->native::android_service_management::Decision)
+            ->Result<(removal_protocol::PreparationData,[u8;16])> {
+            use removal_peer_native::{RemovalPeerOperation as Operation,RemovalPeerProgress as Progress};
+            use removal_protocol::{ActionData,FrameData,ProgressData};
+            if let Some(error)=local.borrow().first { return Err(error); }
+            local.borrow_mut().before_call_data(Operation::Source)?;
+            let progress=peer.admit_source(gate);let custody=removal_peer_returned(local,peer,progress)?;
+            check(progress==Progress::Ready && custody.native_stage==1,"removal-peer-source-ready")?;
+            local.borrow_mut().before_call_data(Operation::Open)?;
+            let progress=peer.open(gate);let custody=removal_peer_returned(local,peer,progress)?;
+            check(progress==Progress::Ready && custody.native_stage==2
+                && local.borrow().effects.phase==RemovalPeerOwnPhase::Published,"removal-peer-open-ready")?;
+            context.post(&local.borrow().effects)?;
+            {
+                let mut ledger=local.borrow_mut();check(!ledger.hint_attempted,"removal-peer-hint-once")?;
+                ledger.hint_attempted=true;
+            }
+            // Fixed SOURCE-selected delivery only. There is deliberately no
+            // noop/default or entry caller. A successful post is not discovery,
+            // authentication, app consent or permission to skip the next steps.
+            ready_hint(context.request.data.binding_data().fields_data().request_id)?;
+            context.post(&local.borrow().effects)?;
+            loop {
+                local.borrow_mut().before_call_data(Operation::Connect)?;
+                let progress=peer.connect(gate);let custody=removal_peer_returned(local,peer,progress)?;
+                if progress==Progress::Ready {
+                    check(custody.native_stage==3,"removal-peer-connected-stage")?;break;
+                }
+                check(progress==Progress::Pending && custody.native_stage==2,"removal-peer-connect-pending")?;
+                removal_peer_pending_wait(context,local,true)?;
+            }
+            local.borrow_mut().before_call_data(Operation::Authenticate)?;
+            let progress=peer.authenticate(gate);let custody=removal_peer_returned(local,peer,progress)?;
+            check(progress==Progress::Ready && custody.native_stage==4 && custody.peer_pid>1 && custody.peer_uid!=0
+                && custody.frame_index==0 && !custody.frame_pending,"removal-peer-authenticated-original")?;
+
+            let challenge=FrameData::challenge_data(context.request.data.binding_data()).map_err(|_|"removal-peer-challenge")?;
+            context.storage(Some(transcript),Some(&challenge))?;
+            let used=challenge.encode_framed_data(buffer).map_err(|_|"removal-peer-frame-encode")?;
+            drop(challenge);context.post(&local.borrow().effects)?;
+            local.borrow_mut().before_call_data(Operation::BeginFrame)?;
+            let progress=peer.send_challenge(&buffer[..used],gate);let custody=removal_peer_returned(local,peer,progress)?;
+            check(progress==Progress::Ready && removal_peer_begin_data(0,custody),"removal-peer-challenge-begin")?;
+            let custody=removal_peer_poll_frame(context,local,peer,0,gate)?;
+            check(custody.frames_bytes as usize==used,"removal-peer-challenge-returned-bytes")?;
+            removal_peer_transcript(context,local,transcript,ActionData::Send,&buffer[..used])?;
+            buffer.fill(0);
+
+            for index in [1u32,2u32] {
+                context.post(&local.borrow().effects)?;
+                local.borrow_mut().before_call_data(Operation::BeginFrame)?;
+                let progress=peer.receive(gate);let custody=removal_peer_returned(local,peer,progress)?;
+                check(progress==Progress::Ready && removal_peer_begin_data(index,custody),"removal-peer-receive-begin")?;
+                removal_peer_poll_frame(context,local,peer,index,gate)?;
+                // Native copy consumes exactly once and independently checks
+                // current same-peer/code/watch. These are Confirmed/Prepared,
+                // not the terminal Ack; no copy is attempted after Ack send.
+                let received=peer.received_frame(gate).map_err(|_|"removal-peer-received-original")?;
+                removal_peer_transcript(context,local,transcript,ActionData::Receive,received)?;
+                local.borrow_mut().observe(peer.custody());
+            }
+            check(transcript.progress_data()==ProgressData::AwaitQuitAcknowledged && transcript.first_error_data().is_none(),
+                "removal-peer-prepared-transcript")?;
+            let preparation=transcript.preparation_data().ok_or("removal-peer-prepared-branch")?;
+            let nonce=removal_hex_data::<16>(transcript.app_nonce_data().ok_or("removal-peer-app-nonce")?)?;
+            let ack=FrameData::quit_acknowledged_data(context.request.data.binding_data(),
+                transcript.app_nonce_data().ok_or("removal-peer-app-nonce")?).map_err(|_|"removal-peer-ack")?;
+            context.storage(Some(transcript),Some(&ack))?;
+            let used=ack.encode_framed_data(buffer).map_err(|_|"removal-peer-frame-encode")?;
+            drop(ack);context.post(&local.borrow().effects)?;
+            local.borrow_mut().before_call_data(Operation::BeginFrame)?;
+            let progress=peer.send_quit_acknowledged(&buffer[..used],gate);let custody=removal_peer_returned(local,peer,progress)?;
+            check(progress==Progress::Ready && removal_peer_begin_data(3,custody),"removal-peer-ack-begin")?;
+            let custody=removal_peer_poll_frame(context,local,peer,3,gate)?;
+            check(custody.frames_bytes as usize==used,"removal-peer-ack-returned-bytes")?;
+            // Pure DATA/Book checks only after full Ack. The next peer operation
+            // is unconditionally WaitExit below, including on a local failure.
+            removal_peer_transcript(context,local,transcript,ActionData::Send,&buffer[..used])?;
+            buffer.fill(0);
+            check(transcript.progress_data()==ProgressData::FramesExchanged && transcript.first_error_data().is_none(),
+                "removal-peer-transcript-incomplete")?;
+            Ok((preparation,nonce))
+        }
+        fn removal_peer_wait_exit(context:&RemovalPeerContext<'_>,local:&std::cell::RefCell<RemovalPeerLocal>,
+            peer:&mut removal_peer_native::RemovalPeer<'_>,
+            gate:&mut dyn FnMut(removal_peer_native::RemovalPeerCheckpoint)->native::android_service_management::Decision)->Result<()> {
+            use removal_peer_native::{RemovalPeerOperation as Operation,RemovalPeerProgress as Progress};
+            loop {
+                local.borrow_mut().before_call_data(Operation::WaitExit)?;
+                let progress=peer.poll_original_exit(gate);let custody=peer.custody();local.borrow_mut().observe(custody);
+                if local.borrow().first.is_none() {
+                    // A successful original exit must still fit the positive
+                    // work cutoff. Hard reserve permits failure settlement only.
+                    let effects=local.borrow().effects;
+                    if let Err(error)=context.post(&effects) { local.borrow_mut().note(error); }
+                }
+                if progress==Progress::Ready {
+                    check(custody.actual_exit_observed && removal_peer_complete_data(3,custody)
+                        && !custody.unknown && !custody.failed,"removal-peer-original-exit")?;
+                    return Ok(());
+                }
+                check(progress==Progress::Pending && !custody.unknown && !custody.actual_exit_observed,
+                    "removal-peer-original-exit-refused")?;
+                removal_peer_pending_wait(context,local,false)?;
+            }
+        }
+        fn removal_peer_scoped(context:&RemovalPeerContext<'_>,effects:RemovalPeerOwnEffects,
+            originals:removal_peer_native::RemovalSourceOriginals<'_>,ready_hint:fn(&str)->Result<()>)->RemovalPeerScope {
+            use std::panic::{catch_unwind,AssertUnwindSafe};
+            use removal_peer_native::{RemovalPeer,RemovalPeerOperation as Operation};
+            let local=std::cell::RefCell::new(RemovalPeerLocal::new(effects));
+            let mut gate=|point|context.checkpoint(&local,point);
+            // Parent pending=true was stored BEFORE this actual constructor.
+            let constructed=catch_unwind(AssertUnwindSafe(||RemovalPeer::parent(originals,context.request.native,&mut gate)));
+            let mut peer=match constructed {
+                Ok(peer)=>peer,
+                Err(_)=>return RemovalPeerScope { proof:None,preparation:None,app_nonce:None,effects,
+                    first:Some("removal-peer-constructor-unwind"),native_first:local.borrow().native_first,
+                    custody:local.borrow().last,settled:false },
+            };
+            local.borrow_mut().observe(peer.custody());
+            let mut transcript=removal_protocol::TranscriptData::new_data(removal_protocol::RoleData::Parent,
+                context.request.data.binding_data().clone());
+            let mut buffer=[0u8;removal_protocol::FRAME_LIMIT];
+            let mut preparation=None;let mut app_nonce=None;
+            let forward=catch_unwind(AssertUnwindSafe(|| {
+                context.storage(Some(&transcript),None)?;
+                removal_peer_forward(context,&local,&mut peer,&mut transcript,&mut buffer,ready_hint,&mut gate)
+            }));
+            match forward {
+                Ok(Ok((branch,nonce)))=>{preparation=Some(branch);app_nonce=Some(nonce);},
+                Ok(Err(error))=>local.borrow_mut().note(error),
+                Err(_)=>local.borrow_mut().note("removal-peer-forward-unwind"),
+            }
+            local.borrow_mut().observe(peer.custody());buffer.fill(0);
+            if local.borrow().first.is_some() { transcript.abort_data(); }
+            // Even if final-send POST or transcript work failed, an actually
+            // completed Ack means this SAME WatchExit must be the next call.
+            if local.borrow().ack_complete {
+                match catch_unwind(AssertUnwindSafe(||removal_peer_wait_exit(context,&local,&mut peer,&mut gate))) {
+                    Ok(Ok(()))=>(),Ok(Err(error))=>local.borrow_mut().note(error),
+                    Err(_)=>local.borrow_mut().note("removal-peer-exit-unwind"),
+                }
+                local.borrow_mut().observe(peer.custody());
+            }
+            let mut proof=None;
+            if !peer.settled() {
+                // One actual close call, never retry a consuming error. Each
+                // independently known native slot is accounted by native3.
+                let closed=catch_unwind(AssertUnwindSafe(|| {
+                    local.borrow_mut().before_call_data(Operation::Close)?;
+                    let progress=peer.close(&mut gate);
+                    removal_peer_returned(&local,&peer,progress).map(|_|())
+                }));
+                match closed { Ok(Ok(()))=>(),Ok(Err(error))=>local.borrow_mut().note(error),
+                    Err(_)=>local.borrow_mut().note("removal-peer-close-unwind") }
+                local.borrow_mut().observe(peer.custody());
+                // A refused operation can still have genuinely closed all
+                // resources. Retire that known cell once; its None result is
+                // failure-only finality, never permission to take M.
+                if peer.custody().native_closed && !peer.custody().unknown && !peer.is_retired() {
+                    match catch_unwind(AssertUnwindSafe(||peer.retire(&mut gate))) {
+                        Ok(Ok(returned))=>proof=returned,
+                        Ok(Err(_))=>local.borrow_mut().note("removal-peer-retire-refused"),
+                        Err(_)=>local.borrow_mut().note("removal-peer-retire-unwind"),
+                    }
+                }
+            }
+            let custody=peer.custody();local.borrow_mut().observe(custody);
+            let settled=removal_peer_known_retired_data(peer.settled(),custody);
+            if !settled {
+                local.borrow_mut().note("removal-peer-custody-retained");
+                // No native Drop exists. Permanently abandon access to this
+                // unknown cell; Parent pending retains the SAME raw4/Book FDs.
+                // The synchronous callback was not retained by native code.
+                std::mem::forget(peer);
+            }
+            drop(gate);
+            let ledger=local.into_inner();
+            RemovalPeerScope { proof,preparation,app_nonce,effects:ledger.effects,first:ledger.first,
+                native_first:ledger.native_first,custody:Some(custody),settled }
+        }
         struct Parent {
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
@@ -3503,6 +4202,10 @@ mod installer {
             removal_request: Option<RemovalRequest>,
             removal_request_started: bool,
             removal_publication: Option<RemovalPublication>,
+            removal_peer_started:bool,removal_peer_pending:bool,
+            removal_peer_failure:Option<&'static str>,removal_peer_native_first:Option<(u32,u64)>,
+            removal_peer_custody:Option<removal_peer_native::RemovalPeerCustody>,
+            removal_exclusive_reobserve_started: bool,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -3519,6 +4222,9 @@ mod installer {
                     removal_request:None,
                     removal_request_started:false,
                     removal_publication:None,
+                    removal_peer_started:false,removal_peer_pending:false,removal_peer_failure:None,
+                    removal_peer_native_first:None,removal_peer_custody:None,
+                    removal_exclusive_reobserve_started:false,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -3575,8 +4281,43 @@ mod installer {
                 // R acquisition does not promote a stale pre-R signature or
                 // code snapshot: actual originals are checked again now.
                 source.reservation_post(&self.book)?;
+                source.admit_existing_maintenance(&mut self.book)?;
                 self.removal_observed=Some(maintenance::observe_removal(&mut self.book,source)?);
                 source.bind_inventory(&self.book,self.removal_observed.as_ref().ok_or("removal-current-missing")?)
+            }
+            fn acquire_removal_exclusion(&mut self,peer:RemovalPeerCompletion)->Result<RemovalExclusion> {
+                let source=self.removal.as_ref().ok_or("removal-original-missing")?;
+                let request=self.removal_request.as_ref().ok_or("removal-request-missing")?;
+                let observed=self.removal_observed.as_ref().ok_or("removal-current-missing")?;
+                source.reservation_post(&self.book)?; source.existing_maintenance_post(&self.book)?;
+                request.post(&self.book,source,observed)?;
+                let retired=peer.retired();
+                check(retired.role()==native::removal_coordinator::RemovalPeerRole::Parent
+                    && retired.original_peer_exit_observed() && retired.peer_pid_data()>0
+                    && retired.binding_data()==&request.native,"removal-peer-exit-required")?;
+                let reservation=self.book.registration.participant.ok_or("removal-original-reservation")?;
+                let maintenance=source.existing_maintenance.ok_or("removal-existing-maintenance")?;
+                self.book.clock()?;
+                // Sole attempt; known acquisition is retained even when the
+                // subsequent clock/source check refuses. R is never closed.
+                self.book.gate.entered=true;
+                self.book.gate.lock_attempted=true;
+                #[allow(deprecated)]
+                let result=fcntl::flock(self.book.fd(maintenance)?.as_raw_fd(),fcntl::FlockArg::LockExclusiveNonblock);
+                result.map_err(|_|"removal-maintenance-busy-or-refused")?;
+                self.book.gate.exclusive_acquired=true;
+                let exclusion=RemovalExclusion { peer,reservation,maintenance };
+                exclusion.post(&self.book,source)?;
+                Ok(exclusion)
+            }
+            fn reobserve_removal_exclusive(&mut self,exclusion:&RemovalExclusion)->Result<()> {
+                check(!self.removal_exclusive_reobserve_started,"removal-reobserve-once")?;
+                self.removal_exclusive_reobserve_started=true;
+                let source=self.removal.as_ref().ok_or("removal-original-missing")?;
+                exclusion.post(&self.book,source)?;
+                let old=self.removal_observed.take().ok_or("removal-current-missing")?;
+                self.removal_observed=Some(maintenance::reobserve_removal_exclusive(&mut self.book,source,exclusion,old)?);
+                exclusion.post(&self.book,source)
             }
             fn prepare_removal_request(&mut self)->Result<()> {
                 check(self.entered && !self.removal_request_started && self.removal_request.is_none(),"removal-request-once")?;
@@ -3596,6 +4337,67 @@ mod installer {
                     &mut self.book,self.removal.as_ref().ok_or("removal-original-missing")?,
                     self.removal_observed.as_ref().ok_or("removal-current-missing")?,
                     self.removal_request.as_ref().ok_or("removal-request-missing")?)
+            }
+            fn join_removal_peer(&mut self,ready_hint:fn(&str)->Result<()>)->Result<RemovalPeerCompletion> {
+                check(self.entered && !self.removal_peer_started && !self.removal_peer_pending
+                    && self.producer.is_none() && self.child.is_none(),"removal-peer-once")?;
+                self.removal_peer_started=true;
+                let result=(|| {
+                    let source=self.removal.as_ref().ok_or("removal-original-missing")?;
+                    let observed=self.removal_observed.as_ref().ok_or("removal-current-missing")?;
+                    let request=self.removal_request.as_ref().ok_or("removal-request-missing")?;
+                    let publication=self.removal_publication.as_ref().ok_or("removal-request-publication-missing")?;
+                    let (context,effects)=RemovalPeerContext::new(&self.book,source,observed,request,publication)?;
+                    let originals=context.native_originals()?;
+                    // Store outside the borrowed scope before allocation or
+                    // callbacks. A panic/unknown must not free their backing.
+                    self.removal_peer_pending=true;
+                    let scope=removal_peer_scoped(&context,effects,originals,ready_hint);
+                    // Original returned custody first, later clock/source veto
+                    // second. Known consumes do not become Unknown merely late.
+                    self.removal_peer_custody=scope.custody;
+                    self.removal_peer_native_first=scope.native_first;
+                    self.removal_peer_pending=!scope.settled;
+                    if let Some(error)=scope.first { self.removal_peer_failure.get_or_insert(error); }
+                    let (complete,effects)=scope.into_completion(&request.native)?;
+                    // Full positive work POST AFTER actual exit, all native
+                    // consumes and the final native retirement. Hard-reserve
+                    // settlement alone cannot admit the subsequent M phase.
+                    context.post(&effects)?;
+                    let directory=context.directory;
+                    let identity=context.directory_post(&effects)?;
+                    context.book.clock()?;
+                    // All native borrows are now gone. Only this real returned
+                    // Bind's exact held/named requestdir baseline advances Book.
+                    // No source/app/system-root identity is refreshed here.
+                    self.book.originals[directory].identity=Some(identity);
+                    self.book.check_name(directory,true)?;
+                    self.removal_request.as_ref().ok_or("removal-request-missing")?.post(&self.book,
+                        self.removal.as_ref().ok_or("removal-original-missing")?,
+                        self.removal_observed.as_ref().ok_or("removal-current-missing")?)?;
+                    self.book.shared_deadline()?.check_work()?;
+                    Ok(complete)
+                })();
+                if let Err(error)=&result { self.removal_peer_failure.get_or_insert(*error);self.note(*error); }
+                result
+            }
+            fn retain_unresolved_removal_peer(&mut self) {
+                if !self.removal_peer_pending { return; }
+                // MEMORY-ONLY retention, never native/FD cleanup or a join.
+                // C copied the raw4 pointers into its retained cell; taking
+                // and forgetting their Vec owners preserves those SAME heap
+                // allocations. The synchronous callback/context was never
+                // retained. No operation may resume this forgotten peer.
+                self.book.unknown=true;
+                for original in &mut self.book.originals {
+                    if let Some(fd)=original.fd.take() {
+                        std::mem::forget(fd);original.state=State::KernelExitRetained;
+                    }
+                }
+                if let Some(source)=self.removal.take() { std::mem::forget(source); }
+                if let Some(request)=self.removal_request.take() { std::mem::forget(request); }
+                if let Some(observed)=self.removal_observed.take() { std::mem::forget(observed); }
+                self.parent_book_settled=false;
             }
             fn admit_and_go_selected(&mut self, source: &str, selected: Option<(ReleaseSetData, &str)>) -> Result<()> {
                 self.admit_and_go_inputs(source,selected,None)
@@ -3908,6 +4710,11 @@ mod installer {
                 Ok(record)
             }
             fn settle_parent_originals(&mut self) -> bool {
+                if self.removal_peer_pending {
+                    self.retain_unresolved_removal_peer();
+                    self.note("removal-peer-custody-retained");
+                    self.settlement_time();return false;
+                }
                 // B3 invokes this only after its parent's evidence writers.
                 // The one-use Command/config OFD remains KernelExitRetained:
                 // its Drop would not provide an errno-observed close receipt.
@@ -3938,6 +4745,15 @@ mod installer {
                 }
                 self.settlement_time();
                 self.parent_book_settled
+            }
+        }
+        impl Drop for Parent {
+            fn drop(&mut self) {
+                // An unwind must not free backing still referenced by an
+                // unretired native cell. This guard only leaks our unresolved
+                // allocations/FDs to actual process exit; it performs no IO,
+                // no close/retire, no retry and cannot report success.
+                self.retain_unresolved_removal_peer();
             }
         }
         fn gate_bytes(fd: BorrowedFd<'_>, deadline: &Deadline) -> Result<()> {
@@ -4174,6 +4990,75 @@ mod installer {
             }
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                // Parent peer owns no replacement Book. Only the two typed
+                // returned original effects can update its local expectations.
+                // These DATA controls execute the actual callback reducer;
+                // they do not pretend to bind/listen, own R or authenticate code.
+                use removal_peer_native::{RemovalNativePhase as PeerNativePhase,RemovalOriginalData as PeerOriginal};
+                let peer_directory=PeerOriginal { device:1,inode:20,links:2,size:64,mode:0o40755,
+                    modified_seconds:1,changed_seconds:1,..PeerOriginal::default() };
+                let bound_directory=PeerOriginal {links:3,size:128,modified_seconds:2,changed_seconds:2,..peer_directory};
+                let bound_socket=PeerOriginal {device:1,inode:21,links:1,mode:0o140755,
+                    modified_seconds:2,changed_seconds:2,..PeerOriginal::default()};
+                let mode_socket=PeerOriginal {mode:0o140666,changed_seconds:3,..bound_socket};
+                let initial=RemovalPeerOwnEffects::new_data(peer_directory).unwrap();
+                for (phase,slot,before) in [(PeerNativePhase::Bind,None,true),(PeerNativePhase::Bind,Some(1),true),
+                    (PeerNativePhase::Listen,Some(0),true),(PeerNativePhase::Bind,Some(0),false),
+                    (PeerNativePhase::SocketMode,Some(0),true)] {
+                    let mut attempt=initial;
+                    assert!(attempt.transition_data(phase,slot,before,peer_directory,PeerOriginal::default()).is_err());
+                    assert_eq!(attempt,initial);
+                }
+                let mut own=initial;
+                own.transition_data(PeerNativePhase::Bind,Some(0),true,peer_directory,PeerOriginal::default()).unwrap();
+                for wrong in [PeerOriginal{inode:99,..bound_directory},PeerOriginal{device:2,..bound_directory},
+                    PeerOriginal{uid:501,..bound_directory},PeerOriginal{gid:20,..bound_directory},
+                    PeerOriginal{mode:0o40777,..bound_directory},PeerOriginal{flags:1,..bound_directory}] {
+                    let mut attempt=own;
+                    assert!(attempt.transition_data(PeerNativePhase::Bind,Some(0),false,wrong,bound_socket).is_err());
+                    assert_eq!(attempt,own);
+                }
+                for wrong in [PeerOriginal{inode:0,..bound_socket},PeerOriginal{device:2,..bound_socket},
+                    PeerOriginal{uid:501,..bound_socket},PeerOriginal{gid:20,..bound_socket},
+                    PeerOriginal{links:2,..bound_socket},PeerOriginal{mode:0o100755,..bound_socket},
+                    PeerOriginal{mode:0o144755,..bound_socket},PeerOriginal{flags:1,..bound_socket}] {
+                    let mut attempt=own;
+                    assert!(attempt.transition_data(PeerNativePhase::Bind,Some(0),false,bound_directory,wrong).is_err());
+                    assert_eq!(attempt,own);
+                }
+                own.transition_data(PeerNativePhase::Bind,Some(0),false,bound_directory,bound_socket).unwrap();
+                assert_eq!(own.phase,RemovalPeerOwnPhase::Bound);
+                assert_eq!(own.directory,bound_directory);assert_eq!(own.socket,Some(bound_socket));
+                assert!(own.transition_data(PeerNativePhase::Bind,Some(0),true,bound_directory,bound_socket).is_err());
+                own.transition_data(PeerNativePhase::SocketMode,Some(0),true,bound_directory,bound_socket).unwrap();
+                for wrong in [PeerOriginal{inode:99,..mode_socket},PeerOriginal{size:1,..mode_socket},
+                    PeerOriginal{mode:0o140777,..mode_socket},PeerOriginal{uid:1,..mode_socket},
+                    PeerOriginal{gid:1,..mode_socket},PeerOriginal{links:2,..mode_socket},PeerOriginal{flags:1,..mode_socket},
+                    PeerOriginal{modified_seconds:99,..mode_socket},PeerOriginal{modified_nanoseconds:1,..mode_socket}] {
+                    let mut attempt=own;
+                    assert!(attempt.transition_data(PeerNativePhase::SocketMode,Some(0),false,bound_directory,wrong).is_err());
+                    assert_eq!(attempt,own);
+                }
+                assert!(own.transition_data(PeerNativePhase::SocketMode,Some(0),false,peer_directory,mode_socket).is_err());
+                own.transition_data(PeerNativePhase::SocketMode,Some(0),false,bound_directory,mode_socket).unwrap();
+                assert_eq!(own.phase,RemovalPeerOwnPhase::Published);
+                assert_eq!(own.socket,Some(mode_socket));
+                assert!(own.transition_data(PeerNativePhase::SocketMode,Some(0),false,bound_directory,mode_socket).is_err());
+                assert_eq!(removal_peer_roster_entry_data(0,30,nix::libc::DT_REG,b"request.json",30,None),Ok(1));
+                assert_eq!(removal_peer_roster_entry_data(1,21,nix::libc::DT_SOCK,b"s",30,Some(mode_socket)),Ok(3));
+                assert_eq!(removal_peer_roster_entry_data(0,21,nix::libc::DT_SOCK,b"s",30,Some(mode_socket)),Ok(2));
+                assert_eq!(removal_peer_roster_entry_data(2,30,nix::libc::DT_REG,b"request.json",30,Some(mode_socket)),Ok(3));
+                for (seen,inode,kind,name,socket) in [
+                    (0,21,nix::libc::DT_SOCK,&b"s"[..],None),
+                    (0,0,nix::libc::DT_REG,&b"request.json"[..],None),
+                    (0,99,nix::libc::DT_REG,&b"request.json"[..],None),
+                    (1,30,nix::libc::DT_REG,&b"request.json"[..],None),
+                    (3,21,nix::libc::DT_SOCK,&b"s"[..],Some(mode_socket)),
+                    (0,21,nix::libc::DT_LNK,&b"s"[..],Some(mode_socket)),
+                    (0,21,nix::libc::DT_REG,&b"s"[..],Some(mode_socket)),
+                    (0,21,nix::libc::DT_SOCK,&b"extra"[..],Some(mode_socket))] {
+                    assert!(removal_peer_roster_entry_data(seen,inode,kind,name,30,socket).is_err());
+                }
                 use native::install_producer::{SignatureResult,CurrentProductResult};
                 // Actual production DATA predicates, never fake verifier
                 // instances/current originals or a constructible capability.
@@ -4234,6 +5119,13 @@ mod installer {
                 for bad in ["00".repeat(16),"AA".repeat(16),"gg".repeat(16),"1".repeat(31),"1".repeat(33),"é".repeat(16)] {
                     assert!(removal_hex_data::<16>(&bad).is_err());
                 }
+                // Concrete retained state capacity consumes the same budget;
+                // there is no second full-observation allowance or saturation.
+                assert_eq!(removal_reobserve_budget_data(1024,transaction::STATE_LIMIT),Ok(1024+transaction::STATE_LIMIT as u64));
+                assert!(removal_reobserve_budget_data(0,0).is_err());
+                assert!(removal_reobserve_budget_data(0,transaction::STATE_LIMIT+1).is_err());
+                assert!(removal_reobserve_budget_data(16*1024*1024,1).is_err());
+                assert!(removal_reobserve_budget_data(u64::MAX,1).is_err());
                 // Actual returned mkdir/file-entry effects alone may advance
                 // directory metadata. Full mode/owner/inode/flags remain fixed;
                 // no assumption about APFS directory link-count deltas is made.
@@ -4374,6 +5266,85 @@ mod installer {
             }
             #[test]
             fn original_join_requires_eof_closes_matching_return_and_timely_sources() {
+                // Execute the same Parent reducers without inventing a native
+                // verifier/peer/retirement capability or a filesystem effect.
+                use removal_peer_native::{RemovalPeerCustody as PeerCustody,RemovalPeerRole as PeerRole,
+                    RemovalPeerOperation as PeerOperation,RemovalOriginalData as PeerOriginal};
+                use native::android_service_management::CellCustody;
+                let peer_directory=PeerOriginal {device:1,inode:20,links:2,size:64,mode:0o40755,
+                    modified_seconds:1,changed_seconds:1,..PeerOriginal::default()};
+                let effects=RemovalPeerOwnEffects::new_data(peer_directory).unwrap();
+                let peer=PeerCustody {role:PeerRole::Parent,cell:CellCustody::Owned,in_call:false,in_gate:false,
+                    failed:false,unknown:false,first_failure:None,native_first_code:0,native_first_failure:0,
+                    native_calls:40,native_returns:40,native_stage:4,frame_index:0,frame_pending:true,
+                    frames_bytes:0,fds:[2;3],references:[2;24],peer_pid:42,peer_uid:501,peer_gid:20,
+                    actual_exit_observed:false,native_closed:false,last_parent_monotonic:10,
+                    request_directory:peer_directory,socket_name:PeerOriginal::default()};
+                for index in 0..4 {
+                    let begun=PeerCustody{frame_index:index,..peer};
+                    assert!(removal_peer_begin_data(index,begun));
+                    assert!(!removal_peer_complete_data(index,begun)); // BEGIN Ready is not a send.
+                    let complete=PeerCustody{frame_index:index+1,frame_pending:false,frames_bytes:100,..begun};
+                    assert!(removal_peer_complete_data(index,complete));
+                    assert!(!removal_peer_begin_data(index,complete));
+                    for bad in [PeerCustody{frame_pending:true,..complete},PeerCustody{frame_index:index,..complete},
+                        PeerCustody{frames_bytes:4,..complete},PeerCustody{frames_bytes:4101,..complete},
+                        PeerCustody{role:PeerRole::App,..complete}] {
+                        assert!(!removal_peer_complete_data(index,bad));
+                    }
+                }
+                let ack=PeerCustody{frame_index:4,frame_pending:false,frames_bytes:100,..peer};
+                let mut ledger=RemovalPeerLocal::new(effects);
+                ledger.observe(PeerCustody{frame_index:3,frames_bytes:0,..peer});
+                assert!(!ledger.ack_complete);
+                ledger.before_call_data(PeerOperation::PollFrame).unwrap();
+                // Actual complete Ack remains latched after the later source
+                // or clock failure. The next call still cannot query live code.
+                ledger.observe(ack);ledger.note("later-work-cutoff");
+                assert!(ledger.ack_complete);assert!(!ledger.exit_started);
+                for operation in [PeerOperation::Source,PeerOperation::Open,PeerOperation::Connect,PeerOperation::Authenticate,
+                    PeerOperation::BeginFrame,PeerOperation::PollFrame,PeerOperation::Recheck,PeerOperation::Close] {
+                    assert!(ledger.before_call_data(operation).is_err());
+                }
+                ledger.before_call_data(PeerOperation::WaitExit).unwrap();
+                assert!(ledger.exit_started);ledger.before_call_data(PeerOperation::WaitExit).unwrap();
+                assert!(ledger.before_call_data(PeerOperation::Recheck).is_err());
+                assert!(ledger.before_call_data(PeerOperation::BeginFrame).is_err());
+                ledger.before_call_data(PeerOperation::Close).unwrap();
+                let mut premature=RemovalPeerLocal::new(effects);
+                premature.observe(peer);
+                assert!(premature.before_call_data(PeerOperation::WaitExit).is_err());
+                let mut first=RemovalPeerLocal::new(effects);
+                first.observe(PeerCustody{failed:true,native_first_code:13,native_first_failure:17,..peer});
+                first.note("later-parent-clock-veto");
+                first.observe(PeerCustody{failed:true,unknown:true,native_first_code:13,native_first_failure:17,..peer});
+                assert_eq!(first.native_first,Some((13,17)));
+                assert_eq!(first.first,Some("removal-peer-native-refused"));
+                let closed=PeerCustody{cell:CellCustody::Consumed,native_closed:true,fds:[4;3],references:[4;24],..ack};
+                assert!(removal_peer_known_retired_data(true,closed));
+                assert!(!removal_peer_known_retired_data(false,closed));
+                for bad in [PeerCustody{cell:CellCustody::Owned,..closed},PeerCustody{in_call:true,..closed},
+                    PeerCustody{in_gate:true,..closed},PeerCustody{fds:[4,5,4],..closed},
+                    PeerCustody{references:[2;24],..closed}] {
+                    assert!(!removal_peer_known_retired_data(true,bad));
+                }
+                // A later Unknown does not rewrite a known consuming return;
+                // it still cannot supply the required successful native proof.
+                assert!(removal_peer_known_retired_data(true,PeerCustody{unknown:true,..closed}));
+                let absent=PeerCustody {cell:CellCustody::Absent,fds:[0;3],references:[0;24],frame_pending:false,..peer};
+                assert!(removal_peer_known_retired_data(true,absent));
+                let mut release=[0;128];let text=b"macos26-arm64-1";release[..text.len()].copy_from_slice(text);
+                let binding=removal_peer_native::RemovalChallengeData {request_id:[1;16],root_nonce:[2;16],source:[3;20],
+                    target:removal_peer_native::RemovalTargetData::Arm64,release,release_len:text.len() as u8,
+                    remove_producer:[4;32],installed_producer:[5;32],inventory:[6;32],protocol:[7;32],
+                    start:10,work:10+TOTAL-SETTLEMENT,hard:10+TOTAL};
+                for custody in [absent,closed,PeerCustody{actual_exit_observed:true,..closed}] {
+                    let scope=RemovalPeerScope {proof:None,preparation:Some(removal_protocol::PreparationData::NeverRegistered),
+                        app_nonce:Some([8;16]),effects,first:None,native_first:None,custody:Some(custody),settled:true};
+                    assert!(matches!(scope.into_completion(&binding),Err("removal-peer-success-proof-missing")));
+                }
+                // No actual PeerRetired is constructed here: known absence,
+                // EOF/no-exit, or even copied exit=true are not capabilities.
                 assert!(joined_data(true,true,true,true,Some(0),0,true,true,false));
                 assert_eq!(completed_exit_data(Some(0),true,true,true,true,true,true,true,false),0);
                 assert_eq!(completed_exit_data(Some(0),false,true,true,true,true,true,true,false),0); // Same-package.
