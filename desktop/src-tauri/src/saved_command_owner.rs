@@ -47,6 +47,7 @@ pub(crate) use android_registration::service_setup::{RemovalPrompt as MacosRemov
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use android_registration::maintenance::{
     Request as MacosMaintenanceRequest,Snapshot as MacosMaintenanceSnapshot,Checked as MacosMaintenanceChecked,
+    RemovalSnapshot as MacosRemovalSnapshot,RemovalChecked as MacosRemovalChecked,
     Handle as MacosMaintenanceHandle,Admitted as MacosMaintenanceAdmitted,Completion as MacosMaintenanceCompletion,
     Status as MacosMaintenanceStatus,Phase as MacosMaintenancePhase,
 };

@@ -1668,6 +1668,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     let mut ios_archive = document.ios_archive_subscribe();
     let ios_archive_guard = IOSArchiveRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+    let removal_notice=document.removal_notice_runtime();
     let (start, enter) = oneshot::channel();
     let handle = tauri::async_runtime::spawn(async move {
         let mut preflight_guard = preflight_guard;
@@ -1694,6 +1696,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_build_relay_failed = false;
         let mut ios_archive_revision = None;
         let mut ios_archive_relay_failed = false;
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+        let mut removal_notice_open=removal_notice.is_some();
         loop {
             if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
@@ -1880,6 +1884,16 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     Err(_) => { ios_archive_relay_failed = true; document.ios_archive_relay_lost(); },
                 }
             }
+            // One bounded native inbox in this SAME relay. The 16-byte value
+            // is only an insecure hint: no path/clock/consent reaches Prepare.
+            // Absent/non-installed/retired observers add no polling loop.
+            let removal_hint=async {
+                #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+                if removal_notice_open{if let Some(notice)=&removal_notice{
+                    return std::future::poll_fn(|cx|notice.poll_hint(cx)).await;
+                }}
+                std::future::pending::<Option<[u8;16]>>().await
+            };
             tokio::select! {
                 biased;
                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; } },
@@ -1890,6 +1904,12 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 result = android_build.changed() => { if result.is_err() { return; } },
                 result = project_recovery.changed() => { if result.is_err() { return; } },
                 result = ios_archive.changed() => { if result.is_err() { return; } },
+                hint = removal_hint => {
+                    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+                    match hint{Some(id)=>{let _=begin_installed_macos_removal_hint(&app,id);},None=>removal_notice_open=false}
+                    #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image")))]
+                    let _=hint;
+                },
                 // Observation only: status checks fixed original endpoints and
                 // already-ended joins. It launches no operation or new clock.
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {},
@@ -1932,6 +1952,9 @@ fn start_exit_observer(app: tauri::AppHandle, document: DocumentBinding) -> (tau
                 if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() {
                     if !q.github_exit(&app).await || !document.can_exit() { return; }
                 }
+                #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+                if !crate::asset_session::macos_removal::settle_notice_for_exit(&app,&document).await
+                    ||!document.can_exit(){return;}
                 if !settle_relay(&app).await || !document.can_exit() { return; }
                 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
                 if !owned_windows::settle_for_exit(&app, &document).await || !document.can_exit() { return; }
@@ -1957,6 +1980,15 @@ pub(crate) fn begin_installed_macos_maintenance(app:&tauri::AppHandle,confirmati
     let state=app.try_state::<ShellState>().ok_or_else(||BridgeError::new(
         "macos_maintenance_unavailable","The original installed window is unavailable."))?;
     state.document.start_macos_maintenance(confirmation)
+}
+
+// Not an invoke/renderer API. Only the retained native observer's fixed inbox
+// calls this; the caller cannot supply a path, raw deadline or authority.
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+fn begin_installed_macos_removal_hint(app:&tauri::AppHandle,id:[u8;16])->Result<(),BridgeError>{
+    let state=app.try_state::<ShellState>().ok_or_else(||BridgeError::new(
+        "macos_maintenance_unavailable","The original installed window is unavailable."))?;
+    state.document.start_macos_removal_hint(id)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -3266,6 +3298,13 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             if let Some(dispatcher)=crate::saved_command_owner::AndroidServiceDispatcher::original_main(window.clone()){
                 let _=document.bind_android_service_dispatcher(dispatcher);
+            }
+            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
+            {
+                // Main owns the notice original before the relay starts. A
+                // partial/Unknown registration stays retained and prevents
+                // later exit finality; setup does not discard its native cell.
+                let _=document.install_macos_removal_notice();
             }
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::install(&window, startup);

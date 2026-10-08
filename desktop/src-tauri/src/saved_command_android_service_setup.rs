@@ -123,6 +123,9 @@ mod removal_prompt {
             Some(self.clock.clone())
         }
         pub(crate) fn cutoff(&self)->&native_removal::ParentCutoff{self.native.cutoff()}
+        /// Borrow only the actually retired native confirmation. No new token,
+        /// Clone or value-based reconstruction is exposed to the peer owner.
+        pub(crate) fn native(&self)->&native_removal::RemovalConfirmed{&self.native}
         pub(crate) fn app_nonce(&self)->[u8;16]{self.native.app_nonce()}
         pub(crate) fn retained_bytes(&self)->Option<usize>{
             std::mem::size_of::<Self>().checked_add(native_removal::RemovalConfirmed::project_owned_upper_bound()?)?

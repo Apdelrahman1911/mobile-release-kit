@@ -13,6 +13,24 @@ pub(crate) const CONTROL_RESERVE: usize = 16 * 1024 * 1024;
 const RECORDS: usize = 8256;
 const NATIVE_FRAME_LIMIT: usize = 16384;
 
+// Descriptive visible namespace only. No contents of root's0700 archives are
+// opened by the app, and none of these DATA predicates authenticates history.
+const REMOVAL_VISIBLE_ARCHIVES: usize = 64;
+const REMOVAL_VISIBLE_ROSTER_BYTES: usize = REMOVAL_VISIBLE_ARCHIVES * 512;
+fn removal_archive_visible_name_data(name:&str)->bool {
+    name.len()==40 && name.starts_with(".remove-") && name.as_bytes()[8..].iter()
+        .all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+        && name.as_bytes()[8..].iter().any(|b|*b!=b'0')
+}
+fn removal_archive_extra_data(name:&str,inode:u64,kind:u8,count:usize)->bool {
+    count<REMOVAL_VISIBLE_ARCHIVES && inode!=0 && kind==nix::libc::DT_DIR
+        && removal_archive_visible_name_data(name)
+}
+fn private_stage_identity_data(id:Identity,inode:u64)->bool {
+    id.mode==0o040700 && id.uid==0 && id.gid==0 && id.flags==0 && id.ino==inode
+}
+fn private_stage_post_data(before:Identity,after:Identity)->bool { before==after }
+
 // Read-only linked DATA. This contains no previous outer-Installer exit proof,
 // permission to install, or selected executable. A selected producer set comes
 // from the original caller's authenticated package policy, never these files.
@@ -432,6 +450,12 @@ impl InstallationSlots {
         #[cfg(feature = "macos-android-registration-helper")]
         {self.removal.is_some()}
     }
+    fn removal_archive_source_scope(&self)->bool {
+        #[cfg(not(feature = "macos-android-registration-helper"))]
+        { self.removal.is_some() && self.book.as_ref().is_some_and(|book|book.removal_gate.is_some()) }
+        #[cfg(feature = "macos-android-registration-helper")]
+        { false }
+    }
     fn parent_point_vetoed(&self)->bool {
         #[cfg(not(feature = "macos-android-registration-helper"))]
         {self.book.as_ref().is_some_and(Book::removal_clock_vetoed)}
@@ -741,14 +765,13 @@ impl InstallationSlots {
         self.check(end,stop,publish)?;
         let before = self.attempt(Problem::PayloadMismatch, end, stop,publish,|book|
             stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
-        if before.st_mode != (SFlag::S_IFDIR.bits() | 0o700) || before.st_uid != 0 || before.st_gid != 0
-            || before.st_flags != 0 || before.st_ino != inode {
+        if !private_stage_identity_data(Identity::of(&before),inode) {
             return self.reject(Problem::Protection,Instant::now(),publish);
         }
         self.attempt(Problem::PayloadMismatch, end, stop,publish,|book| book.check_name(install,end,stop))?;
         let after = self.attempt(Problem::PayloadMismatch, end, stop,publish,|book|
             stat::fstatat(book.fd(install)?,name,AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error))?;
-        if Identity::of(&before) != Identity::of(&after) { return self.reject(Problem::CleanupUnknown,Instant::now(),publish); }
+        if !private_stage_post_data(Identity::of(&before),Identity::of(&after)) { return self.reject(Problem::CleanupUnknown,Instant::now(),publish); }
         // An ordinary nonroot reader does not open root's0700 receipt directory
         // or claim to have inspected its contents. Actual maintenance's new EX
         // owner reobserves the complete contents before any later mutation.
@@ -873,8 +896,23 @@ impl InstallationSlots {
             drop(record); drop(inventory); drop(descriptor);
             drop(producer); drop(producer_bytes); drop(signature_bytes); retained = checkpoint_retained;
         }
-        let actual = self.roster(install,names.len(),end,stop,publish)?;
-        if actual.keys().cloned().collect::<BTreeSet<_>>() != names { return self.reject(Problem::PayloadMismatch,Instant::now(),publish); }
+        let removal_archives=self.removal_archive_source_scope();
+        let limit=names.len().checked_add(if removal_archives { REMOVAL_VISIBLE_ARCHIVES } else { 0 })
+            .ok_or(Problem::Bounds)?;
+        if removal_archives && limit>350 { return self.reject(Problem::Bounds,Instant::now(),publish); }
+        let actual = self.roster(install,limit,end,stop,publish)?;
+        if !names.iter().all(|name|actual.contains_key(name)) { return self.reject(Problem::PayloadMismatch,Instant::now(),publish); }
+        let mut extra=0usize;
+        for (name,(inode,kind)) in &actual {
+            if names.contains(name) { continue; }
+            if !removal_archives || !removal_archive_extra_data(name,*inode,*kind,extra) {
+                return self.reject(Problem::PayloadMismatch,Instant::now(),publish);
+            }
+            // SAME existing no-follow visible PRE/POST. It never opens0700 or
+            // claims to inspect/authenticate its files; root Parent must do so.
+            self.private_stage(install,name,*inode,end,stop,publish)?;
+            extra+=1;
+        }
         for stage in stages {
             let Some((inode,kind)) = actual.get(&stage).copied() else { return self.reject(Problem::Incomplete,Instant::now(),publish); };
             if kind != nix::libc::DT_DIR { return self.reject(Problem::Protection,Instant::now(),publish); }
@@ -1029,7 +1067,10 @@ impl InstallationSlots {
         // No opaque current native allocation receives zero credit. This native
         // snapshot is quiescent here; every live/native frame must be accountable.
         let Some(native_bytes) = self.control_bytes() else { return self.reject(Problem::CleanupUnknown, Instant::now(), publish); };
-        let planned = control_bound(&descriptor, &inventory_bytes, &inventory, &index, native_bytes);
+        let planned = control_bound(&descriptor, &inventory_bytes, &inventory, &index, native_bytes)
+            .and_then(|bytes|bytes.checked_add(if self.removal_archive_source_scope() {
+                REMOVAL_VISIBLE_ROSTER_BYTES //64 fixed40-byte names plus conservative actual BTree/node backing
+            } else { 0 }));
         let Some(planned) = planned.filter(|bytes| *bytes <= CONTROL_RESERVE) else {
             return self.reject(Problem::Bounds, Instant::now(), publish);
         };
@@ -1204,6 +1245,37 @@ fn control_bound(descriptor: &Vec<u8>, raw: &Vec<u8>, inventory: &Inventory, ind
 #[cfg(test)]
 #[test]
 fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
+    // The extra names are admitted only in the private removal source branch,
+    // never an ordinary/legacy wildcard or an attempt to read root-only files.
+    let archive=format!(".remove-{}","1".repeat(32));
+    assert!(removal_archive_visible_name_data(&archive));
+    for bad in [format!(".remove-{}","0".repeat(32)),format!(".remove-{}","A".repeat(32)),
+        format!("{archive}/app"),format!("{archive}x"),".remove-short".into()] {
+        assert!(!removal_archive_visible_name_data(&bad));
+    }
+    assert!(removal_archive_extra_data(&archive,1,nix::libc::DT_DIR,0));
+    assert!(removal_archive_extra_data(&archive,1,nix::libc::DT_DIR,63));
+    assert!(!removal_archive_extra_data(&archive,1,nix::libc::DT_DIR,64));
+    assert!(!removal_archive_extra_data(&archive,0,nix::libc::DT_DIR,0));
+    for kind in [nix::libc::DT_REG,nix::libc::DT_LNK,nix::libc::DT_UNKNOWN] {
+        assert!(!removal_archive_extra_data(&archive,1,kind,0));
+    }
+    let directory=Identity {dev:1,ino:2,mode:0o040700,uid:0,gid:0,links:2,size:64,
+        mtime:3,mtime_ns:4,ctime:5,ctime_ns:6,flags:0};
+    assert!(private_stage_identity_data(directory,2));
+    assert!(private_stage_post_data(directory,directory));
+    for other in [Identity {mode:0o120700,..directory},Identity {mode:0o040755,..directory},
+        Identity {uid:1,..directory},Identity {gid:1,..directory},Identity {flags:1,..directory},
+        Identity {ino:3,..directory}] {
+        assert!(!private_stage_identity_data(other,2));
+        assert!(!private_stage_post_data(directory,other));
+    }
+    assert!(!private_stage_post_data(directory,Identity {ctime_ns:7,..directory}));
+    let ordinary=InstallationSlots::new();
+    assert!(!ordinary.removal_archive_source_scope());
+    let mut unbound=InstallationSlots::new();unbound.removal=Some(RemovalRetention::new());
+    assert!(!unbound.removal_archive_source_scope()); // retained DATA alone is not the owner gate
+    assert_eq!(REMOVAL_VISIBLE_ROSTER_BYTES,32768);
     assert!(!runtime::safe_payload_path(paths::APP_NAME));
     assert_eq!(REMOVAL_WALK_PATHS.len(),10);
     assert_eq!(16+REMOVAL_WALK_PATHS.len()+17,REMOVAL_OWNED_FD_BOUND);

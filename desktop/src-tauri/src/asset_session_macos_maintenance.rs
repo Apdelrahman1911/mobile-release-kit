@@ -13,6 +13,12 @@ pub(super) struct Closure {
     completion:Option<crate::saved_command_owner::MacosMaintenanceCompletion>,
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     last:Option<crate::saved_command_owner::MacosMaintenanceStatus>,
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    peer:Option<macos_removal::Handle>,
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    hints:macos_removal::HintState,
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    notice:Option<Arc<macos_removal::NoticeRuntime>>,
 }
 impl Closure {
     pub(super) fn closed(&self)->bool{self.closed}
@@ -20,17 +26,30 @@ impl Closure {
     /// future erroneous transition were to clear only the presentation flag.
     pub(super) fn data_only(&self)->bool{
         #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
-        { !self.closed && self.original.is_none() && self.completion.is_none() }
+        { !self.closed && self.original.is_none() && self.completion.is_none() && self.peer.is_none() }
         #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         { !self.closed }
     }
     pub(super) fn can_exit(&self)->bool{
         if self.data_only(){return true;}
         #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
-        {self.closed && self.original.as_ref().is_some_and(|original|original.can_exit())}
+        {
+            if let Some(peer)=&self.peer{
+                // Source/channel/main/worker/coordinator retirement is owed in
+                // addition to Saved. Merely joining Saved cannot close a peer.
+                return self.closed&&peer.can_exit()&&self.original.as_ref().is_none_or(|original|original.can_exit());
+            }
+            self.closed && self.original.as_ref().is_some_and(|original|original.can_exit())
+        }
         #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
         {false}
     }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn removal_matches(&self,peer:&macos_removal::Handle)->bool{
+        self.closed&&self.peer.as_ref().is_some_and(|original|original.same(peer))
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn notice_bytes(&self)->Option<usize>{self.notice.as_ref().map_or(Some(0),|notice|notice.retained_bytes())}
 }
 
 pub(super) fn unavailable()->BridgeError{
@@ -44,6 +63,9 @@ impl DocumentBinding {
         passive_document_gate(state)?;
         if !state.maintenance.data_only() || !state.lifetime.original_bound() || state.lost_observed
             || !self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity){return Err(unavailable());}
+        self.macos_maintenance_common_gate(state)
+    }
+    fn macos_maintenance_common_gate(&self,state:&DocumentState)->Result<(),BridgeError>{
         // Do not call android_build.busy here: the second admission owns its
         // SAME unentered cohort. Its Saved snapshot/admit gates examine that
         // exact cohort and every Android original under the existing Registry.
@@ -61,6 +83,93 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot|slot.phase!=Phase::Idle || !slot.owner.resources_settled())
             || state.github.native_work_pending(){return Err(unavailable());}
         Ok(())
+    }
+
+    fn macos_removal_saved_gate(&self,state:&DocumentState,peer:&macos_removal::Handle)->Result<(),BridgeError>{
+        // Exact original exception, not a Boolean "ignore busy"/public gate.
+        // The closure is never temporarily opened around this admission.
+        passive_document_state_gate(state)?;
+        if !state.maintenance.removal_matches(peer)||state.maintenance.original.is_some()
+            ||state.maintenance.completion.is_some()||!state.lifetime.original_bound()||state.lost_observed
+            ||!self.inner.bridge.android_build.original_document_matches(&self.inner.session_identity)
+            ||!peer.work_ok(){return Err(unavailable());}
+        self.macos_maintenance_common_gate(state)
+    }
+
+    /// Main-window startup owns one observer original. Store its bounded cell
+    /// before native registration so a partial/Unknown start is never lost.
+    pub(crate) fn install_macos_removal_notice(&self)->bool{
+        if !cfg!(feature="macos-installed-desktop-image")||!mrk_macos_installed_native::main_thread(){return false;}
+        let runtime=macos_removal::NoticeRuntime::reserved();
+        {
+            let mut state=self.lock();
+            if state.maintenance.notice.is_some(){return false;}
+            state.maintenance.notice=Some(runtime.clone());
+        }
+        runtime.install()
+    }
+    pub(crate) fn removal_notice_runtime(&self)->Option<Arc<macos_removal::NoticeRuntime>>{self.lock().maintenance.notice.clone()}
+
+    /// Native id hint only. No caller supplies a path, deadline or credential.
+    /// The original local read-only bootstrap is captured before any Doc wait.
+    pub(crate) fn start_macos_removal_hint(&self,id:[u8;16])->Result<(),BridgeError>{
+        let at=Instant::now();
+        if !cfg!(feature="macos-installed-desktop-image")||id==[0;16]
+            ||!crate::installation::preparation_profile_available(){return Err(unavailable());}
+        self.reconcile();
+        let snapshot={let state=self.lock();self.macos_maintenance_gate(&state)?;
+            self.inner.bridge.android_build.removal_snapshot(&self.inner.session_identity)?};
+        let checked=snapshot.check_originals()?;
+        let admitted={
+            let mut state=self.lock();self.macos_maintenance_gate(&state)?;
+            if state.maintenance.notice.as_ref().and_then(|notice|notice.retained_bytes()).is_none(){return Err(unavailable());}
+            let census=installation_memory::macos_maintenance_census(self,&state,checked.picker_originals()).map_err(|_|unavailable())?;
+            let prior=self.inner.bridge.android_build.removal_admission_bytes(&self.inner.session_identity,&checked,&census).ok_or_else(unavailable)?;
+            let dispatcher=self.inner.bridge.android_build.removal_dispatcher(&self.inner.session_identity).ok_or_else(unavailable)?;
+            let generation=state.maintenance.hints.admit(id).ok_or_else(unavailable)?;
+            let admitted=match macos_removal::reserve(self,id,generation,at,checked.picker_originals().clone(),
+                checked.source_generation(),prior,dispatcher){Ok(admitted)=>admitted,Err(error)=>{
+                    let _=state.maintenance.hints.retire(id,generation,true);return Err(error);
+                }};
+            state.maintenance.closed=true;state.maintenance.peer=Some(admitted.handle());
+            state.maintenance.completion=None;state.maintenance.last=None;
+            self.bump(&mut state);admitted
+        };
+        admitted.release().map_err(|_|unavailable())
+    }
+
+    fn start_macos_removal_saved(&self,peer:&macos_removal::Handle,confirmation:crate::saved_command_owner::MacosRemovalConfirmed)
+        ->Result<(),BridgeError>{
+        // Once-only actual native proof. The id notification cannot call this.
+        let request=crate::saved_command_owner::MacosMaintenanceRequest::confirmed_removal(&confirmation)?;
+        let snapshot={let state=self.lock();self.macos_removal_saved_gate(&state,peer)?;
+            self.inner.bridge.android_build.maintenance_snapshot(&self.inner.session_identity,request)?};
+        let checked=snapshot.check_originals()?;
+        if !peer.sources_match(checked.picker_originals(),checked.source_generation()){return Err(unavailable());}
+        let admitted={
+            let mut state=self.lock();self.macos_removal_saved_gate(&state,peer)?;
+            let census=installation_memory::macos_removal_census(self,&state,peer,checked.picker_originals()).map_err(|_|unavailable())?;
+            let admitted=self.inner.bridge.android_build.admit_maintenance(&self.inner.session_identity,&checked,&census)?;
+            let original=admitted.handle();
+            state.maintenance.original=Some(original.clone());state.maintenance.completion=None;state.maintenance.last=None;
+            if !peer.bind_saved(original){peer.poison();}
+            self.bump(&mut state);admitted
+        };
+        if !peer.work_ok(){drop(admitted);return Err(unavailable());}
+        admitted.release()
+    }
+
+    pub(super) fn reconcile_macos_removal_locked(&self,state:&mut DocumentState){
+        let Some(peer)=state.maintenance.peer.as_ref().cloned()else{return;};
+        let live=state.lifetime.original_bound()&&!state.lost_observed&&!state.unknown&&!state.exhausted
+            &&!state.stopping&&!state.quit_pending&&!state.retiring&&!state.lock_pending;
+        if !live&&!peer.can_exit(){peer.stop(crate::installed_runtime::AdmissionFailure::Stopped,Instant::now());}
+        peer.reconcile();
+        if peer.may_reopen()&&state.maintenance.original.as_ref().is_none_or(|original|original.can_exit()){
+            if !state.maintenance.hints.retire(peer.id(),peer.generation(),true){peer.poison();return;}
+            state.maintenance.peer=None;state.maintenance.original=None;state.maintenance.completion=None;
+            state.maintenance.closed=false;self.bump(state);
+        }
     }
 
     pub(crate) fn start_macos_maintenance(&self,confirmation:&str)
@@ -115,6 +224,11 @@ impl DocumentBinding {
         // worker/coordinator/native/main-callback final gate; Status cannot do
         // this transition. Unknown never supplies a Completion.
         state.maintenance.last=Some(completion.status());
+        if let Some(peer)=&state.maintenance.peer{
+            // SAME operation/generation/cutoff result is stored before wake.
+            // Even known refusal must wait for channel/source/main/task closure.
+            peer.offer_completion(completion);self.bump(state);return;
+        }
         if completion.may_reopen() {
             state.maintenance.closed=false;
             state.maintenance.original=None;
@@ -136,6 +250,19 @@ impl DocumentBinding {
     #[cfg(feature="desktop-shell")]
     pub(crate) fn finish_macos_maintenance(&self,app:tauri::AppHandle){
         self.reconcile();
+        let peer=self.lock().maintenance.peer.clone();
+        if let Some(peer)=peer{
+            if let Some(confirmation)=peer.take_confirmation(){
+                if self.start_macos_removal_saved(&peer,confirmation).is_err(){
+                    peer.stop(crate::installed_runtime::AdmissionFailure::Stopped,Instant::now());
+                }
+            }
+            self.reconcile();
+            let ready={let state=self.lock();
+                if state.maintenance.removal_matches(&peer){peer.take_ready()}else{None}};
+            if ready.is_some_and(|ready|ready.handle().same(&peer)&&ready.request_quit()){self.request_quit(app);}
+            return;
+        }
         let completion={self.lock().maintenance.completion.take()};
         // This consumes the actual final result, not an exit-ready flag or
         // copied DTO. The SAME final cutoff is sampled again immediately here.
@@ -212,5 +339,18 @@ mod tests {
         assert!(!state.maintenance.data_only());
         // A Boolean presentation change alone cannot create a Prepared proof;
         // this test constructs no maintenance owner, completion or native book.
+        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+        {
+            let notice=macos_removal::NoticeRuntime::reserved();let bytes=notice.retained_bytes().unwrap();
+            state.maintenance.notice=Some(notice);assert_eq!(state.maintenance.notice_bytes(),Some(bytes));
+            // The passive observer cannot circularly block coreQuitReady. It
+            // still owes its separate main retirement BEFORE relay/exit_ready.
+            state.maintenance.closed=false;assert!(state.maintenance.data_only());assert!(state.maintenance.can_exit());
+            let generation=state.maintenance.hints.admit([1;16]).unwrap();
+            assert!(state.maintenance.hints.admit([2;16]).is_none());
+            assert!(!state.maintenance.hints.retire([1;16],generation,false));
+            state.maintenance.closed=true;assert!(!state.maintenance.data_only());assert!(!state.maintenance.can_exit());
+            assert!(credential_lock_gate(&state).is_ok());assert!(quit_question_admitted(&state));
+        }
     }
 }

@@ -925,3 +925,141 @@ int mrk_removal_peer_retire(void *raw,mrk_removal_peer_report *out){
     b->retire_attempted=1;b->report.operation=MRK_REMOVE_CLOSE;*out=b->report;
     memset(b,0,sizeof(*b));free(b);return 1;
 }
+
+
+// Fixed id-only notice. Foundation documents that distributed delivery may be
+// delayed without a bound or dropped; the actual socket protocol stays decisive.
+// The selector observer is NOT retained by notification-center registration.
+static NSString *const MRKRemovalReadyName=@"dev.mobile-release-kit.desktop.remove-ready-v1";
+typedef struct MRKRemovalNotice MRKRemovalNotice;
+@interface MRKRemovalReadyObserver : NSObject { @public MRKRemovalNotice *original; }
+- (void)ready:(NSNotification *)notification;
+@end
+struct MRKRemovalNotice {
+    pid_t pid;uid_t uid;gid_t gid;
+    void *context;mrk_removal_hint hint;
+    NSDistributedNotificationCenter *center;
+    MRKRemovalReadyObserver *observer;
+    mrk_removal_notice_report facts;
+};
+_Static_assert(sizeof(MRKRemovalNotice)<=192,"fixed notice original");
+static int notice_original(MRKRemovalNotice *b) {
+    return b && pthread_main_np()==1 && b->pid==getpid() && b->uid==getuid()
+        && b->gid==getgid() && b->uid!=0 && getuid()==geteuid() && getgid()==getegid();
+}
+static int notice_id(const uint8_t *text,size_t size,uint8_t id[16]) {
+    if(!text || size!=32)return 0;
+    uint8_t any=0;
+    for(unsigned i=0;i<16;i++) {
+        const uint8_t a=text[2*i],b=text[2*i+1];
+        if(!((a>='0'&&a<='9')||(a>='a'&&a<='f'))
+            ||!((b>='0'&&b<='9')||(b>='a'&&b<='f')))return 0;
+        id[i]=(uint8_t)(((a<='9'?a-'0':a-'a'+10)<<4)|(b<='9'?b-'0':b-'a'+10));any|=id[i];
+    }
+    return any!=0;
+}
+@implementation MRKRemovalReadyObserver
+- (void)ready:(NSNotification *)notification {
+    MRKRemovalNotice *b=original;
+    if(!notice_original(b) || b->facts.unknown || !b->facts.registered || b->facts.remove_attempted)return;
+    if(b->facts.active){b->facts.unknown=1;return;}
+    b->facts.active=1;
+    @try {
+        // No userInfo, arbitrary object, path or unbounded UTF8 conversion. The
+        // wire object is exact32 ASCII code units before the stack-only copy.
+        if(![[notification name] isEqualToString:MRKRemovalReadyName] || [notification userInfo]!=nil)return;
+        id value=[notification object];
+        if(![value isKindOfClass:[NSString class]] || [(NSString *)value length]!=32)return;
+        uint8_t text[32],decoded[16];
+        for(NSUInteger i=0;i<32;i++){unichar u=[(NSString *)value characterAtIndex:i];if(u>127)return;text[i]=(uint8_t)u;}
+        if(!notice_id(text,sizeof(text),decoded))return;
+        b->hint(b->context,decoded); // fixed non-retained, nonblocking Rust inbox
+    } @catch (...) {
+        // Untrusted malformed notice is discarded. It cannot acquire an owner
+        // or supply native authority, nor poison unrelated ordinary work.
+    } @finally {b->facts.active=0;}
+}
+- (void)dealloc {
+    // Original remains live until our release returned AND this actual dealloc
+    // was entered. A queued framework retain prevents this flag and therefore
+    // prevents retirement; we never free its callback backing speculatively.
+    if(original)original->facts.observer_destroyed=1;
+    [super dealloc];
+}
+@end
+size_t mrk_removal_notice_bytes(void) {
+    // Two explicit references, original object ivars and one fixed NSString
+    // during posting. Foundation/server-private allocation is not sizeof DATA.
+    return sizeof(MRKRemovalNotice)+sizeof(void *)*4+128;
+}
+void *mrk_removal_notice_reserve(void *context,mrk_removal_hint hint) {
+    if(!context || !hint || pthread_main_np()!=1 || getuid()==0 || getuid()!=geteuid() || getgid()!=getegid())return NULL;
+    MRKRemovalNotice *b=calloc(1,sizeof(*b));if(!b)return NULL;
+    b->pid=getpid();b->uid=getuid();b->gid=getgid();b->context=context;b->hint=hint;b->facts.version=1;return b;
+}
+int mrk_removal_notice_start(void *original,mrk_removal_notice_report *out) {
+    MRKRemovalNotice *b=original;if(!notice_original(b) || !out)return -1;
+    if(b->facts.started || b->facts.remove_attempted || b->facts.unknown){*out=b->facts;return -1;}
+    b->facts.started=1;
+    @try {
+        b->facts.refs[0]=R_ENTERED;b->center=[[NSDistributedNotificationCenter defaultCenter] retain];
+        b->facts.refs[0]=b->center?R_OWNED:R_CLOSED;
+        if(!b->center){*out=b->facts;return 0;}
+        b->facts.refs[1]=R_ENTERED;b->observer=[[MRKRemovalReadyObserver alloc] init];
+        b->facts.refs[1]=b->observer?R_OWNED:R_CLOSED;
+        if(!b->observer){*out=b->facts;return 0;}
+        b->observer->original=b;
+        // Potential registration is retained BEFORE entry. Any throw leaves
+        // unknown registration; no guess that a selector cannot still run.
+        b->facts.registered=1;
+        [b->center addObserver:b->observer selector:@selector(ready:)
+            name:MRKRemovalReadyName object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDrop];
+        *out=b->facts;return 1;
+    } @catch (...) {
+        for(unsigned i=0;i<2;i++)if(b->facts.refs[i]==R_ENTERED)b->facts.refs[i]=R_UNKNOWN;
+        b->facts.unknown=1;*out=b->facts;return -1;
+    }
+}
+int mrk_removal_notice_retire(void *original,mrk_removal_notice_report *out) {
+    MRKRemovalNotice *b=original;if(!notice_original(b) || !out)return -1;
+    if(b->facts.remove_attempted || b->facts.active || b->facts.unknown){*out=b->facts;return -1;}
+    b->facts.remove_attempted=1;
+    @try {
+        if(b->facts.registered) {
+            [b->center removeObserver:b->observer name:MRKRemovalReadyName object:nil];
+            b->facts.registered=0;b->facts.removed=1;
+        }else{b->facts.removed=1;}
+        if(b->facts.refs[1]==R_OWNED) {
+            b->facts.refs[1]=R_CLOSING;[b->observer release];b->observer=nil;b->facts.refs[1]=R_CLOSED;
+            // Release returned but any retained queued observer remains real
+            // custody. Do not free the object pointed to by its `original`.
+            if(!b->facts.observer_destroyed){b->facts.unknown=1;*out=b->facts;return -1;}
+        }
+        if(b->facts.refs[0]==R_OWNED){b->facts.refs[0]=R_CLOSING;[b->center release];b->center=nil;b->facts.refs[0]=R_CLOSED;}
+        if(b->facts.active || b->facts.registered || b->facts.unknown
+            ||(b->facts.refs[0]!=R_EMPTY&&b->facts.refs[0]!=R_CLOSED)
+            ||(b->facts.refs[1]!=R_EMPTY&&b->facts.refs[1]!=R_CLOSED)){b->facts.unknown=1;*out=b->facts;return -1;}
+        *out=b->facts;memset(b,0,sizeof(*b));free(b);return 1;
+    } @catch (...) {
+        for(unsigned i=0;i<2;i++)if(b->facts.refs[i]==R_CLOSING)b->facts.refs[i]=R_UNKNOWN;
+        b->facts.unknown=1;*out=b->facts;return -1;
+    }
+}
+int mrk_removal_notice_post(const uint8_t *text,size_t size) {
+    uint8_t id[16];if(!notice_id(text,size,id))return 0;
+    // Fixed Parent is root; these account checks are only a posting constraint,
+    // not authentication. Anyone can forge an id-only distributed hint.
+    if(getuid()!=0 || geteuid()!=0 || getgid()!=0 || getegid()!=0)return 0;
+    @autoreleasepool {
+        NSString *object=nil;int returned=0;
+        @try {
+            object=[[NSString alloc] initWithBytes:text length:32 encoding:NSASCIIStringEncoding];
+            if(!object)return 0;
+            [[NSDistributedNotificationCenter defaultCenter] postNotificationName:MRKRemovalReadyName
+                object:object userInfo:nil options:(NSDistributedNotificationPostToAllSessions|NSDistributedNotificationDeliverImmediately)];
+            returned=1;
+        } @catch (...) {returned=0;}
+        @try {[object release];} @catch (...) {returned=0;}
+        return returned; // void post returned, NEVER a delivery acknowledgement
+    }
+}

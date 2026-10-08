@@ -22,6 +22,9 @@ pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInp
 mod android_registration;
 #[path = "asset_session_macos_maintenance.rs"]
 mod macos_maintenance;
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+#[path = "asset_session_macos_removal.rs"]
+pub(crate) mod macos_removal;
 use crate::saved_command_owner::{AndroidRegistrationPublisher as RegistrationPublisher,
     AndroidRegistrationPublisherKind as RegistrationPublisherKind};
 fn finish_registration_publisher(publisher: RegistrationPublisher) {
@@ -1759,6 +1762,11 @@ fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
 }
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
     if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+    passive_document_state_gate(state)
+}
+// Same passive checks; only the private matching removal peer uses this
+// companion while its own new-work closure remains continuously installed.
+fn passive_document_state_gate(state: &DocumentState) -> Result<(), BridgeError> {
     // Existing passive services do not require editing/crash-hook qualification.
     // The caller still holds this same document mutex through Supervisor claim.
     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
@@ -3960,7 +3968,7 @@ impl DocumentBinding {
         if evidence_family.is_none() && installation_id.is_none(){
             let mut state=self.lock();self.reconcile_android_registration_locked(&state);
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
-            self.reconcile_macos_maintenance_locked(&mut state);
+            {self.reconcile_macos_removal_locked(&mut state);self.reconcile_macos_maintenance_locked(&mut state);}
         }
     }
     fn reconcile_checked_published(&self,evidence_family:Option<bool>,installation_id:Option<u32>,
@@ -5280,7 +5288,8 @@ impl DocumentBinding {
             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
             && self.inner.bridge.preflight.can_exit() && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit()))
     }
-    #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+    #[cfg(any(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper"))))]
     pub(crate) fn exit_cleanup_end(&self) -> Option<Instant> {
         // Observe only the retained accepted Quit's first STOP; never reconcile,
         // start another owner, or create a timestamp in the exit observer.

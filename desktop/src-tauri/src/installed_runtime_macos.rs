@@ -350,6 +350,188 @@ impl AppRemovalWorkGate {
     }
 }
 
+
+/// Exact DATA reducer for the two fixed request-directory rosters. It consumes
+/// the existing native directory-block format; it never opens/traverses paths.
+#[cfg(not(feature = "macos-android-registration-helper"))]
+struct RemovalRequestNames<'a>{own:&'a str,infra:bool,names:[[u8;255];64],lengths:[usize;64],count:usize,
+    saw_own:bool,saw_json:bool,saw_socket:bool}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl<'a> RemovalRequestNames<'a>{
+    fn new(own:&'a str,infra:bool)->Self{Self{own,infra,names:[[0;255];64],lengths:[0;64],count:0,
+        saw_own:false,saw_json:false,saw_socket:false}}
+    fn push(&mut self,inode:u64,kind:u8,name:&[u8])->Result<()>{
+        if name==b"."||name==b".."{return Ok(());}
+        let length=name.len();
+        if inode==0||length==0||length>255||self.count>=if self.infra{64}else{2}
+            ||name.contains(&b'/')||name.contains(&0)
+            ||(0..self.count).any(|i|self.lengths[i]==length&&self.names[i][..length]==*name){return Err(AdmissionFailure::Inventory);}
+        if self.infra{
+            if kind!=nix::libc::DT_DIR||length!=34||!name.starts_with(b"r-")
+                ||native::removal_coordinator::decode_removal_hint(&name[2..]).is_none(){return Err(AdmissionFailure::Inventory);}
+            self.saw_own|=name==self.own.as_bytes();
+        }else if name==b"request.json"&&kind==nix::libc::DT_REG{self.saw_json=true;}
+        else if name==b"s"&&kind==nix::libc::DT_SOCK{self.saw_socket=true;}
+        else{return Err(AdmissionFailure::Inventory);}
+        self.names[self.count][..length].copy_from_slice(name);self.lengths[self.count]=length;self.count+=1;Ok(())
+    }
+    fn block(&mut self,bytes:&[u8])->Result<()>{
+        if bytes.len()>65536{return Err(AdmissionFailure::Bounds);}let mut at=0;
+        while at<bytes.len(){
+            if bytes.len()-at<11{return Err(AdmissionFailure::Inventory);}
+            let inode=u64::from_ne_bytes(bytes[at..at+8].try_into().map_err(native_error)?);
+            let kind=bytes[at+8];let length=usize::from(u16::from_ne_bytes([bytes[at+9],bytes[at+10]]));
+            let next=at.checked_add(11+length).filter(|n|*n<=bytes.len()).ok_or(AdmissionFailure::Inventory)?;
+            self.push(inode,kind,&bytes[at+11..next])?;at=next;
+        }Ok(())
+    }
+    fn complete(&self)->Result<()>{
+        if self.infra&&!self.saw_own||!self.infra&&(!self.saw_json||!self.saw_socket||self.count!=2){return Err(AdmissionFailure::Inventory);}
+        Ok(())
+    }
+}
+
+/// Read-only fixed request originals. This shallow book is subordinate to the
+/// one peer worker; it is not an installation walker or a source capability.
+#[cfg(not(feature = "macos-android-registration-helper"))]
+pub(crate) struct RemovalRequestOriginal {
+    book:Option<Book>,id:[u8;16],indices:Option<[usize;6]>,socket:Option<Identity>,
+    raw:Vec<u8>,hash:[u8;32],request:Option<crate::macos_remove_protocol::RequestData>,
+    entered:bool,ready:Cell<bool>,closed:bool,
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl RemovalRequestOriginal {
+    pub(crate) fn reserved(id:[u8;16])->Option<Self>{
+        (id!=[0;16]).then(||Self{book:Some(Book::new()),id,indices:None,socket:None,raw:Vec::new(),hash:[0;32],
+            request:None,entered:false,ready:Cell::new(false),closed:false})
+    }
+    pub(crate) fn working_reservation_bytes()->Option<usize>{
+        // Exact finite maxima: six records/names, one1024 Snapshot frame,
+        // raw32KiB+parsed<=32KiB, one64KiB read block and one64KiB directory
+        // block plus64 fixed255-byte names. These buffers are conservatively
+        // charged together even though the same worker uses them in sequence.
+        std::mem::size_of::<Self>().checked_add(6*std::mem::size_of::<Record>())?
+            .checked_add(6*256)?.checked_add(native::vault_filesystem::SNAPSHOT_FRAME_BYTES)?
+            .checked_add(2*crate::macos_remove_protocol::REQUEST_LIMIT)?
+            .checked_add(2*65536+std::mem::size_of::<RemovalRequestNames<'_>>())?
+            .checked_add(native::android_registration::RemovalClock::project_owned_upper_bound()?)
+    }
+    fn book(&self)->Result<&Book>{self.book.as_ref().ok_or(AdmissionFailure::Unknown)}
+    fn observed<T>(&self,result:Result<T>)->Result<T>{
+        if let Err(failure)=result.as_ref(){
+            let book=self.book()?;
+            if !book.removal_clock_vetoed(){book.note_acl(*failure,Instant::now());}
+        }
+        result
+    }
+    fn own_name(&self)->String{format!("r-{}",self.id.iter().map(|b|format!("{b:02x}")).collect::<String>())}
+    fn fixed_names(book:&Book,index:usize,own:&str,infra:bool,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        let mut block=[0u8;65536];let mut names=RemovalRequestNames::new(own,infra);
+        loop{
+            book.point(end,stop)?;
+            let used=native::directory_block(book.fd(index)?.as_fd(),&mut block).map_err(native_error)?;
+            book.point(end,stop)?;
+            if used>block.len(){return Err(AdmissionFailure::Bounds);}
+            if used==0{break;}names.block(&block[..used])?;
+        }
+        names.complete()?;book.check_name(index,end,stop)
+    }
+    fn socket_data(stat:&FileStat)->Result<Identity>{
+        if stat.st_mode!=(SFlag::S_IFSOCK.bits()|0o666)||stat.st_uid!=0||stat.st_gid!=0||stat.st_flags!=0||stat.st_nlink!=1{
+            return Err(AdmissionFailure::Ownership);
+        }
+        Ok(Identity::of(stat))
+    }
+    pub(crate) fn read_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        if self.entered||self.closed{return Err(AdmissionFailure::AlreadyUsed);}
+        self.entered=true;
+        let result=(||{
+            let name=self.own_name();let book=self.book.as_mut().ok_or(AdmissionFailure::Unknown)?;
+            book.records.try_reserve_exact(6).map_err(|_|AdmissionFailure::Bounds)?;
+            if book.records.capacity()!=6{return Err(AdmissionFailure::Bounds);}
+            book.arm_acl_once(end,stop)?;book.started=true;
+            let root=book.open(None,"/",true,end,stop)?;
+            let library=book.open(Some(root),"Library",true,end,stop)?;
+            let support=book.open(Some(library),"Application Support",true,end,stop)?;
+            let infra=book.open(Some(support),"MobileReleaseKit-RemovalRequests",true,end,stop)?;
+            book.fixed_code_mode(infra,0o755,end,stop)?;
+            Self::fixed_names(book,infra,&name,true,end,stop)?;
+            let directory=book.open(Some(infra),&name,true,end,stop)?;
+            book.fixed_code_mode(directory,0o755,end,stop)?;
+            Self::fixed_names(book,directory,&name,false,end,stop)?;
+            book.point(end,stop)?;
+            let socket=stat::fstatat(book.fd(directory)?,"s",AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            self.socket=Some(Self::socket_data(&socket)?);book.point(end,stop)?;
+            let json=book.open(Some(directory),"request.json",false,end,stop)?;
+            book.fixed_code_mode(json,0o444,end,stop)?;
+            self.indices=Some([root,library,support,infra,directory,json]);
+            let size=book.records[json].identity.and_then(|id|u64::try_from(id.size).ok())
+                .filter(|size|*size>0&&*size<=crate::macos_remove_protocol::REQUEST_LIMIT as u64).ok_or(AdmissionFailure::Bounds)?;
+            let (_,raw)=book.read(json,size,true,end,stop)?;
+            self.raw=raw; // same actual bytes are retained before parsing/POST
+            if self.raw.capacity()>crate::macos_remove_protocol::REQUEST_LIMIT{return Err(AdmissionFailure::Bounds);}
+            self.hash=Sha256::digest(&self.raw).into();
+            let parsed=crate::macos_remove_protocol::RequestData::parse_data(&self.raw).map_err(|_|AdmissionFailure::Inventory)?;
+            if native::removal_coordinator::decode_removal_hint(parsed.binding_data().fields_data().request_id.as_bytes())!=Some(self.id)
+                ||parsed.owned_bytes_data().is_none_or(|n|n>crate::macos_remove_protocol::REQUEST_LIMIT){return Err(AdmissionFailure::Bounds);}
+            self.request=Some(parsed);book.point(end,stop)?;Ok(())
+        })();
+        self.observed(result)
+    }
+    /// Immediately after parsing: attach the one restrictive older Parent
+    /// clock. It is not yet authenticated and cannot create a peer/consent.
+    pub(crate) fn bind_clock_once(&mut self,gate:AppRemovalWorkGate,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        if !self.entered||self.closed||self.ready.get()||self.request.is_none(){return Err(AdmissionFailure::AlreadyUsed);}
+        let book=self.book.as_mut().ok_or(AdmissionFailure::Unknown)?;
+        if book.removal_gate.is_some(){return Err(AdmissionFailure::AlreadyUsed);}
+        book.removal_gate=Some(gate);let result=book.point(end,stop);
+        self.observed(result)?;self.ready.set(true);self.recheck(end,stop)
+    }
+    pub(crate) fn request(&self)->Result<&crate::macos_remove_protocol::RequestData>{self.request.as_ref().ok_or(AdmissionFailure::Inventory)}
+    pub(crate) fn raw(&self)->&[u8]{&self.raw}
+    pub(crate) fn hash(&self)->[u8;32]{self.hash}
+    pub(crate) fn first_failure(&self)->Option<(AdmissionFailure,Instant)>{self.book.as_ref().and_then(Book::first_failure)}
+    pub(crate) fn parent_vetoed(&self)->bool{self.book.as_ref().is_some_and(Book::removal_clock_vetoed)}
+    pub(crate) fn originals(&self)->Result<[std::os::fd::BorrowedFd<'_>;3]>{
+        if !self.ready.get(){return Err(AdmissionFailure::Unknown);}
+        let indices=self.indices.ok_or(AdmissionFailure::Unknown)?;let book=self.book()?;
+        Ok([book.fd(indices[3])?.as_fd(),book.fd(indices[4])?.as_fd(),book.fd(indices[5])?.as_fd()])
+    }
+    pub(crate) fn recheck(&self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        let result=(||{
+            if !self.ready.get()||self.closed{return Err(AdmissionFailure::AlreadyUsed);}
+            let book=self.book()?;book.point(end,stop)?;
+            for index in self.indices.ok_or(AdmissionFailure::Unknown)?{book.check_name(index,end,stop)?;}
+            let directory=self.indices.ok_or(AdmissionFailure::Unknown)?[4];
+            let socket=stat::fstatat(book.fd(directory)?,"s",AtFlags::AT_SYMLINK_NOFOLLOW).map_err(native_error)?;
+            if Some(Self::socket_data(&socket)?)!=self.socket{return Err(AdmissionFailure::Identity);}
+            book.point(end,stop)
+        })();
+        if result.is_err(){self.ready.set(false);}self.observed(result)
+    }
+    pub(crate) fn settle(&mut self,expired:&mut dyn FnMut(Option<(AdmissionFailure,Instant)>)->bool)->bool {
+        self.ready.set(false);if self.closed{return false;}
+        let Some(book)=self.book.as_mut()else{return false;};
+        if !self.entered&&book.never_started(){self.book.take();self.closed=true;return true;}
+        let outcome=book.settle(expired);let first=book.first_failure();
+        let verdict=book.cleanup_verdict(first);let own=expired(first);
+        if outcome!=CloseOutcome::Settled||!book.settled()||own||verdict!=AppRemovalCleanup::Allowed{return false;}
+        self.book.take();self.closed=true;true
+    }
+    pub(crate) fn settled(&self)->bool{self.closed&&self.book.is_none()}
+    pub(crate) fn retained_bytes(&self)->Option<usize>{
+        std::mem::size_of::<Self>().checked_add(self.raw.capacity())?.checked_add(match &self.request{
+            Some(value)=>value.owned_bytes_data()?,None=>0})?.checked_add(match &self.book{
+            Some(book)=>book.retained_heap_bytes()?,None=>0})
+    }
+}
+#[cfg(not(feature = "macos-android-registration-helper"))]
+impl Drop for RemovalRequestOriginal {fn drop(&mut self){
+    if let Some(book)=self.book.take(){
+        if book.settled(){drop(book)}else{std::mem::forget(book)}
+    }
+}}
+
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -1162,6 +1344,39 @@ fn installed_github_action_original_slots_are_inert_and_uncertainty_is_absorbing
 // touches a descriptor. It tests missing/empty custody, not native free evidence.
 #[cfg(test)]
 pub(crate) fn common_acl_data_check() -> bool {
+    #[cfg(not(feature = "macos-android-registration-helper"))]
+    {
+        // Pure request DATA/shape checks: never open a path, snapshot or peer.
+        if RemovalRequestOriginal::reserved([0;16]).is_some(){return false;}
+        let untouched=RemovalRequestOriginal::reserved([3;16]).unwrap();
+        if untouched.entered||untouched.ready.get()||untouched.indices.is_some()||untouched.request.is_some()
+            ||RemovalRequestOriginal::working_reservation_bytes().is_none_or(|n|n>256*1024){return false;}
+        drop(untouched);
+        // The actual fixed parser: two entries only, duplicate/type/truncation
+        // refusal and total64 infrastructure bound, including this request.
+        let own="r-11111111111111111111111111111111";
+        let mut pair=RemovalRequestNames::new(own,false);
+        let mut raw=Vec::new();
+        for (kind,name) in [(nix::libc::DT_REG,b"request.json".as_slice()),(nix::libc::DT_SOCK,b"s".as_slice())]{
+            raw.extend_from_slice(&1u64.to_ne_bytes());raw.push(kind);raw.extend_from_slice(&(name.len() as u16).to_ne_bytes());raw.extend_from_slice(name);
+        }
+        if pair.block(&raw).is_err()||pair.complete().is_err()||pair.push(1,nix::libc::DT_REG,b"extra").is_ok(){return false;}
+        let mut one=RemovalRequestNames::new(own,false);
+        if one.push(1,nix::libc::DT_REG,b"request.json").is_err()||one.complete().is_ok()
+            ||one.push(1,nix::libc::DT_REG,b"request.json").is_ok(){return false;}
+        for (kind,name,inode) in [(nix::libc::DT_REG,b"s".as_slice(),1),(nix::libc::DT_LNK,b"request.json".as_slice(),1),
+            (nix::libc::DT_SOCK,b"s".as_slice(),0),(nix::libc::DT_REG,b"../request.json".as_slice(),1)]{
+            if RemovalRequestNames::new(own,false).push(inode,kind,name).is_ok(){return false;}
+        }
+        for cut in [1,10,raw.len()-1]{if RemovalRequestNames::new(own,false).block(&raw[..cut]).is_ok(){return false;}}
+        let mut infra=RemovalRequestNames::new(own,true);
+        if infra.complete().is_ok()||infra.push(1,nix::libc::DT_DIR,own.as_bytes()).is_err(){return false;}
+        for i in 1..64{let name=format!("r-{i:032x}");if infra.push(1,nix::libc::DT_DIR,name.as_bytes()).is_err(){return false;}}
+        if infra.complete().is_err()||infra.count!=64||infra.push(1,nix::libc::DT_DIR,b"r-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee").is_ok(){return false;}
+        for name in [b"r-00000000000000000000000000000000".as_slice(),b"r-ABCDEF12345678901234567890123456".as_slice(),b"r-11".as_slice()]{
+            if RemovalRequestNames::new(own,true).push(1,nix::libc::DT_DIR,name).is_ok(){return false;}
+        }
+    }
     #[cfg(not(feature = "macos-android-registration-helper"))]
     {
         let book=Book::new();let (_sender,stop)=watch::channel(false);let now=Instant::now();

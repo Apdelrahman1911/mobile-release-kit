@@ -918,6 +918,8 @@ mod tests {
     fn cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints() {
         #[cfg(not(any(feature="vault-helper",feature="android-registration-helper")))]
         super::confirmation::check_retirement_data();
+        #[cfg(not(any(feature="vault-helper",feature="android-registration-helper")))]
+        super::notice::check_notice_data();
         let first = ParentCutoff::test_original(5).unwrap();
         let cloned = first.clone();
         let separate = ParentCutoff::test_original(5).unwrap();
@@ -944,3 +946,168 @@ mod tests {
         assert!(ParentCutoff::project_owned_upper_bound().unwrap() <= 128);
     }
 }
+
+
+// Fixed native hint, deliberately outside peer/confirmation authority.
+#[cfg(not(any(feature="vault-helper",feature="android-registration-helper")))]
+mod notice {
+    use std::{ffi::c_void,marker::PhantomData,mem::size_of,panic::{catch_unwind,AssertUnwindSafe},
+        ptr::NonNull,rc::Rc,sync::{Arc,Mutex,atomic::{AtomicBool,Ordering}},task::{Context,Poll,Waker},time::Instant};
+    #[repr(C)]
+    #[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+    struct Facts {version:u32,started:u32,registered:u32,active:u32,remove_attempted:u32,removed:u32,
+        observer_destroyed:u32,unknown:u32,refs:[u32;2]}
+    unsafe extern "C" {
+        fn mrk_removal_notice_bytes()->usize;
+        fn mrk_removal_notice_reserve(context:*mut c_void,hint:unsafe extern "C" fn(*mut c_void,*const u8))->*mut c_void;
+        fn mrk_removal_notice_start(original:*mut c_void,out:*mut Facts)->i32;
+        fn mrk_removal_notice_retire(original:*mut c_void,out:*mut Facts)->i32;
+        fn mrk_removal_notice_post(text:*const u8,size:usize)->i32;
+    }
+    struct Inbox {pending:Option<[u8;16]>,waker:Option<Waker>}
+    /// Single original inbox, not a message queue or a capability. Notification
+    /// loss/duplicates/contention may discard hints; the finite socket attempt
+    /// remains the only source of actual protocol progress.
+    pub struct RemovalNoticeInbox {inner:Mutex<Inbox>,closed:AtomicBool,unknown:AtomicBool}
+    impl RemovalNoticeInbox {
+        pub fn reserved()->Arc<Self>{Arc::new(Self{inner:Mutex::new(Inbox{pending:None,waker:None}),
+            closed:AtomicBool::new(false),unknown:AtomicBool::new(false)})}
+        fn offer(&self,id:[u8;16]) {
+            if id==[0;16]||self.closed.load(Ordering::SeqCst)||self.unknown.load(Ordering::SeqCst){return;}
+            let Ok(mut inbox)=self.inner.try_lock()else{return;}; // never block AppKit
+            if inbox.pending.is_some(){return;}
+            inbox.pending=Some(id);let wake=inbox.waker.take();drop(inbox);
+            if let Some(waker)=wake{waker.wake();}
+        }
+        pub fn poll_hint(&self,cx:&mut Context<'_>)->Poll<Option<[u8;16]>> {
+            if self.closed.load(Ordering::SeqCst)||self.unknown.load(Ordering::SeqCst){return Poll::Ready(None);}
+            let Ok(mut inbox)=self.inner.try_lock()else{return Poll::Pending;};
+            if let Some(id)=inbox.pending.take(){return Poll::Ready(Some(id));}
+            if inbox.waker.as_ref().is_none_or(|old|!old.will_wake(cx.waker())){inbox.waker=Some(cx.waker().clone());}
+            Poll::Pending
+        }
+        pub fn closed(&self)->bool{self.closed.load(Ordering::SeqCst)}
+        pub fn known(&self)->bool{!self.unknown.load(Ordering::SeqCst)}
+        pub fn project_owned_upper_bound()->Option<usize>{size_of::<Self>().checked_add(2*size_of::<usize>())}
+        fn finish(&self,known:bool) {
+            self.closed.store(true,Ordering::SeqCst);if !known{self.unknown.store(true,Ordering::SeqCst);}
+            if let Ok(mut inbox)=self.inner.try_lock(){inbox.pending=None;let wake=inbox.waker.take();drop(inbox);if let Some(waker)=wake{waker.wake();}}
+            else{self.unknown.store(true,Ordering::SeqCst);}
+        }
+    }
+    unsafe extern "C" fn hint(context:*mut c_void,id:*const u8) {
+        if context.is_null()||id.is_null(){return;}
+        // SAFETY: C owns no Rust allocation; the !Send original retains this
+        // exact Arc until known observer destruction. Unknown Drop retains it.
+        let inbox=unsafe{&*context.cast::<RemovalNoticeInbox>()};
+        let result=catch_unwind(AssertUnwindSafe(||{
+            let mut value=[0;16];unsafe{std::ptr::copy_nonoverlapping(id,value.as_mut_ptr(),16)};
+            inbox.offer(value);
+        }));
+        if result.is_err(){inbox.unknown.store(true,Ordering::SeqCst);}
+    }
+    fn facts_valid(f:Facts)->bool {
+        f.version==1&&[f.started,f.registered,f.active,f.remove_attempted,f.removed,f.observer_destroyed,f.unknown].iter().all(|v|*v<=1)
+            &&f.refs.iter().all(|v|*v<=5)
+            &&(f.registered==0||f.started==1&&f.removed==0)
+            &&(f.observer_destroyed==0||f.refs[1]==4)
+    }
+    fn disabled_start_data(result:i32,f:Facts)->bool{
+        // Native start0 has exactly these two known pre-registration returns:
+        // center allocation nil, or retained center + observer allocation nil.
+        // No observer was constructed; do NOT invent a dealloc callback.
+        result==0&&facts_valid(f)&&f.started==1&&f.registered==0&&f.active==0
+            &&f.remove_attempted==0&&f.removed==0&&f.observer_destroyed==0&&f.unknown==0
+            &&matches!(f.refs,[4,0]|[2,4])
+    }
+    fn retired_data(f:Facts,original_observer_absent:bool)->bool{facts_valid(f)&&f.remove_attempted==1&&f.removed==1&&f.registered==0
+        &&f.active==0&&f.unknown==0&&f.refs.iter().all(|v|matches!(*v,0|4))
+        &&if original_observer_absent{f.observer_destroyed==0}else{f.refs[1]==4&&f.observer_destroyed==1}}
+    #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+    pub enum RemovalNoticeStart{Registered,DisabledKnown,Unknown}
+    /// Main-thread-owned original. One retirement attempt; no cleanup in Drop.
+    /// All ordinary app exit gates must also observe the main capture's return.
+    pub struct RemovalNotice {pointer:Option<NonNull<c_void>>,inbox:Option<Arc<RemovalNoticeInbox>>,
+        started:bool,disabled_known:bool,retire_attempted:bool,known:bool,facts:Facts,_main:PhantomData<Rc<()>>}
+    impl RemovalNotice {
+        pub fn project_owned_upper_bound()->Option<usize>{
+            let native=unsafe{mrk_removal_notice_bytes()};if native==0||native>384{return None;}
+            size_of::<Self>().checked_add(native)?.checked_add(RemovalNoticeInbox::project_owned_upper_bound()?)
+        }
+        pub fn reserve(inbox:&Arc<RemovalNoticeInbox>)->Option<Self>{
+            Self::project_owned_upper_bound()?;
+            let pointer=NonNull::new(unsafe{mrk_removal_notice_reserve(Arc::as_ptr(inbox).cast_mut().cast(),hint)})?;
+            Some(Self{pointer:Some(pointer),inbox:Some(inbox.clone()),started:false,disabled_known:false,retire_attempted:false,
+                known:true,facts:Facts{version:1,..Facts::default()},_main:PhantomData})
+        }
+        pub fn start(&mut self)->RemovalNoticeStart{
+            if self.started||self.retire_attempted||!self.known{return RemovalNoticeStart::Unknown;}
+            self.started=true;let Some(pointer)=self.pointer else{self.known=false;return RemovalNoticeStart::Unknown;};
+            let result=unsafe{mrk_removal_notice_start(pointer.as_ptr(),&mut self.facts)};
+            self.known=result>=0&&facts_valid(self.facts)&&self.facts.unknown==0;
+            if self.known&&result==1&&self.facts.registered==1&&self.facts.refs==[2,2]{return RemovalNoticeStart::Registered;}
+            self.disabled_known=disabled_start_data(result,self.facts);
+            if self.disabled_known{return RemovalNoticeStart::DisabledKnown;}
+            self.known=false;RemovalNoticeStart::Unknown
+        }
+        pub fn retire(&mut self,original_quit_end:Instant)->Result<(),()>{
+            if self.retire_attempted||!self.known||Instant::now()>=original_quit_end{return Err(());}
+            // Bind known absence to THIS preceding start0 (or this genuinely
+            // never-started reserved cell), not just a final CLOSED enum.
+            let observer_absent=self.disabled_known||(!self.started&&self.facts.refs==[0,0]);
+            self.retire_attempted=true;let pointer=self.pointer.ok_or(())?;
+            let result=unsafe{mrk_removal_notice_retire(pointer.as_ptr(),&mut self.facts)};
+            if result==1{self.pointer=None;} // actual consume retained before final clock/data checks
+            let known=result==1&&retired_data(self.facts,observer_absent)&&Instant::now()<original_quit_end;
+            self.known=known;if let Some(inbox)=&self.inbox{inbox.finish(known);}
+            if known&&self.inbox.as_ref().is_some_and(|inbox|inbox.known()){self.inbox.take();Ok(())}else{Err(())}
+        }
+        pub fn is_retired(&self)->bool{self.pointer.is_none()}
+    }
+    impl Drop for RemovalNotice {fn drop(&mut self){
+        if self.pointer.is_some(){if let Some(inbox)=self.inbox.take(){
+            inbox.finish(false);std::mem::forget(inbox); // native callback backing, NOT finality
+        }}
+    }}
+    /// Only post the SOURCE-fixed name/id. Parent checks its own original work
+    /// before/after this call. A successful void post conveys no delivery fact.
+    pub fn post_removal_ready(request_id:&str)->bool{
+        let bytes=request_id.as_bytes();if decode_id(bytes).is_none(){return false;}
+        unsafe{mrk_removal_notice_post(bytes.as_ptr(),bytes.len())==1}
+    }
+    pub fn decode_removal_hint(text:&[u8])->Option<[u8;16]>{decode_id(text)}
+    fn decode_id(text:&[u8])->Option<[u8;16]>{
+        if text.len()!=32{return None;}
+        fn half(b:u8)->Option<u8>{match b{b'0'..=b'9'=>Some(b-b'0'),b'a'..=b'f'=>Some(b-b'a'+10),_=>None}}
+        let mut id=[0;16];for (i,out) in id.iter_mut().enumerate(){*out=half(text[2*i])?.checked_mul(16)?.checked_add(half(text[2*i+1])?)?;}
+        (id!=[0;16]).then_some(id)
+    }
+    #[cfg(test)]
+    pub(super) fn check_notice_data(){
+        use std::task::Wake;struct NoWake;impl Wake for NoWake{fn wake(self:Arc<Self>) {}}
+        let good=b"0123456789abcdef0123456789abcdef";let id=decode_id(good).unwrap();
+        for bad in [b"".as_slice(),b"00000000000000000000000000000000",b"0123456789ABCDEF0123456789abcdef",b"0123456789abcdef0123456789abcde/",b"0123456789abcdef0123456789abcdef0"]{assert!(decode_id(bad).is_none());}
+        let inbox=RemovalNoticeInbox::reserved();let waker=Waker::from(Arc::new(NoWake));let mut cx=Context::from_waker(&waker);
+        assert!(inbox.poll_hint(&mut cx).is_pending());inbox.offer(id);inbox.offer([7;16]);
+        assert_eq!(inbox.poll_hint(&mut cx),Poll::Ready(Some(id)));assert!(inbox.poll_hint(&mut cx).is_pending());
+        inbox.finish(true);inbox.offer(id);assert_eq!(inbox.poll_hint(&mut cx),Poll::Ready(None));assert!(inbox.known());
+        let done=Facts{version:1,started:1,remove_attempted:1,removed:1,observer_destroyed:1,refs:[4,4],..Facts::default()};
+        assert!(retired_data(done,false));for bad in [Facts{active:1,..done},Facts{registered:1,..done},Facts{observer_destroyed:0,..done},
+            Facts{unknown:1,..done},Facts{refs:[4,5],..done},Facts{remove_attempted:0,..done},Facts{removed:0,..done}]{assert!(!retired_data(bad,false));}
+        for refs in [[4,0],[2,4]]{
+            let refusal=Facts{version:1,started:1,refs,..Facts::default()};
+            assert!(disabled_start_data(0,refusal));
+            let closed=Facts{version:1,started:1,remove_attempted:1,removed:1,refs:if refs[1]==0{[4,0]}else{[4,4]},..Facts::default()};
+            assert!(retired_data(closed,disabled_start_data(0,refusal)));
+            assert!(!retired_data(closed,false)); // final CLOSED alone is NOT absence proof
+            for changed in [Facts{unknown:1,..refusal},Facts{registered:1,..refusal},Facts{active:1,..refusal},
+                Facts{refs:[2,2],..refusal},Facts{observer_destroyed:1,..refusal},Facts{remove_attempted:1,..refusal}]{
+                assert!(!disabled_start_data(0,changed));
+            }
+            assert!(!disabled_start_data(-1,refusal));assert!(!disabled_start_data(1,refusal));
+        }
+        assert!(!retired_data(done,true)); // constructed observer still needs its actual dealloc
+    }
+}
+#[cfg(not(any(feature="vault-helper",feature="android-registration-helper")))]
+pub use notice::{RemovalNotice,RemovalNoticeInbox,RemovalNoticeStart,decode_removal_hint,post_removal_ready};

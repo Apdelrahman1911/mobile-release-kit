@@ -86,4 +86,19 @@ int mrk_removal_peer_retire(void *original,mrk_removal_peer_report *out);
 // result. This does not observe an original, call a clock/watch or grant proof.
 int mrk_removal_peer_ack_post_data(uint32_t role,uint32_t index,uint32_t direction,
     uint32_t expected,uint32_t before,int64_t returned,int32_t watch_result);
+
+// One fixed insecure id-only readiness hint. A post is not a delivery receipt,
+// a source admission, confirmation, connection, or permission to remove files.
+typedef void (*mrk_removal_hint)(void *context,const uint8_t request_id[16]);
+typedef struct {
+    uint32_t version,started,registered,active,remove_attempted,removed;
+    uint32_t observer_destroyed,unknown,refs[2];
+} mrk_removal_notice_report;
+size_t mrk_removal_notice_bytes(void);
+void *mrk_removal_notice_reserve(void *context,mrk_removal_hint hint);
+int mrk_removal_notice_start(void *original,mrk_removal_notice_report *out);
+// Exactly one remove/release attempt. 1 consumes, -1 retains all unresolved
+// backing, including callback context. No implicit cleanup or retry.
+int mrk_removal_notice_retire(void *original,mrk_removal_notice_report *out);
+int mrk_removal_notice_post(const uint8_t *request_id,size_t size);
 #endif

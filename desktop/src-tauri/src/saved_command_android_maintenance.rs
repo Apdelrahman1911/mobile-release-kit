@@ -3,7 +3,7 @@
 //! The normal UI delegates here; status/consent never grant Installer permission.
 use super::*;
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
-pub(crate) use selected::{State,Request,Checked,Snapshot,Handle,Admitted,Completion,Status,Phase,OriginalClock};
+pub(crate) use selected::{State,Request,Checked,Snapshot,Handle,Admitted,Completion,Status,Phase,OriginalClock,RemovalSnapshot,RemovalChecked};
 #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
 #[derive(Default)]
 pub(super) struct State;
@@ -81,6 +81,24 @@ mod selected{
     }
     impl Checked{
         pub(crate) fn picker_originals(&self)->&[Option<Arc<crate::asset_session::OriginalWork>>;3]{&self.snapshot.pickers}
+        pub(crate) fn source_generation(&self)->u32{self.snapshot.source_generation}
+    }
+    /// Pure pre-peer census snapshot. It carries no Request/consent, Control
+    /// claim, epoch permission, native source or task. Real maintenance still
+    /// captures/checks/adopts its ordinary original after native confirmation.
+    pub(crate) struct RemovalSnapshot {
+        owner:Weak<Inner>,document:Weak<()>,pickers:[Option<Arc<crate::asset_session::OriginalWork>>;3],source_generation:u32,
+    }
+    pub(crate) struct RemovalChecked {snapshot:RemovalSnapshot}
+    impl RemovalSnapshot {
+        pub(crate) fn check_originals(self)->Result<RemovalChecked,BridgeError>{
+            for original in self.pickers.iter().flatten(){if !original.android_source_selected_settled(){return Err(unavailable());}}
+            Ok(RemovalChecked{snapshot:self})
+        }
+    }
+    impl RemovalChecked {
+        pub(crate) fn picker_originals(&self)->&[Option<Arc<crate::asset_session::OriginalWork>>;3]{&self.snapshot.pickers}
+        pub(crate) fn source_generation(&self)->u32{self.snapshot.source_generation}
     }
     #[derive(Default)]
     struct FailureProjection{imported:Option<(u64,Instant,wire::Reason)>,exported:Option<(u64,wire::Reason)>}
@@ -358,21 +376,19 @@ mod selected{
             tokio::time::sleep(original.pause()).await;
         }
     }
-    fn retained(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
-        census:&crate::asset_session::MacosMaintenanceCensus<'_>)->Option<usize>{
+    fn retained_rows(inner:&Inner,registry:&Registry,document:&Arc<()>,census_bytes:usize)->Option<usize>{
         if registry.active.is_some() || registry.prepared.is_some() || registry.recovery_review.is_some() || registry.recovery.is_some()
             || inner.toolchain.is_some() || registry.android_registration.active.is_some() || registry.android_registration.review.is_some(){return None;}
         #[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer")))]
         if inner.ios_observation.try_lock().ok()?.is_some(){return None;}
         #[cfg(all(test,debug_assertions,feature="development-runtime",not(feature="desktop-shell")))]
         if inner.fixture.try_lock().ok()?.is_some(){return None;}
-        let mut bytes=census.for_originals(document,checked.picker_originals())?.checked_add(arc_bytes::<Inner>()?)?
+        let mut bytes=census_bytes.checked_add(arc_bytes::<Inner>()?)?
             .checked_add(SIGNAL_STORAGE)?.checked_add(inner.android_registration_control.retained_bytes()?)?
             .checked_add(inner.runtime.android_registration_retained_heap_bytes(document)?)?
             .checked_add(registry.android_sources.retained_data_bytes()?.checked_sub(std::mem::size_of::<android_sources::Sources>())?)?
             .checked_add(registry.android_catalog.registration_retained_bytes()?.checked_sub(std::mem::size_of::<android_catalog::Catalog>())?)?
             .checked_add(registry.android_registration.maintenance_retained_bytes()?.checked_sub(std::mem::size_of::<Registration>())?)?
-            .checked_add(std::mem::size_of::<Checked>())?.checked_add(checked.snapshot.request.id.capacity())?
             .checked_add(arc_bytes::<()>()?)?;
         if let Some(dispatcher)=inner.android_service_dispatcher.get(){let _=dispatcher;bytes=bytes.checked_add(arc_bytes::<service_setup::Dispatcher>()?)?;}
         if let Some(last)=&registry.last{
@@ -382,6 +398,19 @@ mod selected{
             if let Some(terminal)=&last.result{let Terminal::AndroidBuild(terminal)=terminal else{return None;};bytes=bytes.checked_add(terminal.retained_heap_bytes()?)?;}
         }
         Some(bytes)
+    }
+    fn retained(inner:&Inner,registry:&Registry,document:&Arc<()>,checked:&Checked,
+        census:&crate::asset_session::MacosMaintenanceCensus<'_>)->Option<usize>{
+        retained_rows(inner,registry,document,census.for_originals(document,checked.picker_originals())?)?
+            .checked_add(std::mem::size_of::<Checked>())?.checked_add(checked.snapshot.request.id.capacity())
+    }
+    fn owner_reservation(prior:usize,control_bytes:usize,removal:bool)->Option<usize>{
+        let extra=if removal{service_setup::RemovalMainCut::reservation_bytes()?}else{0};
+        prior.checked_add(extra)?.checked_add(arc_bytes::<Original>()?)?.checked_add(control_bytes)?
+            .checked_add(arc_bytes::<native::Signal>()?)?
+            .checked_add(service_setup::MaintenancePreparation::reservation_bytes()?)?
+            .checked_add(transport::Client::project_owned_upper_bound()?)?
+            .checked_add(12*SIGNAL_STORAGE+TASK_STORAGE)
     }
     // The very same predicate is used for the UI hint and real snapshot.
     // No epoch/claim, source census, entropy, native call or task is acquired here.
@@ -396,6 +425,33 @@ mod selected{
         (available,ready)
     }
     impl SavedCommandOwner{
+        pub(crate) fn removal_snapshot(&self,document:&Arc<()>)->Result<RemovalSnapshot,BridgeError>{
+            let registry=self.inner.lock();
+            if !maintenance_readiness(&self.inner,&registry,document).1{return Err(unavailable());}
+            Ok(RemovalSnapshot{owner:Arc::downgrade(&self.inner),document:Arc::downgrade(document),
+                pickers:registry.android_sources.census_originals().ok_or_else(unavailable)?,
+                source_generation:registry.android_sources.census_generation()})
+        }
+        pub(crate) fn removal_admission_bytes(&self,document:&Arc<()>,checked:&RemovalChecked,
+            census:&crate::asset_session::MacosMaintenanceCensus<'_>)->Option<usize>{
+            let registry=self.inner.lock();let snapshot=&checked.snapshot;
+            if !maintenance_readiness(&self.inner,&registry,document).1
+                ||snapshot.owner.as_ptr()!=Arc::as_ptr(&self.inner)||snapshot.document.as_ptr()!=Arc::as_ptr(document)
+                ||!registry.android_sources.same_census_originals(&snapshot.pickers)
+                ||registry.android_sources.census_generation()!=snapshot.source_generation{return None;}
+            let base=retained_rows(&self.inner,&registry,document,census.for_originals(document,checked.picker_originals())?)?
+                .checked_add(std::mem::size_of::<RemovalChecked>())?
+                .checked_add(std::mem::size_of::<Checked>())?.checked_add(128)?;
+            // Pure finite maximum for the future32-hex operation-id allocation;
+            // actual admission below still recomputes actual capacities and
+            // the full live-peer census before its own GO. No fake Control.
+            let control=arc_bytes::<Control>()?.checked_add(128)?.checked_add(SIGNAL_STORAGE)?;
+            owner_reservation(base,control,true).filter(|bytes|*bytes<=OWNED_LIMIT)
+        }
+        pub(crate) fn removal_dispatcher(&self,document:&Arc<()>)->Option<Arc<service_setup::Dispatcher>>{
+            if !self.inner.android_original_document_matches(Some(document)){return None;}
+            self.inner.android_service_dispatcher.get().cloned()
+        }
         pub(crate) fn maintenance_readiness(&self,document:&Arc<()>)->(bool,bool){
             maintenance_readiness(&self.inner,&self.inner.lock(),document)
         }
@@ -435,15 +491,7 @@ mod selected{
                 generation,admitted:snapshot.request.at,work,hard,slot:Arc::downgrade(&self.inner.android_registration_control),
                 cohort:cohort.identity.clone(),epoch:cohort.epoch,first:Mutex::new(None),unknown:AtomicBool::new(false),
                 dirty:AtomicBool::new(false),latches:AtomicUsize::new(0),stop,audit});
-            let extra_removal=if snapshot.request.removal.is_some(){
-                service_setup::RemovalMainCut::reservation_bytes().ok_or_else(unavailable)?
-            }else{0};
-            let whole=prior.checked_add(extra_removal).and_then(|bytes|bytes.checked_add(arc_bytes::<Original>()?))
-                .and_then(|bytes|bytes.checked_add(control.retained_bytes()?))
-                .and_then(|bytes|bytes.checked_add(arc_bytes::<native::Signal>()?))
-                .and_then(|bytes|bytes.checked_add(service_setup::MaintenancePreparation::reservation_bytes()?))
-                .and_then(|bytes|bytes.checked_add(transport::Client::project_owned_upper_bound()?))
-                .and_then(|bytes|bytes.checked_add(12*SIGNAL_STORAGE+TASK_STORAGE))
+            let whole=owner_reservation(prior,control.retained_bytes().ok_or_else(unavailable)?,snapshot.request.removal.is_some())
                 .filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(unavailable)?;
             let signal=Arc::new(native::Signal::reserved());let original_clock=OnceLock::new();
             let removal_cut=if let Some(removal)=&snapshot.request.removal{

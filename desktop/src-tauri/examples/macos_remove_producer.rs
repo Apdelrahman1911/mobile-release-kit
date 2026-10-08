@@ -20,6 +20,13 @@ mod emitter {
     const INPUTS:[(&str,ReadRole);5]=[("remove-descriptor-input.json",ReadRole::RemoveDescriptor),
         ("producer.json",ReadRole::InstallDescriptor),("producer.sig",ReadRole::Signature),
         ("install-inventory.json",ReadRole::Inventory),("mrk-macos-remove",ReadRole::Program)];
+    // Existing Parent uses the same2MiB allowance for supplied native copies,
+    // cells and wrappers. This is not Security.framework heap or process RSS.
+    fn native_allocation_data(bounds:[Option<usize>;4])->Result<usize> {
+        let bytes=bounds.into_iter().try_fold(0usize,|total,next|total.checked_add(next?))
+            .ok_or("remove-native-allocation-bound")?;
+        need(bytes<=2*1024*1024,"remove-native-allocation-bound")?;Ok(bytes)
+    }
     fn arguments(args:&[OsString])->Result<(PathBuf,PathBuf)> {
         need(args.len()==4&&args[0]=="--package-root"&&args[2]=="--input-root","arguments")?;
         let root=PathBuf::from(&args[1]);let input=PathBuf::from(&args[3]);
@@ -30,6 +37,13 @@ mod emitter {
         let start=Instant::now();let args:Vec<_>=std::env::args_os().skip(1).take(5).collect();
         let(root_path,input_path)=arguments(&args)?;let mut book=Book::new(start)?;
         let result=(||->Result<(String,String,String,usize,usize)> {
+            // All four originals retain a conservative native supplied-memory
+            // allowance before any native call. Separately bounded raw/parser
+            // storage and Book's streaming buffer are not hidden in this sum.
+            native_allocation_data([ProducerVerifier::project_owned_upper_bound(),
+                RemovalProgramVerifier::project_owned_upper_bound(),
+                RemovalProducerSigner::project_owned_upper_bound(),
+                RemovalProducerVerifier::project_owned_upper_bound()])?;
             book.tick()?;book.pending.set(true);let platform=native::platform();book.pending.set(false);
             platform.map_err(|_|"platform")?;book.tick()?;
             book.pending.set(true);let source=install_producer::source_signer_data();book.pending.set(false);
@@ -145,6 +159,16 @@ mod emitter {
                 assert!(arguments(&values.into_iter().map(OsString::from).collect::<Vec<_>>()).is_err());
             }
             assert!(arguments(&good[..3]).is_err());
+            let admitted=native_allocation_data([ProducerVerifier::project_owned_upper_bound(),
+                RemovalProgramVerifier::project_owned_upper_bound(),RemovalProducerSigner::project_owned_upper_bound(),
+                RemovalProducerVerifier::project_owned_upper_bound()]).unwrap();
+            assert!(admitted>0&&admitted<=2*1024*1024);
+            assert_eq!(native_allocation_data([Some(2*1024*1024),Some(0),Some(0),Some(0)]),Ok(2*1024*1024));
+            for bounds in [[None,Some(1),Some(1),Some(1)],
+                [Some(usize::MAX),Some(1),Some(0),Some(0)],
+                [Some(2*1024*1024),Some(1),Some(0),Some(0)]] {
+                assert_eq!(native_allocation_data(bounds),Err("remove-native-allocation-bound"));
+            }
             assert_eq!(INPUTS.map(|v|v.0),["remove-descriptor-input.json","producer.json","producer.sig","install-inventory.json","mrk-macos-remove"]);
             assert_eq!(INPUTS.map(|v|v.1.policy().0),[16384,65536,512,1048576,67108864]);
             assert!(ReadRole::Package.policy().2);assert!(!ReadRole::Program.policy().1&&!ReadRole::Program.policy().2);

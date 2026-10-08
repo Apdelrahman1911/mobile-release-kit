@@ -68,6 +68,13 @@ pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'
     let bytes=known::android_service_setup_bytes(state,pickers)?;
     Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
 }
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) fn macos_removal_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
+    peer:&macos_removal::Handle,pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
+    if !state.maintenance.removal_matches(peer)||!android_fixture_histories_empty(document){return Err(Reason::Capacity);}
+    let bytes=known::macos_removal_bytes(state,peer,pickers)?;
+    Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
+}
 fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     if !document.inner.installed_session.try_lock().is_ok_and(|history|history.is_none()){return false;}
@@ -406,17 +413,27 @@ mod known {
             self.arc::<Inner>()?; self.arc::<()>()?; self.add(SESSION_SIGNAL_BYTES)
         }
         fn document(&mut self, state: &DocumentState) -> Count<()> {
+            if !state.maintenance.data_only(){return Err(Reason::Capacity);}
+            self.document_state_gate(state)?;
+            self.document_rows(state)
+        }
+        fn document_state_gate(&self,state:&DocumentState)->Count<()>{
             if state.unknown || state.exhausted || state.stopping || state.retiring || state.lock_pending
-                || !state.maintenance.data_only() || state.quit_pending || state.compatibility_picker_pending
+                || state.quit_pending || state.compatibility_picker_pending
                 || state.session_owner_reason == Some(Reason::CleanupUnknown) { return Err(Reason::Capacity); }
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol",
                 not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"),
                 target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if state.first_origin.is_some() { return Err(Reason::Capacity); }
+            Ok(())
+        }
+        fn document_rows(&mut self,state:&DocumentState)->Count<()>{
             // Inner contains the Mutex<DocumentState>, including the inline old
             // Slot, image/evidence/installation/GitHub/vault registry cells.
             // External test-history gates must prove their optional holds absent.
             self.document_cells()?;
+            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+            self.add(capacity(state.maintenance.notice_bytes())?)?;
             if let Some(lane) = &state.saved_observation { self.saved_observation(lane)?; }
             if let Some(binding) = &state.saved_input { self.saved_observation(&binding.lane)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
@@ -544,6 +561,20 @@ mod known {
         for picker in pickers.iter().flatten(){census.owner(picker)?;}
         Ok(census.bytes)
     }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn macos_removal_bytes(state:&DocumentState,peer:&macos_removal::Handle,
+        pickers:&[Option<Arc<OriginalWork>>;3])->Count<usize>{
+        // The only live-owner exception is this SAME retained peer, never an
+        // arbitrary "ignore busy" switch. Its full prior reservation includes
+        // the request/current/peer originals and both task instances; Unknown
+        // cannot become zero-byte credit. Saved adds its own quote afterward.
+        if !state.maintenance.removal_matches(peer)
+            ||!peer.sources_match(pickers,peer.source_generation()){return Err(Reason::Capacity);}
+        let mut census=Census::new();census.document_state_gate(state)?;
+        census.document_rows(state)?;census.add(capacity(peer.reservation())?)?;
+        for picker in pickers.iter().flatten(){census.owner(picker)?;}
+        Ok(census.bytes)
+    }
     pub(super) fn admitted(state: &DocumentState, control: usize) -> Count<()> {
         let mut census = Census::new();
         census.document(state)?;
@@ -590,6 +621,18 @@ mod known {
             assert!(super::super::admitted(&state, usize::MAX).is_err());
             assert_eq!((state.next_operation, state.next_context), (7, 3));
             assert!(state.slot.is_none());
+            #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+            {
+                let notice=macos_removal::NoticeRuntime::reserved();
+                let passive=notice.retained_bytes().unwrap();let peer=macos_removal::working_reservation().unwrap();
+                assert!(passive>0&&peer>16*1024*1024);
+                let total=passive.checked_add(peer).unwrap();
+                assert!(fits(SESSION_BYTES-total,total).is_ok());assert!(fits(SESSION_BYTES-total+1,total).is_err());
+                assert!(fits(usize::MAX,peer).is_err());
+                let mut exact=Census::new();assert!(exact.add(SESSION_BYTES-total).is_ok());
+                assert!(exact.add(passive).is_ok());assert!(exact.add(peer).is_ok());assert_eq!(exact.bytes,SESSION_BYTES);
+                assert!(exact.add(1).is_err());assert_eq!(notice.retained_bytes(),Some(passive));
+            }
         }
         #[test]
         fn arc_identity_is_not_value_equality_and_set_exhaustion_is_closed() {

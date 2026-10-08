@@ -1556,6 +1556,36 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     TOOL.remove_preview_command(SimpleNamespace(target=target, expected_source="a" * 40, work=work, output=work / "remove-preview"))
                 output.assert_not_called()
 
+        # Retention policy uses the actual operation SOURCE, not an RSS mock.
+        # The following inert flow still executes that exact body and receipts.
+        helper_tree = ast.parse((source / "desktop/tools/macos_android_helper_package.py").read_text(encoding="utf-8"))
+        operation_tree = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        removal_tree = next(node for node in operation_tree.body if isinstance(node, ast.FunctionDef) and node.name == "package_remove")
+        deletions = [(node.lineno, tuple(target.id for target in node.targets))
+                     for node in ast.walk(removal_tree) if isinstance(node, ast.Delete)]
+        self.assertEqual([names for _line, names in deletions], [
+            ("input_values", "value", "program", "inventory"), ("executable_body", "compiled"),
+            ("producer", "expected", "package")])
+        def unique_call_line(name):
+            lines = [node.lineno for node in ast.walk(removal_tree)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == name]
+            self.assertEqual(len(lines), 1)
+            return lines[0]
+        compile_line = next(node.lineno for node in removal_tree.body if isinstance(node, ast.Assign)
+                            and any(isinstance(target, ast.Name) and target.id == "compiled" for target in node.targets))
+        self.assertLess(deletions[0][0], compile_line)
+        self.assertLess(unique_call_line("producer_signing_copy"), deletions[1][0])
+        self.assertLess(deletions[1][0], unique_call_line("credential_scope"))
+        self.assertLess(unique_call_line("removal_distribution_layout_data"), deletions[2][0])
+        self.assertLess(deletions[2][0], unique_call_line("package_image"))
+        receipt = next(node.value for node in removal_tree.body if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant)
+                               and target.slice.value == "removalDistribution" for target in node.targets))
+        scalar_values = {key.value: value.id for key, value in zip(receipt.keys, receipt.values)
+                         if isinstance(key, ast.Constant) and isinstance(value, ast.Name)}
+        for key, name in (("packageSha256", "package_hash"), ("packageBytes", "package_bytes"),
+                          ("inventorySha256", "inventory_hash"), ("removerExecutableSha256", "expected_remover")):
+            self.assertEqual(scalar_values[key], name)
         successful = None
         for fault in (None, "input-unknown", "descriptor-drift", "late", "credential-unknown", "unexpected-installer"):
             operation = RemovePorts(fault)

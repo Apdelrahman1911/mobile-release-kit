@@ -3946,7 +3946,8 @@ class Operation:
         original = self.original(final_root, self.package_filename, "remove-final-package-original", self.stager.MAX_BYTES, (0o444,))
         package = self.read(original)
         self.package_finalization_input(original, package)
-        self.package_outputs.append((original, digest(package)))
+        package_hash, package_bytes = digest(package), len(package)
+        self.package_outputs.append((original, package_hash))
         installed_root = self.directory(self.work_entry, "producer-root", "remove-installed-producer")
         need(set(os.listdir(installed_root["fd"])) == {"Install.pkg", "producer.json", "producer.sig"},
              "remove-installed-producer-roster")
@@ -3989,6 +3990,9 @@ class Operation:
                                   (0o555,) if name == self.stager.REMOVER_NAME else (0o444,))
             need(self.read(entry) == value, "remove-input-exact-original-copy")
             self.package_outputs.append((entry, digest(value)))
+        # Original FDs/digests stay in package_outputs; every package_post still
+        # rehashes them. The copied input bodies are no longer needed here.
+        del input_values, value, program, inventory
         root = self.package_directory("remove-producer-root")
         self.package_file(root, "Remove.pkg", package)
         self.package_post()
@@ -4006,6 +4010,7 @@ class Operation:
         executable_body = self.read(executable)
         self.stager.macho(executable_body, system_only=True, target=self.target)
         producer = self.producer_signing_copy(executable, executable_body)
+        del executable_body, compiled
         with self.credential_scope("producer", producer=producer):
             self.stage = "remove-producer-emission"
             need(package_timeout_data(self.package_clock(), self.package_endpoint, 123) == 123, "remove-producer-original-clock-reserve")
@@ -4021,15 +4026,18 @@ class Operation:
         self.stager.removal_distribution_layout_data(os.listdir(root["fd"]), expected,
             {name: (value, 0o444) for name, value in expected.items()})
         self.package_roots.append((root, set(expected)))
+        # Credential checks have consumed the signed producer body. Keep only
+        # scalar receipt facts before reading/signing the distribution image.
+        del producer, expected, package
         self.distribution_entry = self.package_directory(self.image_directory)
         self.package_post()
         image, _path = self.package_image(root, "distribution")
         self.package_post()
         need(not self.installer_entered and not self.mount_entered, "remove-no-installed-operation")
         self.receipt["removalDistribution"] = {"schemaVersion": 1, "kind": "mrk-remove-package-emitted-image-v1", "target": self.target,
-            "packageVersion": selection.package_version, "release": selection.release, "packageSha256": digest(package), "packageBytes": len(package),
+            "packageVersion": selection.package_version, "release": selection.release, "packageSha256": package_hash, "packageBytes": package_bytes,
             "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed), "producerSummary": summary, "userImage": image,
-            "installedProducerSha256": digest(installed), "inventorySha256": digest(inventory), "removerExecutableSha256": digest(program),
+            "installedProducerSha256": digest(installed), "inventorySha256": inventory_hash, "removerExecutableSha256": expected_remover,
             "sourceProducerProfileSha256": source.producer_sha256, "sourceServiceProfileSha256": source.service_sha256,
             "finalPackageReceiptSha256": self.receipt["finalPackageReceiptSha256"], "groupEndpointMet": True, "originalOuterReturnRequired": True,
             "installerEntered": False, "applicationLaunched": False, "removalExecuted": False, "productReady": False}
