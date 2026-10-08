@@ -4776,7 +4776,7 @@ final class NormalAppUITests: XCTestCase {
             let review = try waitElement(named(renderer, "Native configuration save"), in: renderer)
             try inventory(review, caption: "Exact native destination inventory", paths: ["release/mobile-release.json", ".gitignore"])
             try fixture.assertUnchanged()
-            try press(review, "Apply reviewed save", renderer: renderer, timeout: 48, failures: Self.configurationFailures)
+            try press(review, "Apply reviewed save", renderer: renderer, failures: Self.configurationFailures, timeout: 48)
             try confirmedDialog(renderer, title: "Apply this configuration save?", action: "Apply reviewed save",
                                 checkbox: "I reviewed this exact inventory and understand that cancellation may be too late after Apply.")
             _ = try waitElement(review.staticTexts.matching(NSPredicate(format: "title == %@", "Submitted configuration saved")),

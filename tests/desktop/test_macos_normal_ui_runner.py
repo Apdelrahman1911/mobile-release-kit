@@ -123,7 +123,7 @@ ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
   '92d403fa15562aab3c92fe0e5d78a9893a1f7dd0f440dd6a8614dc2548c60e31',
   '                let observed = try read(path)\n'),
  (2981, 2982, 'd044507984e3652c3ae6eda02752f307ceb65e38a6a8b5f81b3cf40440d6d6df', ''),
- (4698, 4980, 'e71e33dd58d87777aeb8658cb7b7882ce323b89ebd98e9a441018f67a5d1ca0a', ''),
+ (4698, 4980, 'e6c45d863e0f73cacaff298621176cc7b6ba90026d01f2a6acd536323396f824', ''),
  (5002, 5012, '1370af131a521e62e1f81d1a2a8ecc3e595711ec9bd8c754b6d9ad212d982dbc', ''))
 
 def without_positive_android_source(source):
@@ -2013,6 +2013,11 @@ class NormalPhaseDataTests(unittest.TestCase):
             # Disposition phrase has its surrounding fixed text.
             self.assertIn(token if token!='"retained-local-result' else 'Local artifacts: retained-local-result.',journey)
         self.assertEqual(journey.count('try press(review, "Build, sign and validate"'),1)
+        # Swift argument labels still follow the unchanged declaration order.
+        signature=source.split('    @MainActor private func press(',1)[1].split(') throws {',1)[0]
+        self.assertIn('failures: [String] = [], timeout: TimeInterval = 5',signature)
+        self.assertEqual(journey.count('try press(review, "Apply reviewed save", renderer: renderer, failures: Self.configurationFailures, timeout: 48)'),1)
+        self.assertNotIn('try press(review, "Apply reviewed save", renderer: renderer, timeout: 48, failures: Self.configurationFailures)',journey)
         self.assertNotIn('license.click()',journey)
         for forbidden in ('"Open encrypted vault"','"Create encrypted vault"','"Register protected tool copy", renderer:',
                           '"Request system registration"','"Open System Settings"'):
