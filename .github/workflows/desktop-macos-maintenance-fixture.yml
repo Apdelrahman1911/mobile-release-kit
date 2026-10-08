@@ -64,7 +64,7 @@ jobs:
         run: |
           builtin source ./desktop/tools/macos_maintenance_fixture_prepare.sh
 
-      - name: Compile and test nine changed removal DATA groups
+      - name: Compile and test selected removal DATA groups
         id: native
         timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}

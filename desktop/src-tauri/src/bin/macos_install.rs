@@ -70,6 +70,8 @@ mod installer {
         removal_live_reserved: usize, removal_control_reserved: u64,
         removal_snapshot_capture: Option<maintenance::RemovalSnapshotCapture>,
         removal_snapshot_work_reserved: bool,
+        removal_payload_plan:Option<maintenance::RemovalPayloadPlan>,
+        removal_observation_control:Option<u64>,removal_observation_reserved:u64,
         removal_archive_scan: Option<maintenance::RemovalArchiveScan>,
         payload_written: u64, payload_write_calls: u64,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
@@ -358,7 +360,7 @@ mod installer {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
-                removal_live_reserved:0,removal_control_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_archive_scan:None,
+                removal_live_reserved:0,removal_control_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
                 gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
@@ -1930,6 +1932,150 @@ mod installer {
             assert_eq!(removal_archive_raw_hash(1,|_,_|Err("original-read-failed")),Err("original-read-failed"));
         }
 
+        // Removal-only plan captured by the SAME fully admitted second walker.
+        // Only this module constructs nodes; wire/parser DATA cannot mint it.
+        const REMOVAL_PLAN_NODES:usize=2*installation_record::FILE_LIMIT*(mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1);
+        pub(super) struct RemovalPayloadNode {
+            pub(super) name:String, pub(super) identity:Identity, pub(super) flags:u32,
+            pub(super) parent:Option<usize>, pub(super) generation:usize,
+            pub(super) directory:bool, pub(super) children:Vec<usize>, expected_children:usize,
+            pub(super) size:u64, pub(super) digest:[u8;32], pub(super) executable:bool,
+            pub(super) held:Option<usize>, pub(super) complete:bool,
+        }
+        pub(super) struct RemovalPayloadGeneration {
+            pub(super) release:String, pub(super) app_name:String,
+            pub(super) inventory_sha256:String, pub(super) roots:[Option<usize>;2],
+        }
+        pub(super) struct RemovalPayloadPlan {
+            pub(super) nodes:Vec<RemovalPayloadNode>, pub(super) generations:Vec<RemovalPayloadGeneration>,
+            stack:[usize;17], stack_len:usize, active:Option<usize>,
+            base_control:u64, charged:u64, failed:bool, pub(super) complete:bool,
+        }
+        impl RemovalPayloadPlan {
+            pub(super) fn begin(book:&mut Install)->Result<()> {
+                check(book.removal_payload_plan.is_none(),"removal-payload-plan-once")?;
+                let base_control=book.removal_observation_control.ok_or("removal-payload-plan-budget")?;
+                let initial=std::mem::size_of::<Self>() as u64;
+                check(base_control.checked_add(initial).is_some_and(|n|n<=16*1024*1024),"removal-payload-plan-budget")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(initial)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-plan-budget")?;
+                book.removal_payload_plan=Some(Self { nodes:Vec::new(),generations:Vec::new(),stack:[0;17],stack_len:0,
+                    active:None,base_control,charged:initial,failed:false,complete:false });Ok(())
+            }
+            fn growth(&self,extra:usize,overlap:usize)->Result<()> {
+                check(self.base_control.checked_add(self.charged).and_then(|n|n.checked_add(extra as u64))
+                    .and_then(|n|n.checked_add(overlap as u64)).is_some_and(|n|n<=16*1024*1024),"removal-payload-plan-budget")
+            }
+            fn charge(&mut self,book:&mut Install,extra:usize)->Result<()> {
+                self.growth(extra,0)?;
+                self.charged=self.charged.checked_add(extra as u64).ok_or("removal-payload-plan-budget")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-plan-budget")?;Ok(())
+            }
+            fn reserve_nodes(&mut self,book:&mut Install)->Result<()> {
+                check(self.nodes.len()<REMOVAL_PLAN_NODES,"removal-payload-plan-count")?;
+                if self.nodes.len()==self.nodes.capacity() {
+                    let old=self.nodes.capacity();let next=old.max(16).checked_mul(2).ok_or("removal-payload-plan-count")?.min(REMOVAL_PLAN_NODES);
+                    let unit=std::mem::size_of::<RemovalPayloadNode>();
+                    self.growth((next-old)*unit,old*unit)?;
+                    self.nodes.try_reserve_exact(next-self.nodes.len()).map_err(|_|"removal-payload-plan-allocation")?;
+                    check(self.nodes.capacity()<=next,"removal-payload-plan-allocation")?;
+                    self.charge(book,(self.nodes.capacity()-old)*unit)?;
+                }Ok(())
+            }
+            pub(super) fn finish(&mut self)->Result<()> {
+                check(!self.failed && !self.complete && self.active.is_none() && self.stack_len==0
+                    && !self.generations.is_empty() && self.generations.len()<=9
+                    && self.generations.iter().all(|g|g.roots.iter().all(Option::is_some))
+                    && self.nodes.iter().all(|n|n.complete && n.children.len()==n.expected_children),"removal-payload-plan-incomplete")?;
+                self.complete=true;Ok(())
+            }
+            pub(super) fn charged_bytes(&self)->u64 { self.charged }
+        }
+        fn payload_plan_edit(book:&mut Install,operation:impl FnOnce(&mut RemovalPayloadPlan,&mut Install)->Result<()>)->Result<()> {
+            let Some(mut plan)=book.removal_payload_plan.take() else { return Ok(()); };
+            let result=if plan.failed || plan.complete {Err("removal-payload-plan-phase")}else{operation(&mut plan,book)};
+            if result.is_err(){plan.failed=true;}book.removal_payload_plan=Some(plan);result
+        }
+        fn payload_generation_begin(book:&mut Install,generation:&GenerationData)->Result<()> {
+            payload_plan_edit(book,|plan,book| {
+                check(plan.active.is_none() && plan.stack_len==0 && plan.generations.len()<9,"removal-payload-plan-generation")?;
+                let binding=generation.release_data().binding_data();
+                check(!plan.generations.iter().any(|g|g.release==binding.release),"removal-payload-plan-generation")?;
+                let app_bound=if generation.retained_invocation_data().is_some(){255}else{paths::APP_NAME.len()};
+                let old=plan.generations.capacity();let unit=std::mem::size_of::<RemovalPayloadGeneration>();
+                let extra=if old==plan.generations.len(){(9-old)*unit}else{0};
+                plan.growth(extra+binding.release.len()+app_bound+binding.inventory_sha256.len(),if extra!=0{old*unit}else{0})?;
+                let app_name=match generation.retained_invocation_data() {None=>paths::APP_NAME.to_owned(),
+                    Some(id)=>data(transaction::retained_app_name_data(id))?};
+                check(app_name.capacity()<=app_bound,"removal-payload-plan-allocation")?;
+                if extra!=0 {plan.generations.try_reserve_exact(9-plan.generations.len()).map_err(|_|"removal-payload-plan-allocation")?;
+                    check(plan.generations.capacity()<=9,"removal-payload-plan-allocation")?;}
+                let release=binding.release.to_owned();let inventory_sha256=binding.inventory_sha256.to_owned();
+                plan.charge(book,(plan.generations.capacity()-old)*unit+release.capacity()+app_name.capacity()+inventory_sha256.capacity())?;
+                let index=plan.generations.len();plan.generations.push(RemovalPayloadGeneration {release,app_name,inventory_sha256,roots:[None,None]});
+                plan.active=Some(index);Ok(())
+            })
+        }
+        fn payload_generation_end(book:&mut Install)->Result<()> {
+            payload_plan_edit(book,|plan,_| {
+                let index=plan.active.ok_or("removal-payload-plan-generation")?;
+                check(plan.stack_len==0 && plan.generations[index].roots.iter().all(Option::is_some),"removal-payload-plan-generation")?;
+                plan.active=None;Ok(())
+            })
+        }
+        fn payload_directory_enter(book:&mut Install,original:usize,prefix:&str,depth:usize,children:usize)->Result<()> {
+            payload_plan_edit(book,|plan,book| {
+                let generation=plan.active.ok_or("removal-payload-plan-generation")?;
+                check(depth<17 && plan.stack_len==depth && children<=installation_record::FILE_LIMIT,"removal-payload-plan-depth")?;
+                let root_kind=if depth==0 {match prefix {"app"=>Some(0),"runtime"=>Some(1),_=>return Err("removal-payload-plan-root")}}else{None};
+                plan.reserve_nodes(book)?;
+                let name=if root_kind==Some(0) {plan.generations[generation].app_name.as_str()}
+                    else {book.originals[original].name.as_str()};
+                check((component(name)||root_kind==Some(0)&&name==paths::APP_NAME) && name.len()<=255,"removal-payload-plan-name")?;
+                plan.growth(name.len()+children*std::mem::size_of::<usize>(),0)?;
+                let name=name.to_owned();let parent=if depth==0{None}else{Some(plan.stack[depth-1])};
+                let mut child_nodes=Vec::new();child_nodes.try_reserve_exact(children).map_err(|_|"removal-payload-plan-allocation")?;
+                check(child_nodes.capacity()<=children,"removal-payload-plan-allocation")?;
+                plan.charge(book,name.capacity()+child_nodes.capacity()*std::mem::size_of::<usize>())?;
+                let actual=stat::fstat(book.fd(original)?).map_err(|_|"removal-payload-plan-stat")?;
+                check(Identity::of(&actual)==book.identity(original)? && actual.st_flags==0,"removal-payload-plan-original")?;
+                let index=plan.nodes.len();plan.nodes.push(RemovalPayloadNode {name,identity:Identity::of(&actual),flags:0,parent,generation,
+                    directory:true,children:child_nodes,expected_children:children,size:0,digest:[0;32],executable:false,
+                    held:if root_kind==Some(0)&&generation==0{Some(original)}else{None},complete:false});
+                if let Some(parent)=parent {
+                    let node=&mut plan.nodes[parent];check(node.children.len()<node.expected_children,"removal-payload-plan-roster")?;node.children.push(index);
+                } else if let Some(kind)=root_kind {check(plan.generations[generation].roots[kind].is_none(),"removal-payload-plan-root")?;plan.generations[generation].roots[kind]=Some(index);}
+                plan.stack[depth]=index;plan.stack_len=depth+1;Ok(())
+            })
+        }
+        fn payload_file_observed(book:&mut Install,original:usize,entry:&Entry,depth:usize)->Result<()> {
+            payload_plan_edit(book,|plan,book| {
+                check(depth<17 && plan.stack_len==depth+1,"removal-payload-plan-depth")?;
+                let parent=plan.stack[depth];let generation=plan.active.ok_or("removal-payload-plan-generation")?;
+                plan.reserve_nodes(book)?;
+                let name=book.originals[original].name.as_str();check(component(name)&&name.len()<=255,"removal-payload-plan-name")?;
+                plan.growth(name.len(),0)?;
+                let name=name.to_owned();
+                let actual=stat::fstat(book.fd(original)?).map_err(|_|"removal-payload-plan-stat")?;
+                check(Identity::of(&actual)==book.identity(original)? && actual.st_flags==0
+                    && actual.st_size>=0 && actual.st_size as u64==entry.size,"removal-payload-plan-original")?;
+                let digest=worker::removal_hex_data::<32>(&entry.sha256)?;
+                plan.charge(book,name.capacity())?;let index=plan.nodes.len();
+                plan.nodes.push(RemovalPayloadNode {name,identity:Identity::of(&actual),flags:0,parent:Some(parent),generation,directory:false,
+                    children:Vec::new(),expected_children:0,size:entry.size,digest,executable:entry.executable,held:None,complete:true});
+                let node=&mut plan.nodes[parent];check(node.children.len()<node.expected_children,"removal-payload-plan-roster")?;node.children.push(index);Ok(())
+            })
+        }
+        fn payload_directory_leave(book:&mut Install,depth:usize)->Result<()> {
+            payload_plan_edit(book,|plan,_| {
+                check(depth<17 && plan.stack_len==depth+1,"removal-payload-plan-depth")?;
+                let index=plan.stack[depth];let node=&mut plan.nodes[index];
+                check(node.children.len()==node.expected_children,"removal-payload-plan-roster")?;
+                node.complete=true;plan.stack_len=depth;Ok(())
+            })
+        }
+
         // Fixed removal-only capture of the SAME complete second observation.
         // These are comparison bytes/identities, never a parser-made permission.
         pub(super) const REMOVAL_SNAPSHOT_WORK: u64 = 2 * 1024 * 1024;
@@ -2205,6 +2351,29 @@ mod installer {
             }
         }
 
+        impl RemovalSnapshotCapture {
+            pub(super) fn directory_children(&self,path:&str)->Result<&[(String,u64)]> {
+                self.directories.iter().find(|r|r.path==path).map(|r|r.children.as_slice()).ok_or("removal-payload-control-directory")
+            }
+            pub(super) fn directory_rows_data(&self)->impl Iterator<Item=(&str,Identity,u32,&[(String,u64)])> {
+                self.directories.iter().map(|r|(r.path.as_str(),r.identity,r.flags,r.children.as_slice()))
+            }
+        }
+        impl RemovalObserved {
+            // Only immutable controls survive code withdrawal. This is not the
+            // old full app/source POST with its missing-name checks suppressed.
+            pub(super) fn payload_controls_post(&self,book:&Install)->Result<()> {
+                held_inventory(book,self.inventory_original,self.inventory_bytes())?;
+                held_bytes(book,self.record_original,&self.record_bytes)?;
+                self.inner.controls_post(book)?;
+                let history=self.inner.history.as_ref().ok_or("removal-payload-state")?;
+                held_bytes(book,history.state_original,&history.state_bytes)
+            }
+        }
+        pub(super) fn rebind_removal_app(book:&mut Install,original:usize,archive:usize)->Result<()> {
+            rebind_renamed(book,original,archive,"app")
+        }
+
         // Each additional observation acquires and accounts its own descriptor;
         // it is not adoption of a failed or retired descriptor, nor an offset reset.
         fn roster_now(book: &mut Install, directory: usize) -> Result<BTreeMap<String, u64>> {
@@ -2364,6 +2533,7 @@ mod installer {
                 name.rsplit_once('/').filter(|(parent,_)| *parent == prefix).map(|(_,leaf)| leaf.to_owned())).collect();
             let actual = roster_now(book, root)?;
             check(actual.keys().cloned().collect::<BTreeSet<_>>() == wanted, "maintenance-payload-roster")?;
+            payload_directory_enter(book,root,prefix,depth,actual.len())?;
             for name in wanted {
                 let path = format!("{prefix}/{name}");
                 if let Some(entry) = index.files.get(&path) {
@@ -2374,6 +2544,7 @@ mod installer {
                         && stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                         "maintenance-payload-original")?;
                     check(book.read(reader, entry.size, false)?.0 == entry.sha256, "maintenance-payload-hash")?;
+                    payload_file_observed(book,reader,entry,depth)?;
                     book.forward_close(reader, "maintenance-payload-close")?;
                 } else {
                     let reader = book.open(Some(root), &name, true)?;
@@ -2382,7 +2553,7 @@ mod installer {
                     book.forward_close(reader, "maintenance-payload-close")?;
                 }
             }
-            book.check_name(root, true)
+            book.check_name(root,true)?;payload_directory_leave(book,depth)
         }
         fn audit_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
             allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
@@ -2398,6 +2569,7 @@ mod installer {
             check(record.instance() == generation.instance_data(), "maintenance-generation-instance")?;
             let inventory = Inventory::parse_for_release(&raw, binding.runtime_manifest_sha256, binding.release)?;
             let index = inventory.index()?;
+            payload_generation_begin(book,generation)?;
             exact_roster(book, release, &["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
                 .into_iter().map(str::to_owned).collect())?;
             let runtime = book.open(Some(release), "runtime", true)?;
@@ -2425,6 +2597,7 @@ mod installer {
                 if let Some(app) = app { book.forward_close(app, "maintenance-retained-app-close")?; }
                 book.forward_close(release, "maintenance-retained-release-close")?;
             }
+            payload_generation_end(book)?;
             Ok((app, release, cost, (raw.len() + descriptor.len()) as u64))
         }
         fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64) -> Result<()> {
@@ -2696,6 +2869,10 @@ mod installer {
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
                 + book.removal_live_reserved as u64;
             let budget=data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
+            if book.removal_control_reserved!=0 {
+                book.removal_observation_control=Some(control_bound);
+                book.removal_observation_reserved=book.removal_control_reserved;
+            }
             let prior_archive_bytes=removal_archive_storage_bytes(book)?;
             let complete_storage=budget.payload_totals_data().1.checked_add(planned_evidence)
                 .and_then(|n|n.checked_add(costs.len() as u64*transaction::PRODUCER_CONTROL_LIMIT as u64))
@@ -3450,7 +3627,7 @@ mod installer {
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
-                    removal_live_reserved:0,removal_control_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_archive_scan:None,
+                    removal_live_reserved:0,removal_control_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
@@ -5236,8 +5413,9 @@ mod installer {
             RemovalPeerScope { proof,preparation,app_nonce,effects:ledger.effects,first:ledger.first,
                 native_first:ledger.native_first,custody:Some(custody),settled }
         }
-        // One fixed two-file ledger in the existing Parent. No native borrow
-        // points into these DATA buffers, and Drop performs no filesystem work.
+        // Same Parent ledger: initial snapshot+admission, then four fixed
+        // immutable phase/failure records. No native borrow points into these
+        // DATA buffers; Drop performs no filesystem work.
         struct RemovalSnapshotFile {
             writer:Option<usize>,reader:Option<usize>,written:u64,digest:Sha256,
             sealed:bool,persisted:bool,closed:bool,directory_persisted:bool,readback:bool,
@@ -5252,7 +5430,7 @@ mod installer {
         }
         struct RemovalSnapshot {
             capture:maintenance::RemovalSnapshotCapture,archive:Option<usize>,name:String,
-            files:[RemovalSnapshotFile;2],attempted:bool,record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            files:[RemovalSnapshotFile;6],attempted:bool,record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
         }
         // Private, non-Clone return of this original writer only; not serialized.
         struct RemovalSnapshotAdmission {
@@ -5285,7 +5463,7 @@ mod installer {
         }
         impl RemovalSnapshot {
             fn new(capture:maintenance::RemovalSnapshotCapture)->Self {
-                Self { capture,archive:None,name:String::new(),files:[RemovalSnapshotFile::new(),RemovalSnapshotFile::new()],attempted:false,record:None }
+                Self { capture,archive:None,name:String::new(),files:std::array::from_fn(|_|RemovalSnapshotFile::new()),attempted:false,record:None }
             }
             fn row_post(book:&Install,row:&maintenance::RemovalSnapshotControl,n:usize)->Result<()> {
                 let original=book.originals.get(n).ok_or("removal-snapshot-control-original")?;
@@ -5328,8 +5506,8 @@ mod installer {
             }
             fn create(&mut self,book:&mut Install,slot:usize)->Result<()> {
                 let directory=self.archive.ok_or("removal-snapshot-archive")?;
-                let name=if slot==0 {"snapshot-v1"} else {"admission.json"};
-                check(slot<2 && self.files[slot].writer.is_none(),"removal-snapshot-file-once")?;
+                let name=removal_payload_file_name(slot)?;
+                check(slot<6 && self.files[slot].writer.is_none(),"removal-snapshot-file-once")?;
                 book.absent(directory,name)?;
                 let before=RemovalPublication::parent_before(book,directory)?;
                 let n=book.create_file(directory,name,Role::ReceiptWriter)?;
@@ -5380,7 +5558,7 @@ mod installer {
                 book.clock()?;let persisted=native::sync(book.fd(n)?.as_fd(),true);
                 file.persisted=persisted.is_ok();persisted.map_err(|_|"removal-snapshot-file-persist")?;book.clock()?;
                 file.closed=book.close(n);check(file.closed,"removal-snapshot-writer-close")?;book.clock()?;
-                let name=if slot==0 {"snapshot-v1"}else{"admission.json"};
+                let name=removal_payload_file_name(slot)?;
                 let reader=book.open(Some(directory),name,false)?;file.reader=Some(reader);
                 check(book.identity(reader)?==Identity::of(&actual),"removal-snapshot-readback-original")?;
                 book.protected(reader,false,Some(0o444))?;
@@ -5512,7 +5690,7 @@ mod installer {
                 self.census_post(book)?;
                 self.file_post(book,0)?;self.file_post(book,1)?;
                 exclusion.post(book,source)?;observed.post(book)?;
-                check(self.files.iter().all(RemovalSnapshotFile::settled_data),"removal-snapshot-original-finality")?;
+                check(self.files[..2].iter().all(RemovalSnapshotFile::settled_data),"removal-snapshot-original-finality")?;
                 Ok(RemovalSnapshotAdmission { archive,snapshot:self.files[0].reader.ok_or("removal-snapshot-reader")?,
                     record:self.files[1].reader.ok_or("removal-snapshot-reader")?,snapshot_sha256:snapshot_sha,
                     record_sha256:parsed.digest_data().to_owned() })
@@ -5542,6 +5720,530 @@ mod installer {
             }
         }
 
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        enum RemovalPayloadPhase { OriginalSource, Transferred, AppWithdrawn, Removing, Absent }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        enum RemovalNodeEffect { Present, Removed, Unknown }
+        struct RemovalNodeState { original:Option<usize>,effect:RemovalNodeEffect,roster_observed:bool,
+            returned:Option<std::result::Result<(),i32>> }
+        struct RemovalPayloadExecution {
+            source:RemovalAdmission, observed:maintenance::RemovalObserved, snapshot:RemovalSnapshot,
+            admission:RemovalSnapshotAdmission, exclusion:RemovalExclusion, plan:maintenance::RemovalPayloadPlan,
+            phase:RemovalPayloadPhase, states:Vec<RemovalNodeState>, release_originals:Vec<usize>,
+            record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            pending_record:Option<(usize,mobile_release_desktop::macos_remove_record::RemovalRecordData)>,
+            failure_record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            first:Option<(&'static str,mobile_release_desktop::macos_remove_record::FailureKindData)>,
+            attempted:bool,remaining_originals:usize,ancestor_flags:[u32;4],
+            withdrawal_return:Option<std::result::Result<(),Option<i32>>>,
+        }
+        struct RemovalPayloadAbsence { archive:usize,record:usize,snapshot:usize,record_sha256:String }
+        fn removal_payload_originals_data(files:usize,directories:usize,controls:usize,prior:usize)->Option<usize> {
+            if files>9*installation_record::FILE_LIMIT || directories>9*installation_record::FILE_LIMIT
+                || controls>75 || prior>=64 {return None;}
+            files.checked_mul(2)?.checked_add(directories.checked_mul(3)?)?
+                .checked_add(controls.checked_mul(2)?)?.checked_add(prior.checked_mul(4)?)?.checked_add(32)
+        }
+        fn removal_payload_original_budget_data(used:usize,files:usize,directories:usize,controls:usize,prior:usize)->Option<(usize,usize)> {
+            let future=removal_payload_originals_data(files,directories,controls,prior)?;
+            let end=used.checked_add(future).filter(|n|*n<=24576)?;Some((future,end))
+        }
+        fn removal_payload_allocation_data(control:u64,extra:usize,storage:u64,snapshot:u64)->bool {
+            control.checked_add(extra as u64).is_some_and(|n|n<=16*1024*1024)
+                && storage.checked_add(snapshot).and_then(|n|n.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64))
+                    .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+        }
+        fn removal_payload_live_data(live:usize,external:usize)->bool {
+            // Depth<=17 directories plus one leaf/roster; ONE generation
+            // anchor; four progress readbacks; two fixed census margins.
+            // These alternatives conservatively total25, reserve26 unchanged.
+            live.checked_add(external).and_then(|n|n.checked_add(26)).is_some_and(|n|n<=96)
+        }
+        fn removal_payload_app_last_data(index:usize,current_app:usize,states:&[RemovalNodeState])->bool {
+            index!=current_app || states.iter().enumerate().all(|(i,s)|i==current_app||s.effect==RemovalNodeEffect::Removed)
+        }
+        fn removal_payload_latch_data(first:&mut Option<(&'static str,mobile_release_desktop::macos_remove_record::FailureKindData)>,
+            error:&'static str,kind:mobile_release_desktop::macos_remove_record::FailureKindData) {
+            if first.is_none(){*first=Some((error,kind));}
+        }
+        fn removal_payload_children_data<'a>(children:impl Iterator<Item=(&'a str,u64,RemovalNodeEffect)>,actual:&BTreeMap<String,u64>)->bool {
+            let mut count=0;
+            for (name,inode,effect) in children {
+                match effect {
+                    RemovalNodeEffect::Present=>{count+=1;if actual.get(name)!=Some(&inode){return false;}},
+                    RemovalNodeEffect::Removed=>(),RemovalNodeEffect::Unknown=>return false,
+                }
+            }actual.len()==count
+        }
+        fn removal_payload_sealed_record_data(record_bytes:usize,written:u64,sealed_returned:bool,raw_hash_matches:bool)->bool {
+            record_bytes>0 && record_bytes<=mobile_release_desktop::macos_remove_record::RECORD_LIMIT
+                && written==record_bytes as u64 && sealed_returned && raw_hash_matches
+        }
+        fn removal_payload_phase_allows_unlink_data(phase:RemovalPayloadPhase,deletion_record_settled:bool,first:bool)->bool {
+            phase==RemovalPayloadPhase::Removing && deletion_record_settled && !first
+        }
+        fn removal_payload_parent_change_data(before:Identity,flags:u32,actual:Identity,actual_flags:u32,named:Identity,named_flags:u32)->bool {
+            before.dev==actual.dev && before.ino==actual.ino && before.mode==actual.mode
+                && before.uid==actual.uid && before.gid==actual.gid && flags==actual_flags && actual_flags==named_flags
+                && actual==named && actual.mode&0o170000==0o040000
+        }
+        fn removal_payload_file_name(slot:usize)->Result<&'static str> {
+            match slot {0=>Ok("snapshot-v1"),1=>Ok("admission.json"),2=>Ok("app-withdrawn.json"),
+                3=>Ok("payload-roster-removal.json"),4=>Ok("payload-absent-observed.json"),5=>Ok("first-failure.json"),
+                _=>Err("removal-payload-record-slot")}
+        }
+        impl RemovalPayloadExecution {
+            fn new(source:RemovalAdmission,observed:maintenance::RemovalObserved,snapshot:RemovalSnapshot,
+                admission:RemovalSnapshotAdmission,exclusion:RemovalExclusion,plan:maintenance::RemovalPayloadPlan)->Self {
+                Self {source,observed,snapshot,admission,exclusion,plan,phase:RemovalPayloadPhase::OriginalSource,
+                    states:Vec::new(),release_originals:Vec::new(),record:None,pending_record:None,failure_record:None,first:None,attempted:false,remaining_originals:0,ancestor_flags:[0;4],withdrawal_return:None}
+            }
+            fn root(&self)->usize {self.source.originals.code[3]}
+            fn archive(&self)->usize {self.admission.archive}
+            fn current_app(&self)->Result<usize> {self.plan.generations.first().and_then(|g|g.roots[0]).ok_or("removal-payload-current-app")}
+            fn note(&mut self,error:&'static str,kind:mobile_release_desktop::macos_remove_record::FailureKindData) {
+                removal_payload_latch_data(&mut self.first,error,kind);
+            }
+            fn external_post(&self,book:&Install)->Result<()> {
+                check(self.phase!=RemovalPayloadPhase::OriginalSource && self.source.settled()
+                    && self.source.first.is_none(),"removal-payload-source-phase")?;
+                self.source.originals.input.post(book)?;
+                for (slot,n) in self.source.originals.code[..4].iter().enumerate() {
+                    book.check_name(*n,true)?;
+                    check(stat::fstat(book.fd(*n)?).map_err(|_|"removal-payload-source-stat")?.st_flags==self.ancestor_flags[slot],"removal-payload-source-flags")?;
+                }
+                for (n,raw) in self.source.originals.installed_pair.iter().zip(&self.source.originals.installed_raw) {
+                    maintenance::held_bytes(book,*n,raw)?;
+                }
+                let root=self.root();let r=self.exclusion.reservation;let m=self.exclusion.maintenance;
+                check(book.registration.entered && book.registration.verified && book.registration.exclusive_acquired
+                    && book.registration.lock_attempted && book.registration.parent==Some(root) && book.registration.participant==Some(r)
+                    && !book.registration.closed_under_maintenance && book.gate.entered && book.gate.verified
+                    && book.gate.exclusive_acquired && book.gate.lock_attempted && book.gate.parent==Some(root)
+                    && book.gate.participant==Some(m) && self.source.existing_maintenance==Some(m),"removal-payload-exclusion")?;
+                book.registration_protected(r)?;book.gate_protected(m)?;
+                maintenance::held_bytes(book,r,paths::REGISTRATION_GATE_BYTES)?;
+                maintenance::held_bytes(book,m,paths::MAINTENANCE_GATE_BYTES)?;
+                let peer=self.exclusion.peer.retired();
+                check(peer.original_peer_exit_observed() && peer.role()==native::removal_coordinator::RemovalPeerRole::Parent,
+                    "removal-payload-peer-retirement")?;
+                self.observed.payload_controls_post(book)?;
+                for slot in 0..2 {
+                    check(self.snapshot.files[slot].settled_data(),"removal-payload-snapshot-finality")?;
+                    let n=self.snapshot.files[slot].reader.ok_or("removal-payload-snapshot-original")?;
+                    book.check_name(n,true)?;
+                    check(stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-snapshot-stat")?.st_flags==0,"removal-payload-snapshot-flags")?;
+                }
+                book.clock()
+            }
+            fn original_open(&mut self,book:&mut Install,parent:Option<usize>,name:&str,directory:bool)->Result<usize> {
+                check(self.remaining_originals>0,"removal-payload-original-budget")?;
+                self.remaining_originals-=1;book.open(parent,name,directory)
+            }
+            fn roster(&mut self,book:&mut Install,parent:usize)->Result<BTreeMap<String,u64>> {
+                let original=&book.originals[parent];let grandparent=original.parent;let name=original.name.clone();
+                let reader=self.original_open(book,grandparent,&name,true)?;
+                check(book.identity(parent)?.same_object(book.identity(reader)?),"removal-payload-roster-original")?;
+                let found=book.roster(reader)?;book.check_name(reader,true)?;
+                book.forward_close(reader,"removal-payload-roster-close")?;Ok(found)
+            }
+            fn remaining_children(&self,index:usize,actual:&BTreeMap<String,u64>)->bool {
+                removal_payload_children_data(self.plan.nodes[index].children.iter().map(|child|{
+                    let node=&self.plan.nodes[*child];(node.name.as_str(),node.identity.ino,self.states[*child].effect)
+                }),actual)
+            }
+            fn namespace_matches(&self,parent:usize,book:&Install,actual:&BTreeMap<String,u64>)->Result<bool> {
+                let identity=book.identity(parent)?;
+                if let Some(index)=self.states.iter().enumerate().find_map(|(i,s)|s.original.filter(|n|
+                    self.plan.nodes[i].directory && book.identity(*n).is_ok_and(|v|v.dev==identity.dev&&v.ino==identity.ino)).map(|_|i)) {
+                    return Ok(self.remaining_children(index,actual));
+                }
+                if identity.same_object(book.identity(self.root())?) {
+                    let old=self.snapshot.capture.root_children()?;let mut expected=BTreeMap::new();
+                    for (name,inode) in old {
+                        let removed=name==paths::APP_NAME && self.phase!=RemovalPayloadPhase::Transferred
+                            || self.plan.generations.iter().enumerate().any(|(g,row)|g>0 && name==&row.app_name
+                                && row.roots[0].is_some_and(|i|self.states[i].effect==RemovalNodeEffect::Removed));
+                        if !removed{expected.insert(name.clone(),*inode);}
+                    }
+                    expected.insert(self.snapshot.name.clone(),book.identity(self.archive())?.ino);return Ok(*actual==expected);
+                }
+                if identity.same_object(book.identity(self.archive())?) {
+                    let mut expected=BTreeMap::new();
+                    for slot in 0..6 {
+                        let file=&self.snapshot.files[slot];
+                        if let Some(n)=file.reader.or(file.writer) {
+                            expected.insert(removal_payload_file_name(slot)?.to_owned(),book.identity(n)?.ino);
+                        }
+                    }
+                    let app=self.current_app()?;
+                    if self.phase!=RemovalPayloadPhase::Transferred && self.states[app].effect==RemovalNodeEffect::Present {
+                        expected.insert("app".to_owned(),self.plan.nodes[app].identity.ino);
+                    }
+                    return Ok(*actual==expected);
+                }
+                for (g,release) in self.release_originals.iter().enumerate() {
+                    if identity.same_object(book.identity(*release)?) {
+                        let path=format!("versions/{}",self.plan.generations[g].release);
+                        let names=self.snapshot.capture.directory_children(&path)?;
+                        let root=self.plan.generations[g].roots[1].ok_or("removal-payload-runtime-root")?;
+                        let expected:BTreeMap<_,_>=names.iter().filter(|(name,_)|name!="runtime"||self.states[root].effect!=RemovalNodeEffect::Removed).cloned().collect();
+                        return Ok(*actual==expected);
+                    }
+                }
+                Err("removal-payload-parent-not-planned")
+            }
+            fn advance_parent(&mut self,book:&mut Install,parent:usize,before:(Identity,u32))->Result<()> {
+                // The sole caller has already retained the actual returned own
+                // effect. No unknown/nonzero return enters this baseline path.
+                let actual=stat::fstat(book.fd(parent)?).map_err(|_|"removal-payload-parent-stat")?;
+                let original=&book.originals[parent];let named=book.named(original.parent,&original.name).map_err(|_|"removal-payload-parent-name")?;
+                check(removal_payload_parent_change_data(before.0,before.1,Identity::of(&actual),actual.st_flags,Identity::of(&named),named.st_flags),
+                    "removal-payload-parent-effect")?;
+                let roster=self.roster(book,parent)?;check(self.namespace_matches(parent,book,&roster)?,"removal-payload-parent-roster")?;
+                // Only independently verified aliases of THIS actual parent
+                // share this returned effect. Everything else stays exact.
+                for n in 0..book.originals.len() {
+                    if book.originals[n].fd.is_none(){continue;}
+                    let old=book.identity(n)?;
+                    if old.dev==before.0.dev && old.ino==before.0.ino {
+                        let held=stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-alias-stat")?;
+                        let original=&book.originals[n];let named=book.named(original.parent,&original.name).map_err(|_|"removal-payload-alias-name")?;
+                        check(removal_payload_parent_change_data(old,before.1,Identity::of(&held),held.st_flags,Identity::of(&named),named.st_flags)
+                            && Identity::of(&held)==Identity::of(&actual),"removal-payload-alias-effect")?;
+                        book.originals[n].identity=Some(Identity::of(&held));
+                    }
+                }
+                for (i,state) in self.states.iter().enumerate() {
+                    if state.original.is_some_and(|n|book.identity(n).is_ok_and(|id|id.dev==before.0.dev&&id.ino==before.0.ino)) {
+                        self.plan.nodes[i].identity=Identity::of(&actual);
+                    }
+                }
+                native::no_xattrs(book.fd(parent)?.as_fd()).map_err(|_|"removal-payload-parent-attributes")?;
+                book.check_name(parent,true)?;book.clock()
+            }
+            fn transfer(&mut self,book:&mut Install)->Result<()> {
+                check(!self.attempted && self.phase==RemovalPayloadPhase::OriginalSource && self.plan.complete,"removal-payload-once")?;
+                self.attempted=true;self.exclusion.post(book,&self.source)?;self.observed.post(book)?;
+                check(self.source.settled() && self.source.first.is_none()
+                    && self.snapshot.files[..2].iter().all(RemovalSnapshotFile::settled_data)
+                    && self.snapshot.archive==Some(self.admission.archive)
+                    && self.snapshot.files[0].reader==Some(self.admission.snapshot)
+                    && self.snapshot.files[1].reader==Some(self.admission.record)
+                    && format!("{:x}",self.snapshot.files[0].digest.clone().finalize())==self.admission.snapshot_sha256,
+                    "removal-payload-admission")?;
+                self.snapshot.file_post(book,0)?;self.snapshot.file_post(book,1)?;
+                let record=self.snapshot.record.take().ok_or("removal-payload-admission")?;
+                check(record.digest_data()==self.admission.record_sha256 && record.prefix_data()==mobile_release_desktop::macos_remove_record::PrefixData::AdmissionRecorded
+                    && record.first_failure_data().is_none(),"removal-payload-admission")?;self.record=Some(record);
+                let (files,directories)=self.plan.nodes.iter().fold((0usize,0usize),|(f,d),n|if n.directory{(f,d+1)}else{(f+1,d)});
+                let (future,end)=removal_payload_original_budget_data(book.originals.len(),files,directories,
+                    self.snapshot.capture.directory_count(),self.snapshot.capture.prior_archives()?.rows().len())
+                    .ok_or("removal-payload-original-budget")?;
+                let old_capacity=book.originals.capacity();
+                let table=if end>old_capacity{end.checked_mul(std::mem::size_of::<Original>()).ok_or("removal-payload-memory")?}else{0};
+                let states=self.plan.nodes.len().checked_mul(std::mem::size_of::<RemovalNodeState>()).ok_or("removal-payload-memory")?;
+                // One bounded roster/hash/progress working cell, not a new cap.
+                let working=2*1024*1024+states+9*std::mem::size_of::<usize>()+std::mem::size_of::<Self>();
+                let extra=table.checked_add(future.checked_mul(255).ok_or("removal-payload-memory")?)
+                    .and_then(|n|n.checked_add(working)).ok_or("removal-payload-memory")?;
+                let (_,storage)=self.snapshot.capture.quote.ok_or("removal-payload-budget")?;
+                let control=book.removal_observation_control.ok_or("removal-payload-budget")?
+                    .checked_add(book.removal_control_reserved.checked_sub(book.removal_observation_reserved)
+                        .ok_or("removal-payload-budget")?).ok_or("removal-payload-budget")?;
+                check(removal_payload_allocation_data(control,extra,storage,self.snapshot.files[0].written),"removal-payload-budget")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-payload-memory")?;
+                book.originals.try_reserve_exact(future).map_err(|_|"removal-payload-allocation")?;
+                check(book.originals.capacity()<=old_capacity.max(end),"removal-payload-allocation")?;
+                self.states.try_reserve_exact(self.plan.nodes.len()).map_err(|_|"removal-payload-allocation")?;
+                self.release_originals.try_reserve_exact(9).map_err(|_|"removal-payload-allocation")?;
+                check(self.states.capacity()<=self.plan.nodes.len() && self.release_originals.capacity()<=9,"removal-payload-allocation")?;
+                self.states.extend(self.plan.nodes.iter().map(|_|RemovalNodeState {original:None,effect:RemovalNodeEffect::Present,roster_observed:false,returned:None}));
+                self.remaining_originals=future;
+                let app=self.current_app()?;let original=self.plan.nodes[app].held.ok_or("removal-payload-current-app")?;
+                check(!self.source.originals.code.contains(&original) && book.identity(original)?==self.plan.nodes[app].identity
+                    && book.originals[original].parent==Some(self.root()) && book.originals[original].name==paths::APP_NAME,
+                    "removal-payload-current-app")?;
+                self.states[app].original=Some(original);
+                // Native five + peer are retired; no callback can borrow these
+                // now-consumed code originals. The external package stays held.
+                for n in self.source.originals.code[4..].iter().copied().rev() {
+                    check(n!=original && !self.source.originals.installed_pair.contains(&n)
+                        && n!=self.exclusion.maintenance && n!=self.exclusion.reservation,"removal-payload-source-alias")?;
+                    book.check_name(n,true)?;book.forward_close(n,"removal-payload-code-close")?;
+                }
+                // The first observation may have retained another app-root
+                // alias. No live child may depend on it; retire it rather than
+                // carrying an obsolete pre-withdrawal pathname into settlement.
+                for alias in 0..book.originals.len() {
+                    if alias==original || book.originals[alias].fd.is_none(){continue;}
+                    if book.identity(alias)?.same_object(self.plan.nodes[app].identity) {
+                        check(book.identity(alias)?==self.plan.nodes[app].identity
+                            && book.originals[alias].parent==Some(self.root()) && book.originals[alias].name==paths::APP_NAME
+                            && !book.originals.iter().any(|r|r.fd.is_some()&&r.parent==Some(alias)),"removal-payload-app-alias")?;
+                        book.check_name(alias,true)?;book.forward_close(alias,"removal-payload-app-alias-close")?;
+                    }
+                }
+                let external=book.removal_live_reserved.checked_add(if book.worker_deadline.is_some(){EXTRA_LIVE}else{0})
+                    .ok_or("removal-payload-live-budget")?;
+                check(removal_payload_live_data(book.originals.iter().filter(|r|r.fd.is_some()).count(),external),
+                    "removal-payload-live-budget")?;
+                for (slot,n) in self.source.originals.code[..4].iter().enumerate() {
+                    self.ancestor_flags[slot]=stat::fstat(book.fd(*n)?).map_err(|_|"removal-payload-source-stat")?.st_flags;
+                }
+                self.phase=RemovalPayloadPhase::Transferred;self.external_post(book)?;
+                self.external_post(book)
+            }
+            fn failure_basis(&self)->Result<&mobile_release_desktop::macos_remove_record::RemovalRecordData> {
+                if let Some((slot,record))=&self.pending_record {
+                    let file=&self.snapshot.files[*slot];
+                    // Actual complete writes + returned seal describe the
+                    // record a fresh reader may see, NOT fsync/close success.
+                    if removal_payload_sealed_record_data(record.bytes_data().len(),file.written,file.sealed,
+                        format!("{:x}",file.digest.clone().finalize())==record.digest_data()) {return Ok(record);}
+                }
+                self.record.as_ref().ok_or("removal-payload-record")
+            }
+            fn progress(&mut self,book:&mut Install,slot:usize)->Result<()> {
+                use mobile_release_desktop::macos_remove_record::{RemovalRecordData,PrefixData,RemovalBindingData};
+                self.external_post(book)?;check((2..=5).contains(&slot),"removal-payload-record-slot")?;
+                check(if slot==5{self.failure_record.is_none()}else{self.pending_record.is_none() && self.first.is_none()},
+                    "removal-payload-record-once")?;
+                let old=if slot==5{self.failure_basis()?}else{self.record.as_ref().ok_or("removal-payload-record")?};
+                let descriptor=self.source.descriptor.as_ref().ok_or("removal-payload-source")?;
+                let fields=self.source.removal.as_ref().ok_or("removal-payload-source")?.binding_data();
+                let state_sha=format!("{:x}",Sha256::digest(self.observed.snapshot_state_bytes()?));
+                let binding=RemovalBindingData {target:descriptor.release_set_data().target_data(),source_commit:descriptor.release_set_data().current_data().binding_data().source_commit,
+                    removal_descriptor_sha256:&format!("{:x}",Sha256::digest(self.source.originals.input.descriptor_data())),
+                    installed_producer_sha256:&format!("{:x}",Sha256::digest(&self.source.originals.installed_raw[0])),
+                    installed_inventory_sha256:descriptor.release_set_data().current_data().binding_data().inventory_sha256,
+                    installation_state_sha256:&state_sha,payload_roster_sha256:&self.admission.snapshot_sha256};
+                check(fields.source_commit==binding.source_commit,"removal-payload-source")?;
+                let next=if slot==5 {old.first_failure_latched_data(self.first.ok_or("removal-payload-first-failure")?.1,binding)}
+                    else {old.next_prefix_data(match slot {2=>PrefixData::AppWithdrawn,3=>PrefixData::PayloadRosterRemoval,
+                        4=>PrefixData::PayloadAbsentObserved,_=>return Err("removal-payload-record-slot")},binding)}
+                    .map_err(|_|"removal-payload-record")?;
+                // Retain intended DATA before the writer can return any
+                // effect. Only the actual seal/write ledger can select it as
+                // a failure basis; it never grants forward phase permission.
+                if slot==5 {self.failure_record=Some(next);}else{self.pending_record=Some((slot,next));}
+                let retained=if slot==5{self.failure_record.as_ref()}else{self.pending_record.as_ref().map(|(_,record)|record)}
+                    .ok_or("removal-payload-record")?;
+                let bytes=retained.bytes_data().to_vec();let before=book.originals.len();
+                check(self.remaining_originals>=3,"removal-payload-original-budget")?;
+                self.snapshot.create(book,slot)?;self.snapshot.write(book,slot,&bytes)?;self.snapshot.close_file(book,slot)?;
+                let used=book.originals.len().checked_sub(before).ok_or("removal-payload-original-budget")?;
+                self.remaining_originals=self.remaining_originals.checked_sub(used).ok_or("removal-payload-original-budget")?;
+                check(used==2 && self.snapshot.files[slot].settled_data(),"removal-payload-record-finality")?;
+                maintenance::held_bytes(book,self.snapshot.files[slot].reader.ok_or("removal-payload-record")?,&bytes)?;
+                let parsed=RemovalRecordData::parse_data(&bytes,binding).map_err(|_|"removal-payload-record-readback")?;
+                let retained=if slot==5{self.failure_record.as_ref()}else{self.pending_record.as_ref().map(|(_,record)|record)}
+                    .ok_or("removal-payload-record")?;
+                check(parsed.digest_data()==retained.digest_data(),"removal-payload-record-readback")?;
+                if slot!=5 {self.record=Some(self.pending_record.take().ok_or("removal-payload-record")?.1);}
+                let roster=self.roster(book,self.archive())?;
+                check(self.namespace_matches(self.archive(),book,&roster)?,"removal-payload-record-roster")?;
+                self.external_post(book)
+            }
+            fn withdraw(&mut self,book:&mut Install)->Result<()> {
+                check(self.phase==RemovalPayloadPhase::Transferred && self.first.is_none(),"removal-payload-withdrawal-phase")?;
+                self.external_post(book)?;let app=self.current_app()?;let original=self.states[app].original.ok_or("removal-payload-current-app")?;
+                let from=self.root();let to=self.archive();
+                let before_from=RemovalPublication::parent_before(book,from)?;let before_to=RemovalPublication::parent_before(book,to)?;
+                let from_roster=self.roster(book,from)?;let to_roster=self.roster(book,to)?;
+                check(self.namespace_matches(from,book,&from_roster)? && self.namespace_matches(to,book,&to_roster)?,"removal-payload-withdrawal-roster")?;
+                book.check_name(original,true)?;book.protected(original,true,Some(0o555))?;book.absent(to,"app")?;
+                check(book.identity(from)?.dev==book.identity(to)?.dev && book.identity(original)?.dev==book.identity(from)?.dev,"removal-payload-withdrawal-volume")?;
+                book.clock()?;
+                let returned=native::publish_directory(book.fd(from)?.as_fd(),paths::APP_NAME,book.fd(to)?.as_fd(),"app");
+                self.withdrawal_return=Some(match &returned {Ok(())=>Ok(()),Err(error)=>Err(error.raw_os_error())});
+                if let Err(error)=returned {
+                    if error.raw_os_error()!=Some(Errno::EEXIST as i32){book.unknown=true;self.states[app].effect=RemovalNodeEffect::Unknown;}
+                    return Err("removal-payload-exclusive-withdrawal");
+                }
+                // Known returned rename precedes the next clock/POST.
+                self.phase=RemovalPayloadPhase::AppWithdrawn;book.clock()?;
+                maintenance::rebind_removal_app(book,original,to)?;
+                self.plan.nodes[app].name="app".to_owned();self.plan.nodes[app].identity=book.identity(original)?;
+                book.absent(from,paths::APP_NAME)?;
+                self.advance_parent(book,from,before_from)?;self.advance_parent(book,to,before_to)?;
+                book.persist(from,false)?;book.persist(to,false)?;
+                self.progress(book,2)?;
+                // Phase ENTRY, durably observed before any irreversible unlink.
+                self.progress(book,3)?;self.phase=RemovalPayloadPhase::Removing;Ok(())
+            }
+            fn node_original(&mut self,book:&mut Install,index:usize,parent:usize)->Result<usize> {
+                check(self.states[index].effect==RemovalNodeEffect::Present,"removal-payload-node-state")?;
+                let n=if let Some(n)=self.states[index].original {n}else {
+                    let name=self.plan.nodes[index].name.clone();let directory=self.plan.nodes[index].directory;
+                    let n=self.original_open(book,Some(parent),&name,directory)?;self.states[index].original=Some(n);n
+                };
+                let node=&self.plan.nodes[index];let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-node-stat")?;
+                check(book.originals[n].parent==Some(parent) && book.originals[n].name==node.name
+                    && Identity::of(&actual)==node.identity && actual.st_flags==node.flags && node.flags==0,"removal-payload-node-original")?;
+                book.protected(n,node.directory,Some(if node.directory||node.executable{0o555}else{0o444}))?;
+                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-payload-node-attributes")?;book.check_name(n,true)?;Ok(n)
+            }
+            fn remove_node(&mut self,book:&mut Install,index:usize,parent:usize,keep_root:bool,depth:usize)->Result<()> {
+                check(depth<=17 && (!self.plan.nodes[index].directory || depth<17)
+                    && removal_payload_phase_allows_unlink_data(self.phase,self.snapshot.files[3].settled_data(),self.first.is_some()),
+                    "removal-payload-unlink-phase")?;
+                self.external_post(book)?;book.check_name(parent,true)?;
+                let n=self.node_original(book,index,parent)?;
+                if self.plan.nodes[index].directory {
+                    let roster=self.roster(book,n)?;check(self.remaining_children(index,&roster),"removal-payload-directory-roster")?;
+                    self.states[index].roster_observed=true;
+                    for child_position in 0..self.plan.nodes[index].children.len() {
+                        let child=self.plan.nodes[index].children[child_position];
+                        self.remove_node(book,child,n,false,depth+1)?;
+                    }
+                    // Last-child POST (or the initial empty reader) was actual.
+                    // Unchanged full metadata proves that exact empty census
+                    // remains current; no offset rewind or unbudgeted reader.
+                    book.check_name(n,true)?;
+                    check(self.states[index].roster_observed && self.plan.nodes[index].children.iter()
+                        .all(|c|self.states[*c].effect==RemovalNodeEffect::Removed),"removal-payload-directory-not-empty")?;
+                    book.persist(n,false)?;
+                    if keep_root{return Ok(());}
+                } else {
+                    let node=&self.plan.nodes[index];let digest=book.read(n,node.size,false)?.0;
+                    check(removal_hex_data::<32>(&digest)?==node.digest,"removal-payload-node-content")?;
+                    book.check_name(n,true)?;
+                }
+                self.unlink_original(book,index,parent,n)
+            }
+            fn unlink_original(&mut self,book:&mut Install,index:usize,parent:usize,n:usize)->Result<()> {
+                check(removal_payload_phase_allows_unlink_data(self.phase,self.snapshot.files[3].settled_data(),self.first.is_some())
+                    && self.states[index].effect==RemovalNodeEffect::Present,"removal-payload-unlink-phase")?;
+                let current_app=self.current_app()?;
+                check(removal_payload_app_last_data(index,current_app,&self.states),"removal-payload-app-directory-last")?;
+                self.external_post(book)?;book.check_name(n,true)?;
+                let before=RemovalPublication::parent_before(book,parent)?;
+                let node=&self.plan.nodes[index];let name=node.name.clone();let directory=node.directory;
+                check(book.originals[n].parent==Some(parent) && book.originals[n].name==name,"removal-payload-unlink-original")?;
+                let before_child=stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-unlink-stat")?;
+                check(Identity::of(&before_child)==node.identity && before_child.st_flags==node.flags,"removal-payload-unlink-original")?;
+                book.clock()?;
+                let returned=unistd::unlinkat(book.fd(parent)?,name.as_str(),if directory{unistd::UnlinkatFlags::RemoveDir}else{unistd::UnlinkatFlags::NoRemoveDir});
+                match returned {
+                    Ok(())=>{self.states[index].returned=Some(Ok(()));self.states[index].effect=RemovalNodeEffect::Removed;},
+                    Err(error)=>{self.states[index].returned=Some(Err(error as i32));self.states[index].effect=RemovalNodeEffect::Unknown;
+                        book.unknown=true;return Err("removal-payload-unlink-return");}
+                }
+                // Keep the actual effect before the next deadline/POST. This
+                // original no longer has a name; generic named POST is invalid.
+                book.clock()?;book.absent(parent,&name)?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-unlinked-stat")?;
+                check(node.identity.dev==i64::from(actual.st_dev) && node.identity.ino==actual.st_ino
+                    && node.identity.mode==u32::from(actual.st_mode) && node.identity.uid==actual.st_uid
+                    && node.identity.gid==actual.st_gid && actual.st_flags==0,"removal-payload-unlinked-original")?;
+                self.advance_parent(book,parent,before)?;
+                book.forward_close(n,"removal-payload-unlinked-close")?;
+                if directory {book.persist(parent,false)?;}
+                self.external_post(book)
+            }
+            fn final_namespace(&mut self,book:&mut Install)->Result<()> {
+                check(self.withdrawal_return==Some(Ok(())) && self.states.iter().all(|s|s.effect==RemovalNodeEffect::Removed
+                    && s.returned==Some(Ok(())) && s.original.is_some_and(|n|book.originals[n].state==State::Closed && book.originals[n].fd.is_none())),
+                    "removal-payload-original-finality")?;
+                self.external_post(book)?;
+                book.absent(self.root(),paths::APP_NAME)?;book.absent(self.archive(),"app")?;
+                for g in 0..self.plan.generations.len() {
+                    if g>0 {book.absent(self.root(),&self.plan.generations[g].app_name)?;}
+                }
+                // Complete retained control namespace, not just payload names.
+                for row in self.snapshot.capture.directory_rows_data() {
+                    let path=row.0;
+                    let (parent,name)=if path.is_empty(){
+                        let root=&book.originals[self.root()];(root.parent,root.name.clone())
+                    }else if let Some(("versions",leaf))=path.split_once('/') {
+                        (Some(self.snapshot.capture.versions_original()?),leaf.to_owned())
+                    }else{(Some(self.root()),path.to_owned())};
+                    // The ordinary capture only has root/versions/release/stage
+                    // directories; no payload node/path is admitted here.
+                    check(!path.contains('/') || path.starts_with("versions/")&&!path[9..].contains('/'),"removal-payload-control-location")?;
+                    check(self.remaining_originals>=2,"removal-payload-original-budget")?;
+                    self.remaining_originals-=2;
+                    let reader=book.open(parent,&name,true)?;
+                    let live=if path.is_empty(){self.root()}else if path=="versions"{self.snapshot.capture.versions_original()?}
+                        else if let Some((g,_))=self.plan.generations.iter().enumerate().find(|(_,g)|path==format!("versions/{}",g.release)){self.release_originals[g]}
+                        else{reader};
+                    let expected=if live==reader{row.1}else{book.identity(live)?};
+                    check(book.identity(reader)?==expected && stat::fstat(book.fd(reader)?).map_err(|_|"removal-payload-control-stat")?.st_flags==row.2,
+                        "removal-payload-control-original")?;
+                    book.protected(reader,true,Some(if path.starts_with(".install-"){0o700}else{0o755}))?;
+                    native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_|"removal-payload-control-attributes")?;
+                    let original=&book.originals[reader];let grandparent=original.parent;let label=original.name.clone();
+                    let roster_reader=book.open(grandparent,&label,true)?;
+                    check(book.identity(roster_reader)?==book.identity(reader)?,"removal-payload-control-roster-original")?;
+                    let actual=book.roster(roster_reader)?;
+                    let matches=if path.is_empty(){self.namespace_matches(self.root(),book,&actual)?}
+                        else if let Some((g,_))=self.plan.generations.iter().enumerate().find(|(_,g)|path==format!("versions/{}",g.release)) {
+                            self.namespace_matches(self.release_originals[g],book,&actual)?
+                        }else{actual.len()==row.3.len() && row.3.iter().all(|(n,i)|actual.get(n)==Some(i))};
+                    check(matches,"removal-payload-control-roster")?;
+                    book.check_name(roster_reader,true)?;book.forward_close(roster_reader,"removal-payload-control-roster-close")?;
+                    book.check_name(reader,true)?;book.forward_close(reader,"removal-payload-control-close")?;
+                }
+                let before=book.originals.len();
+                let prior=self.snapshot.capture.prior_archives()?;
+                let quoted=prior.rows().len().checked_mul(4).ok_or("removal-payload-original-budget")?;
+                check(self.remaining_originals>=quoted,"removal-payload-original-budget")?;
+                maintenance::post_removal_archive_census(book,prior)?;
+                let used=book.originals.len().checked_sub(before).ok_or("removal-payload-original-budget")?;
+                check(used<=quoted,"removal-payload-original-budget")?;self.remaining_originals-=used;
+                self.snapshot.file_post(book,0)?;self.snapshot.file_post(book,1)?;
+                for slot in 2..4 {self.snapshot.file_post(book,slot)?;}
+                self.external_post(book)
+            }
+            fn run_inner(&mut self,book:&mut Install)->Result<RemovalPayloadAbsence> {
+                self.transfer(book)?;self.withdraw(book)?;
+                let current_app=self.current_app()?;
+                self.remove_node(book,current_app,self.archive(),true,0)?;
+                for g in 0..self.plan.generations.len() {
+                    // At most ONE new generation anchor remains live. Its
+                    // identity stays in the original ledger after known close;
+                    // the final 2C census uses independently owned readers.
+                    let name=self.plan.generations[g].release.clone();
+                    let release=self.original_open(book,Some(self.snapshot.capture.versions_original()?),&name,true)?;
+                    let (identity,flags)=self.snapshot.capture.directory_identity(&format!("versions/{name}"))?;
+                    check(book.identity(release)?==identity && flags==0,"removal-payload-release-original")?;
+                    book.protected(release,true,Some(0o755))?;self.release_originals.push(release);
+                    if g>0 {let app=self.plan.generations[g].roots[0].ok_or("removal-payload-app-root")?;self.remove_node(book,app,self.root(),false,0)?;}
+                    let runtime=self.plan.generations[g].roots[1].ok_or("removal-payload-runtime-root")?;
+                    self.remove_node(book,runtime,release,false,0)?;
+                    book.check_name(release,true)?;book.forward_close(release,"removal-payload-release-close")?;
+                }
+                let app_original=self.states[current_app].original.ok_or("removal-payload-current-app")?;
+                self.unlink_original(book,current_app,self.archive(),app_original)?;
+                self.final_namespace(book)?;
+                self.progress(book,4)?;self.phase=RemovalPayloadPhase::Absent;
+                self.snapshot.file_post(book,4)?;
+                let record=self.snapshot.files[4].reader.ok_or("removal-payload-record")?;
+                Ok(RemovalPayloadAbsence {archive:self.archive(),snapshot:self.admission.snapshot,record,
+                    record_sha256:self.record.as_ref().ok_or("removal-payload-record")?.digest_data().to_owned()})
+            }
+            fn run(&mut self,book:&mut Install)->Result<RemovalPayloadAbsence> {
+                let result=self.run_inner(book);
+                if let Err(error)=result {
+                    use mobile_release_desktop::macos_remove_record::FailureKindData;
+                    self.note(error,if error.contains("close"){FailureKindData::CloseUnknown}
+                        else if book.unknown{FailureKindData::OriginalUnknown}
+                        else if error.contains("persist"){FailureKindData::Persistence}
+                        else if book.clock().is_err(){FailureKindData::Deadline}
+                        else if error=="removal-payload-exclusive-withdrawal"{FailureKindData::OriginalFailed}
+                        else{FailureKindData::PostMismatch});
+                    // Actual failure persists in memory even if no further work
+                    // can be safely admitted. Never retry a partial failure file.
+                    if self.phase!=RemovalPayloadPhase::OriginalSource && !book.unknown && book.clock().is_ok()
+                        && self.record.is_some() && self.failure_record.is_none() && self.snapshot.files[5].writer.is_none() {
+                        let _=self.progress(book,5);
+                    }
+                }result
+            }
+        }
+
         struct Parent {
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
@@ -5556,6 +6258,7 @@ mod installer {
             removal_peer_custody:Option<removal_peer_native::RemovalPeerCustody>,
             removal_exclusive_reobserve_started: bool,
             removal_snapshot: Option<RemovalSnapshot>,
+            removal_payload_execution:Option<RemovalPayloadExecution>,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -5576,6 +6279,7 @@ mod installer {
                     removal_peer_native_first:None,removal_peer_custody:None,
                     removal_exclusive_reobserve_started:false,
                     removal_snapshot:None,
+                    removal_payload_execution:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -5667,12 +6371,28 @@ mod installer {
                 let source=self.removal.as_ref().ok_or("removal-original-missing")?;
                 exclusion.post(&self.book,source)?;
                 maintenance::RemovalSnapshotCapture::begin(&mut self.book,source.root_original())?;
+                maintenance::RemovalPayloadPlan::begin(&mut self.book)?;
                 let old=self.removal_observed.take().ok_or("removal-current-missing")?;
                 self.removal_observed=Some(maintenance::reobserve_removal_exclusive(&mut self.book,source,exclusion,old)?);
                 exclusion.post(&self.book,source)?;
                 let prior=maintenance::take_removal_archive_census(&mut self.book)?;
-                self.book.removal_snapshot_capture.as_mut().ok_or("removal-snapshot-capture-missing")?.finish(prior)
+                self.book.removal_snapshot_capture.as_mut().ok_or("removal-snapshot-capture-missing")?.finish(prior)?;
+                self.book.removal_payload_plan.as_mut().ok_or("removal-payload-plan-missing")?.finish()
             }
+            fn remove_admitted_payload(&mut self,admission:RemovalSnapshotAdmission,exclusion:RemovalExclusion)->Result<RemovalPayloadAbsence> {
+                check(self.removal_payload_execution.is_none() && self.removal.as_ref().is_some_and(RemovalAdmission::settled)
+                    && self.removal_observed.is_some() && self.removal_snapshot.is_some()
+                    && self.book.removal_payload_plan.as_ref().is_some_and(|plan|plan.complete),"removal-payload-transfer")?;
+                // All values are existing same-owner originals. Store them
+                // before any original close/native mutation can return.
+                let source=self.removal.take().ok_or("removal-payload-source")?;
+                let observed=self.removal_observed.take().ok_or("removal-payload-observation")?;
+                let snapshot=self.removal_snapshot.take().ok_or("removal-payload-snapshot")?;
+                let plan=self.book.removal_payload_plan.take().ok_or("removal-payload-plan")?;
+                self.removal_payload_execution=Some(RemovalPayloadExecution::new(source,observed,snapshot,admission,exclusion,plan));
+                self.removal_payload_execution.as_mut().ok_or("removal-payload-transfer")?.run(&mut self.book)
+            }
+
             fn persist_removal_admission(&mut self,exclusion:&RemovalExclusion)->Result<RemovalSnapshotAdmission> {
                 check(self.removal_snapshot.is_none(),"removal-snapshot-once")?;
                 let capture=self.book.removal_snapshot_capture.take().ok_or("removal-snapshot-capture-missing")?;
@@ -6092,7 +6812,8 @@ mod installer {
                 // Retire them under this original clock BEFORE any book close.
                 let producer_settled = self.producer.as_mut().is_none_or(|producer| producer.settle(&self.book));
                 let removal_settled = self.removal.as_mut().is_none_or(|removal| removal.settle(&self.book));
-                let native_settled = producer_settled && removal_settled;
+                let payload_settled=self.removal_payload_execution.as_ref().is_none_or(|owner|owner.source.settled());
+                let native_settled=producer_settled && removal_settled && payload_settled;
                 if native_settled { self.parent_book_settled = self.book.settle_originals(); }
                 else {
                     self.note("producer-native-finality-unknown");
@@ -6401,8 +7122,97 @@ mod installer {
                 // not a native fsync/close/old-writer success observation.
             }
 
+            fn removal_payload_data_checks() {
+                use mobile_release_desktop::macos_remove_record::FailureKindData;
+                // Actual production reducers only. These do not execute or
+                // stand in for APFS rename/unlink/close/native qualification.
+                assert_eq!(removal_payload_originals_data(3,4,5,6),Some(6+12+10+24+32));
+                assert_eq!(removal_payload_originals_data(0,0,0,0),Some(32));
+                assert!(removal_payload_originals_data(usize::MAX,0,0,0).is_none());
+                assert!(removal_payload_originals_data(0,usize::MAX,0,0).is_none());
+                assert!(removal_payload_originals_data(0,0,76,0).is_none());
+                assert!(removal_payload_originals_data(0,0,0,64).is_none());
+                let future=removal_payload_originals_data(3,4,5,6).unwrap();
+                assert_eq!(removal_payload_original_budget_data(24576-future,3,4,5,6),Some((future,24576)));
+                assert!(removal_payload_original_budget_data(24577-future,3,4,5,6).is_none());
+                assert!(removal_payload_original_budget_data(usize::MAX,3,4,5,6).is_none());
+                let obsolete=3+3*4+2*5+4*6+32;
+                assert!(24576-obsolete+obsolete<=24576);
+                assert!(removal_payload_original_budget_data(24576-obsolete,3,4,5,6).is_none());
+                assert!(removal_payload_live_data(65,5));
+                assert!(!removal_payload_live_data(66,5));
+                assert!(!removal_payload_live_data(usize::MAX,0));
+                let control=16*1024*1024;let progress=5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
+                let storage=installation_record::PAYLOAD_LIMIT-progress-1;
+                assert!(removal_payload_allocation_data(control-128,128,storage,1));
+                assert!(!removal_payload_allocation_data(control-127,128,storage,1));
+                assert!(!removal_payload_allocation_data(control-128,128,storage,2));
+                assert!(!removal_payload_allocation_data(u64::MAX,1,storage,1));
+                for phase in [RemovalPayloadPhase::OriginalSource,RemovalPayloadPhase::Transferred,
+                    RemovalPayloadPhase::AppWithdrawn,RemovalPayloadPhase::Absent] {
+                    assert!(!removal_payload_phase_allows_unlink_data(phase,true,false));
+                }
+                assert!(removal_payload_phase_allows_unlink_data(RemovalPayloadPhase::Removing,true,false));
+                assert!(!removal_payload_phase_allows_unlink_data(RemovalPayloadPhase::Removing,false,false));
+                assert!(!removal_payload_phase_allows_unlink_data(RemovalPayloadPhase::Removing,true,true));
+                // Each actual cut may leave a complete sealed next-prefix
+                // file, even though this operation cannot claim it settled.
+                // The fresh-reader failure basis must agree, while unlink
+                // still requires the original full slot3 settlement.
+                for cut in 0..7 {
+                    let mut file=RemovalSnapshotFile::new();file.writer=Some(1);
+                    file.written=if cut==0{63}else{64};file.sealed=cut>=2;
+                    file.persisted=cut>=3;file.closed=cut>=4;
+                    if cut>=5 {file.reader=Some(2);file.readback=true;}
+                    file.directory_persisted=cut>=6;
+                    assert_eq!(removal_payload_sealed_record_data(64,file.written,file.sealed,true),cut>=2);
+                    assert_eq!(file.settled_data(),cut==6);
+                    assert_eq!(removal_payload_phase_allows_unlink_data(RemovalPayloadPhase::Removing,file.settled_data(),false),cut==6);
+                    assert!(!removal_payload_phase_allows_unlink_data(RemovalPayloadPhase::Removing,file.settled_data(),true));
+                }
+                assert!(!removal_payload_sealed_record_data(64,63,true,true));
+                assert!(!removal_payload_sealed_record_data(64,64,true,false));
+                assert!(!removal_payload_sealed_record_data(0,0,true,true));
+                assert!(!removal_payload_sealed_record_data(usize::MAX,u64::MAX,true,true));
+                let before=Identity {dev:1,ino:2,mode:0o040755,uid:0,gid:0,links:4,size:80,
+                    mtime:5,mtime_ns:1,ctime:6,ctime_ns:2};
+                let actual=Identity {links:3,size:64,mtime:7,ctime:8,..before};
+                assert!(removal_payload_parent_change_data(before,0,actual,0,actual,0));
+                for foreign in [Identity {dev:2,..actual},Identity {ino:3,..actual},Identity {mode:0o040777,..actual},
+                    Identity {uid:1,..actual},Identity {gid:1,..actual},Identity {mode:0o100444,..actual}] {
+                    assert!(!removal_payload_parent_change_data(before,0,foreign,0,foreign,0));
+                }
+                assert!(!removal_payload_parent_change_data(before,0,actual,1,actual,1));
+                assert!(!removal_payload_parent_change_data(before,0,actual,0,Identity {ctime:9,..actual},0));
+                let mut roster=BTreeMap::from([("listed".to_owned(),4)]);
+                let children=[("listed",4,RemovalNodeEffect::Present),("old",5,RemovalNodeEffect::Removed)];
+                assert!(removal_payload_children_data(children.into_iter(),&roster));
+                roster.insert("foreign".into(),6);
+                assert!(!removal_payload_children_data(children.into_iter(),&roster));
+                roster.remove("foreign");roster.insert("listed".into(),7);
+                assert!(!removal_payload_children_data(children.into_iter(),&roster));
+                roster.clear();
+                assert!(!removal_payload_children_data(children.into_iter(),&roster));
+                assert!(removal_payload_children_data([("listed",4,RemovalNodeEffect::Removed)].into_iter(),&roster));
+                assert!(!removal_payload_children_data([("listed",4,RemovalNodeEffect::Unknown)].into_iter(),&roster));
+                let mut states=vec![RemovalNodeState {original:None,effect:RemovalNodeEffect::Present,roster_observed:false,returned:None},
+                    RemovalNodeState {original:None,effect:RemovalNodeEffect::Present,roster_observed:false,returned:None}];
+                assert!(!removal_payload_app_last_data(0,0,&states));
+                assert!(removal_payload_app_last_data(1,0,&states));
+                states[1].effect=RemovalNodeEffect::Unknown;assert!(!removal_payload_app_last_data(0,0,&states));
+                states[1].effect=RemovalNodeEffect::Removed;assert!(removal_payload_app_last_data(0,0,&states));
+                let mut first=None;removal_payload_latch_data(&mut first,"actual-first",FailureKindData::Persistence);
+                removal_payload_latch_data(&mut first,"later-close",FailureKindData::CloseUnknown);
+                assert_eq!(first,Some(("actual-first",FailureKindData::Persistence)));
+                assert_eq!((0..6).map(|slot|removal_payload_file_name(slot).unwrap()).collect::<Vec<_>>(),
+                    ["snapshot-v1","admission.json","app-withdrawn.json","payload-roster-removal.json",
+                        "payload-absent-observed.json","first-failure.json"]);
+                assert!(removal_payload_file_name(6).is_err());
+            }
+
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                removal_payload_data_checks();
                 maintenance::removal_archive_data_checks();
                 removal_snapshot_data_checks();
                 // A spaced fixed application leaf is not a general payload

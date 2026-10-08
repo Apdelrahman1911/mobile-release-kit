@@ -121,6 +121,24 @@ impl AndroidBuildOwner {
         self.saved.bind_android_service_dispatcher(document,dispatcher)
     }
 
+    // Preserve the same saved owner and original admission references. The
+    // Document adapter adds no policy, resource custody, or substitute permit.
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn removal_snapshot(&self,document:&std::sync::Arc<()>)
+        ->Result<crate::saved_command_owner::MacosRemovalSnapshot,BridgeError>{
+        self.saved.removal_snapshot(document)
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn removal_admission_bytes(&self,document:&std::sync::Arc<()>,checked:&crate::saved_command_owner::MacosRemovalChecked,
+        census:&crate::asset_session::MacosMaintenanceCensus<'_>)->Option<usize>{
+        self.saved.removal_admission_bytes(document,checked,census)
+    }
+    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(crate) fn removal_dispatcher(&self,document:&std::sync::Arc<()>)
+        ->Option<std::sync::Arc<crate::saved_command_owner::AndroidServiceDispatcher>>{
+        self.saved.removal_dispatcher(document)
+    }
+
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(crate) fn maintenance_readiness(&self,document:&std::sync::Arc<()>)->(bool,bool){
         self.saved.maintenance_readiness(document)

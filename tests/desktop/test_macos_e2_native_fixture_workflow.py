@@ -13,7 +13,7 @@ STEP_NAMES = (
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
     "Prepare only the locked fixture graphs through the original command owner",
-    "Compile and test nine changed removal DATA groups",
+    "Compile and test selected removal DATA groups",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
     "Require closed scoped qualification without full E2 acceptance",
@@ -556,9 +556,11 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(ns["PARENT_RUST_TESTS"], (
             "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
             "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources"))
-        self.assertEqual(len(ns["CHANGES_SOURCES"]), 37)
+        self.assertEqual(len(ns["CHANGES_SOURCES"]), 39)
+        self.assertIn("desktop/src-tauri/src/android_build_owner.rs", ns["CHANGES_SOURCES"])
+        self.assertIn("desktop/src-tauri/src/macos_remove_record.rs", ns["CHANGES_SOURCES"])
         self.assertEqual(ns["CHANGES_ROLES"], ('removal-changes-parent-rust-tests', 'removal-changes-app-rust-tests', 'removal-changes-native-rust-tests', 'removal-changes-emitter-rust-tests'))
-        self.assertEqual(ns["CHANGES_RUST_TESTS"], (('installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality', 'installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources'), ('asset_session::macos_removal::tests::fixed_ingress_and_private_completion_never_replace_originals', 'asset_session::macos_maintenance::tests::new_work_closure_is_not_stop_and_preserves_lock_and_quit_routes', 'asset_session::installation_memory::known::tests::fixed_session_partition_and_overflow_refuse_without_credit', 'edit_owner::installed_configuration_data_tests::installed_configuration_owner_contract_is_inert', 'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound'), ('removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',), ('emitter::tests::fixed_remove_inputs_rosters_and_original_finality_refuse_install_or_partial_routes',)))
+        self.assertEqual(ns["CHANGES_RUST_TESTS"], (('installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality', 'installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources'), ('asset_session::macos_removal::tests::fixed_ingress_and_private_completion_never_replace_originals', 'asset_session::macos_maintenance::tests::new_work_closure_is_not_stop_and_preserves_lock_and_quit_routes', 'asset_session::installation_memory::known::tests::fixed_session_partition_and_overflow_refuse_without_credit', 'edit_owner::installed_configuration_data_tests::installed_configuration_owner_contract_is_inert', 'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound', 'macos_remove_record::tests::removal_record_closed_schema_and_bindings_are_data_only', 'macos_remove_record::tests::removal_prefix_failure_and_new_attempt_never_rewrite_history'), ('removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',), ('emitter::tests::fixed_remove_inputs_rosters_and_original_finality_refuse_install_or_partial_routes',)))
         self.assertEqual(ns["CHANGES_RUST_TESTS"][0], ns["PARENT_RUST_TESTS"])
         for profile in (False, True, "parent", "changes"):
             changes = profile == "changes"

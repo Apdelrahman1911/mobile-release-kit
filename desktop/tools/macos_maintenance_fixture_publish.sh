@@ -71,7 +71,7 @@ if not bootstrap_ok:
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
 REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
 REMOVAL_PARENT_SELECTED = False  # Historical one-original Parent2 scope remains closed.
-REMOVAL_CHANGES_SELECTED = True  # Four originals/nine changed DATA groups; fixed SOURCE only.
+REMOVAL_CHANGES_SELECTED = True  # Four originals/selected changed DATA groups; fixed SOURCE only.
 OWNER_DIAGNOSTIC_ROLES = (
     "removal-native-rust-tests", "removal-app-rust-tests",
     "removal-integration-native-rust-tests", "removal-integration-app-rust-tests", "removal-integration-parent-rust-tests", "removal-parent-rust-tests", "removal-changes-parent-rust-tests", "removal-changes-app-rust-tests", "removal-changes-native-rust-tests", "removal-changes-emitter-rust-tests",
@@ -923,6 +923,6 @@ try:
 except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-print("Changed DATA compiled and nine selected groups completed; live removal and shipping-image qualification remain pending."
+print("Changed DATA compiled and selected groups completed; live removal and shipping-image qualification remain pending."
       if summary["removalChangesDataQualified"] else "Changed DATA failed; retained summary is failure evidence only.")
 PY_PUBLISH

@@ -81,24 +81,46 @@ struct RecordWire {
 /// The original bytes are retained so a historical link hashes exactly the
 /// admitted record, not a reserialization that silently changes its identity.
 #[derive(Debug)]
-pub struct RemovalRecordData { wire: RecordWire, bytes: Vec<u8>, sha256: String }
+pub struct RemovalRecordData { wire: RecordWire, bytes: Vec<u8>, sha256: String, target: MaintenanceTargetData }
 impl RemovalRecordData {
     pub fn parse_data(bytes: &[u8], expected: RemovalBindingData<'_>) -> Result<Self> {
+        Self::parse_record_data(bytes, Some(expected))
+    }
+    /// Closed historical comparison DATA only: this does not select an expected
+    /// source or grant signature, current-original, resume or reinstall authority.
+    pub fn parse_shape_data(bytes: &[u8]) -> Result<Self> {
+        Self::parse_record_data(bytes, None)
+    }
+    fn parse_record_data(bytes: &[u8], expected: Option<RemovalBindingData<'_>>) -> Result<Self> {
         require(!bytes.is_empty() && bytes.len() <= RECORD_LIMIT, RecordDataError::Limit)?;
-        require(expected.valid(), RecordDataError::Binding)?;
+        // Preserve the original expected-binding check before parsing/copying,
+        // and its precedence over previous-identity and phase refusals below.
+        if let Some(expected) = expected { require(expected.valid(), RecordDataError::Binding)?; }
         let value = strict_json(bytes).map_err(|_| RecordDataError::Shape)?;
         let fields = value.as_object().ok_or(RecordDataError::Shape)?;
         // Option-valued fields are mandatory too; serde alone accepts omission.
         require(fields.len() == KEYS.len() && KEYS.iter().all(|k| fields.contains_key(*k)), RecordDataError::Shape)?;
+        // Derived struct visitors also accept positional arrays. These closed
+        // optional records are explicitly null or objects, never sequences.
+        require(["previousAttempt", "firstFailure"].iter().all(|key|
+            fields.get(*key).is_some_and(|v| v.is_null() || v.is_object())), RecordDataError::Shape)?;
         let wire: RecordWire = serde_json::from_value(value).map_err(|_| RecordDataError::Shape)?;
-        require(wire.schema_version == 1 && wire.kind == KIND && wire.target == expected.target.target()
-            && wire.source_commit == expected.source_commit
-            && wire.removal_descriptor_sha256 == expected.removal_descriptor_sha256
-            && wire.installed_producer_sha256 == expected.installed_producer_sha256
-            && wire.installed_inventory_sha256 == expected.installed_inventory_sha256
-            && wire.installation_state_sha256 == expected.installation_state_sha256
-            && wire.payload_roster_sha256 == expected.payload_roster_sha256
+        let target = if wire.target == MaintenanceTargetData::Arm64.target() { MaintenanceTargetData::Arm64 }
+            else if wire.target == MaintenanceTargetData::Intel.target() { MaintenanceTargetData::Intel }
+            else { return Err(RecordDataError::Binding); };
+        require(wire.schema_version == 1 && wire.kind == KIND && hex(&wire.source_commit, 40)
+            && [&wire.removal_descriptor_sha256, &wire.installed_producer_sha256,
+                &wire.installed_inventory_sha256, &wire.installation_state_sha256,
+                &wire.payload_roster_sha256].iter().all(|s| hex(s, 64))
             && hex(&wire.request_id, 32) && hex(&wire.root_nonce, 32), RecordDataError::Binding)?;
+        if let Some(expected) = expected {
+            require(target == expected.target && wire.source_commit == expected.source_commit
+                && wire.removal_descriptor_sha256 == expected.removal_descriptor_sha256
+                && wire.installed_producer_sha256 == expected.installed_producer_sha256
+                && wire.installed_inventory_sha256 == expected.installed_inventory_sha256
+                && wire.installation_state_sha256 == expected.installation_state_sha256
+                && wire.payload_roster_sha256 == expected.payload_roster_sha256, RecordDataError::Binding)?;
+        }
         if let Some(previous) = &wire.previous_attempt {
             require(hex(&previous.request_id, 32) && hex(&previous.root_nonce, 32)
                 && hex(&previous.record_sha256, 64), RecordDataError::Binding)?;
@@ -108,7 +130,7 @@ impl RemovalRecordData {
         // No forward DATA transition follows a latched failure. Consequently
         // its recorded phase is the last prefix, never a future effect claim.
         require(wire.first_failure.is_none_or(|f| f.phase == wire.prefix), RecordDataError::Transition)?;
-        Ok(Self { wire, bytes: bytes.to_vec(), sha256: format!("{:x}", Sha256::digest(bytes)) })
+        Ok(Self { wire, bytes: bytes.to_vec(), sha256: format!("{:x}", Sha256::digest(bytes)), target })
     }
     fn from_wire(wire: RecordWire, expected: RemovalBindingData<'_>) -> Result<Self> {
         let mut bytes = serde_json::to_vec(&wire).map_err(|_| RecordDataError::Shape)?;
@@ -127,6 +149,35 @@ impl RemovalRecordData {
             installation_state_sha256: expected.installation_state_sha256.into(), payload_roster_sha256: expected.payload_roster_sha256.into(),
             request_id: request_id.into(), root_nonce: root_nonce.into(), previous_attempt: None,
             prefix: PrefixData::AdmissionRecorded, first_failure: None }, expected)
+    }
+    /// Borrowed, validated comparison fields; not an independently selected
+    /// expected binding. Callers still authenticate their own current originals.
+    pub fn binding_data(&self) -> RemovalBindingData<'_> {
+        RemovalBindingData { target: self.target, source_commit: &self.wire.source_commit,
+            removal_descriptor_sha256: &self.wire.removal_descriptor_sha256,
+            installed_producer_sha256: &self.wire.installed_producer_sha256,
+            installed_inventory_sha256: &self.wire.installed_inventory_sha256,
+            installation_state_sha256: &self.wire.installation_state_sha256,
+            payload_roster_sha256: &self.wire.payload_roster_sha256 }
+    }
+    /// Retained owned storage only, including spare capacities, not caller input,
+    /// parser/encoder temporaries or allocator overhead. The owner quotes those
+    /// separately before parsing; no allocation or re-encoding is done here.
+    pub fn owned_bytes_data(&self) -> Option<usize> {
+        let mut bytes = std::mem::size_of::<Self>().checked_add(self.bytes.capacity())?
+            .checked_add(self.sha256.capacity())?;
+        for value in [&self.wire.kind, &self.wire.target, &self.wire.source_commit,
+            &self.wire.removal_descriptor_sha256, &self.wire.installed_producer_sha256,
+            &self.wire.installed_inventory_sha256, &self.wire.installation_state_sha256,
+            &self.wire.payload_roster_sha256, &self.wire.request_id, &self.wire.root_nonce] {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        if let Some(previous) = &self.wire.previous_attempt {
+            for value in [&previous.request_id, &previous.root_nonce, &previous.record_sha256] {
+                bytes = bytes.checked_add(value.capacity())?;
+            }
+        }
+        Some(bytes)
     }
     pub fn bytes_data(&self) -> &[u8] { &self.bytes }
     pub fn digest_data(&self) -> &str { &self.sha256 }
@@ -319,6 +370,106 @@ mod tests {
         for invalid in [invalid_source, invalid_roster] {
             assert_eq!(RemovalRecordData::admission_data(OLD_REQUEST, OLD_NONCE, invalid).unwrap_err(), RecordDataError::Binding);
         }
+        // Shape-only history parsing uses the same closed grammar, but a valid
+        // different source/target is comparison DATA rather than expected truth.
+        let mut independent = base.clone();
+        independent["target"] = json!(MaintenanceTargetData::Intel.target());
+        independent["sourceCommit"] = json!("7".repeat(40));
+        let raw = serde_json::to_vec_pretty(&independent).unwrap();
+        let shape = RemovalRecordData::parse_shape_data(&raw).unwrap();
+        let binding = shape.binding_data();
+        assert_eq!(binding.target, MaintenanceTargetData::Intel);
+        assert_eq!(binding.source_commit, "7".repeat(40));
+        assert!(std::ptr::eq(binding.source_commit, shape.wire.source_commit.as_str()));
+        assert_eq!(shape.bytes_data(), raw);
+        assert_eq!(shape.digest_data(), format!("{:x}", Sha256::digest(&raw)));
+        assert_eq!(RemovalRecordData::parse_data(&raw, expected()).unwrap_err(), RecordDataError::Binding);
+        assert_eq!(RemovalRecordData::parse_data(&raw, binding).unwrap().bytes_data(), raw);
+        for key in KEYS {
+            let mut changed = base.clone(); changed.as_object_mut().unwrap().remove(key);
+            assert_eq!(RemovalRecordData::parse_shape_data(&serde_json::to_vec(&changed).unwrap()).unwrap_err(),
+                RecordDataError::Shape, "shape missing {key}");
+        }
+        let mut invalid = Vec::new();
+        let mut changed = base.clone(); changed["extra"] = json!(true); invalid.push((changed, RecordDataError::Shape));
+        for (key, value) in [("schemaVersion", json!(2)), ("kind", json!("other")), ("target", json!("other")),
+            ("sourceCommit", json!("f".repeat(39))), ("prefix", json!("future")),
+            ("firstFailure", json!({"phase":"payload-absent-observed","kind":"deadline"})),
+            ("previousAttempt", json!({"requestId":NEW_REQUEST,"rootNonce":NEW_NONCE})),
+            ("firstFailure", json!({"phase":"admission-recorded","kind":"deadline","extra":true}))] {
+            let error = match key { "prefix" | "previousAttempt" => RecordDataError::Shape,
+                "firstFailure" if value.get("extra").is_some() => RecordDataError::Shape,
+                "firstFailure" => RecordDataError::Transition, _ => RecordDataError::Binding };
+            let mut changed = base.clone(); changed[key] = value; invalid.push((changed, error));
+        }
+        for key in ["sourceCommit", "removalDescriptorSha256", "installedProducerSha256", "installedInventorySha256",
+            "installationStateSha256", "payloadRosterSha256", "requestId", "rootNonce"] {
+            let width = if key == "sourceCommit" {40} else if key.ends_with("Sha256") {64} else {32};
+            for value in ["0".repeat(width), "A".repeat(width), "f".repeat(width + 1)] {
+                let mut changed = base.clone(); changed[key] = json!(value); invalid.push((changed, RecordDataError::Binding));
+            }
+            let mut changed = base.clone(); changed[key] = json!(1); invalid.push((changed, RecordDataError::Shape));
+        }
+        // Nonempty positional arrays can satisfy serde's derived struct
+        // visitor, but are not objects in this fixed wire schema.
+        for (key, value) in [("previousAttempt", json!([NEW_REQUEST, NEW_NONCE, expected().payload_roster_sha256])),
+            ("firstFailure", json!(["admission-recorded", "deadline"]))] {
+            let mut changed = base.clone(); changed[key] = value; invalid.push((changed, RecordDataError::Shape));
+        }
+        for (changed, error) in invalid {
+            let raw = serde_json::to_vec(&changed).unwrap();
+            assert_eq!(RemovalRecordData::parse_shape_data(&raw).unwrap_err(), error);
+            assert_eq!(RemovalRecordData::parse_data(&raw, expected()).unwrap_err(), error);
+        }
+        for raw in [duplicate.as_bytes(), nonfinite.as_bytes()] {
+            assert_eq!(RemovalRecordData::parse_shape_data(raw).unwrap_err(), RecordDataError::Shape);
+        }
+        assert_eq!(RemovalRecordData::parse_shape_data(&[]).unwrap_err(), RecordDataError::Limit);
+        assert_eq!(RemovalRecordData::parse_shape_data(&bound).unwrap_err(), RecordDataError::Limit);
+        let shape_full = RemovalRecordData::parse_shape_data(full.bytes_data()).unwrap();
+        assert_eq!(shape_full.bytes_data(), full.bytes_data());
+        assert_eq!(shape_full.digest_data(), full.digest_data());
+        // All seven independent tuple fields still compare, even though each
+        // substituted value is a valid shape-only historical field.
+        for index in 0..7 {
+            let mut expected = expected();
+            match index { 0 => expected.target = MaintenanceTargetData::Intel,
+                1 => expected.source_commit = "7777777777777777777777777777777777777777",
+                2 => expected.removal_descriptor_sha256 = expected.payload_roster_sha256,
+                3 => expected.installed_producer_sha256 = expected.payload_roster_sha256,
+                4 => expected.installed_inventory_sha256 = expected.payload_roster_sha256,
+                5 => expected.installation_state_sha256 = expected.payload_roster_sha256,
+                _ => expected.payload_roster_sha256 = expected.installed_producer_sha256 }
+            assert_eq!(RemovalRecordData::parse_data(original.bytes_data(), expected).unwrap_err(), RecordDataError::Binding);
+        }
+        assert_eq!(RemovalRecordData::parse_data(b"{", invalid_source).unwrap_err(), RecordDataError::Binding);
+        assert_eq!(RemovalRecordData::parse_data(&[], invalid_source).unwrap_err(), RecordDataError::Limit);
+        // Count actual capacity, not byte lengths; grow each retained backing
+        // in turn without changing its validated bytes or borrowing authority.
+        let mut capacity_record = RemovalRecordData::parse_shape_data(original.bytes_data()).unwrap();
+        let initial = capacity_record.owned_bytes_data().unwrap();
+        let old = capacity_record.bytes.capacity(); capacity_record.bytes.reserve(old + 1);
+        assert_eq!(capacity_record.owned_bytes_data().unwrap(), initial + capacity_record.bytes.capacity() - old);
+        macro_rules! spare {
+            ($field:expr) => {{
+                let total = capacity_record.owned_bytes_data().unwrap();
+                let old = $field.capacity(); $field.reserve(old + 1);
+                assert_eq!(capacity_record.owned_bytes_data().unwrap(), total + $field.capacity() - old);
+            }};
+        }
+        spare!(capacity_record.sha256); spare!(capacity_record.wire.kind); spare!(capacity_record.wire.target);
+        spare!(capacity_record.wire.source_commit); spare!(capacity_record.wire.removal_descriptor_sha256);
+        spare!(capacity_record.wire.installed_producer_sha256); spare!(capacity_record.wire.installed_inventory_sha256);
+        spare!(capacity_record.wire.installation_state_sha256); spare!(capacity_record.wire.payload_roster_sha256);
+        spare!(capacity_record.wire.request_id); spare!(capacity_record.wire.root_nonce);
+        assert_eq!(capacity_record.bytes_data(), original.bytes_data());
+        assert_eq!(capacity_record.digest_data(), original.digest_data());
+        let w = &original.wire;
+        assert_eq!(original.owned_bytes_data(), Some(std::mem::size_of::<RemovalRecordData>() + original.bytes.capacity()
+            + original.sha256.capacity() + w.kind.capacity() + w.target.capacity() + w.source_commit.capacity()
+            + w.removal_descriptor_sha256.capacity() + w.installed_producer_sha256.capacity()
+            + w.installed_inventory_sha256.capacity() + w.installation_state_sha256.capacity()
+            + w.payload_roster_sha256.capacity() + w.request_id.capacity() + w.root_nonce.capacity()));
     }
     #[test]
     fn removal_prefix_failure_and_new_attempt_never_rewrite_history() {
@@ -355,6 +506,55 @@ mod tests {
         let mut future: Value = serde_json::from_slice(begin().bytes_data()).unwrap();
         future["firstFailure"] = json!({"phase":"payload-absent-observed","kind":"deadline"});
         assert_eq!(parse(future).unwrap_err(), RecordDataError::Transition);
+        // A shape-only tip preserves the actual original digest, including
+        // whitespace, and new_attempt still requires the independently bound
+        // ORIGINAL genesis payload commitment rather than a new envelope hash.
+        let mut raw = late.bytes_data().to_vec(); raw.extend_from_slice(b"  ");
+        let prior = RemovalRecordData::parse_shape_data(&raw).unwrap();
+        let mut child = prior.new_attempt_data(NEW_REQUEST, NEW_NONCE, 1, expected()).unwrap();
+        assert_ne!(prior.digest_data(), late.digest_data());
+        assert_eq!(child.previous_attempt_data(), Some((OLD_REQUEST, OLD_NONCE, prior.digest_data())));
+        assert_eq!(child.binding_data().payload_roster_sha256, prior.binding_data().payload_roster_sha256);
+        assert_eq!(child.first_failure_data(), None);
+        assert_eq!(prior.first_failure_data(), late.first_failure_data());
+        let shape_child = RemovalRecordData::parse_shape_data(child.bytes_data()).unwrap();
+        assert_eq!(shape_child.previous_attempt_data(), child.previous_attempt_data());
+        let mut new_envelope = expected(); new_envelope.payload_roster_sha256 = prior.digest_data();
+        assert_eq!(prior.new_attempt_data(NEW_REQUEST, NEW_NONCE, 1, new_envelope).unwrap_err(), RecordDataError::Binding);
+        let prior_capacity = child.wire.previous_attempt.as_ref().unwrap();
+        let expected_size = std::mem::size_of::<RemovalRecordData>() + child.bytes.capacity() + child.sha256.capacity()
+            + [&child.wire.kind, &child.wire.target, &child.wire.source_commit, &child.wire.removal_descriptor_sha256,
+                &child.wire.installed_producer_sha256, &child.wire.installed_inventory_sha256,
+                &child.wire.installation_state_sha256, &child.wire.payload_roster_sha256,
+                &child.wire.request_id, &child.wire.root_nonce, &prior_capacity.request_id,
+                &prior_capacity.root_nonce, &prior_capacity.record_sha256].iter().map(|s| s.capacity()).sum::<usize>();
+        assert_eq!(child.owned_bytes_data(), Some(expected_size));
+        for index in 0..3 {
+            let before = child.owned_bytes_data().unwrap();
+            let previous = child.wire.previous_attempt.as_mut().unwrap();
+            let value = match index { 0 => &mut previous.request_id, 1 => &mut previous.root_nonce, _ => &mut previous.record_sha256 };
+            let capacity = value.capacity(); value.reserve(capacity + 1); let delta = value.capacity() - capacity;
+            assert_eq!(child.owned_bytes_data().unwrap(), before + delta);
+        }
+        let base: Value = serde_json::from_slice(child.bytes_data()).unwrap();
+        for key in ["requestId", "rootNonce", "recordSha256"] {
+            for value in [Value::Null, json!("0".repeat(if key == "recordSha256" {64} else {32})), json!("A")] {
+                let error = if value.is_null() { RecordDataError::Shape } else { RecordDataError::Binding };
+                let mut changed = base.clone(); changed["previousAttempt"][key] = value;
+                assert_eq!(RemovalRecordData::parse_shape_data(&serde_json::to_vec(&changed).unwrap()).unwrap_err(), error);
+            }
+        }
+        for (key, value) in [("requestId", NEW_REQUEST), ("rootNonce", NEW_NONCE)] {
+            let mut reused = base.clone(); reused["previousAttempt"][key] = json!(value);
+            let raw = serde_json::to_vec(&reused).unwrap();
+            assert_eq!(RemovalRecordData::parse_shape_data(&raw).unwrap_err(), RecordDataError::ReusedIdentity);
+            assert_eq!(RemovalRecordData::parse_data(&raw, expected()).unwrap_err(), RecordDataError::ReusedIdentity);
+            let mut wrong = expected(); wrong.target = MaintenanceTargetData::Intel;
+            assert_eq!(RemovalRecordData::parse_data(&raw, wrong).unwrap_err(), RecordDataError::Binding);
+        }
+        let raw = String::from_utf8(child.bytes_data().to_vec()).unwrap()
+            .replacen("\"previousAttempt\":{", "\"previousAttempt\":{\"requestId\":\"duplicate\",", 1);
+        assert_eq!(RemovalRecordData::parse_shape_data(raw.as_bytes()).unwrap_err(), RecordDataError::Shape);
     }
     #[test]
     fn fresh_removal_and_reinstall_table_never_upgrades_old_failure() {
