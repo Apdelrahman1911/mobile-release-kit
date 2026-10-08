@@ -25,7 +25,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - scope: local-edits3
+          - scope: wrapping-keychain-private
             target: aarch64-apple-darwin
             runner: macos-26
             supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'
@@ -34,15 +34,6 @@ jobs:
             supplier_run: '37467019389'
             supplier_attempt: '1'
             supplier_artifact: '11415902210'
-          - scope: local-edits3
-            target: x86_64-apple-darwin
-            runner: macos-26-intel
-            supplier_receipt: 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b'
-            supplier_tar: '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd'
-            supplier_source: '079ab2a2c8fef88f01bf909e7669c685f07e1375'
-            supplier_run: '37476532238'
-            supplier_attempt: '1'
-            supplier_artifact: '11419502465'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.scope == 'doctor-preflight2' && 212 || contains(fromJSON('["project-fields","ios-current-synthetic","android-inputs","project-fields-android-inputs","vault-helper-shipping","installation-inspection","vault-helper-shipping-installation-inspection","project-recovery-pending","ios-recovery-pending","doctor-preflight2","local-edits3"]'), matrix.scope) && 137 || 75 }}
     env:
@@ -66,9 +57,9 @@ jobs:
       # Independent immutable publisher bindings; caller hashes come from build.rs.
       MRK_GITHUB_PREFLIGHT_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
       MRK_GITHUB_RELEASE_TOOLING_SHA: b4cb582837a244f67e4c926f2ce2bb42ad8cfe37
-      # Only local-edits3 is selected on the two fixed hosts; every other route remains unexecuted.
+      # Only wrapping-keychain-private is selected on the fixed ARM host; other routes are unselected.
       # 150min is a worst-case bound only for doctor/preflight, not a runtime estimate.
-      # Share one engineering installation; each selected journey keeps its original owner/results.
+      # Reuse the private cohort owner; this scope does not build or install the desktop app.
       MRK_MACOS_AQUA_SCOPE: ${{ matrix.scope }}
       MACOSX_DEPLOYMENT_TARGET: '26.0'
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
