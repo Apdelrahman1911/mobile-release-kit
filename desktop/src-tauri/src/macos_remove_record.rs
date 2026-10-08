@@ -1,0 +1,412 @@
+//! Closed removal progress/comparison DATA, not an installer state, filesystem
+//! observer, live gate, authenticated package or permission to mutate/reinstall.
+//! A previous record never certifies its writer's future close or outer exit.
+//! Native callers retain all source/control/roster originals and their own EX.
+#![forbid(unsafe_code)]
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use crate::{macos_install_maintenance::{CheckData, MaintenanceTargetData},
+    macos_install_transaction::INVOCATION_LIMIT, protocol::strict_json};
+
+pub const RECORD_LIMIT: usize = 16 * 1024;
+const KIND: &str = "mrk-macos-removal-progress-v1";
+const KEYS: [&str; 14] = ["schemaVersion", "kind", "target", "sourceCommit",
+    "removalDescriptorSha256", "installedProducerSha256", "installedInventorySha256",
+    "installationStateSha256", "payloadRosterSha256", "requestId", "rootNonce",
+    "previousAttempt", "prefix", "firstFailure"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordDataError { Limit, Shape, Binding, Transition, ReusedIdentity }
+type Result<T> = std::result::Result<T, RecordDataError>;
+fn require(value: bool, error: RecordDataError) -> Result<()> {
+    if value { Ok(()) } else { Err(error) }
+}
+fn hex(value: &str, length: usize) -> bool {
+    value.len() == length && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && value.bytes().any(|b| b != b'0')
+}
+
+/// Independent source-selected comparison inputs, NOT signature/custody proof.
+/// The state/roster hashes cover the protected prior state and complete planned
+/// current/retained payload census; no names or missing files are discovered here.
+#[derive(Clone, Copy)]
+pub struct RemovalBindingData<'a> {
+    pub target: MaintenanceTargetData,
+    pub source_commit: &'a str,
+    pub removal_descriptor_sha256: &'a str,
+    pub installed_producer_sha256: &'a str,
+    pub installed_inventory_sha256: &'a str,
+    pub installation_state_sha256: &'a str,
+    pub payload_roster_sha256: &'a str,
+}
+impl RemovalBindingData<'_> {
+    fn valid(self) -> bool {
+        hex(self.source_commit, 40) && [self.removal_descriptor_sha256,
+            self.installed_producer_sha256, self.installed_inventory_sha256,
+            self.installation_state_sha256, self.payload_roster_sha256].iter().all(|s| hex(s, 64))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrefixData { AdmissionRecorded, AppWithdrawn, PayloadRosterRemoval, PayloadAbsentObserved }
+impl PrefixData {
+    fn next(self, next: Self) -> bool {
+        matches!((self, next), (Self::AdmissionRecorded, Self::AppWithdrawn)
+            | (Self::AppWithdrawn, Self::PayloadRosterRemoval)
+            | (Self::PayloadRosterRemoval, Self::PayloadAbsentObserved))
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailureKindData { OriginalFailed, OriginalUnknown, PostMismatch, Deadline, Persistence, CloseUnknown }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirstFailureData { pub phase: PrefixData, pub kind: FailureKindData }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviousAttempt { request_id: String, root_nonce: String, record_sha256: String }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RecordWire {
+    schema_version: u32, kind: String, target: String, source_commit: String,
+    removal_descriptor_sha256: String, installed_producer_sha256: String,
+    installed_inventory_sha256: String, installation_state_sha256: String, payload_roster_sha256: String,
+    request_id: String, root_nonce: String, previous_attempt: Option<PreviousAttempt>,
+    prefix: PrefixData, first_failure: Option<FirstFailureData>,
+}
+
+/// Private validated fields; no Deserialize/Clone or native action conversion.
+/// The original bytes are retained so a historical link hashes exactly the
+/// admitted record, not a reserialization that silently changes its identity.
+#[derive(Debug)]
+pub struct RemovalRecordData { wire: RecordWire, bytes: Vec<u8>, sha256: String }
+impl RemovalRecordData {
+    pub fn parse_data(bytes: &[u8], expected: RemovalBindingData<'_>) -> Result<Self> {
+        require(!bytes.is_empty() && bytes.len() <= RECORD_LIMIT, RecordDataError::Limit)?;
+        require(expected.valid(), RecordDataError::Binding)?;
+        let value = strict_json(bytes).map_err(|_| RecordDataError::Shape)?;
+        let fields = value.as_object().ok_or(RecordDataError::Shape)?;
+        // Option-valued fields are mandatory too; serde alone accepts omission.
+        require(fields.len() == KEYS.len() && KEYS.iter().all(|k| fields.contains_key(*k)), RecordDataError::Shape)?;
+        let wire: RecordWire = serde_json::from_value(value).map_err(|_| RecordDataError::Shape)?;
+        require(wire.schema_version == 1 && wire.kind == KIND && wire.target == expected.target.target()
+            && wire.source_commit == expected.source_commit
+            && wire.removal_descriptor_sha256 == expected.removal_descriptor_sha256
+            && wire.installed_producer_sha256 == expected.installed_producer_sha256
+            && wire.installed_inventory_sha256 == expected.installed_inventory_sha256
+            && wire.installation_state_sha256 == expected.installation_state_sha256
+            && wire.payload_roster_sha256 == expected.payload_roster_sha256
+            && hex(&wire.request_id, 32) && hex(&wire.root_nonce, 32), RecordDataError::Binding)?;
+        if let Some(previous) = &wire.previous_attempt {
+            require(hex(&previous.request_id, 32) && hex(&previous.root_nonce, 32)
+                && hex(&previous.record_sha256, 64), RecordDataError::Binding)?;
+            require(previous.request_id != wire.request_id && previous.root_nonce != wire.root_nonce,
+                RecordDataError::ReusedIdentity)?;
+        }
+        // No forward DATA transition follows a latched failure. Consequently
+        // its recorded phase is the last prefix, never a future effect claim.
+        require(wire.first_failure.is_none_or(|f| f.phase == wire.prefix), RecordDataError::Transition)?;
+        Ok(Self { wire, bytes: bytes.to_vec(), sha256: format!("{:x}", Sha256::digest(bytes)) })
+    }
+    fn from_wire(wire: RecordWire, expected: RemovalBindingData<'_>) -> Result<Self> {
+        let mut bytes = serde_json::to_vec(&wire).map_err(|_| RecordDataError::Shape)?;
+        bytes.push(b'\n');
+        Self::parse_data(&bytes, expected)
+    }
+    /// Comparison encoding only. Actual original admission and publication are
+    /// future caller obligations, not effects carried out by this constructor.
+    pub fn admission_data(request_id: &str, root_nonce: &str, expected: RemovalBindingData<'_>) -> Result<Self> {
+        // Public caller strings are checked before any owned copies/encoding.
+        require(expected.valid() && hex(request_id, 32) && hex(root_nonce, 32), RecordDataError::Binding)?;
+        Self::from_wire(RecordWire { schema_version: 1, kind: KIND.into(), target: expected.target.target().into(),
+            source_commit: expected.source_commit.into(), removal_descriptor_sha256: expected.removal_descriptor_sha256.into(),
+            installed_producer_sha256: expected.installed_producer_sha256.into(),
+            installed_inventory_sha256: expected.installed_inventory_sha256.into(),
+            installation_state_sha256: expected.installation_state_sha256.into(), payload_roster_sha256: expected.payload_roster_sha256.into(),
+            request_id: request_id.into(), root_nonce: root_nonce.into(), previous_attempt: None,
+            prefix: PrefixData::AdmissionRecorded, first_failure: None }, expected)
+    }
+    pub fn bytes_data(&self) -> &[u8] { &self.bytes }
+    pub fn digest_data(&self) -> &str { &self.sha256 }
+    pub fn request_id_data(&self) -> &str { &self.wire.request_id }
+    pub fn root_nonce_data(&self) -> &str { &self.wire.root_nonce }
+    pub fn prefix_data(&self) -> PrefixData { self.wire.prefix }
+    pub fn first_failure_data(&self) -> Option<FirstFailureData> { self.wire.first_failure }
+    pub fn previous_attempt_data(&self) -> Option<(&str, &str, &str)> {
+        self.wire.previous_attempt.as_ref().map(|p| (p.request_id.as_str(), p.root_nonce.as_str(), p.record_sha256.as_str()))
+    }
+    /// Caller records an actually returned effect before a later POST/clock/
+    /// persistence veto. This method does not observe that return or write it.
+    pub fn next_prefix_data(&self, next: PrefixData, expected: RemovalBindingData<'_>) -> Result<Self> {
+        require(self.wire.first_failure.is_none() && self.wire.prefix.next(next), RecordDataError::Transition)?;
+        let mut wire = self.wire.clone(); wire.prefix = next;
+        Self::from_wire(wire, expected)
+    }
+    pub fn first_failure_latched_data(&self, kind: FailureKindData, expected: RemovalBindingData<'_>) -> Result<Self> {
+        if self.wire.first_failure.is_some() { return Self::parse_data(&self.bytes, expected); }
+        let mut wire = self.wire.clone(); wire.first_failure = Some(FirstFailureData { phase: wire.prefix, kind });
+        Self::from_wire(wire, expected)
+    }
+    /// `existing_attempt_count` INCLUDES the predecessor and all retained
+    /// attempts, before this new record. 63 may make64; 64 must never make65.
+    /// Count is supplied DATA, not a directory/history observer or pruning grant.
+    /// This creates fresh admission only; it does NOT inherit an old prefix or
+    /// clear the predecessor's failure. Classify PRIOR record + fresh observation.
+    pub fn new_attempt_data(&self, request_id: &str, root_nonce: &str, existing_attempt_count: usize,
+        expected: RemovalBindingData<'_>) -> Result<Self> {
+        require(existing_attempt_count > 0 && existing_attempt_count < INVOCATION_LIMIT, RecordDataError::Limit)?;
+        // Recheck the entire previous binding against this independent selection.
+        Self::parse_data(&self.bytes, expected)?;
+        let mut fresh = Self::admission_data(request_id, root_nonce, expected)?.wire;
+        fresh.previous_attempt = Some(PreviousAttempt { request_id: self.wire.request_id.clone(),
+            root_nonce: self.wire.root_nonce.clone(), record_sha256: self.sha256.clone() });
+        Self::from_wire(fresh, expected)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppSlotsData { OldOnly, NewOnly, Both, Neither, Unknown }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadPresenceData { AllPresentMatching, PartialInRosterMatching, AllAbsent, Unknown }
+/// All fields are present comparison DATA from a future native observer. A
+/// Matches label is not actual EX or signature authority. Namespace/roster
+/// comparisons must cover every current/retained planned entry and control;
+/// unknown/foreign names are never ignored and no old inode grants custody.
+#[derive(Clone, Copy)]
+pub struct FreshObservationData<'a> {
+    pub request_id: &'a str, pub root_nonce: &'a str, pub prior_record_sha256: &'a str,
+    pub source_purpose: CheckData, pub exclusive_original: CheckData,
+    pub protected_controls: CheckData, pub remaining_roster: CheckData, pub complete_namespace: CheckData,
+    pub app_slots: AppSlotsData, pub payload: PayloadPresenceData,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassificationData {
+    Unobserved, Indeterminate, Mismatch, Incomplete,
+    FreshAppCoordinationRequired, WithdrawalObservedAfterAdmission, RemainingPayloadObserved,
+    PayloadAbsenceObservedAfterInterruptedRemoval, PayloadAbsenceReobserved,
+}
+fn checks(values: &[CheckData]) -> std::result::Result<(), ClassificationData> {
+    for value in values {
+        match value {
+            CheckData::Matches => (), CheckData::Unobserved => return Err(ClassificationData::Unobserved),
+            CheckData::Unknown => return Err(ClassificationData::Indeterminate),
+            CheckData::Differs => return Err(ClassificationData::Mismatch),
+        }
+    }
+    Ok(())
+}
+/// Historical failure deliberately remains in `prior`; a current observation
+/// does not rewrite it or certify old unlink/close/outer-exit outcomes.
+pub fn classify_data(prior: &RemovalRecordData, current: FreshObservationData<'_>) -> ClassificationData {
+    use {AppSlotsData as A, ClassificationData as C, PayloadPresenceData as P, PrefixData as S};
+    if !hex(current.request_id, 32) || !hex(current.root_nonce, 32)
+        || current.request_id == prior.request_id_data() || current.root_nonce == prior.root_nonce_data()
+        || current.prior_record_sha256 != prior.digest_data() { return C::Mismatch; }
+    if let Err(value) = checks(&[current.source_purpose, current.exclusive_original, current.protected_controls,
+        current.remaining_roster, current.complete_namespace]) { return value; }
+    if current.app_slots == A::Unknown || current.payload == P::Unknown { return C::Indeterminate; }
+    match (prior.prefix_data(), current.app_slots, current.payload) {
+        (S::AdmissionRecorded, A::OldOnly, P::AllPresentMatching) => C::FreshAppCoordinationRequired,
+        (S::AdmissionRecorded, A::NewOnly, P::AllPresentMatching) => C::WithdrawalObservedAfterAdmission,
+        (S::AppWithdrawn, A::NewOnly, P::AllPresentMatching)
+        | (S::PayloadRosterRemoval, A::NewOnly, P::AllPresentMatching | P::PartialInRosterMatching) => C::RemainingPayloadObserved,
+        (S::PayloadRosterRemoval, A::Neither, P::AllAbsent) => C::PayloadAbsenceObservedAfterInterruptedRemoval,
+        (S::PayloadAbsentObserved, A::Neither, P::AllAbsent) => C::PayloadAbsenceReobserved,
+        (_, A::Both, _) | (S::AppWithdrawn | S::PayloadRosterRemoval | S::PayloadAbsentObserved, A::OldOnly, _)
+        | (S::PayloadAbsentObserved, _, P::AllPresentMatching | P::PartialInRosterMatching) => C::Mismatch,
+        _ => C::Incomplete,
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReinstallClassificationData { Unobserved, Indeterminate, Mismatch, RemovalIncomplete, NewInstallAfterRemovalObservation }
+/// This descriptive result is never RestoreFixedApp or earlier-removal success.
+/// A genuine new Install owner must authenticate its own current package/source
+/// and EX, reobserve all controls/absence, and enforce its release policy.
+/// Archived app DIRECTORY must remain until the final payload disappearance;
+/// a different native ordering requires an explicitly reviewed table extension.
+pub fn classify_reinstall_data(prior: &RemovalRecordData, current: FreshObservationData<'_>) -> ReinstallClassificationData {
+    use {ClassificationData as C, ReinstallClassificationData as R};
+    match classify_data(prior, current) {
+        C::PayloadAbsenceObservedAfterInterruptedRemoval | C::PayloadAbsenceReobserved => R::NewInstallAfterRemovalObservation,
+        C::Unobserved => R::Unobserved, C::Indeterminate => R::Indeterminate, C::Mismatch => R::Mismatch,
+        _ => R::RemovalIncomplete,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    fn expected() -> RemovalBindingData<'static> {
+        RemovalBindingData { target: MaintenanceTargetData::Arm64, source_commit: "1111111111111111111111111111111111111111",
+            removal_descriptor_sha256: "2222222222222222222222222222222222222222222222222222222222222222",
+            installed_producer_sha256: "3333333333333333333333333333333333333333333333333333333333333333",
+            installed_inventory_sha256: "4444444444444444444444444444444444444444444444444444444444444444",
+            installation_state_sha256: "5555555555555555555555555555555555555555555555555555555555555555",
+            payload_roster_sha256: "6666666666666666666666666666666666666666666666666666666666666666" }
+    }
+    const OLD_REQUEST: &str = "11111111111111111111111111111111";
+    const OLD_NONCE: &str = "22222222222222222222222222222222";
+    const NEW_REQUEST: &str = "33333333333333333333333333333333";
+    const NEW_NONCE: &str = "44444444444444444444444444444444";
+    fn begin() -> RemovalRecordData { RemovalRecordData::admission_data(OLD_REQUEST, OLD_NONCE, expected()).unwrap() }
+    fn at(prefix: PrefixData) -> RemovalRecordData {
+        let mut record = begin();
+        for next in [PrefixData::AppWithdrawn, PrefixData::PayloadRosterRemoval, PrefixData::PayloadAbsentObserved] {
+            if record.prefix_data() == prefix { break; }
+            record = record.next_prefix_data(next, expected()).unwrap();
+        }
+        record
+    }
+    fn parse(value: Value) -> Result<RemovalRecordData> {
+        RemovalRecordData::parse_data(&serde_json::to_vec(&value).unwrap(), expected())
+    }
+    fn fresh<'a>(record: &'a RemovalRecordData, app_slots: AppSlotsData, payload: PayloadPresenceData) -> FreshObservationData<'a> {
+        FreshObservationData { request_id: NEW_REQUEST, root_nonce: NEW_NONCE, prior_record_sha256: record.digest_data(),
+            source_purpose: CheckData::Matches, exclusive_original: CheckData::Matches, protected_controls: CheckData::Matches,
+            remaining_roster: CheckData::Matches, complete_namespace: CheckData::Matches, app_slots, payload }
+    }
+    #[test]
+    fn removal_record_closed_schema_and_bindings_are_data_only() {
+        let original = begin();
+        let base: Value = serde_json::from_slice(original.bytes_data()).unwrap();
+        assert_eq!(RemovalRecordData::parse_data(original.bytes_data(), expected()).unwrap().digest_data(), original.digest_data());
+        for key in KEYS {
+            let mut value = base.clone(); value.as_object_mut().unwrap().remove(key);
+            assert_eq!(parse(value).unwrap_err(), RecordDataError::Shape, "missing {key}");
+        }
+        let mut extra = base.clone(); extra["available"] = json!(true);
+        assert_eq!(parse(extra).unwrap_err(), RecordDataError::Shape);
+        for (key, value) in [("schemaVersion", json!(true)), ("prefix", json!(1)), ("firstFailure", json!([])),
+            ("previousAttempt", json!([])), ("rootNonce", Value::Null)] {
+            let mut changed = base.clone(); changed[key] = value;
+            assert_eq!(parse(changed).unwrap_err(), RecordDataError::Shape, "type {key}");
+        }
+        for key in ["target", "sourceCommit", "removalDescriptorSha256", "installedProducerSha256",
+            "installedInventorySha256", "installationStateSha256", "payloadRosterSha256", "requestId", "rootNonce"] {
+            let mut changed = base.clone(); changed[key] = json!("0".repeat(if key.ends_with("Sha256") {64} else {32}));
+            assert_eq!(parse(changed).unwrap_err(), RecordDataError::Binding, "binding {key}");
+        }
+        let mut kind = base.clone(); kind["kind"] = json!("mrk-macos-maintenance-state-v2");
+        assert_eq!(parse(kind).unwrap_err(), RecordDataError::Binding);
+        let mut nested = base.clone(); nested["firstFailure"] = json!({"phase":"admission-recorded","kind":"original-unknown","closed":true});
+        assert_eq!(parse(nested).unwrap_err(), RecordDataError::Shape);
+        let text = String::from_utf8(original.bytes_data().to_vec()).unwrap();
+        let duplicate = text.replacen('{', "{\"schemaVersion\":1,", 1);
+        assert_eq!(RemovalRecordData::parse_data(duplicate.as_bytes(), expected()).unwrap_err(), RecordDataError::Shape);
+        let nonfinite = text.replacen("\"schemaVersion\":1", "\"schemaVersion\":NaN", 1);
+        assert_eq!(RemovalRecordData::parse_data(nonfinite.as_bytes(), expected()).unwrap_err(), RecordDataError::Shape);
+        let mut bound = original.bytes_data().to_vec(); bound.resize(RECORD_LIMIT, b' ');
+        let full = RemovalRecordData::parse_data(&bound, expected()).unwrap();
+        assert_eq!(full.bytes_data().len(), RECORD_LIMIT);
+        assert_ne!(full.digest_data(), original.digest_data()); // original bytes, not canonical echo
+        bound.push(b' ');
+        assert_eq!(RemovalRecordData::parse_data(&bound, expected()).unwrap_err(), RecordDataError::Limit);
+        assert_eq!(RemovalRecordData::parse_data(&[], expected()).unwrap_err(), RecordDataError::Limit);
+        let mut other = expected(); other.target = MaintenanceTargetData::Intel;
+        assert_eq!(RemovalRecordData::parse_data(original.bytes_data(), other).unwrap_err(), RecordDataError::Binding);
+        // The public constructor must refuse before copying unbounded input.
+        let oversized = "1".repeat(RECORD_LIMIT + 1);
+        let zero = "0".repeat(32);
+        for (request, nonce) in [(&oversized[..], OLD_NONCE), (OLD_REQUEST, &oversized[..]),
+            (&zero[..], OLD_NONCE), (OLD_REQUEST, &zero[..])] {
+            assert_eq!(RemovalRecordData::admission_data(request, nonce, expected()).unwrap_err(), RecordDataError::Binding);
+        }
+        let invalid_source = RemovalBindingData { source_commit: &oversized, ..expected() };
+        let invalid_roster = RemovalBindingData { payload_roster_sha256: &oversized, ..expected() };
+        for invalid in [invalid_source, invalid_roster] {
+            assert_eq!(RemovalRecordData::admission_data(OLD_REQUEST, OLD_NONCE, invalid).unwrap_err(), RecordDataError::Binding);
+        }
+    }
+    #[test]
+    fn removal_prefix_failure_and_new_attempt_never_rewrite_history() {
+        use PrefixData as P;
+        let prefixes = [P::AdmissionRecorded, P::AppWithdrawn, P::PayloadRosterRemoval, P::PayloadAbsentObserved];
+        for (index, prefix) in prefixes.iter().enumerate() {
+            let record = at(*prefix);
+            for (next_index, next) in prefixes.iter().enumerate() {
+                assert_eq!(record.next_prefix_data(*next, expected()).is_ok(), next_index == index + 1);
+            }
+            let failed = record.first_failure_latched_data(FailureKindData::OriginalUnknown, expected()).unwrap();
+            let later = failed.first_failure_latched_data(FailureKindData::Persistence, expected()).unwrap();
+            assert_eq!(later.bytes_data(), failed.bytes_data());
+            assert_eq!(later.first_failure_data(), Some(FirstFailureData { phase: *prefix, kind: FailureKindData::OriginalUnknown }));
+            for next in prefixes { assert_eq!(failed.next_prefix_data(next, expected()).unwrap_err(), RecordDataError::Transition); }
+            let fresh = failed.new_attempt_data(NEW_REQUEST, NEW_NONCE, INVOCATION_LIMIT - 1, expected()).unwrap();
+            assert_eq!(fresh.prefix_data(), P::AdmissionRecorded);
+            assert_eq!(fresh.first_failure_data(), None);
+            assert_eq!(fresh.previous_attempt_data(), Some((OLD_REQUEST, OLD_NONCE, failed.digest_data())));
+            assert_eq!(failed.first_failure_data().unwrap().kind, FailureKindData::OriginalUnknown);
+            for count in [0, INVOCATION_LIMIT, usize::MAX] {
+                assert_eq!(failed.new_attempt_data(NEW_REQUEST, NEW_NONCE, count, expected()).unwrap_err(), RecordDataError::Limit);
+            }
+            for (request, nonce) in [(OLD_REQUEST, NEW_NONCE), (NEW_REQUEST, OLD_NONCE)] {
+                assert_eq!(failed.new_attempt_data(request, nonce, 1, expected()).unwrap_err(), RecordDataError::ReusedIdentity);
+            }
+            let mut mismatch = expected(); mismatch.installed_inventory_sha256 = expected().payload_roster_sha256;
+            assert_eq!(failed.new_attempt_data(NEW_REQUEST, NEW_NONCE, 1, mismatch).unwrap_err(), RecordDataError::Binding);
+        }
+        // Actual returned-prefix DATA precedes a later veto, never the reverse.
+        let returned = begin().next_prefix_data(P::AppWithdrawn, expected()).unwrap();
+        let late = returned.first_failure_latched_data(FailureKindData::PostMismatch, expected()).unwrap();
+        assert_eq!(late.prefix_data(), P::AppWithdrawn);
+        let mut future: Value = serde_json::from_slice(begin().bytes_data()).unwrap();
+        future["firstFailure"] = json!({"phase":"payload-absent-observed","kind":"deadline"});
+        assert_eq!(parse(future).unwrap_err(), RecordDataError::Transition);
+    }
+    #[test]
+    fn fresh_removal_and_reinstall_table_never_upgrades_old_failure() {
+        use {AppSlotsData as A, ClassificationData as C, PayloadPresenceData as P, PrefixData as S, ReinstallClassificationData as R};
+        let cases = [
+            (S::AdmissionRecorded,A::OldOnly,P::AllPresentMatching,C::FreshAppCoordinationRequired),
+            (S::AdmissionRecorded,A::NewOnly,P::AllPresentMatching,C::WithdrawalObservedAfterAdmission),
+            (S::AppWithdrawn,A::NewOnly,P::AllPresentMatching,C::RemainingPayloadObserved),
+            (S::PayloadRosterRemoval,A::NewOnly,P::AllPresentMatching,C::RemainingPayloadObserved),
+            (S::PayloadRosterRemoval,A::NewOnly,P::PartialInRosterMatching,C::RemainingPayloadObserved),
+            (S::PayloadRosterRemoval,A::Neither,P::AllAbsent,C::PayloadAbsenceObservedAfterInterruptedRemoval),
+            (S::PayloadAbsentObserved,A::Neither,P::AllAbsent,C::PayloadAbsenceReobserved),
+            (S::AdmissionRecorded,A::Neither,P::AllAbsent,C::Incomplete),
+            (S::AdmissionRecorded,A::NewOnly,P::PartialInRosterMatching,C::Incomplete),
+            (S::AppWithdrawn,A::NewOnly,P::PartialInRosterMatching,C::Incomplete),
+            (S::AppWithdrawn,A::OldOnly,P::AllPresentMatching,C::Mismatch),
+            (S::PayloadAbsentObserved,A::NewOnly,P::AllPresentMatching,C::Mismatch),
+            (S::PayloadRosterRemoval,A::Neither,P::PartialInRosterMatching,C::Incomplete),
+        ];
+        for (prefix, slots, payload, want) in cases {
+            let prior = at(prefix).first_failure_latched_data(FailureKindData::CloseUnknown, expected()).unwrap();
+            let before = prior.bytes_data().to_vec();
+            let observation = fresh(&prior, slots, payload);
+            assert_eq!(classify_data(&prior, observation), want);
+            let reinstall = classify_reinstall_data(&prior, observation);
+            assert_eq!(reinstall == R::NewInstallAfterRemovalObservation,
+                matches!(want, C::PayloadAbsenceObservedAfterInterruptedRemoval | C::PayloadAbsenceReobserved));
+            assert_eq!(prior.bytes_data(), before);
+            assert_eq!(prior.first_failure_data().unwrap().kind, FailureKindData::CloseUnknown);
+        }
+        for prefix in [S::AdmissionRecorded,S::AppWithdrawn,S::PayloadRosterRemoval,S::PayloadAbsentObserved] {
+            let prior = at(prefix);
+            for payload in [P::AllPresentMatching,P::PartialInRosterMatching,P::AllAbsent] {
+                assert_eq!(classify_data(&prior, fresh(&prior,A::Both,payload)), C::Mismatch);
+            }
+        }
+        let prior = at(S::PayloadRosterRemoval);
+        let original = fresh(&prior,A::Neither,P::AllAbsent);
+        for index in 0..5 {
+            for (check,want) in [(CheckData::Unknown,C::Indeterminate),(CheckData::Unobserved,C::Unobserved),(CheckData::Differs,C::Mismatch)] {
+                let mut current = original;
+                match index { 0=>current.source_purpose=check,1=>current.exclusive_original=check,
+                    2=>current.protected_controls=check,3=>current.remaining_roster=check,_=>current.complete_namespace=check }
+                assert_eq!(classify_data(&prior,current),want);
+                assert_ne!(classify_reinstall_data(&prior,current),R::NewInstallAfterRemovalObservation);
+            }
+        }
+        let mut current=original; current.request_id=OLD_REQUEST; assert_eq!(classify_data(&prior,current),C::Mismatch);
+        current=original; current.root_nonce=OLD_NONCE; assert_eq!(classify_data(&prior,current),C::Mismatch);
+        current=original; current.prior_record_sha256=expected().payload_roster_sha256;
+        assert_eq!(classify_data(&prior,current),C::Mismatch);
+        current=original; current.app_slots=A::Unknown; assert_eq!(classify_data(&prior,current),C::Indeterminate);
+        current=original; current.payload=P::Unknown; assert_eq!(classify_data(&prior,current),C::Indeterminate);
+    }
+}

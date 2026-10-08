@@ -68,7 +68,9 @@ finally:
             bootstrap_ok = False
 if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
+REMOVAL_DATA_SELECTED = True  # Fixed reviewed SOURCE selector, never runtime input.
 OWNER_DIAGNOSTIC_ROLES = (
+    "removal-native-rust-tests", "removal-app-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -94,6 +96,7 @@ OWNER_DIAGNOSTIC_ROLES = (
 )
 
 OWNER_DIAGNOSTIC_PHASES = (
+    "removal-native-rust-tests", "removal-app-rust-tests",
     "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
@@ -123,6 +126,25 @@ OWNER_DIAGNOSTIC_PHASES = (
 )
 
 OWNER_DIAGNOSTIC_REFUSALS = (
+    'removal-app-rust-test-bound',
+    'removal-app-rust-test-framing',
+    'removal-app-rust-test-record',
+    'removal-app-rust-test-result',
+    'removal-app-rust-test-roster',
+    'removal-artifacts',
+    'removal-call-finality',
+    'removal-call-roster',
+    'removal-native-rust-test-bound',
+    'removal-native-rust-test-framing',
+    'removal-native-rust-test-record',
+    'removal-native-rust-test-result',
+    'removal-native-rust-test-roster',
+    'removal-owner-finality',
+    'removal-owner-result',
+    'removal-owner-scope',
+    'removal-record',
+    'removal-source-binding',
+
     'registration-app-rust-test-record',
     'registration-app-rust-test-bound',
     'registration-app-rust-test-framing',
@@ -385,6 +407,7 @@ summary = {
     "contextReceiptDiagnostic": None, "diagnosticCaptured": False,
     "contextObservationCompleted": False,
     "registrationReservation": None, "registrationReservationQualified": False, "registrationFailure": None,
+    "removalData": None, "removalDataQualified": False, "removalDataDiagnostic": None,
     "failure": "owner-result-missing-or-refused", "accepted": False,
     "syntheticIdentity": True, "productionIdentityQualified": False,
     "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -486,10 +509,11 @@ try:
         # An unfinished/unknown phase can never qualify native acceptance.
         installer_context = context_record
     service_layout = None
+    selected_roles = fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
     fixture.need(layout_record["selected"] is False and layout_record["started"] is False
-                 and all(call["role"] in fixture.REGISTRATION_ROLES for call in calls)
-                 and [call["role"] for call in calls] == list(fixture.REGISTRATION_ROLES[:len(calls)]),
+                 and all(call["role"] in selected_roles for call in calls)
+                 and [call["role"] for call in calls] == list(selected_roles[:len(calls)]),
                  "summary-registration-route")
     if layout_record["observerSourceSha256"] is not None:
         fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
@@ -627,7 +651,7 @@ try:
     diagnostic_captured = False
     registration = None
     registration_last = None
-    if outcome == "success":
+    if outcome == "success" and not REMOVAL_DATA_SELECTED:
         try:
             registration = fixture.registration_reservation_result(result, source, rows)
             registration_last = fixture.registration_publication_tick(
@@ -646,6 +670,24 @@ try:
                 fixture.canonical(failed), calls[-1]["returncode"], source)
         except BaseException:
             pass  # Failed/missing diagnostic is not a success or a second native call.
+    removal_data = None
+    removal_last = None
+    if outcome == "success" and REMOVAL_DATA_SELECTED:
+        try:
+            removal_data = fixture.removal_data_result(result, source, rows)
+            removal_last = fixture.registration_publication_tick(
+                removal_data, fixture.decimal(removal_data["clock"]["lastNs"]))
+        except BaseException:
+            removal_data = None
+    removal_qualified = removal_data is not None
+    removal_diagnostic = None
+    failed_graphs = [call for call in calls if "removalDataDiagnostic" in call]
+    if (REMOVAL_DATA_SELECTED and len(failed_graphs) == 1 and failed_graphs[0] is calls[-1]
+            and all(call["returned"] for call in calls)
+            and all(result[key] for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown"))
+            and not result["cleanupErrors"]):
+        removal_diagnostic = fixture.installer_worker_diagnostic_data(
+            failed_graphs[0]["removalDataDiagnostic"], failed_graphs[0], rows, removal_role=failed_graphs[0]["role"])
     context_completed = installer_context is not None and installer_context["completed"]
     known_pass = (
         outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
@@ -678,14 +720,18 @@ try:
         contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured),
         contextObservationCompleted=bool(context_completed),
         registrationReservation=registration, registrationReservationQualified=registration_qualified, registrationFailure=registration_failure,
+        removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
-        failure=None if registration_qualified else "native-step-or-owner-did-not-establish-acceptance")
+        failure=None if (removal_qualified if REMOVAL_DATA_SELECTED else registration_qualified) else "native-step-or-owner-did-not-establish-acceptance")
     book.check()
 except BaseException:
     summary["accepted"] = False
     summary["registrationReservation"] = None
     summary["registrationReservationQualified"] = False
     summary["registrationFailure"] = None
+    summary['removalData'] = None
+    summary['removalDataQualified'] = False
+    summary['removalDataDiagnostic'] = None
     summary["nativeRustTests"] = None
     summary["installerWorkerRustTests"] = None
     summary["installedReaderRustTests"] = None
@@ -708,6 +754,9 @@ finally:
         summary["registrationReservation"] = None
         summary["registrationReservationQualified"] = False
         summary["registrationFailure"] = None
+        summary['removalData'] = None
+        summary['removalDataQualified'] = False
+        summary['removalDataDiagnostic'] = None
         summary["nativeRustTests"] = None
         summary["installerWorkerRustTests"] = None
         summary["installedReaderRustTests"] = None
@@ -728,12 +777,16 @@ publisher = fixture.Originals()
 try:
     if summary["registrationReservationQualified"]:
         registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
+    if summary["removalDataQualified"]:
+        removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     body = fixture.canonical(summary)
     fixture.need(len(body) <= 49152, "summary-output-bound")
     publisher.publish(work / "e2-workflow-result.json", body, 0o600)
     fixture.need(publisher.finish(), "summary-output-close")
     if summary["registrationReservationQualified"]:
         registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
+    if summary["removalDataQualified"]:
+        removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     output_path = Path(os.environ["GITHUB_OUTPUT"])
     fixture.need(output_path.parent == WORK_PARENT / "_runner_file_commands"
                  and re.fullmatch(r"set_output_[A-Za-z0-9-]+", output_path.name), "summary-step-output-route")
@@ -745,7 +798,8 @@ try:
         line = ((b"accepted=true\n" if summary["accepted"] else b"accepted=false\n")
                 + (b"diagnostic_captured=true\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\n")
                 + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n")
-                + (b"registration_qualified=true\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\n"))
+                + (b"registration_qualified=true\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\n")
+                + (b"removal_data_qualified=true\n" if summary["removalDataQualified"] else b"removal_data_qualified=false\n"))
         fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
         os.fsync(fd)
         fixture.need(fixture.signature(os.fstat(fd)) == fixture.signature(os.stat(output_path, follow_symlinks=False)),
@@ -754,9 +808,11 @@ try:
         os.close(fd)
     if summary["registrationReservationQualified"]:
         registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
+    if summary["removalDataQualified"]:
+        removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
 except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-print("Registration reservation primitive qualification completed; no app, Installer transaction or ServiceManagement qualification."
-      if summary["registrationReservationQualified"] else "Registration reservation qualification failed; retained summary is failure evidence only.")
+print("Removal DATA compilation and selected tests completed; no removal/installer/native-peer qualification."
+      if summary["removalDataQualified"] else "Removal DATA qualification failed; retained summary is failure evidence only.")
 PY_PUBLISH

@@ -1,4 +1,5 @@
-// Fixed SOURCE detached-signature and two-App purpose facts, not package
+// Fixed SOURCE Install/Remove detached signatures, two-App and standalone
+// remover purpose facts, not package
 // authority, uniform child signers or a Keychain service. Caller retains files.
 // Private-key use below exists ONLY in the explicit packaging-example build.
 #include "install_producer.h"
@@ -47,6 +48,8 @@ _Static_assert(sizeof(mrk_install_producer_leaf_sha256)==32 && sizeof(mrk_instal
     "complete SOURCE signer pins");
 #define MRK_PRODUCER_MAGIC UINT64_C(0x4d524b50524f4432)
 static const uint8_t message_domain[]="MobileReleaseKit-package-producer-v2"; // includes one NUL
+static const uint8_t remove_message_domain[]="MobileReleaseKit-remove-producer-v1";
+_Static_assert(sizeof(remove_message_domain)<=sizeof(message_domain),"remove domain fits original supplied buffer");
 typedef struct {
     uint64_t magic;
     pthread_t thread;
@@ -124,15 +127,18 @@ static int key_attributes(producer_cell *cell) {
         && SecKeyIsAlgorithmSupported((SecKeyRef)cell->values[6],kSecKeyOperationTypeVerify,
             kSecKeyAlgorithmRSASignatureMessagePKCS1v15SHA256);
 }
-static int code_role(uint32_t role) { return role==1 || role==2; }
+static int code_role(uint32_t role) { return role==1 || role==2 || role==5; }
+#if MRK_INSTALL_PRODUCER_SIGNING
+static int sign_role(uint32_t role) { return role==3 || role==6; }
+#endif
 static const char *code_suffix(uint32_t role) {
-    return role==1 ? "" : "/Contents/Helpers/MobileReleaseKitPayload.app";
+    return role==5 ? "/mrk-macos-remove" : role==1 ? "" : "/Contents/Helpers/MobileReleaseKitPayload.app";
 }
 static const char *code_main(uint32_t role) {
-    return role==1 ? "/Contents/MacOS/mrk-macos-entry" : "/Contents/MacOS/mobile-release-kit-desktop";
+    return role==5 ? "" : role==1 ? "/Contents/MacOS/mrk-macos-entry" : "/Contents/MacOS/mobile-release-kit-desktop";
 }
 static const char *code_identifier(uint32_t role) {
-    return role==1 ? "dev.mobile-release-kit.desktop.entry" : "dev.mobile-release-kit.desktop";
+    return role==5 ? "dev.mobile-release-kit.desktop.remove" : role==1 ? "dev.mobile-release-kit.desktop.entry" : "dev.mobile-release-kit.desktop";
 }
 static int canonical_path(const uint8_t *path,size_t size,uint32_t role) {
     if(!code_role(role) || !path || size<=1 || size>=MRK_INSTALL_PRODUCER_PATH_MAX
@@ -165,7 +171,19 @@ static int borrowed_directory(int fd,const char *path,const struct stat *expecte
         && directory_equal(&held,expected) && directory_equal(&held,&named)
         && fcntl(fd,F_GETPATH,actual)==0 && memchr(actual,0,sizeof(actual)) && strcmp(actual,path)==0;
 }
+static int borrowed_remove(int fd,const char *path,const struct stat *expected,int directory) {
+    struct stat held={0},named={0};char actual[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
+    if(fd<0 || fstat(fd,&held)!=0 || lstat(path,&named)!=0 || held.st_uid!=getuid() || held.st_gid!=getgid()
+        || held.st_flags!=0 || !directory_equal(&held,expected) || !directory_equal(&held,&named)) return 0;
+    if(directory) {
+        if(!S_ISDIR(held.st_mode) || (held.st_mode&07022)!=0 || held.st_nlink<=0) return 0;
+    } else if(!S_ISREG(held.st_mode) || (held.st_mode&07777)!=0555 || held.st_nlink!=1
+        || held.st_size<=0 || (uint64_t)held.st_size>UINT64_C(67108864)) return 0;
+    return fcntl(fd,F_GETPATH,actual)==0 && memchr(actual,0,sizeof(actual)) && strcmp(actual,path)==0;
+}
 static int code_originals(producer_cell *cell) {
+    if(cell->report.reserved==5) return borrowed_remove(cell->outer_fd,cell->outer_path,&cell->outer_identity,1)
+        && borrowed_remove(cell->code_fd,cell->code_path,&cell->code_identity,0);
     return borrowed_directory(cell->outer_fd,cell->outer_path,&cell->outer_identity)
         && borrowed_directory(cell->code_fd,cell->code_path,&cell->code_identity);
 }
@@ -194,7 +212,8 @@ static int code_facts(producer_cell *cell) {
     if(!code_hardened(info)) return 0;
     CFTypeRef identifier=CFDictionaryGetValue(info,kSecCodeInfoIdentifier);
     CFTypeRef executable=CFDictionaryGetValue(info,kSecCodeInfoMainExecutable);
-    CFStringRef required=cell->report.reserved==1 ? CFSTR("dev.mobile-release-kit.desktop.entry") : CFSTR("dev.mobile-release-kit.desktop");
+    CFStringRef required=cell->report.reserved==5 ? CFSTR("dev.mobile-release-kit.desktop.remove")
+        : cell->report.reserved==1 ? CFSTR("dev.mobile-release-kit.desktop.entry") : CFSTR("dev.mobile-release-kit.desktop");
     char expected[MRK_INSTALL_PRODUCER_PATH_MAX]={0},actual[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
     int size=snprintf(expected,sizeof(expected),"%s%s",cell->code_path,code_main(cell->report.reserved));
     CFTypeRef der=cell->values[5];
@@ -217,7 +236,7 @@ static int code_step(producer_cell *cell,uint32_t phase,mrk_install_producer_rep
         if(!code_originals(cell)) failed(cell);
         if(!cell->report.failed) switch(phase) {
             case 1:
-                cell->values[0]=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)cell->code_path,strlen(cell->code_path),true);break;
+                cell->values[0]=CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8 *)cell->code_path,strlen(cell->code_path),cell->report.reserved!=5);break;
             case 2: {
                 SecStaticCodeRef code=NULL;
                 status=SecStaticCodeCreateWithPath((CFURLRef)cell->values[0],kSecCSDefaultFlags,&code);
@@ -345,7 +364,7 @@ static void sign_keychain_phase(producer_cell *cell,uint32_t phase) {
     }
 }
 static int sign_step(producer_cell *cell,uint32_t phase,mrk_install_producer_report *out) {
-    if(cell->report.reserved!=3 || cell->report.failed || cell->report.unknown || phase<1
+    if(!sign_role(cell->report.reserved) || cell->report.failed || cell->report.unknown || phase<1
         || phase>MRK_INSTALL_PRODUCER_SIGN_STEPS || phase!=cell->report.phase+1) return 0;
     unsigned slot=sign_slot(phase),error_slot=phase==9?9:phase==11?12:MRK_INSTALL_PRODUCER_SLOTS;
     if(slot>=MRK_INSTALL_PRODUCER_SIGN_SLOTS || cell->values[slot] || cell->report.states[slot]) return 0;
@@ -443,7 +462,7 @@ void *mrk_install_producer_new(const uint8_t *descriptor,size_t size,const uint8
 }
 void *mrk_install_producer_code_new(uint32_t role,int outer,int code,const uint8_t *path,size_t size) {
 #if MRK_INSTALL_PRODUCER_CONFIGURED
-    if(!source_selected() || !canonical_path(path,size,role) || outer<0 || code<0
+    if(!source_selected() || (role!=1 && role!=2) || !canonical_path(path,size,role) || outer<0 || code<0
         || getuid()!=geteuid() || getgid()!=getegid()) return NULL;
     char outer_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0},code_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
     memcpy(outer_path,path,size);
@@ -462,14 +481,47 @@ void *mrk_install_producer_code_new(uint32_t role,int outer,int code,const uint8
     (void)role;(void)outer;(void)code;(void)path;(void)size;return NULL;
 #endif
 }
+void *mrk_remove_producer_new(const uint8_t *descriptor,size_t size,const uint8_t *signature,size_t signature_size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    if(!source_selected() || !descriptor || !signature || !size || size>MRK_REMOVE_PRODUCER_DESCRIPTOR_MAX
+        || signature_size!=MRK_INSTALL_PRODUCER_RSA_BITS/8 || getuid()!=geteuid() || getgid()!=getegid()) return NULL;
+    producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
+    cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
+    cell->report.version=1;cell->report.reserved=4;cell->message_size=sizeof(remove_message_domain)+size;cell->signature_size=signature_size;
+    memcpy(cell->message,remove_message_domain,sizeof(remove_message_domain));memcpy(cell->message+sizeof(remove_message_domain),descriptor,size);
+    memcpy(cell->signature,signature,signature_size);return cell;
+#else
+    (void)descriptor;(void)size;(void)signature;(void)signature_size;return NULL;
+#endif
+}
+void *mrk_remove_producer_code_new(int directory,int program,const uint8_t *path,size_t size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    if(!source_selected() || !canonical_path(path,size,5) || directory<0 || program<0
+        || getuid()!=geteuid() || getgid()!=getegid()) return NULL;
+    char outer_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0},code_path[MRK_INSTALL_PRODUCER_PATH_MAX]={0};
+    memcpy(outer_path,path,size);int length=snprintf(code_path,sizeof(code_path),"%s/mrk-macos-remove",outer_path);
+    struct stat outer_identity={0},code_identity={0};
+    if(length<=0 || (size_t)length>=sizeof(code_path) || fstat(directory,&outer_identity)!=0 || fstat(program,&code_identity)!=0
+        || !borrowed_remove(directory,outer_path,&outer_identity,1) || !borrowed_remove(program,code_path,&code_identity,0)) return NULL;
+    producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
+    cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
+    cell->report.version=1;cell->report.reserved=5;cell->outer_fd=directory;cell->code_fd=program;
+    cell->outer_identity=outer_identity;cell->code_identity=code_identity;
+    memcpy(cell->outer_path,outer_path,sizeof(outer_path));memcpy(cell->code_path,code_path,sizeof(code_path));
+    if(!code_originals(cell)){cell->magic=0;free(cell);return NULL;}return cell;
+#else
+    (void)directory;(void)program;(void)path;(void)size;return NULL;
+#endif
+}
 int mrk_install_producer_step(void *raw,uint32_t phase,mrk_install_producer_report *out) {
 #if MRK_INSTALL_PRODUCER_CONFIGURED
     producer_cell *cell=raw;
     if(!original(cell) || !out) return 0;
 #if MRK_INSTALL_PRODUCER_SIGNING
-    if(cell->report.reserved==3) return sign_step(cell,phase,out);
+    if(sign_role(cell->report.reserved)) return sign_step(cell,phase,out);
 #endif
-    if(cell->report.reserved) return code_step(cell,phase,out);
+    if(code_role(cell->report.reserved)) return code_step(cell,phase,out);
+    if(cell->report.reserved!=0 && cell->report.reserved!=4) return 0;
     if(cell->report.failed || cell->report.unknown || phase<1
         || phase>MRK_INSTALL_PRODUCER_STEPS || phase!=cell->report.phase+1) return 0;
     unsigned slot=phase_slot(phase);
@@ -601,10 +653,23 @@ void *mrk_install_producer_sign_new(const uint8_t *descriptor,size_t size) {
     (void)descriptor;(void)size;return NULL;
 #endif
 }
+void *mrk_remove_producer_sign_new(const uint8_t *descriptor,size_t size) {
+#if MRK_INSTALL_PRODUCER_CONFIGURED
+    if(!source_selected() || !descriptor || !size || size>MRK_REMOVE_PRODUCER_DESCRIPTOR_MAX
+        || getuid()!=geteuid() || getgid()!=getegid()) return NULL;
+    producer_cell *cell=calloc(1,sizeof(*cell));if(!cell) return NULL;
+    cell->magic=MRK_PRODUCER_MAGIC;cell->thread=pthread_self();cell->process=getpid();cell->uid=getuid();cell->gid=getgid();
+    cell->report.version=1;cell->report.reserved=6;cell->message_size=sizeof(remove_message_domain)+size;
+    memcpy(cell->message,remove_message_domain,sizeof(remove_message_domain));memcpy(cell->message+sizeof(remove_message_domain),descriptor,size);
+    return cell;
+#else
+    (void)descriptor;(void)size;return NULL;
+#endif
+}
 int mrk_install_producer_sign_copy(void *raw,uint8_t *out,size_t capacity,size_t *size) {
 #if MRK_INSTALL_PRODUCER_CONFIGURED
     producer_cell *cell=raw;
-    if(!original(cell) || !out || !size || capacity!=sizeof(cell->signature) || cell->report.reserved!=3
+    if(!original(cell) || !out || !size || capacity!=sizeof(cell->signature) || !sign_role(cell->report.reserved)
         || cell->signature_copied || cell->report.failed || cell->report.unknown || cell->report.matched!=1
         || cell->report.phase!=MRK_INSTALL_PRODUCER_SIGN_STEPS || cell->report.calls!=cell->report.returned
         || cell->signature_size!=MRK_INSTALL_PRODUCER_RSA_BITS/8) return 0;

@@ -20,6 +20,10 @@ const CODE_SLOTS:usize=6;
 // Same 320KiB supplied-resource ceiling; includes bounded C path/stat stack.
 const CODE_STACK_LIMIT:usize=8192;
 const DOMAIN:&[u8]=b"MobileReleaseKit-package-producer-v2\0";
+const REMOVE_DOMAIN:&[u8]=b"MobileReleaseKit-remove-producer-v1\0";
+const REMOVE_DESCRIPTOR_LIMIT:usize=16384;
+const REMOVE_FILENAME:&[u8]=b"/mrk-macos-remove";
+const _:()=assert!(REMOVE_DOMAIN.len()<=DOMAIN.len());
 #[cfg(any(test,feature="package-producer-signing"))]
 const SIGN_STEPS:u8=12;
 #[cfg(any(test,feature="package-producer-signing"))]
@@ -44,25 +48,34 @@ pub enum CurrentProductResult { PurposeVerified,Unavailable,Refused,Unknown }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum ProducerOperation {
     DetachedSignature,CurrentProduct(CurrentProductRole),
+    RemoveDetachedSignature,RemoveProgram,
     #[cfg(any(test,feature="package-producer-signing"))]
     PackageSigning,
+    #[cfg(any(test,feature="package-producer-signing"))]
+    RemoveSigning,
 }
 impl ProducerOperation {
     fn code(self)->u32 {match self {
         Self::DetachedSignature=>0,Self::CurrentProduct(CurrentProductRole::EntryApp)=>1,
         Self::CurrentProduct(CurrentProductRole::PayloadApp)=>2,
+        Self::RemoveDetachedSignature=>4,Self::RemoveProgram=>5,
         #[cfg(any(test,feature="package-producer-signing"))]
         Self::PackageSigning=>3,
-    }}
-    fn steps(self)->u8 {match self {
-        Self::DetachedSignature=>STEPS,Self::CurrentProduct(_)=>CODE_STEPS,
         #[cfg(any(test,feature="package-producer-signing"))]
-        Self::PackageSigning=>SIGN_STEPS,
+        Self::RemoveSigning=>6,
+    }}
+    fn detached(self)->bool{matches!(self,Self::DetachedSignature|Self::RemoveDetachedSignature)}
+    #[cfg(any(test,feature="package-producer-signing"))]
+    fn signing(self)->bool{matches!(self,Self::PackageSigning|Self::RemoveSigning)}
+    fn steps(self)->u8 {match self {
+        Self::DetachedSignature|Self::RemoveDetachedSignature=>STEPS,Self::CurrentProduct(_)|Self::RemoveProgram=>CODE_STEPS,
+        #[cfg(any(test,feature="package-producer-signing"))]
+        Self::PackageSigning|Self::RemoveSigning=>SIGN_STEPS,
     }}
     fn slots(self)->usize {match self {
-        Self::DetachedSignature=>SLOTS,Self::CurrentProduct(_)=>CODE_SLOTS,
+        Self::DetachedSignature|Self::RemoveDetachedSignature=>SLOTS,Self::CurrentProduct(_)|Self::RemoveProgram=>CODE_SLOTS,
         #[cfg(any(test,feature="package-producer-signing"))]
-        Self::PackageSigning=>SIGN_SLOTS,
+        Self::PackageSigning|Self::RemoveSigning=>SIGN_SLOTS,
     }}
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -71,6 +84,7 @@ enum VerificationResult { Matched,Unavailable,Refused,Unknown }
 enum VerificationInput<'a> {
     Signature {descriptor:&'a [u8],signature:&'a [u8]},
     Current {outer:c_int,code:c_int,outer_path:&'a [u8]},
+    RemoveProgram {directory:c_int,program:c_int,directory_path:&'a [u8]},
     #[cfg(any(test,feature="package-producer-signing"))]
     Signing {descriptor:&'a [u8]},
 }
@@ -80,14 +94,25 @@ fn canonical_outer_path(path:&[u8],role:CurrentProductRole)->bool {
         && path.len().checked_add(role.suffix().len()).and_then(|n|n.checked_add(role.executable().len()))
             .is_some_and(|n|n<PATH_LIMIT)
 }
+fn canonical_remove_directory(path:&[u8])->bool{
+    path.len()>1&&path.len()<PATH_LIMIT&&path[0]==b'/'&&!path.contains(&0)
+        &&path[1..].split(|b|*b==b'/').all(|p|!p.is_empty()&&p!=b"."&&p!=b"..")
+        &&path.len().checked_add(REMOVE_FILENAME.len()).is_some_and(|n|n<PATH_LIMIT)
+}
 impl VerificationInput<'_> {
     fn valid_for(self,operation:ProducerOperation)->bool {match (self,operation) {
         (Self::Signature{descriptor,signature},ProducerOperation::DetachedSignature)=>
             !descriptor.is_empty()&&descriptor.len()<=DESCRIPTOR_LIMIT&&matches!(signature.len(),256|384|512),
+        (Self::Signature{descriptor,signature},ProducerOperation::RemoveDetachedSignature)=>
+            !descriptor.is_empty()&&descriptor.len()<=REMOVE_DESCRIPTOR_LIMIT&&matches!(signature.len(),256|384|512),
+        (Self::RemoveProgram{directory,program,directory_path},ProducerOperation::RemoveProgram)=>
+            directory>=0&&program>=0&&canonical_remove_directory(directory_path),
         (Self::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(role))=>
             outer>=0&&code>=0&&canonical_outer_path(outer_path,role),
         #[cfg(any(test,feature="package-producer-signing"))]
         (Self::Signing{descriptor},ProducerOperation::PackageSigning)=>!descriptor.is_empty()&&descriptor.len()<=DESCRIPTOR_LIMIT,
+        #[cfg(any(test,feature="package-producer-signing"))]
+        (Self::Signing{descriptor},ProducerOperation::RemoveSigning)=>!descriptor.is_empty()&&descriptor.len()<=REMOVE_DESCRIPTOR_LIMIT,
         _=>false,
     }}
 }
@@ -105,7 +130,8 @@ pub struct ProducerCustody {
     pub operation:ProducerOperation,pub phase:Option<ProducerPhase>,pub cell:CellCustody,pub references:[u32;SLOTS],
     pub entered:bool,pub in_call:bool,pub gate_entered:bool,
     /// Positive native fact only; it cannot replace settled()/purpose checks.
-    pub signature_matched:bool,pub purpose_matched:Option<CurrentProductRole>,pub failed:bool,pub unknown:bool,
+    pub signature_matched:bool,pub purpose_matched:Option<CurrentProductRole>,
+    pub remove_signature_matched:bool,pub remove_program_matched:bool,pub failed:bool,pub unknown:bool,
     pub calls:u32,pub returned:u32,pub first_failure:Option<Instant>,
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -150,6 +176,8 @@ unsafe extern "C" {
     fn mrk_install_producer_source_leaf_matches(der:*const u8,size:usize)->c_int;
     fn mrk_install_producer_new(descriptor:*const u8,size:usize,signature:*const u8,signature_size:usize)->*mut c_void;
     fn mrk_install_producer_code_new(role:u32,outer:c_int,code:c_int,outer_path:*const u8,path_size:usize)->*mut c_void;
+    fn mrk_remove_producer_new(descriptor:*const u8,size:usize,signature:*const u8,signature_size:usize)->*mut c_void;
+    fn mrk_remove_producer_code_new(directory:c_int,program:c_int,path:*const u8,size:usize)->*mut c_void;
     fn mrk_install_producer_step(cell:*mut c_void,phase:u32,out:*mut Report)->c_int;
     fn mrk_install_producer_release(cell:*mut c_void,slot:u32,out:*mut Report)->c_int;
     fn mrk_install_producer_retire(cell:*mut c_void)->c_int;
@@ -157,6 +185,7 @@ unsafe extern "C" {
 #[cfg(feature="package-producer-signing")]
 unsafe extern "C" {
     fn mrk_install_producer_sign_new(descriptor:*const u8,size:usize)->*mut c_void;
+    fn mrk_remove_producer_sign_new(descriptor:*const u8,size:usize)->*mut c_void;
     fn mrk_install_producer_sign_copy(cell:*mut c_void,out:*mut u8,capacity:usize,size:*mut usize)->c_int;
 }
 pub fn source_signer_data()->Option<SourceSignerData> {
@@ -175,10 +204,10 @@ pub fn source_leaf_matches_data(der:&[u8])->bool {
 
 fn phase_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
     #[cfg(any(test,feature="package-producer-signing"))]
-    if operation==ProducerOperation::PackageSigning {return match phase {
+    if operation.signing() {return match phase {
         1..=8=>Some(usize::from(phase-1)),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None,
     };}
-    if operation!=ProducerOperation::DetachedSignature {return match phase {
+    if !operation.detached() {return match phase {
         1..=4=>Some(usize::from(phase-1)),6=>Some(4),7=>Some(5),_=>None,
     };}
     match phase {
@@ -189,13 +218,13 @@ fn phase_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
 }
 fn second_slot(phase:u8,operation:ProducerOperation)->Option<usize> {
     #[cfg(any(test,feature="package-producer-signing"))]
-    if operation==ProducerOperation::PackageSigning {return match phase{9=>Some(9),11=>Some(12),_=>None};}
-    (operation==ProducerOperation::DetachedSignature && phase==9).then_some(9)
+    if operation.signing() {return match phase{9=>Some(9),11=>Some(12),_=>None};}
+    (operation.detached() && phase==9).then_some(9)
 }
 fn error_slot(phase:u8,slot:usize,operation:ProducerOperation)->bool {
     #[cfg(any(test,feature="package-producer-signing"))]
-    if operation==ProducerOperation::PackageSigning {return matches!((phase,slot),(9,9)|(11,12)|(12,13));}
-    operation==ProducerOperation::DetachedSignature && ((phase==9 && slot==9)||phase==22||phase==29)
+    if operation.signing() {return matches!((phase,slot),(9,9)|(11,12)|(12,13));}
+    operation.detached() && ((phase==9 && slot==9)||phase==22||phase==29)
 }
 fn transition(raw:Report,old:Report,phase:ProducerPhase,operation:ProducerOperation)->bool {
     let call_limit=u32::from(operation.steps())+operation.slots() as u32;
@@ -254,11 +283,18 @@ impl Native for Calls {
         match (input,operation) {
             (VerificationInput::Signature{descriptor,signature},ProducerOperation::DetachedSignature)=>
                 unsafe{mrk_install_producer_new(descriptor.as_ptr(),descriptor.len(),signature.as_ptr(),signature.len())},
+            (VerificationInput::Signature{descriptor,signature},ProducerOperation::RemoveDetachedSignature)=>
+                unsafe{mrk_remove_producer_new(descriptor.as_ptr(),descriptor.len(),signature.as_ptr(),signature.len())},
+            (VerificationInput::RemoveProgram{directory,program,directory_path},ProducerOperation::RemoveProgram)=>
+                unsafe{mrk_remove_producer_code_new(directory,program,directory_path.as_ptr(),directory_path.len())},
             (VerificationInput::Current{outer,code,outer_path},ProducerOperation::CurrentProduct(_))=>
                 unsafe{mrk_install_producer_code_new(operation.code(),outer,code,outer_path.as_ptr(),outer_path.len())},
             #[cfg(feature="package-producer-signing")]
             (VerificationInput::Signing{descriptor},ProducerOperation::PackageSigning)=>
                 unsafe{mrk_install_producer_sign_new(descriptor.as_ptr(),descriptor.len())},
+            #[cfg(feature="package-producer-signing")]
+            (VerificationInput::Signing{descriptor},ProducerOperation::RemoveSigning)=>
+                unsafe{mrk_remove_producer_sign_new(descriptor.as_ptr(),descriptor.len())},
             _=>std::ptr::null_mut(),
         }
     }
@@ -303,6 +339,8 @@ impl ProducerVerifier {
         entered:self.entered,in_call:self.in_call,gate_entered:self.in_gate,
         signature_matched:self.operation==ProducerOperation::DetachedSignature&&self.report.matched==1,
         purpose_matched:match self.operation{ProducerOperation::CurrentProduct(role) if self.report.matched==1=>Some(role),_=>None},
+        remove_signature_matched:self.operation==ProducerOperation::RemoveDetachedSignature&&self.report.matched==1,
+        remove_program_matched:self.operation==ProducerOperation::RemoveProgram&&self.report.matched==1,
         failed:self.report.failed==1||self.first.is_some(),unknown:self.unknown||self.in_call||self.in_gate||self.report.unknown==1,
         calls:self.report.calls,returned:self.report.returned,first_failure:self.first}}
     fn note(&mut self,at:Instant){self.first=Some(self.first.map_or(at,|first|first.min(at)));}
@@ -441,6 +479,52 @@ impl CurrentProductVerifier {
     pub fn settled(&self)->bool {self.inner.settled()}
 }
 
+/// Fixed Remove-v1 detached signature, same original custody and raw-message
+/// engine. No release/peer/exclusion authority follows from this result.
+pub struct RemovalProducerVerifier{inner:ProducerVerifier}
+impl Default for RemovalProducerVerifier{fn default()->Self{Self::new()}}
+impl RemovalProducerVerifier{
+    pub fn new()->Self{Self{inner:ProducerVerifier::new_for(ProducerOperation::RemoveDetachedSignature)}}
+    pub fn project_owned_upper_bound()->Option<usize>{ProducerVerifier::project_owned_upper_bound()?.checked_add(std::mem::size_of::<Self>())}
+    pub fn custody(&self)->ProducerCustody{self.inner.custody()}
+    pub fn settled(&self)->bool{self.inner.settled()}
+    pub fn close(&mut self,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->bool{self.inner.close(gate)}
+    pub fn verify_and_close(&mut self,descriptor:&[u8],signature:&[u8],gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->SignatureResult{
+        self.verify_with(descriptor,signature,gate,&mut Calls)
+    }
+    fn verify_with(&mut self,descriptor:&[u8],signature:&[u8],gate:&mut dyn FnMut(ProducerCheckpoint)->Decision,native:&mut impl Native)->SignatureResult{
+        match self.inner.verify_input(VerificationInput::Signature{descriptor,signature},gate,native){
+            VerificationResult::Matched=>SignatureResult::SignatureVerified,VerificationResult::Unavailable=>SignatureResult::Unavailable,
+            VerificationResult::Refused=>SignatureResult::Refused,_=>SignatureResult::Unknown,
+        }
+    }
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum RemovalProgramResult{PurposeVerified,Unavailable,Refused,Unknown}
+/// STATIC signed on-disk program only. Caller retains/adopts its complete
+/// nofollow chain, file digest, filesystem/ACL policy and original POST. The
+/// emitter need not be this program. Live Parent/peer ALSO must prove their
+/// actual executed image/audit token/location; this wrapper does not do that.
+pub struct RemovalProgramVerifier{inner:ProducerVerifier}
+impl Default for RemovalProgramVerifier{fn default()->Self{Self::new()}}
+impl RemovalProgramVerifier{
+    pub fn new()->Self{Self{inner:ProducerVerifier::new_for(ProducerOperation::RemoveProgram)}}
+    pub fn project_owned_upper_bound()->Option<usize>{ProducerVerifier::project_owned_upper_bound()?.checked_add(std::mem::size_of::<Self>())}
+    pub fn custody(&self)->ProducerCustody{self.inner.custody()}
+    pub fn settled(&self)->bool{self.inner.settled()}
+    pub fn close(&mut self,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->bool{self.inner.close(gate)}
+    pub fn verify_and_close(&mut self,directory:BorrowedFd<'_>,program:BorrowedFd<'_>,directory_path:&Path,
+        gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->RemovalProgramResult{
+        self.verify_with(VerificationInput::RemoveProgram{directory:directory.as_raw_fd(),program:program.as_raw_fd(),
+            directory_path:directory_path.as_os_str().as_bytes()},gate,&mut Calls)
+    }
+    fn verify_with(&mut self,input:VerificationInput<'_>,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision,native:&mut impl Native)->RemovalProgramResult{
+        match self.inner.verify_input(input,gate,native){VerificationResult::Matched=>RemovalProgramResult::PurposeVerified,
+            VerificationResult::Unavailable=>RemovalProgramResult::Unavailable,VerificationResult::Refused=>RemovalProgramResult::Refused,
+            _=>RemovalProgramResult::Unknown}
+    }
+}
+
 /// Public signature bytes only. Creation does not authenticate Developer-ID
 /// purpose, a completed package, or any ReleaseSet authority.
 #[cfg(any(test,feature="package-producer-signing"))]
@@ -505,6 +589,23 @@ impl PackageProducerSigner {
     }
 }
 
+/// Nonshipping Remove-v1 signer only; same key selection/custody/copy/close.
+#[cfg(any(test,feature="package-producer-signing"))]
+pub struct RemovalProducerSigner{inner:PackageProducerSigner}
+#[cfg(any(test,feature="package-producer-signing"))]
+impl Default for RemovalProducerSigner{fn default()->Self{Self::new()}}
+#[cfg(any(test,feature="package-producer-signing"))]
+impl RemovalProducerSigner{
+    pub fn new()->Self{Self{inner:PackageProducerSigner{inner:ProducerVerifier::new_for(ProducerOperation::RemoveSigning),copy_entered:false,copy_returned:false}}}
+    pub fn project_owned_upper_bound()->Option<usize>{PackageProducerSigner::project_owned_upper_bound()?.checked_add(std::mem::size_of::<Self>())}
+    pub fn custody(&self)->ProducerCustody{self.inner.custody()}
+    pub fn settled(&self)->bool{self.inner.settled()}
+    pub fn close(&mut self,gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->bool{self.inner.close(gate)}
+    pub fn sign_and_close(&mut self,descriptor:&[u8],gate:&mut dyn FnMut(ProducerCheckpoint)->Decision)->PackageSignResult{
+        self.inner.sign_with(descriptor,gate,&mut Calls)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,8 +629,8 @@ mod tests {
         fn step(&mut self,_:*mut c_void,n:u32,out:&mut Report)->c_int{
             self.report.phase=n;self.report.calls+=1;
             // Independently literal fixture layout, not transition() as oracle.
-            let code=matches!(self.report.reserved,1|2);
-            let sign=self.report.reserved==3;
+            let code=matches!(self.report.reserved,1|2|5);
+            let sign=matches!(self.report.reserved,3|6);
             let slot=if sign {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10=>Some(10),11=>Some(11),12=>Some(13),_=>None}}
                 else if code {match n{1..=4=>Some((n-1)as usize),6=>Some(4),7=>Some(5),_=>None}}
                 else {match n{1..=8=>Some((n-1)as usize),9=>Some(8),10..=16=>Some(n as usize),
@@ -552,7 +653,7 @@ mod tests {
         }
         fn retire(&mut self,_:*mut c_void)->c_int{assert!(self.report.states.iter().all(|s|matches!(*s,0|4)));self.retired=true;1}
         fn signature_copy(&mut self,_:*mut c_void,output:&mut [u8;512],size:&mut usize)->c_int {
-            assert_eq!(self.report.reserved,3);assert_eq!(self.report.matched,1);assert!(!self.copied);
+            assert!(matches!(self.report.reserved,3|6));assert_eq!(self.report.matched,1);assert!(!self.copied);
             self.copied=true;*size=if self.copy_bad{513}else{256};output[..256].fill(7);1
         }
     }
@@ -619,6 +720,33 @@ mod tests {
         assert_eq!(&raw.states[..14],&[2,2,2,2,2,2,2,2,2,4,2,2,4,4]);
         assert!(!transition(raw,old,ProducerPhase::CopySignature,operation));
         assert!(!transition(raw,old,ProducerPhase::Inspect(13),operation));
+        // The exact old operations remain 0/1/2/3. New removal purposes have
+        // disjoint fixed values even when their native slot layout is shared.
+        assert_eq!(ProducerOperation::DetachedSignature.code(),0);
+        assert_eq!(ProducerOperation::CurrentProduct(CurrentProductRole::EntryApp).code(),1);
+        assert_eq!(ProducerOperation::CurrentProduct(CurrentProductRole::PayloadApp).code(),2);
+        assert_eq!(ProducerOperation::PackageSigning.code(),3);
+        for(mode,operation,steps,slots)in [(4,ProducerOperation::RemoveDetachedSignature,29,26),
+            (5,ProducerOperation::RemoveProgram,8,6),(6,ProducerOperation::RemoveSigning,12,14)]{
+            assert_eq!(operation.code(),mode);assert_eq!(operation.steps(),steps);assert_eq!(operation.slots(),slots);
+            let mut native=DataCalls::new();native.report.reserved=mode;
+            let mut old=Report{version:1,reserved:mode,..Report::default()};
+            for n in 1..=steps{
+                native.step(std::ptr::null_mut(),u32::from(n),&mut raw);
+                assert!(transition(raw,old,ProducerPhase::Inspect(n),operation));
+                for foreign in 0..=6{if foreign!=mode{let mut bad=raw;bad.reserved=foreign;
+                    assert!(!transition(bad,old,ProducerPhase::Inspect(n),operation));}}
+                if slots<SLOTS{let mut extra=raw;extra.states[slots]=2;assert!(!transition(extra,old,ProducerPhase::Inspect(n),operation));}
+                if n<steps{let mut early=raw;early.matched=1;assert!(!transition(early,old,ProducerPhase::Inspect(n),operation));}
+                old=raw;
+            }
+            assert_eq!(raw.matched,1);assert!(!transition(raw,old,ProducerPhase::Inspect(steps+1),operation));
+        }
+        assert_eq!(REMOVE_DOMAIN,b"MobileReleaseKit-remove-producer-v1\0");assert_ne!(REMOVE_DOMAIN,DOMAIN);
+        assert!(REMOVE_DOMAIN.len()<=DOMAIN.len());
+        assert!(RemovalProducerVerifier::project_owned_upper_bound().unwrap()<=320*1024);
+        assert!(RemovalProgramVerifier::project_owned_upper_bound().unwrap()<=320*1024);
+        assert!(RemovalProducerSigner::project_owned_upper_bound().unwrap()<=320*1024);
         assert_eq!(std::mem::size_of::<Report>(),136);assert_eq!(std::mem::size_of::<SourceSigner>(),104);
         assert!(ProducerVerifier::project_owned_upper_bound().unwrap()<=320*1024);
         assert!(PackageProducerSigner::project_owned_upper_bound().unwrap()<=320*1024);
@@ -716,9 +844,72 @@ mod tests {
             assert_eq!(result,PackageSignResult::Refused);assert!(signer.settled()&&native.retired);
             assert_eq!(native.copied,returned);
         }
+        let mut native=DataCalls::new();let mut remove=RemovalProducerVerifier::new();
+        assert_eq!(remove.verify_with(b"remove raw descriptor",&[0;256],&mut |_|Decision::Proceed,&mut native),SignatureResult::SignatureVerified);
+        assert!(remove.settled()&&native.retired&&remove.custody().remove_signature_matched);
+        assert!(!remove.custody().signature_matched&&!remove.custody().remove_program_matched&&remove.custody().purpose_matched.is_none());
+        assert_eq!(remove.custody().operation,ProducerOperation::RemoveDetachedSignature);
+        let mut native=DataCalls::new();native.failed_at=Some(22);let mut remove=RemovalProducerVerifier::new();
+        let mut imported=false;
+        assert_eq!(remove.verify_with(b"{}",&[0;256],&mut |point|{if let ProducerCheckpoint::Returned{phase:ProducerPhase::Inspect(22),custody,..}=point{
+            imported=custody.failed&&custody.first_failure.is_some();}Decision::Proceed},&mut native),SignatureResult::Refused);
+        assert!(imported&&remove.settled()&&native.retired&&!remove.custody().remove_signature_matched);
+        let input=VerificationInput::RemoveProgram{directory:11,program:12,directory_path:b"/private/owned-remover"};
+        let mut native=DataCalls::new();let mut program=RemovalProgramVerifier::new();
+        assert_eq!(program.verify_with(input,&mut |_|Decision::Proceed,&mut native),RemovalProgramResult::PurposeVerified);
+        assert!(program.settled()&&native.retired&&program.custody().remove_program_matched);
+        assert!(!program.custody().signature_matched&&!program.custody().remove_signature_matched&&program.custody().purpose_matched.is_none());
+        assert_eq!(native.releases,vec![5,4,3,2,1,0]);
+        assert!(!input.valid_for(ProducerOperation::CurrentProduct(CurrentProductRole::EntryApp)));
+        assert!(!input.valid_for(ProducerOperation::RemoveDetachedSignature));
+        let old=VerificationInput::Current{outer:11,code:12,outer_path:b"/private/Entry.app"};
+        assert!(!old.valid_for(ProducerOperation::RemoveProgram));
+        for path in [b"relative".as_slice(),b"/",b"/a//b",b"/a/../b",b"/a/./b",b"/a/",b"/a\0b"]{
+            let mut native=DataCalls::new();let mut program=RemovalProgramVerifier::new();
+            assert_eq!(program.verify_with(VerificationInput::RemoveProgram{directory:11,program:12,directory_path:path},
+                &mut |_|Decision::Proceed,&mut native),RemovalProgramResult::Refused);assert!(program.settled()&&!native.allocated);
+        }
+        assert!(!VerificationInput::RemoveProgram{directory:-1,program:12,directory_path:b"/fixed"}.valid_for(ProducerOperation::RemoveProgram));
+        let mut native=DataCalls::new();native.failed_at=Some(5);let mut program=RemovalProgramVerifier::new();
+        assert_eq!(program.verify_with(input,&mut |_|Decision::Proceed,&mut native),RemovalProgramResult::Refused);
+        assert!(program.settled()&&native.retired&&!program.custody().remove_program_matched);
+        let mut native=DataCalls::new();let mut signer=RemovalProducerSigner::new();
+        assert!(matches!(signer.inner.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::SignatureCreated(_)));
+        assert!(signer.settled()&&native.retired&&native.copied);assert_eq!(signer.custody().operation,ProducerOperation::RemoveSigning);
+        for descriptor in [b"".as_slice(),&vec![0;REMOVE_DESCRIPTOR_LIMIT+1]]{
+            let mut native=DataCalls::new();let mut signer=RemovalProducerSigner::new();
+            assert_eq!(signer.inner.sign_with(descriptor,&mut |_|Decision::Proceed,&mut native),PackageSignResult::Refused);
+            assert!(signer.settled()&&!native.allocated);
+            let mut native=DataCalls::new();let mut remove=RemovalProducerVerifier::new();
+            assert_eq!(remove.verify_with(descriptor,&[0;256],&mut |_|Decision::Proceed,&mut native),SignatureResult::Refused);
+            assert!(remove.settled()&&!native.allocated);
+        }
     }
     #[test]
     fn unknown_native_or_gate_custody_never_releases_or_publishes_success() {
+        let input=VerificationInput::RemoveProgram{directory:11,program:12,directory_path:b"/private/owned-remover"};
+        for failure in 0..3{
+            let mut native=DataCalls::new();if failure==0{native.bad_at=Some(4);}else if failure==1{native.unknown_at=Some(4);}else{native.release_unknown=true;}
+            let mut program=RemovalProgramVerifier::new();
+            assert_eq!(program.verify_with(input,&mut |_|Decision::Proceed,&mut native),RemovalProgramResult::Unknown);
+            assert!(!program.settled()&&!native.retired);
+            let mut native=DataCalls::new();if failure==0{native.bad_at=Some(9);}else if failure==1{native.unknown_at=Some(9);}else{native.release_unknown=true;}
+            let mut remove=RemovalProducerVerifier::new();
+            assert_eq!(remove.verify_with(b"{}",&[0;256],&mut |_|Decision::Proceed,&mut native),SignatureResult::Unknown);
+            assert!(!remove.settled()&&!native.retired);
+        }
+        for program_mode in [false,true]{
+            let mut native=DataCalls::new();let mut gate=|point|match point{
+                ProducerCheckpoint::Returned{phase:ProducerPhase::RetireCell,..}=>Decision::Stop,_=>Decision::Proceed};
+            if program_mode{let mut program=RemovalProgramVerifier::new();
+                assert_eq!(program.verify_with(input,&mut gate,&mut native),RemovalProgramResult::Unknown);assert!(!program.settled());}
+            else{let mut remove=RemovalProducerVerifier::new();
+                assert_eq!(remove.verify_with(b"{}",&[0;256],&mut gate,&mut native),SignatureResult::Unknown);assert!(!remove.settled());}
+            assert!(native.retired); // actual consuming return is recorded, never rolled back.
+        }
+        let mut native=DataCalls::new();native.copy_bad=true;let mut signer=RemovalProducerSigner::new();
+        assert_eq!(signer.inner.sign_with(b"{}",&mut |_|Decision::Proceed,&mut native),PackageSignResult::Unknown);
+        assert!(!signer.settled()&&!native.retired);
         for malformed in [false,true] {
             let mut native=DataCalls::new();if malformed{native.bad_at=Some(9);}else{native.unknown_at=Some(9);}
             let mut verifier=ProducerVerifier::new();

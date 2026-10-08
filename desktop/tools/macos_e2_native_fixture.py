@@ -74,6 +74,38 @@ PRODUCER_SIGNING_RUST_TESTS = (
 PACKAGE_PRODUCER_RUST_TESTS = (
     "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
 )
+REMOVAL_ARGUMENT = "--qualify-removal-data"
+REMOVAL_ROLES = ("removal-native-rust-tests", "removal-app-rust-tests")
+REMOVAL_NATIVE_RUST_TESTS = (
+    'install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns',
+    'install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses',
+    'install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success',
+    'removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',
+)
+REMOVAL_APP_RUST_TESTS = (
+    'macos_remove_producer::tests::fixed_remove_domain_raw_installed_current_and_final_package_are_distinct',
+    'macos_remove_producer::tests::closed_remove_shape_limits_and_current_only_binding_refuse_mixed_authority',
+    'macos_remove_record::tests::removal_record_closed_schema_and_bindings_are_data_only',
+    'macos_remove_record::tests::removal_prefix_failure_and_new_attempt_never_rewrite_history',
+    'macos_remove_record::tests::fresh_removal_and_reinstall_table_never_upgrades_old_failure',
+    'macos_remove_protocol::tests::four_frames_bind_both_targets_roles_and_preparation_labels_as_data_only',
+    'macos_remove_protocol::tests::closed_json_types_duplicates_and_exact_framing_refuse_without_a_second_message',
+    'macos_remove_protocol::tests::current_binding_direction_order_and_fresh_nonce_data_cannot_be_replayed',
+    'macos_remove_protocol::tests::original_raw_endpoints_equality_regression_and_first_refusal_never_renew',
+    'macos_remove_protocol::tests::fixed_encoding_capacity_and_retained_storage_count_real_copies',
+)
+REMOVAL_SOURCES = (
+    'desktop/native/macos-installed-native/build.rs',
+    'desktop/native/macos-installed-native/src/lib.rs',
+    'desktop/native/macos-installed-native/src/install_producer.h',
+    'desktop/native/macos-installed-native/src/install_producer.m',
+    'desktop/native/macos-installed-native/src/install_producer.rs',
+    'desktop/native/macos-installed-native/src/removal_coordinator.rs',
+    'desktop/src-tauri/src/lib.rs',
+    'desktop/src-tauri/src/macos_remove_producer.rs',
+    'desktop/src-tauri/src/macos_remove_record.rs',
+    'desktop/src-tauri/src/macos_remove_protocol.rs',
+)
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 REGISTRATION_ARGUMENT = "--qualify-registration-reservation"
 REGISTRATION_SOURCE = "desktop/native/macos-installed-entry/registration_fixture.c"
@@ -545,15 +577,21 @@ def installer_worker_diagnostic_sources(rows):
     return canonical_names, aliases
 
 
-def installer_worker_diagnostic_result(stdout, stderr, rows):
+def installer_worker_diagnostic_result(stdout, stderr, rows, *, removal_role=None):
     """Small diagnostic projection, not a compiler result or native authority."""
     source = installer_worker_diagnostic_sources(rows)
     if (source is None or type(stdout) is not bytes or type(stderr) is not bytes
             or len(stdout) + len(stderr) > 4 * 1024 * 1024):
         return None
     _names, aliases = source
+    selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
+    if removal_role is not None:
+        if removal_role not in REMOVAL_ROLES:
+            return None
+        selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
+        selected_type = "mrk-macos-removal-data-diagnostic-v1"
     result = {
-        "schemaVersion": 1, "type": "mrk-macos-installer-worker-diagnostic-v1", "diagnosticOnly": True,
+        "schemaVersion": 1, "type": selected_type, "diagnosticOnly": True,
         "classification": "unrecognized", "stdoutSha256": digest(stdout), "stderrSha256": digest(stderr),
         "stdoutBytes": len(stdout), "stderrBytes": len(stderr), "errorCodes": [], "errorLocations": [],
         "failedTests": [], "panicLocations": [], "truncated": False, "unresolvedLocations": False,
@@ -593,7 +631,7 @@ def installer_worker_diagnostic_result(stdout, stderr, rows):
             if match is not None:
                 add("errorCodes", match[1].decode("ascii"), 32)
                 continue
-            failed = next((name for name in INSTALLER_WORKER_RUST_TESTS
+            failed = next((name for name in selected_names
                            if line == ("test " + name + " ... FAILED").encode("ascii")), None)
             if failed is not None:
                 add("failedTests", failed, 3)
@@ -601,7 +639,7 @@ def installer_worker_diagnostic_result(stdout, stderr, rows):
             match = re.fullmatch(rb"thread '([^'\r\n]{1,256})'(?: \([1-9][0-9]{0,19}\))? panicked at ([^:\r\n]{1,768}):([1-9][0-9]{0,6}):([1-9][0-9]{0,5}):", line)
             if match is not None and all(32 <= byte <= 126 for byte in line):
                 name = match[1].decode("ascii")
-                if name in INSTALLER_WORKER_RUST_TESTS:
+                if name in selected_names:
                     add("panicLocations", {"test": name, "path": aliases.get(match[2].decode("ascii")),
                                            "line": int(match[3]), "column": int(match[4])}, 3)
     rust = bool(result["errorCodes"] or result["errorLocations"])
@@ -611,20 +649,28 @@ def installer_worker_diagnostic_result(stdout, stderr, rows):
     return result if len(canonical(result)) <= 12 * 1024 else None
 
 
-def installer_worker_diagnostic_data(value, call, rows):
+def installer_worker_diagnostic_data(value, call, rows, *, removal_role=None):
     """Closed DATA bound to one actual failed original; no permission or pass."""
     keys = {"schemaVersion", "type", "diagnosticOnly", "classification", "stdoutSha256", "stderrSha256",
             "stdoutBytes", "stderrBytes", "errorCodes", "errorLocations", "failedTests", "panicLocations",
             "truncated", "unresolvedLocations"}
+    selected_names, selected_type = INSTALLER_WORKER_RUST_TESTS, "mrk-macos-installer-worker-diagnostic-v1"
+    selected_role = "installer-worker-rust-tests"
+    if removal_role is not None:
+        if removal_role not in REMOVAL_ROLES:
+            return None
+        selected_role = removal_role
+        selected_names = REMOVAL_NATIVE_RUST_TESTS if removal_role == REMOVAL_ROLES[0] else REMOVAL_APP_RUST_TESTS
+        selected_type = "mrk-macos-removal-data-diagnostic-v1"
     source = installer_worker_diagnostic_sources(rows)
     if (source is None or type(value) is not dict or set(value) != keys or type(call) is not dict
-            or call.get("role") != "installer-worker-rust-tests" or call.get("entered") is not True
+            or call.get("role") != selected_role or call.get("entered") is not True
             or call.get("returned") is not True or type(call.get("returncode")) is not int
             or not 1 <= call["returncode"] <= 255 or type(call.get("workTimeoutSeconds")) is not int
-            or call["workTimeoutSeconds"] != 480 or type(call.get("outputLimitBytes")) is not int
+            or not (call["workTimeoutSeconds"] == 480 if removal_role is None else 0 < call["workTimeoutSeconds"] <= 480) or type(call.get("outputLimitBytes")) is not int
             or call["outputLimitBytes"] != 4 * 1024 * 1024
             or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
-            or value["type"] != "mrk-macos-installer-worker-diagnostic-v1" or value["diagnosticOnly"] is not True
+            or value["type"] != selected_type or value["diagnosticOnly"] is not True
             or type(value["truncated"]) is not bool or type(value["unresolvedLocations"]) is not bool):
         return None
     for stream in ("stdout", "stderr"):
@@ -640,7 +686,7 @@ def installer_worker_diagnostic_data(value, call, rows):
         if type(items) is not list or len(items) > maximum or any(item in items[:index] for index, item in enumerate(items)):
             return None
     if (not all(code(item) for item in value["errorCodes"])
-            or not all(type(item) is str and item in INSTALLER_WORKER_RUST_TESTS for item in value["failedTests"])):
+            or not all(type(item) is str and item in selected_names for item in value["failedTests"])):
         return None
     for key, tag in (("errorLocations", "code"), ("panicLocations", "test")):
         for row in value[key]:
@@ -652,7 +698,7 @@ def installer_worker_diagnostic_data(value, call, rows):
             if key == "errorLocations":
                 if row[tag] is not None and (not code(row[tag]) or row[tag] not in value["errorCodes"]):
                     return None
-            elif type(row[tag]) is not str or row[tag] not in INSTALLER_WORKER_RUST_TESTS:
+            elif type(row[tag]) is not str or row[tag] not in selected_names:
                 return None
     rust = bool(value["errorCodes"] or value["errorLocations"])
     tests = bool(value["failedTests"] or value["panicLocations"])
@@ -2251,7 +2297,7 @@ def package_producer_rust_test_record():
 def _rust_tests_data(value, expected, label):
     """Only fixed SOURCE wrappers supply this expected record; never output DATA."""
     count = len(expected["tests"])  # SOURCE-fixed wrapper record, not received DATA.
-    need(count in (1, 2, 3, 5, 6) and expected["passed"] == count, label + "-record")
+    need(count in (1, 2, 3, 4, 5, 6, 10) and expected["passed"] == count, label + "-record")
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
@@ -2291,7 +2337,7 @@ def package_producer_rust_tests_data(value):
 def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
     count = len(expected_names)  # Only the fixed SOURCE tuples call this.
-    need(count in (1, 2, 3, 5, 6), label + "-roster")
+    need(count in (1, 2, 3, 4, 5, 6, 10), label + "-roster")
     need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
     need(len(lines) == count + 6 and lines[:2] == [b"", ("running 1 test" if count == 1 else "running %d tests" % count).encode("ascii")]
@@ -2498,6 +2544,73 @@ def registration_reservation_result(result, source, rows):
             "compiled": data["compiled"], "sourceHashes": data["sourceHashes"],
             "nativeStdoutSha256": calls[-1]["stdoutSha256"], "nativeOriginalReturncode": 0,
             "liveRegistrationQualified": False, "installerTransactionQualified": False,
+            "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
+
+
+def removal_native_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-native-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(REMOVAL_NATIVE_RUST_TESTS),
+            "passed": 4, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def removal_native_rust_tests_result(stdout):
+    _rust_test_output(stdout, REMOVAL_NATIVE_RUST_TESTS, "removal-native-rust-test")
+    return removal_native_rust_test_record()
+
+
+def removal_app_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-app-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(REMOVAL_APP_RUST_TESTS),
+            "passed": 10, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def removal_app_rust_tests_result(stdout):
+    _rust_test_output(stdout, REMOVAL_APP_RUST_TESTS, "removal-app-rust-test")
+    return removal_app_rust_test_record()
+
+
+def removal_data_result(result, source, rows):
+    """Only this returned two-graph DATA scope; never removal or installer authority."""
+    need(type(result) is dict and identity(source, 40) and result.get("source") == source
+         and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
+         and result.get("outcome") == "passed" and result.get("passed") is True
+         and result.get("failure") is None and result.get("phase") == REMOVAL_ROLES[-1], "removal-owner-result")
+    need(all(result.get(key) is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown", "scratchRetired"))
+         and result.get("cleanupErrors") == []
+         and all(result.get(key) is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
+             "nativeOwnerReturned", "protectedRetentionRequired", "exactReceiptRetired", "protectedRootRetired",
+             "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified"))
+         and all(result.get(key) is None for key in ("native", "nativeRustTests", "package", "producerSigningRustTests",
+             "packageProducerRustTests", "contextReceiptDiagnostic", "installedReaderRustTests", "installerWorkerRustTests"))
+         and result.get("installedArtifactRoster") is None and result.get("receiptOriginals") == []
+         and result.get("protectedMetadataObservations") == [], "removal-owner-finality")
+    need(result["installerContext"]["started"] is False and result["installerContext"]["completed"] is False
+         and result["serviceLayoutObservation"]["selected"] is False and result["serviceLayoutObservation"]["started"] is False
+         and result["btmLogObservation"]["state"] == "not-requested", "removal-owner-scope")
+    artifacts = result.get("artifacts")
+    need(type(artifacts) is dict and set(artifacts) == {"removal-data"}, "removal-artifacts")
+    data = artifacts["removal-data"]
+    need(type(data) is dict and set(data) == {"clock", "nativeRustTests", "appRustTests", "sourceHashes"}, "removal-record")
+    registration_clock_data(data["clock"])
+    _rust_tests_data(data["nativeRustTests"], removal_native_rust_test_record(), "removal-native-rust-test")
+    _rust_tests_data(data["appRustTests"], removal_app_rust_test_record(), "removal-app-rust-test")
+    need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(REMOVAL_SOURCES)
+         and all(identity(data["sourceHashes"][name], 64) and data["sourceHashes"][name] == rows[name]["sha256"]
+                 for name in REMOVAL_SOURCES), "removal-source-binding")
+    calls = result.get("originalCalls")
+    need(type(calls) is list and len(calls) == 2 and all(type(call) is dict for call in calls)
+         and [call.get("role") for call in calls] == list(REMOVAL_ROLES), "removal-call-roster")
+    for call in calls:
+        need(set(call) == {"role", "entered", "returned", "workTimeoutSeconds", "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
+             and call["entered"] is True and call["returned"] is True
+             and type(call["returncode"]) is int and call["returncode"] == 0
+             and type(call["workTimeoutSeconds"]) is int and 0 < call["workTimeoutSeconds"] <= 480
+             and type(call["outputLimitBytes"]) is int and call["outputLimitBytes"] == 4194304
+             and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
+    return {"scope": "removal-compiled-data-only", "clock": data["clock"],
+            "nativeRustTests": data["nativeRustTests"], "appRustTests": data["appRustTests"],
+            "sourceHashes": data["sourceHashes"], "originalCalls": calls,
+            "liveRemovalQualified": False, "installerTransactionQualified": False,
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
 
 
@@ -3175,7 +3288,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -3364,12 +3477,13 @@ class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
     def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
-                 service_cocoa=False, registration_reservation=False):
+                 service_cocoa=False, registration_reservation=False, removal_data=False):
         need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
-             and type(registration_reservation) is bool
-             and sum((service_layout, context_receipts, service_cocoa, registration_reservation)) <= 1,
+             and type(registration_reservation) is bool and type(removal_data) is bool
+             and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data)) <= 1,
              "layout-operation-selector")
         self.registration_selected = registration_reservation
+        self.removal_selected = removal_data
         self.registration_deadline = self.registration_last = None
         self.registration_clock_failed = False
         self.service_cocoa_selected = service_cocoa
@@ -4766,7 +4880,7 @@ class Operation:
                 and self.outputs_closed and self.protected_closed and native_finality and context_finality
                 and layout_finality and not self.cleanup_errors)
         self.scratch_retired = False
-        if safe and getattr(self, "registration_selected", False):
+        if safe and (getattr(self, "registration_selected", False) or getattr(self, "removal_selected", False)):
             try:
                 self.registration_tick()  # Same deadline AFTER all original closes, before deletion.
             except BaseException:
@@ -4996,7 +5110,97 @@ class Operation:
                      protectedRootRetired=fixture_closed)
         return value
 
+    def execute_removal_data(self):
+        # Existing sole command owner, two fixed graphs, no native fixture/BTM route.
+        failure = None
+        self.scratch_retired = False
+        self.sources_closed = self.outputs_closed = self.protected_closed = False
+        origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        need(type(origin) is int and 0 < origin <= MAX_RAW - WORK_SECONDS * 1000000000, "registration-phase-origin")
+        self.registration_last, self.registration_deadline = origin, origin + WORK_SECONDS * 1000000000
+        data = {"clock": {"clock": "CLOCK_MONOTONIC", "startedNs": str(origin),
+                          "deadlineNs": str(self.registration_deadline), "lastNs": str(origin), "closed": False},
+                "nativeRustTests": None, "appRustTests": None, "sourceHashes": {}}
+        self.artifacts["removal-data"] = data
+        try:
+            self.registration_tick()
+            self.begin()
+            for relative in REMOVAL_SOURCES:
+                data["sourceHashes"][relative] = digest(self.source.read(relative))
+            batches = (
+                (REMOVAL_ROLES[0], NATIVE, ("--features", "package-producer-signing", "--lib"),
+                 REMOVAL_NATIVE_RUST_TESTS, removal_native_rust_tests_result, "nativeRustTests"),
+                (REMOVAL_ROLES[1], INSTALLER, ("--lib",), REMOVAL_APP_RUST_TESTS, removal_app_rust_tests_result, "appRustTests"),
+            )
+            for role, directory, flags, names, parser, key in batches:
+                self.registration_tick()
+                target = self.scratch / (role + "-target")
+                self.scratch_origins[target] = self.mkdir(target)["identity"]
+                primary = None
+                try:
+                    cargo, environment = self.compiler_environment(target)
+                    argv = [cargo, "test", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"),
+                            "--locked", "--offline", "--jobs", "1", "--target", TARGET,
+                            "--no-default-features", *flags, "--message-format=short", "--color", "never",
+                            "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *names]
+                    result = self.call(role, argv, environment, cwd=CHECKOUT, timeout=self.registration_tick(480), limit=4194304)
+                    if result.returncode != 0:
+                        try:
+                            diagnostic = installer_worker_diagnostic_result(result.stdout, result.stderr, self.source.rows, removal_role=role)
+                            if diagnostic is not None:
+                                self.calls[-1]["removalDataDiagnostic"] = diagnostic
+                        except BaseException:
+                            pass  # A projection failure cannot replace the returned nonzero original.
+                        raise Refused("original-command-failed")
+                    self.registration_tick()
+                    data[key] = parser(result.stdout)
+                    self.registration_tick()
+                except BaseException as error:
+                    primary = error
+                    raise
+                finally:
+                    try:
+                        if all(call["returned"] for call in self.calls) and not self.registration_clock_failed:
+                            self.registration_tick()
+                            self.retire_target(target)
+                            self.registration_tick()
+                    except BaseException:
+                        if primary is None:
+                            raise
+        except BaseException as error:
+            failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
+                       and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
+                       else "removal-original-refused-or-unknown")
+        finally:
+            try:
+                self.registration_tick()
+            except BaseException:
+                self.cleanup_errors.append("registration-clock-unconfirmed")
+                if failure is None:
+                    failure = "registration-phase-clock"
+            try:
+                self.finish()
+            except BaseException:
+                self.cleanup_errors.append("removal-finalization-unknown")
+                if failure is None:
+                    failure = "removal-finalization-unknown"
+            try:
+                self.registration_tick()
+            except BaseException:
+                if failure is None:
+                    failure = "registration-phase-clock"
+        data["clock"].update(lastNs=str(self.registration_last), closed=(failure is None and self.sources_closed and self.outputs_closed
+                      and self.protected_closed and self.scratch_retired and not self.cleanup_errors))
+        value = self.receipt(failure)
+        passed = (failure is None and self.sources_closed and self.outputs_closed and self.protected_closed
+                  and self.scratch_retired and not self.cleanup_errors)
+        value.update(passed=passed, outcome="passed" if passed else "failed")
+        return value
+
+
     def execute(self):
+        if getattr(self, "removal_selected", False):
+            return self.execute_removal_data()
         if getattr(self, "registration_selected", False):
             return self.execute_registration()
         failure = None
@@ -5072,7 +5276,8 @@ def main():
                               service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT],
                               context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT],
                               service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT],
-                              registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT])
+                              registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT],
+                              removal_data=sys.argv[1:] == [REMOVAL_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -5099,6 +5304,9 @@ def main():
         if operation.registration_selected and value["passed"]:
             registration_reservation_result(value, os.environ["GITHUB_SHA"], source.rows)
             operation.registration_tick()
+        if operation.removal_selected and value["passed"]:
+            removal_data_result(value, os.environ["GITHUB_SHA"], source.rows)
+            operation.registration_tick()
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")
         report.publish(work / "e2-native-result.json", body)
@@ -5118,7 +5326,7 @@ def main():
         report.finish()
         print("E2 fixture evidence finalization failed; do not accept a provisional result.", file=sys.stderr)
         return 1
-    if operation.registration_selected and value["passed"]:
+    if (operation.registration_selected or operation.removal_selected) and value["passed"]:
         try:
             operation.registration_tick()  # SAME endpoint after receipt and stdout closes/writes.
         except BaseException:

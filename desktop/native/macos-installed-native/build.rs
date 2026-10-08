@@ -205,6 +205,9 @@ fn main() {
                 ("mrk_install_producer_source", "mrk_install_producer_compile_only_source"),
                 ("mrk_install_producer_source_leaf_matches", "mrk_install_producer_compile_only_source_leaf_matches"),
                 ("mrk_install_producer_new", "mrk_install_producer_compile_only_new"),
+                ("mrk_remove_producer_new", "mrk_remove_producer_compile_only_new"),
+                ("mrk_remove_producer_code_new", "mrk_remove_producer_compile_only_code_new"),
+                ("mrk_remove_producer_sign_new", "mrk_remove_producer_compile_only_sign_new"),
                 ("mrk_install_producer_code_new", "mrk_install_producer_compile_only_code_new"),
                 ("mrk_install_producer_sign_new", "mrk_install_producer_compile_only_sign_new"),
                 ("mrk_install_producer_sign_copy", "mrk_install_producer_compile_only_sign_copy"),
@@ -212,7 +215,7 @@ fn main() {
                 ("mrk_install_producer_release", "mrk_install_producer_compile_only_release"),
                 ("mrk_install_producer_retire", "mrk_install_producer_compile_only_retire"),
             ] { syntax.define(from, Some(to)); }
-            // Type/API coverage of configured signing code only: all nine
+            // Type/API coverage of configured signing code only: all twelve
             // exports are renamed, and no Rust path can call this translation.
             syntax.define("MRK_INSTALL_PRODUCER_SIGNING", Some("1"));
             syntax.include(&compile_only).file("src/install_producer.m")
