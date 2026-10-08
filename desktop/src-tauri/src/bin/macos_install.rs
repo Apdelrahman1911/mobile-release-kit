@@ -4550,7 +4550,7 @@ mod installer {
             encoded: Vec<u8>, digest: [u8;32],
             native: native::removal_coordinator::RemovalChallengeData,
         }
-        fn removal_hex_data<const N:usize>(text:&str)->Result<[u8;N]> {
+        pub(super) fn removal_hex_data<const N:usize>(text:&str)->Result<[u8;N]> {
             check(text.len()==N*2 && text.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
                 "removal-binding-hex")?;
             let mut value=[0;N];
