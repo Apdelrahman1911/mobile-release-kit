@@ -46,7 +46,7 @@ def workflow_step(workflow, name):
 
 # Exact independent shipping-compile job only. All prior installed/source
 # assertions receive their unchanged bytes; a partial or altered job refuses.
-SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 70172, '3afa3893694784c7d00e6682c9947b5304184b93599cb3a3dece9ec1722e3479', ''))
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 73267, 'c194c396b28813f9875f52e0d85ba13dac29196a289ebefbcc9dbc426b926dfc', ''))
 
 
 def without_shipping_compile_workflow(source):
@@ -8059,7 +8059,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
         tree = ast.parse(program)
         pure_names = {"need", "pairs", "finite_float", "document", "identity", "tool_shape_data", "returned_data", "commands_data",
                       "artifact_data", "cleanup_allowed_data", "passed_data", "controller_config_data",
-                      "controller_audit_data", "controller_record_data", "controller_runtime_data"}
+                      "controller_audit_data", "controller_record_data", "controller_runtime_data", "owner_error_data"}
         constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT",
                      "CONTROLLER_BASE", "CONTROLLER_DIRS", "CONTROLLER_EXES", "CONTROLLER_SCRIPTS", "CONTROLLER_FILES", "CONTROLLER_REASONS"}
         selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
@@ -8181,6 +8181,49 @@ class MacCurrentRuntimeData(unittest.TestCase):
         for bad in (CompletedProcess(argv[5], 0, b'', b''), CompletedProcess(argv[6], True, b'', b''),
                     CompletedProcess(argv[6], 0, '', b''), CompletedProcess(argv[6], 0, b'x' * 4097, b'')):
             self.assertFalse(ns['returned_data'](bad, argv[6], 4096))
+        # Actual workflow projection on inert owner exceptions; no process or main executes.
+        class OwnerError(Exception):
+            def __init__(self, message, mask=None):
+                super().__init__(message)
+                self.dispatched, self.contained, self.cleanup_complete = True, True, False
+                self.owner_failure_mask = mask
+        class Interrupted(KeyboardInterrupt):
+            dispatched, contained = True, False
+        owner_types = SimpleNamespace(ProcessError=OwnerError, ProcessInterrupted=Interrupted)
+        diagnose = lambda error: ns['owner_error_data'](error, owner_types)
+        diagnostic = diagnose(OwnerError('owned command produced incomplete output', 63))
+        self.assertEqual(diagnostic, dict(available=True, chainTruncated=False, typedFacts=[dict(
+            kind='process-error', dispatched=True, contained=True, cleanupComplete=False,
+            ownerFailureMask=63, reason='incomplete-output')]))
+        for mask in (None, True, False, -1, 0, 64, '2'):
+            self.assertIsNone(diagnose(OwnerError('private credential/path never exported', mask))['typedFacts'][0]['ownerFailureMask'])
+        for mask in (1, 2, 4, 8, 16, 32):
+            self.assertEqual(diagnose(OwnerError('owned command output exceeds its bound', mask))['typedFacts'][0]['ownerFailureMask'], mask)
+        hidden = OwnerError('private credential/path never exported')
+        hidden.dispatched, hidden.contained, hidden.cleanup_complete = 1, 'yes', None
+        row = diagnose(hidden)['typedFacts'][0]
+        self.assertEqual((row['dispatched'], row['contained'], row['cleanupComplete'], row['reason']), (None, None, None, 'unknown'))
+        self.assertNotIn('private credential/path', json.dumps(diagnose(hidden)))
+        nontext = OwnerError(object())
+        self.assertEqual(diagnose(nontext)['typedFacts'][0]['reason'], 'unknown')
+        interrupted = diagnose(Interrupted())['typedFacts'][0]
+        self.assertEqual((interrupted['kind'], interrupted['contained'], interrupted['cleanupComplete'], interrupted['ownerFailureMask']),
+                         ('interrupted', False, None, None))
+        self.assertEqual(ns['owner_error_data'](hidden, None), dict(available=False, typedFacts=[], chainTruncated=False))
+        wrapped = ValueError('private wrapper text')
+        wrapped.__cause__ = hidden; hidden.__context__ = wrapped
+        self.assertEqual(len(diagnose(wrapped)['typedFacts']), 1)
+        self.assertFalse(diagnose(wrapped)['chainTruncated'])
+        head = OwnerError('unknown')
+        for _ in range(20):
+            parent = OwnerError('unknown'); parent.__cause__ = head; head = parent
+        self.assertEqual(len(diagnose(head)['typedFacts']), 16)
+        self.assertTrue(diagnose(head)['chainTruncated'])
+        self.assertEqual(program.count('owner_error_data(error, owner)'), 2)  # definition + catch only
+        self.assertIn("receipt['failure']['ownerDiagnostic'] = dict(available=False)", program)
+        self.assertIn("owner = None", program)
+        self.assertIn("pending = True; receipt['originalPending'] = True", program)
+        self.assertIn("if not pending and input_originals_known:", program)
         _target, output, rows, _macho = normal_cargo_fixture(work / 'cargo-target', checkout=checkout)
         rows.append({'reason': 'build-finished', 'success': True})
         encoded = lambda value: b''.join(json.dumps(row, separators=(',', ':')).encode() + b'\n' for row in value)

@@ -4978,6 +4978,45 @@ jobs:
                           sizeAllowed=0 < info.st_size <= 256 * 1024 * 1024)
 
 
+          def owner_error_data(error, owner):
+              # Closed observation only; never substitutes for an original return.
+              if owner is None:
+                  return dict(available=False, typedFacts=[], chainTruncated=False)
+              reasons = {
+                  'owned command produced incomplete output': 'incomplete-output',
+                  'owned command output exceeds its bound': 'output-bound',
+                  'owned command protocol or original ownership is incomplete': 'protocol-or-ownership',
+                  'owned command failed, timed out, or produced incomplete output': 'command-failed-or-incomplete',
+                  'owned command cleanup could not be confirmed': 'cleanup-unconfirmed',
+                  'owned command executable could not be started': 'exec-rejected',
+                  'owned command was stopped before execution': 'stopped-before-exec',
+                  'owned command original parent ended': 'parent-ended',
+                  'owned command original observer ended': 'observer-ended',
+                  'owned command fence name already exists': 'fence-collision',
+              }
+              pending, seen, facts = [error], set(), []
+              while pending and len(seen) < 16:
+                  current = pending.pop()
+                  if current is None or id(current) in seen: continue
+                  seen.add(id(current))
+                  if isinstance(current, (owner.ProcessError, owner.ProcessInterrupted)):
+                      interrupted = isinstance(current, owner.ProcessInterrupted)
+                      row = dict(kind='interrupted' if interrupted else 'process-error')
+                      for source, target in (('dispatched', 'dispatched'), ('contained', 'contained'),
+                                             ('cleanup_complete', 'cleanupComplete')):
+                          value = getattr(current, source, None)
+                          row[target] = value if type(value) is bool else None
+                      mask = getattr(current, 'owner_failure_mask', None) if not interrupted else None
+                      # Simultaneous failed predicates, NOT chronological cause or authority.
+                      row['ownerFailureMask'] = mask if type(mask) is int and 1 <= mask <= 63 else None
+                      args = current.args
+                      row['reason'] = (reasons.get(args[0], 'unknown')
+                                       if len(args) == 1 and type(args[0]) is str else 'unknown')
+                      facts.append(row)
+                  pending.extend((current.__context__, current.__cause__))
+              return dict(available=True, typedFacts=facts, chainTruncated=bool(pending))
+
+
           def returned_data(result, argv, cap):
               return (type(result) is subprocess.CompletedProcess and type(result.args) is list
                       and result.args == argv and type(result.returncode) is int
@@ -5075,6 +5114,7 @@ jobs:
               pending = False
               input_originals_known = True
               controller = None
+              owner = None
               receipt = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
                              workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
                              target=TARGET, commands=[], originalPending=False, sourcePost=False, toolsPost=False,
@@ -5408,6 +5448,11 @@ jobs:
                   receipt['failure'] = dict(stage=stage, kind=type(error).__name__)
                   if type(error) is ValueError and len(error.args) == 1 and error.args[0] in CONTROLLER_REASONS:
                       receipt['failure']['condition'] = error.args[0]
+                  try:
+                      receipt['failure']['ownerDiagnostic'] = owner_error_data(error, owner)
+                  except BaseException:
+                      # Diagnostic failure cannot replace the original error or settle pending work.
+                      receipt['failure']['ownerDiagnostic'] = dict(available=False)
               finally:
                   receipt['originalPending'] = pending
                   try:
