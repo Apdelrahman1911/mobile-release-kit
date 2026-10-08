@@ -3973,6 +3973,115 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertIsNone(diagnostic["outputDataFailure"])
                 else: self.assertEqual(diagnostic["outputDataFailure"]["reasonCode"], expected_code)
 
+
+        # Standard Swift compiler diagnostics do not contain XCTest method text.
+        # Exercise the actual parser/publisher, never another compiler/CLI owner.
+        compiler_prefix = b"/Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"
+        def compiler_line(message, *, line=321, column=17, severity=b"error", path=compiler_prefix, ending=b"\n"):
+            return path + f":{line}:{column}: ".encode() + severity + b": " + message + ending
+        def compiler_diagnostic(stdout, stderr=b"", **kwargs):
+            return MODULE.normal_failure_diagnostics("build", None,
+                subprocess.CompletedProcess(["fixed-build"], 65, stdout, stderr), **kwargs)
+        compile_error = compiler_line(b"cannot convert value of type '" + secret + b"' to expected argument type 'Int'")
+        compile_note = compiler_line(b"PRIVATE unexpected note " + secret, line=322, severity=b"note",
+            path=b"NormalAppUITests.swift", ending=b"\r\n")
+        observed = compiler_diagnostic(compile_error, compile_note + b"** BUILD FAILED **\n")
+        self.assertEqual(observed["compilerDiagnostics"], [
+            {"stream": "stdout", "source": "NormalAppUITests.swift", "line": 321, "column": 17,
+             "severity": "error", "reasonCodes": ["type-mismatch"]},
+            {"stream": "stderr", "source": "NormalAppUITests.swift", "line": 322, "column": 17,
+             "severity": "note", "reasonCodes": []}])
+        self.assertTrue(observed["markers"]["buildFailed"])
+        self.assertEqual(observed["status"], "classified")
+        self.assertEqual(observed["sourceFailures"], [])
+        self.assertEqual(observed["originalReturncode"], 65)
+        self.assertEqual(observed["stdoutSha256"], hashlib.sha256(compile_error).hexdigest())
+        for hidden in (secret, b"/Users/runner", b"unexpected note", b"expected argument type"):
+            self.assertNotIn(hidden, MODULE.encoded(observed))
+        for message, code in ((b"value has no member 'PRIVATE'", "missing-member"),
+                (b"cannot find 'PRIVATE' in scope", "missing-name"),
+                (b"'PRIVATE' is inaccessible due to 'private' protection level", "inaccessible"),
+                (b"missing argument for parameter 'PRIVATE' in call", "missing-argument"),
+                (b"extra argument 'PRIVATE' in call", "extra-argument"),
+                (b"generic parameter 'PRIVATE' could not be inferred", "inference"),
+                (b"ambiguous use of 'PRIVATE'", "ambiguous-overload"),
+                (b"variable 'PRIVATE' used before being initialized", "initialization"),
+                (b"call can throw but is not marked with 'try'", "throwing"),
+                (b"call to main actor-isolated method 'PRIVATE'", "actor-isolation"),
+                (b"capture of 'PRIVATE' with non-sendable type", "sendability"),
+                (b"expected expression after 'PRIVATE'", "syntax"),
+                (b"invalid redeclaration of 'PRIVATE'", "redeclaration")):
+            with self.subTest(compiler_category=code):
+                item = compiler_diagnostic(compiler_line(message))["compilerDiagnostics"][0]
+                self.assertIn(code, item["reasonCodes"])
+                self.assertNotIn(b"PRIVATE", MODULE.encoded(item))
+        unknown = compiler_diagnostic(compiler_line(secret))
+        self.assertEqual(unknown["compilerDiagnostics"][0]["reasonCodes"], [])
+        self.assertEqual(unknown["status"], "classified")  # A usable public SOURCE site, not a cause claim.
+        for raw in (compile_error[:-1], compiler_line(b"x" * 4096),
+                compiler_line(secret, line=0), compiler_line(secret, line=65536), compiler_line(secret, line="01"),
+                compiler_line(secret, column=0), compiler_line(secret, column=4097), compiler_line(secret, column="01"),
+                compiler_line(secret, severity=b"warning"), compiler_line(secret, path=b"Private.swift"),
+                compiler_line(secret, path=b"/Users/private/NormalAppUITests.swift"),
+                compiler_line(secret, path=compiler_prefix + b".bak"),
+                b"prefix " + compile_error, compiler_line(secret + b"\x00suffix")):
+            with self.subTest(compiler_bad_site=raw[:80]):
+                item = compiler_diagnostic(raw)
+                self.assertEqual(item["compilerDiagnostics"], [])
+                self.assertNotIn(secret, MODULE.encoded(item))
+        self.assertTrue(compiler_diagnostic(compile_error[:-1])["findingsTruncated"])
+        self.assertTrue(compiler_diagnostic(compiler_line(b"x" * 4096))["findingsTruncated"])
+        for path in (b"NormalAppUITests.swift", compiler_prefix,
+                b"desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift"):
+            item = compiler_diagnostic(compiler_line(b"unknown", line=65535, column=4096, path=path))
+            self.assertEqual((item["compilerDiagnostics"][0]["line"], item["compilerDiagnostics"][0]["column"]), (65535, 4096))
+        crowded = b"".join(compiler_line(b"unknown", line=n, severity=b"note") for n in range(1, 9)) + compile_error
+        item = compiler_diagnostic(crowded, b"Error Domain=NSPOSIXErrorDomain Code=2\n")
+        self.assertEqual(len(item["compilerDiagnostics"]), 4)
+        self.assertEqual(item["compilerDiagnostics"][0]["severity"], "error")
+        self.assertTrue(item["findingsTruncated"])
+        self.assertEqual(item["errorCodes"], [{"stream": "stderr", "domain": "NSPOSIXErrorDomain", "code": 2}])
+        self.assertLessEqual(len(MODULE.encoded(item)) + 1, 4096)
+        # Stress optional-row trimming without weakening the existing final cap.
+        actual_base = MODULE.failure_base
+        def nearly_full_base(*args, **kwargs):
+            value = actual_base(*args, **kwargs)
+            value["legacyPadding"] = "x" * (3900 - len(MODULE.encoded(value)))
+            return value
+        with patch.object(MODULE, "failure_base", side_effect=nearly_full_base):
+            item = compiler_diagnostic(crowded)
+        self.assertTrue(item["findingsTruncated"])
+        self.assertLessEqual(len(item["compilerDiagnostics"]), 1)
+        self.assertIn("legacyPadding", item)
+        self.assertLessEqual(len(MODULE.encoded(item)) + 1, 4096)
+        exact = compile_error + b"x" * (1048576 - len(compile_error))
+        self.assertEqual(len(compiler_diagnostic(exact)["compilerDiagnostics"]), 1)
+        with self.assertRaises(MODULE.Refused): compiler_diagnostic(exact + b"x")
+        for phase, selection, engineering in (("query", None, False), ("summary", "test.xcresult", False),
+                ("test", "test.xcresult", False), ("build", None, True)):
+            value = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, compile_error, b""), engineering=engineering)
+            self.assertNotIn("compilerDiagnostics", value)
+            self.assertNotIn("buildFailed", value["markers"])
+        build_request = {"phase": "build", "result": None, "derived": Path("/inert/DerivedData")}
+        build_original = subprocess.CompletedProcess(["fixed-build"], 65, compile_error, b"")
+        for fault in ("none", "formatter", "publication"):
+            with self.subTest(compiler_publication=fault), ExitStack() as stack:
+                captured = []
+                def publish_build(path, raw, cap):
+                    captured.append((path, raw, cap))
+                    if fault == "publication": raise OSError(secret.decode())
+                stack.enter_context(patch.object(MODULE, "exclusive_output", side_effect=publish_build))
+                stack.enter_context(patch.object(MODULE.sys, "stderr", io.StringIO()))
+                if fault == "formatter": stack.enter_context(patch.object(MODULE, "normal_failure_diagnostics", side_effect=ValueError(secret.decode())))
+                MODULE.publish_failure_diagnostics(build_request, build_original)
+                self.assertEqual(build_original.returncode, 65)
+                self.assertEqual(len(captured), 1)
+                self.assertEqual((captured[0][0].name, captured[0][2]), ("build.failure-diagnostics.json", 4096))
+                self.assertLessEqual(len(captured[0][1]), 4096)
+                self.assertNotIn(secret, captured[0][1])
+                self.assertEqual(json.loads(captured[0][1])["originalReturncode"], 65)
+
     def test_dashboard_failure_diagnostics_preserve_finite_prewait_data(self):
         reasons = (
             "loading", "not-loaded", "bridge-unavailable", "selection-unavailable",

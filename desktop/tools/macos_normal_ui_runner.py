@@ -1886,6 +1886,9 @@ def failure_base(phase, selection, original, *, engineering=False):
         "queryObservations": [], "requireObservations": [], "dashboardReadiness": None,
         "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
+    if not engineering and phase == "build":
+        value["compilerDiagnostics"] = []
+        value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
     return value
@@ -1912,6 +1915,32 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                  rb"-\[MRKNormalAppUITests\.NormalAppUITests (" + method_pattern + rb")\][ \t]{0,8}:")
     markers = {"testExecuteFailed": rb"(?m)^\*\* TEST EXECUTE FAILED \*\*\r?$",
                "testingFailed": rb"(?m)^Testing failed:", "xcodebuildError": rb"(?m)^xcodebuild: error:"}
+    compiler_eligible = "compilerDiagnostics" in value
+    # These are public SOURCE locations, not arbitrary paths or error prose.
+    # No quoted compiler token is published; unknown messages retain their site.
+    compiler_site = (rb"(?:(?:/Users/runner/work/mobile-release-kit/mobile-release-kit/)?"
+        rb"desktop/native/macos-normal-ui/MRKNormalAppUITests/)?NormalAppUITests\.swift:"
+        rb"([1-9][0-9]{0,4}):([1-9][0-9]{0,3}):[ \t]{1,8}(error|note):[ \t]{1,8}([^\r\n\x00]+)")
+    compiler_reasons = (
+        ("type-mismatch", (b"cannot convert", b"cannot assign value of type", b"cannot be converted")),
+        ("missing-member", (b"has no member", b"has no dynamic member")),
+        ("missing-name", (b"cannot find", b"use of unresolved identifier")),
+        ("inaccessible", (b"is inaccessible due to", b"cannot access")),
+        ("missing-argument", (b"missing argument", b"requires an argument")),
+        ("extra-argument", (b"extra argument", b"argument passed to call that takes no arguments")),
+        ("inference", (b"could not be inferred", b"requires that", b"generic parameter")),
+        ("ambiguous-overload", (b"ambiguous", b"no exact matches", b"no matching")),
+        ("initialization", (b"before being initialized", b"before all stored properties are initialized",
+                            b"used within its own initial value", b"return from initializer without initializing")),
+        ("throwing", (b"can throw", b"can throw but is not marked", b"try is not allowed", b"call to throwing")),
+        ("actor-isolation", (b"actor-isolated", b"main actor", b"nonisolated", b"async", b"await")),
+        ("sendability", (b"sendable", b"sending risks causing data races")),
+        ("syntax", (b"expected expression", b"expected declaration", b"expected pattern", b"expected member",
+                    b"expected identifier", b"expected '", b"consecutive statements", b"unterminated", b"extraneous")),
+        ("redeclaration", (b"invalid redeclaration", b"already declared", b"already defined")),
+    ) if compiler_eligible else ()
+    if compiler_eligible:
+        markers["buildFailed"] = rb"(?m)^\*\* BUILD FAILED \*\*\r?$"
     if methods:
         markers.update(selectedCaseStarted=rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
             selectedCaseFailed=rb"(?m)^Test Case '" + case + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$")
@@ -2147,6 +2176,25 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             record, offset = body[offset:end], end + 1
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
+            if compiler_eligible:
+                if complete and len(record) <= 4096:
+                    site = re.fullmatch(compiler_site, record)
+                    if site is not None and int(site.group(1)) <= 65535 and int(site.group(2)) <= 4096:
+                        message = site.group(4).lower()  # Local only; never returned or logged.
+                        finding = {"stream": stream, "source": "NormalAppUITests.swift",
+                            "line": int(site.group(1)), "column": int(site.group(2)),
+                            "severity": site.group(3).decode("ascii"),
+                            "reasonCodes": [code for code, tokens in compiler_reasons
+                                            if any(token in message for token in tokens)][:3]}
+                        rows = value["compilerDiagnostics"]
+                        if finding not in rows:
+                            rows.append(finding)
+                            rows.sort(key=lambda row: row["severity"] != "error")  # Errors precede optional notes.
+                            if len(rows) > 4:
+                                rows.pop()
+                                value["findingsTruncated"] = True
+                elif b"NormalAppUITests.swift:" in record:
+                    value["findingsTruncated"] = True  # Never classify partial or oversized records.
             if output_eligible:
                 attempted_marker = (output_namespace in record or (record and output_namespace.startswith(record))
                     or (not complete and any(record.endswith(output_namespace[:size])
@@ -2254,9 +2302,15 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             "line": output_site[0] if output_site is not None else None,
             "column": output_site[1] if output_site is not None else None,
             "sample": "after-cleanup-attempt" if output_scenario is not None else None}
+    if compiler_eligible:
+        # New optional observations cannot displace old findings or their cap.
+        # Reserve two bytes for the final status string below.
+        while value["compilerDiagnostics"] and len(encoded(value)) + 1 > 4094:
+            value["compilerDiagnostics"].pop()
+            value["findingsTruncated"] = True
     value["status"] = ("unavailable" if require_invalid or guide_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
-        or value.get("outputDataFailure") is not None else "unclassified")
+        or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 
