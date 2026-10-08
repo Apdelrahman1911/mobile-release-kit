@@ -8390,7 +8390,8 @@ mod installer {
             }
             fn create(source:RemovalResumeSource,exclusion:RemovalResumeExclusion,observed:maintenance::RemovalResumeObservation,
                 book:&Install,request:&str,nonce:&str)->Result<Self> {
-                use mobile_release_desktop::macos_remove_record::{self as record,CheckData as K,ClassificationData as C};
+                use mobile_release_desktop::{macos_remove_record::{self as record,ClassificationData as C},
+                    macos_install_maintenance::CheckData as K};
                 removal_hex_data::<16>(request)?;removal_hex_data::<16>(nonce)?;
                 exclusion.post(book,&source)?;observed.continuation_budget(book)?;
                 let genesis=source.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?;
