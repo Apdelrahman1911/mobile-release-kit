@@ -22,5 +22,7 @@
 #endif
 #define MRK_MAINTENANCE_GATE_NAME "maintenance-gate-v1"
 #define MRK_MAINTENANCE_GATE_BYTES "MRK-MACOS-MAINTENANCE-GATE-v1\n"
+#define MRK_REGISTRATION_GATE_NAME "registration-reservation-v1"
+#define MRK_REGISTRATION_GATE_BYTES "MRK-MACOS-REGISTRATION-RESERVATION-v1\n"
 #define MRK_INSTALLED_ENTRY_ARGUMENT "--mrk-installed-entry-v1"
 #endif

@@ -69,6 +69,7 @@ finally:
 if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 OWNER_DIAGNOSTIC_ROLES = (
+    "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
     'service-cocoa-startup',
@@ -93,6 +94,7 @@ OWNER_DIAGNOSTIC_ROLES = (
 )
 
 OWNER_DIAGNOSTIC_PHASES = (
+    "reservation-rust-tests", "registration-entry-build", "registration-fixture-build", "registration-fixture-run",
     'fixture-btm-log',
     'service-layout-build', 'service-layout-single', 'service-layout-nested',
     'service-cocoa-startup',
@@ -121,6 +123,43 @@ OWNER_DIAGNOSTIC_PHASES = (
 )
 
 OWNER_DIAGNOSTIC_REFUSALS = (
+    'registration-app-rust-test-record',
+    'registration-app-rust-test-bound',
+    'registration-app-rust-test-framing',
+    'registration-app-rust-test-roster',
+    'registration-app-rust-test-result',
+    'registration-failure-frame',
+    'registration-failure-shape',
+    'registration-failure-facts',
+    'registration-failure-originals',
+    'registration-artifacts',
+    'registration-call-finality',
+    'registration-call-roster',
+    'registration-clock-record',
+    'registration-clock-shape',
+    'registration-compiled',
+    'registration-fixture-fact',
+    'registration-fixture-facts',
+    'registration-fixture-frame',
+    'registration-fixture-shape',
+    'registration-fixture-type',
+    'registration-image-post',
+    'registration-native-stderr',
+    'registration-native-streams',
+    'registration-owner-finality',
+    'registration-owner-result',
+    'registration-owner-scope',
+    'registration-phase-clock',
+    'registration-phase-deadline',
+    'registration-phase-origin',
+    'registration-publication-clock',
+    'registration-record',
+    'registration-rust-test-bound',
+    'registration-rust-test-framing',
+    'registration-rust-test-record',
+    'registration-rust-test-result',
+    'registration-rust-test-roster',
+    'registration-source-binding',
     'cocoa-admission-prerequisites',
     'cocoa-code-selector',
     'cocoa-completion-call-binding',
@@ -345,6 +384,7 @@ summary = {
     "contextDistributionDiagnostic": None,
     "contextReceiptDiagnostic": None, "diagnosticCaptured": False,
     "contextObservationCompleted": False,
+    "registrationReservation": None, "registrationReservationQualified": False, "registrationFailure": None,
     "failure": "owner-result-missing-or-refused", "accepted": False,
     "syntheticIdentity": True, "productionIdentityQualified": False,
     "actualAppIntegrationQualified": False, "distributionQualified": False,
@@ -413,7 +453,8 @@ try:
                  and all(result[key] is False for key in (
                      "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified",
                      "arbitraryConcurrentPrivilegedWriterResistance", "flatPayloadAtomicNoReplace",
-                     "rawOutputIncluded", "environmentValuesIncluded", "protectedRootRetired", "exactReceiptRetired")),
+                     "rawOutputIncluded", "environmentValuesIncluded", "exactReceiptRetired"))
+                 and type(result["protectedRootRetired"]) is bool,
                  "summary-owner-scope")
     flags = ("installerEntered", "installationReturnedSuccess", "nativeEntered", "nativeOwnerReturned",
              "sourceClosesKnown", "protectedClosesKnown", "outputClosesKnown", "scratchRetired", "protectedRetentionRequired")
@@ -446,10 +487,10 @@ try:
         installer_context = context_record
     service_layout = None
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
-    fixture.need(layout_record["type"] == fixture.COCOA_TYPE and layout_record["selected"] is True
-                 and all(call["role"] not in ("service-layout-single", "service-layout-nested", "native-run")
-                         and not call["role"].startswith("context-") for call in calls),
-                 "summary-layout-route")
+    fixture.need(layout_record["selected"] is False and layout_record["started"] is False
+                 and all(call["role"] in fixture.REGISTRATION_ROLES for call in calls)
+                 and [call["role"] for call in calls] == list(fixture.REGISTRATION_ROLES[:len(calls)]),
+                 "summary-registration-route")
     if layout_record["observerSourceSha256"] is not None:
         fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
                      "summary-cocoa-source")
@@ -579,17 +620,32 @@ try:
         # Exact own-event masks/hashes are mentions, not path lookups,
         # causal findings, native finality or service authority.
         btm_log = btm_record
-    # This committed workflow selects only fixed Cocoa startup DATA.
-    # Context/normal CLI behavior is retained, but cannot qualify this observation.
+    # This committed workflow selects only fixed registration primitive qualification.
+    # Full E2/Cocoa/Context helper paths are unchanged but are not selected here.
     fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")
     context_receipt_diagnostic = None
     diagnostic_captured = False
+    registration = None
+    registration_last = None
     if outcome == "success":
         try:
-            fixture.service_cocoa_result(result, source)
-            diagnostic_captured = True
+            registration = fixture.registration_reservation_result(result, source, rows)
+            registration_last = fixture.registration_publication_tick(
+                registration, fixture.decimal(registration["clock"]["lastNs"]))
         except BaseException:
-            pass  # Preserve failure metadata; never promote an incomplete original.
+            registration = None  # Original/source/clock failure never becomes positive.
+    registration_qualified = registration is not None
+    registration_failure = None
+    if (len(calls) == 6 and calls[-1]["role"] == fixture.REGISTRATION_ROLES[-1]
+            and calls[-1]["returned"] and calls[-1]["returncode"] != 0
+            and all(call["returned"] for call in calls)
+            and all(result[key] for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown"))):
+        try:
+            failed = result["artifacts"]["registration-reservation"]["nativeFailure"]
+            registration_failure = fixture.registration_fixture_failure(
+                fixture.canonical(failed), calls[-1]["returncode"], source)
+        except BaseException:
+            pass  # Failed/missing diagnostic is not a success or a second native call.
     context_completed = installer_context is not None and installer_context["completed"]
     known_pass = (
         outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
@@ -621,11 +677,15 @@ try:
         contextDistributionDiagnostic=context_distribution_diagnostic,
         contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured),
         contextObservationCompleted=bool(context_completed),
+        registrationReservation=registration, registrationReservationQualified=registration_qualified, registrationFailure=registration_failure,
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
-        failure=None if known_pass or diagnostic_captured else "native-step-or-owner-did-not-establish-acceptance")
+        failure=None if registration_qualified else "native-step-or-owner-did-not-establish-acceptance")
     book.check()
 except BaseException:
     summary["accepted"] = False
+    summary["registrationReservation"] = None
+    summary["registrationReservationQualified"] = False
+    summary["registrationFailure"] = None
     summary["nativeRustTests"] = None
     summary["installerWorkerRustTests"] = None
     summary["installedReaderRustTests"] = None
@@ -645,6 +705,9 @@ except BaseException:
 finally:
     if not book.finish():
         summary["accepted"] = False
+        summary["registrationReservation"] = None
+        summary["registrationReservationQualified"] = False
+        summary["registrationFailure"] = None
         summary["nativeRustTests"] = None
         summary["installerWorkerRustTests"] = None
         summary["installedReaderRustTests"] = None
@@ -663,10 +726,14 @@ finally:
         summary["failure"] = "summary-input-close-unknown"
 publisher = fixture.Originals()
 try:
+    if summary["registrationReservationQualified"]:
+        registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
     body = fixture.canonical(summary)
     fixture.need(len(body) <= 49152, "summary-output-bound")
     publisher.publish(work / "e2-workflow-result.json", body, 0o600)
     fixture.need(publisher.finish(), "summary-output-close")
+    if summary["registrationReservationQualified"]:
+        registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
     output_path = Path(os.environ["GITHUB_OUTPUT"])
     fixture.need(output_path.parent == WORK_PARENT / "_runner_file_commands"
                  and re.fullmatch(r"set_output_[A-Za-z0-9-]+", output_path.name), "summary-step-output-route")
@@ -677,17 +744,19 @@ try:
                      and before.st_nlink == 1, "summary-step-output-original")
         line = ((b"accepted=true\n" if summary["accepted"] else b"accepted=false\n")
                 + (b"diagnostic_captured=true\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\n")
-                + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n"))
+                + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n")
+                + (b"registration_qualified=true\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\n"))
         fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
         os.fsync(fd)
         fixture.need(fixture.signature(os.fstat(fd)) == fixture.signature(os.stat(output_path, follow_symlinks=False)),
                      "summary-step-output-changed")
     finally:
         os.close(fd)
+    if summary["registrationReservationQualified"]:
+        registration_last = fixture.registration_publication_tick(summary["registrationReservation"], registration_last)
 except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-print("E2 native fixture accepted." if summary["accepted"] else
-      "Cocoa status observation completed; no lifecycle or production qualification." if summary["diagnosticCaptured"] else
-      "E2 native fixture is not accepted; retained summary is failure evidence only.")
+print("Registration reservation primitive qualification completed; no app, Installer transaction or ServiceManagement qualification."
+      if summary["registrationReservationQualified"] else "Registration reservation qualification failed; retained summary is failure evidence only.")
 PY_PUBLISH

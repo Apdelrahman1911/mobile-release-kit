@@ -22,7 +22,7 @@ mod installer {
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum State { Reserved, Acquiring, Owned, NoHandle, Closing, Closed, Unknown, KernelExitRetained }
     #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant }
+    enum Role { Reader, PayloadWriter, MetadataWriter, ReceiptWriter, GateWriter, GateParticipant, ReservationWriter, ReservationParticipant }
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Identity { dev: i64, ino: u64, mode: u32, uid: u32, gid: u32, links: u64, size: i64,
         mtime: i64, mtime_ns: i64, ctime: i64, ctime_ns: i64 }
@@ -48,6 +48,18 @@ mod installer {
         fn new() -> Self { Self { entered:false,creation:"not-attempted",written:0,sealed:false,persisted:false,
             parent_persisted:false,parent:None,writer:None,participant:None,verified:false,lock_attempted:false,exclusive_acquired:false } }
     }
+    // R is independent of M: never overwrite the lifetime maintenance participant.
+    // These fields record actual original calls, not authority decoded from DATA.
+    struct RegistrationReservation {
+        entered: bool, creation: &'static str, written: u64, sealed: bool, persisted: bool, parent_persisted: bool,
+        parent: Option<usize>, writer: Option<usize>, participant: Option<usize>, verified: bool,
+        lock_attempted: bool, exclusive_acquired: bool, closed_under_maintenance: bool, verified_after_go: bool,
+    }
+    impl RegistrationReservation {
+        fn new() -> Self { Self { entered:false,creation:"not-attempted",written:0,sealed:false,persisted:false,
+            parent_persisted:false,parent:None,writer:None,participant:None,verified:false,
+            lock_attempted:false,exclusive_acquired:false,closed_under_maintenance:false,verified_after_go:false } }
+    }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
         // `end` remains the original legacy-entry clock. The private B2 path
@@ -58,6 +70,7 @@ mod installer {
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
         metadata: installation_record::Progress,
         gate: MaintenanceGate,
+        registration: RegistrationReservation,
         // Actual native observations of the one B3 writer, never parsed action authority.
         maintenance: Option<maintenance::Effects>,
         #[cfg(feature = "macos-installed-installer-fixture")]
@@ -330,7 +343,7 @@ mod installer {
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
-                gate:MaintenanceGate::new(),maintenance:None,
+                gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
                 #[cfg(feature = "macos-installed-installer-fixture")]
                 fixture: None }
         }
@@ -361,6 +374,7 @@ mod installer {
                     self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned;
                     if self.originals[n].role == Role::MetadataWriter { self.metadata.opened()?; }
                     if self.originals[n].role == Role::GateWriter { self.gate.creation = "created"; }
+                    if self.originals[n].role == Role::ReservationWriter { self.registration.creation = "created"; }
                     Ok(n)
                 }
                 Err(_error) => {
@@ -377,6 +391,7 @@ mod installer {
         fn open_role(&mut self, parent: Option<usize>, name: &str, directory: bool, role: Role) -> Result<usize> {
             let n = self.reserve(parent, name, role)?;
             if role == Role::GateParticipant { self.gate.participant = Some(n); }
+            if role == Role::ReservationParticipant { self.registration.participant = Some(n); }
             let before = self.named(parent, name).map_err(|_| "named-refused")?;
             check(before.st_mode & SFlag::S_IFMT.bits() == if directory { SFlag::S_IFDIR.bits() } else { SFlag::S_IFREG.bits() }
                 && (directory || before.st_nlink == 1), "input-type")?;
@@ -391,6 +406,7 @@ mod installer {
             let n = self.reserve(Some(parent), name, role)?;
             if role == Role::MetadataWriter { self.metadata.attempted()?; }
             if role == Role::GateWriter { self.gate.writer = Some(n); self.gate.creation = "attempting"; }
+            if role == Role::ReservationWriter { self.registration.writer = Some(n); self.registration.creation = "attempting"; }
             self.originals[n].state = State::Acquiring;
             let flags = OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK;
             let opened = fcntl::openat(self.fd(parent)?, name, flags, Mode::from_bits_truncate(0o600));
@@ -435,6 +451,8 @@ mod installer {
             actual.map_err(|_| "persistence-refused")?; // Actual native error wins.
             if file && self.originals[n].role == Role::GateWriter { self.gate.persisted = true; }
             if !file && self.gate.parent == Some(n) && self.gate.writer.is_some() { self.gate.parent_persisted = true; }
+            if file && self.originals[n].role == Role::ReservationWriter { self.registration.persisted = true; }
+            if !file && self.registration.parent == Some(n) && self.registration.writer.is_some() { self.registration.parent_persisted = true; }
             self.clock()?; // The SAME original synchronous call may return late.
             #[cfg(feature = "macos-installed-installer-fixture")]
             if self.fixture_report_persistence_failure(point) { return Err("fixture-reported-persistence-failure"); }
@@ -519,6 +537,10 @@ mod installer {
                     self.gate.written = self.gate.written.checked_add(count as u64).ok_or("gate-write-bound")?;
                     check(self.gate.written <= paths::MAINTENANCE_GATE_BYTES.len() as u64, "gate-write-bound")?;
                 }
+                if self.originals[n].role == Role::ReservationWriter {
+                    self.registration.written = self.registration.written.checked_add(count as u64).ok_or("registration-write-bound")?;
+                    check(self.registration.written <= paths::REGISTRATION_GATE_BYTES.len() as u64, "registration-write-bound")?;
+                }
                 bytes = &bytes[count..];
             }
             Ok(())
@@ -528,6 +550,7 @@ mod installer {
             unistd::fchown(self.fd(n)?, Some(unistd::Uid::from_raw(0)), Some(unistd::Gid::from_raw(0))).map_err(|_| "file-owner")?;
             stat::fchmod(self.fd(n)?, Mode::from_bits_truncate(if executable { 0o555 } else { 0o444 })).map_err(|_| "file-mode")?;
             if self.originals[n].role == Role::GateWriter { self.gate.sealed = true; }
+            if self.originals[n].role == Role::ReservationWriter { self.registration.sealed = true; }
             self.protected(n, false, Some(if executable { 0o555 } else { 0o444 }))?;
             native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_| "file-attributes")?;
             self.persist(n, true)?; self.forward_close(n, "file-close-unknown")
@@ -551,7 +574,7 @@ mod installer {
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,
                 "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
                 "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),
-                "maintenanceGate":self.gate_record(),
+                "maintenanceGate":self.gate_record(),"registrationReservation":self.registration_record(),
                 "originalSettlement":"pending-final-closes","stage":self.original_summary(self.stage),
                 "runtime":self.original_summary(self.runtime),"app":self.original_summary(self.app),"createdAncestors":self.creation_summary(),
                 "inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")})).map_err(|_| "receipt-shape")?;
@@ -691,6 +714,121 @@ mod installer {
             let support = self.open(Some(library), "Application Support", true)?; self.protected_as(support, true, None, AclRole::SystemSupport)?;
             Ok(support)
         }
+        fn registration_protected(&self, reader: usize) -> Result<()> {
+            check(self.registration.participant == Some(reader)
+                && self.originals[reader].role == Role::ReservationParticipant
+                && self.originals[reader].parent == self.registration.parent
+                && self.originals[reader].name == paths::REGISTRATION_GATE_NAME, "registration-original")?;
+            let parent = self.registration.parent.ok_or("registration-original")?;
+            self.check_name(parent, false)?; self.protected(parent, true, Some(0o755))?;
+            self.protected(reader, false, Some(0o444))?;
+            let actual = stat::fstat(self.fd(reader)?).map_err(|_| "registration-stat")?;
+            check(actual.st_flags == 0 && actual.st_size == paths::REGISTRATION_GATE_BYTES.len() as i64, "registration-shape")?;
+            native::no_xattrs(self.fd(reader)?.as_fd()).map_err(|_| "registration-attributes")?;
+            self.check_name(reader, true)
+        }
+        fn registration_open(&mut self, destination: usize) -> Result<usize> {
+            check(self.registration.entered && self.registration.parent == Some(destination)
+                && self.registration.participant.is_none(), "registration-original")?;
+            let reader = self.open_role(Some(destination), paths::REGISTRATION_GATE_NAME, false, Role::ReservationParticipant)?;
+            if let Some(writer) = self.registration.writer {
+                check(self.identity(writer)?.same_object(self.identity(reader)?), "registration-created-correspondence")?;
+            }
+            self.registration_protected(reader)?;
+            let (_, body) = self.read(reader, paths::REGISTRATION_GATE_BYTES.len() as u64, true)?;
+            check(body == paths::REGISTRATION_GATE_BYTES, "registration-content")?;
+            self.registration.verified = true;
+            self.clock()?; Ok(reader)
+        }
+        fn registration_before_maintenance(&mut self, destination: usize) -> Result<()> {
+            self.clock()?;
+            check(!self.registration.entered && !self.gate.entered && !self.worker_stderr_is_gate,
+                "registration-order")?;
+            self.registration.entered = true; self.registration.parent = Some(destination);
+            match self.named(Some(destination), paths::REGISTRATION_GATE_NAME) {
+                Err(Errno::ENOENT) => { self.registration.creation = "absent-observed"; return Ok(()); },
+                Ok(_) => self.registration.creation = "existing-not-modified",
+                Err(_) => return Err("registration-name-refused"),
+            }
+            let reader = self.registration_open(destination)?;
+            self.registration.lock_attempted = true;
+            #[allow(deprecated)] // Borrow the original; never an early-unlocking Flock wrapper.
+            let locked = fcntl::flock(self.fd(reader)?.as_raw_fd(), fcntl::FlockArg::LockExclusiveNonblock);
+            locked.map_err(|_| "registration-busy-or-refused")?;
+            self.registration.exclusive_acquired = true;
+            self.clock()?; self.registration_protected(reader)
+        }
+        fn registration_complete_admitted(&mut self, destination: usize, action: ActionData) -> Result<()> {
+            // Only two fixed callers: exact fresh roster, or fully authenticated
+            // maintenance::observe + current incoming producer controls. No repair.
+            self.clock()?;
+            check(!self.worker_stderr_is_gate && self.registration.entered
+                && self.registration.parent == Some(destination) && !self.registration.closed_under_maintenance,
+                "registration-order")?;
+            let maintenance = self.gate.participant.ok_or("registration-maintenance-required")?;
+            check(self.gate.verified && self.gate.lock_attempted && self.gate.exclusive_acquired
+                && self.gate.parent == Some(destination) && self.originals[maintenance].state == State::Owned,
+                "registration-maintenance-required")?;
+            self.gate_protected(maintenance)?;
+            if self.registration.creation == "absent-observed" {
+                // Same-current/no-op or restore of an R-capable release cannot
+                // repair a missing reservation. Update was admitted from an
+                // exact source-authorized predecessor by maintenance::observe.
+                check(matches!(action, ActionData::FreshInstall | ActionData::Update), "registration-predecessor-required")?;
+                check(self.registration.participant.is_none() && !self.registration.lock_attempted
+                    && !self.registration.exclusive_acquired, "registration-order")?;
+                self.absent(destination, paths::REGISTRATION_GATE_NAME)?;
+                let writer = self.create_file(destination, paths::REGISTRATION_GATE_NAME, Role::ReservationWriter)?;
+                self.write_all(writer, paths::REGISTRATION_GATE_BYTES)?;
+                self.seal_file(writer, false)?; self.persist(destination, false)?;
+                self.registration_open(destination)?;
+            } else {
+                check(self.registration.creation == "existing-not-modified" && self.registration.verified
+                    && self.registration.lock_attempted && self.registration.exclusive_acquired,
+                    "registration-order")?;
+            }
+            let reader = self.registration.participant.ok_or("registration-original")?;
+            self.registration_protected(reader)?; self.gate_protected(maintenance)?;
+            // Consume R only with the actual original M_EX already held. A
+            // failed/unknown close bars all payload/worker effects; M stays last.
+            check(self.close(reader), "registration-close-unknown")?;
+            self.registration.closed_under_maintenance = true; // Returned close before possible late clock.
+            self.clock()?; self.gate_protected(maintenance)?; self.registration_ready()
+        }
+        fn registration_after_go(&mut self, destination: usize) -> Result<()> {
+            self.clock()?;
+            check(self.worker_stderr_is_gate && self.worker_go_eof && self.worker_deadline.is_some()
+                && !self.registration.entered && self.gate.verified && !self.gate.lock_attempted
+                && !self.gate.exclusive_acquired && self.gate.parent == Some(destination), "registration-worker-go")?;
+            self.registration.entered = true; self.registration.parent = Some(destination);
+            self.registration.creation = "existing-not-modified";
+            self.registration_open(destination)?;
+            self.registration.verified_after_go = true;
+            // The worker authenticates permanent R but NEVER claims its own EX.
+            self.registration_ready()
+        }
+        fn registration_ready(&self) -> Result<()> {
+            self.clock()?;
+            let reader = self.registration.participant.ok_or("registration-finality-missing")?;
+            check(self.registration.entered && self.registration.verified, "registration-finality-missing")?;
+            let maintenance = self.gate.participant.ok_or("registration-maintenance-required")?;
+            self.gate_protected(maintenance)?;
+            if self.worker_stderr_is_gate {
+                check(self.worker_go_eof && self.registration.verified_after_go
+                    && !self.registration.lock_attempted && !self.registration.exclusive_acquired
+                    && !self.registration.closed_under_maintenance, "registration-worker-go")?;
+                self.registration_protected(reader)
+            } else {
+                check(self.gate.lock_attempted && self.gate.exclusive_acquired
+                    && self.registration.closed_under_maintenance && !self.registration.verified_after_go
+                    && self.originals[reader].state == State::Closed && self.originals[reader].fd.is_none(),
+                    "registration-finality-missing")?;
+                let parent = self.registration.parent.ok_or("registration-original")?;
+                self.check_name(parent, false)?;
+                let named = self.named(Some(parent), paths::REGISTRATION_GATE_NAME).map_err(|_| "registration-name-refused")?;
+                check(Identity::of(&named) == self.identity(reader)? && named.st_flags == 0, "registration-closed-original")
+            }
+        }
         fn gate_protected(&self, reader: usize) -> Result<()> {
             self.protected(reader, false, Some(0o444))?;
             let s = stat::fstat(self.fd(reader)?).map_err(|_| "gate-stat")?;
@@ -745,6 +883,24 @@ mod installer {
                 "exclusiveAcquired":self.gate.exclusive_acquired,"participant":state(self.gate.participant),
                 "cleanup":"original-closes-only-permanent-gate-retained"})
         }
+        fn registration_record(&self) -> serde_json::Value {
+            let state = |index: Option<usize>| -> &'static str {
+                match index.and_then(|i| self.originals.get(i)).map(|r| r.state) {
+                    None => "not-attempted", Some(State::Reserved) => "reserved", Some(State::Acquiring) => "acquiring",
+                    Some(State::Owned) => "owned", Some(State::NoHandle) => "no-handle", Some(State::Closing) => "closing",
+                    Some(State::Closed) => "closed", Some(State::Unknown) => "unknown",
+                    Some(State::KernelExitRetained) => "kernel-exit-retained",
+                }
+            };
+            serde_json::json!({"schemaVersion":1,"entered":self.registration.entered,"creation":self.registration.creation,
+                "fixedBytes":paths::REGISTRATION_GATE_BYTES.len(),"writtenBytes":self.registration.written,
+                "sealed":self.registration.sealed,"filePersisted":self.registration.persisted,
+                "parentPersisted":self.registration.parent_persisted,"writer":state(self.registration.writer),
+                "verified":self.registration.verified,"exclusiveAttempted":self.registration.lock_attempted,
+                "exclusiveAcquired":self.registration.exclusive_acquired,"participant":state(self.registration.participant),
+                "closedUnderMaintenance":self.registration.closed_under_maintenance,"verifiedAfterGo":self.registration.verified_after_go,
+                "cleanup":"original-closes-only-permanent-reservation-retained"})
+        }
         fn install(&mut self, source: &str) -> Result<()> {
             let prepared = self.prepare_fresh(source)?;
             let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
@@ -760,9 +916,9 @@ mod installer {
             let indexed = inventory.index()?;
             check(indexed.payload_bytes.checked_add(inventory_bytes.len() as u64)
                 .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
-                .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .and_then(|n| n.checked_add((paths::MAINTENANCE_GATE_BYTES.len() + paths::REGISTRATION_GATE_BYTES.len()) as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "inventory-bound")?;
-            check(indexed.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT), "installed-file-bound")?;
+            check(indexed.files.len().checked_add(4).is_some_and(|n| n <= installation_record::FILE_LIMIT), "installed-file-bound")?;
             let support = self.support_root()?;
             #[cfg(not(feature = "macos-installed-installer-fixture"))]
             let destination = self.directory(support, "MobileReleaseKit", false, 0o755)?;
@@ -773,25 +929,30 @@ mod installer {
             #[cfg(feature = "macos-installed-installer-fixture")]
             self.fixture_before_release_absence(versions)?;
             self.absent(versions, paths::RELEASE)?;
+            self.registration_before_maintenance(destination)?;
             self.maintenance_gate(destination)?;
+            maintenance::fresh_registration_roster(self, destination, versions)?;
+            self.registration_complete_admitted(destination, ActionData::FreshInstall)?;
             Ok(PreparedFresh { input, inventory, inventory_bytes, destination, versions })
         }
         fn prepare_maintenance_input(&mut self, input: usize, inventory: Inventory, inventory_bytes: Vec<u8>) -> Result<PreparedFresh> {
             check(!cfg!(feature="macos-installed-installer-fixture"),"worker-fixture-route-unavailable")?;
             let index = inventory.index()?;
             check(index.payload_bytes.checked_add(inventory_bytes.len() as u64)
-                .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64 + paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64 + paths::MAINTENANCE_GATE_BYTES.len() as u64 + paths::REGISTRATION_GATE_BYTES.len() as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT)
-                && index.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT),"inventory-bound")?;
+                && index.files.len().checked_add(4).is_some_and(|n| n <= installation_record::FILE_LIMIT),"inventory-bound")?;
             let support = self.support_root()?;
             let destination = self.directory(support,"MobileReleaseKit",false,0o755)?;
             let versions = self.directory(destination,"versions",false,0o755)?;
+            self.registration_before_maintenance(destination)?;
             self.maintenance_gate(destination)?;
             Ok(PreparedFresh { input,inventory,inventory_bytes,destination,versions })
         }
         fn install_prepared(&mut self, prepared: PreparedFresh, invocation: &str) -> Result<()> {
             check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
             check(worker::invocation_valid(invocation), "stage-identity")?;
+            self.registration_ready()?;
             let (stage, app, runtime) = self.stage_payload(&prepared, invocation, true)?;
             let runtime = runtime.ok_or("stage-missing")?;
             let PreparedFresh { input: _, inventory: _, inventory_bytes, destination, versions } = prepared;
@@ -945,6 +1106,7 @@ mod installer {
                     _ => Err("gate-finality-missing"),
                 };
             }
+            if result.is_ok() { result = self.registration_ready(); }
             let settled = self.settle_originals();
             // Sample AFTER every final close; an earlier Ok is not timely finality.
             match self.worker_deadline.as_ref() {
@@ -962,7 +1124,7 @@ mod installer {
                 "runtimePublication":self.runtime_publication,"appPublication":self.app_publication,"staging":self.stage_name,
                 "payloadVerified":self.payload_verified,"payloadWritersSettled":self.payload_writers_settled(),
                 "installationMetadata":self.metadata.snapshot(self.metadata_writers_settled()),"originalsSettled":self.originals_settled(),
-                "maintenanceGate":self.gate_record(),
+                "maintenanceGate":self.gate_record(),"registrationReservation":self.registration_record(),
                 "deadlineMetAfterFinalCloses":result.deadline_met,"createdAncestors":self.creation_summary(),"cleanup":"original-closes-only-no-deletion",
                 "sourceCommit":option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),"inventorySha256":option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256"),
                 "runtimeManifestSha256":option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")})
@@ -1041,6 +1203,13 @@ mod installer {
         fn exact_roster(book: &mut Install, directory: usize, wanted: &BTreeSet<String>) -> Result<()> {
             check(roster_now(book, directory)?.keys().cloned().collect::<BTreeSet<_>>() == *wanted,
                 "maintenance-exact-roster")
+        }
+        pub(super) fn fresh_registration_roster(book: &mut Install, root: usize, versions: usize) -> Result<()> {
+            check(book.gate.verified && book.gate.exclusive_acquired && !book.worker_stderr_is_gate,
+                "registration-maintenance-required")?;
+            let mut names: BTreeSet<String> = ["versions", paths::MAINTENANCE_GATE_NAME].into_iter().map(str::to_owned).collect();
+            if book.registration.verified { names.insert(paths::REGISTRATION_GATE_NAME.into()); }
+            exact_roster(book, root, &names)?; exact_roster(book, versions, &BTreeSet::new())
         }
         fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
             let reader = book.open(Some(parent), name, false)?;
@@ -1266,6 +1435,10 @@ mod installer {
                 Ok(_) => Some(read_history(book, root, &selected)?),
             };
             let mut root_names: BTreeSet<String> = ["versions", paths::MAINTENANCE_GATE_NAME].into_iter().map(str::to_owned).collect();
+            // Before parent creation only an authenticated existing R is in the
+            // exact roster. The worker requires the parent's provisioned leaf;
+            // it authenticates that original after actual GO, before effects.
+            if book.registration.verified || book.worker_stderr_is_gate { root_names.insert(paths::REGISTRATION_GATE_NAME.into()); }
             let mut version_names = BTreeSet::new(); let mut costs = Vec::new(); let mut evidence_bytes = 0u64;
             let mut metadata_control = 0u64; let mut controls = None;
             let (action, old_app, old_release, invocation_count) = if let Some(history) = &history {
@@ -1339,6 +1512,12 @@ mod installer {
                     .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64)).ok_or("maintenance-payload-bound")?;
                 costs.push(incoming_cost);
             }
+            // Gates are root-wide permanent storage, not release metadata or
+            // another generation. Charge both once inside unchanged aggregate caps.
+            let root_cost = costs.first_mut().ok_or("maintenance-generation-missing")?;
+            root_cost.files = root_cost.files.checked_add(2).ok_or("maintenance-payload-bound")?;
+            root_cost.bytes = root_cost.bytes.checked_add((paths::MAINTENANCE_GATE_BYTES.len()
+                + paths::REGISTRATION_GATE_BYTES.len()) as u64).ok_or("maintenance-payload-bound")?;
             let selected_bytes = selected.encode_data().map_err(|_| "maintenance-selected-shape")?;
             check(EXPORT_LIMIT == transaction::REQUEST_EXPORT_LIMIT, "maintenance-request-bound")?;
             // Historical results are not success authority and need not be
@@ -1353,8 +1532,8 @@ mod installer {
                 .and_then(|n| n.checked_add(6 * transaction::PRODUCER_CONTROL_LIMIT as u64))
                 .ok_or("maintenance-control-bound")?;
             let records = (book.originals.len() as u64).checked_add(copy_files.checked_mul(3).ok_or("maintenance-original-bound")?)
-                .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256)).ok_or("maintenance-original-bound")?;
-            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12;
+                .and_then(|n| n.checked_add(incoming.directories.len() as u64 * 3 + 256 + 3)).ok_or("maintenance-original-bound")?;
+            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1;
             data(transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live))?;
             Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls })
         }
@@ -1656,6 +1835,7 @@ mod installer {
         }
         pub(super) fn execute(book: &mut Install, observed: Observed, invocation: &str) -> Result<()> {
             check(book.worker_stderr_is_gate && book.worker_go_eof && book.maintenance.is_none(), "maintenance-original-go-required")?;
+            book.registration_ready()?;
             let deadline = book.worker_deadline.as_ref().ok_or("worker-clock-missing")?;
             let at = deadline.check_work()?;
             let progress = data(ProgressData::new_data(observed.action,at,deadline.original_endpoint()))?;
@@ -2019,7 +2199,7 @@ mod installer {
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
-                    metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),maintenance:None,
+                    metadata:installation_record::Progress::default(),gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
                     #[cfg(feature = "macos-installed-installer-fixture")]
                     fixture:None }
             }
@@ -2265,7 +2445,12 @@ mod installer {
             "pending-original-export-finalization", "persistence-refused", "postruntime-persistence-report", "pre-exit-writer-result",
             "prepublication-persistence-report", "private-writer-init", "protection-refused", "published-original",
             "published-stat", "read-bound", "read-refused", "readback-close",
-            "receipt-shape", "refused-staging-retained", "runtime-publication-collision", "runtime-publication-confirmed",
+            "receipt-shape", "refused-staging-retained",
+            "registration-attributes", "registration-busy-or-refused", "registration-close-unknown", "registration-closed-original",
+            "registration-content", "registration-created-correspondence", "registration-finality-missing", "registration-maintenance-required",
+            "registration-name-refused", "registration-order", "registration-original", "registration-predecessor-required",
+            "registration-shape", "registration-stat", "registration-worker-go", "registration-write-bound",
+            "runtime-publication-collision", "runtime-publication-confirmed",
             "sealed-directory-stat", "size-changed", "source-attributes", "source-close",
             "source-directory-close", "source-exact-roster", "source-identity-size", "source-spelling",
             "stage-directory-after-runtime-rename", "stage-identity", "stage-missing", "staging-created",
@@ -2795,6 +2980,7 @@ mod installer {
                     if let Some(producer) = &self.producer {
                         observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
                     }
+                    self.book.registration_complete_admitted(observed.prepared.destination, observed.action)?;
                     // This fixed sibling is reserved before intent or worker
                     // payload. Request spelling supplies correlation, not EX,
                     // producer trust, a source tuple, or package identity.
@@ -2805,7 +2991,7 @@ mod installer {
                 } else { let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?; }
                 let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
                 check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
-                self.book.gate_protected(gate)?; self.book.source_post(&actual)?;
+                self.book.gate_protected(gate)?; self.book.registration_ready()?; self.book.source_post(&actual)?;
                 let end = self.book.shared_deadline()?.end;
                 // Include temporary ends of two pipes and the standard spawn
                 // error channel as headroom, not extra permitted live book FDs.
@@ -2859,7 +3045,7 @@ mod installer {
                 let worker_result = &ready["writerResultEndpoint"];
                 pipe_shape(worker_command)?; pipe_shape(worker_result)?;
                 valid_control(&ready,&control("ready",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result))?;
-                self.book.source_post(actual)?; self.book.gate_protected(gate)?;
+                self.book.source_post(actual)?; self.book.gate_protected(gate)?; self.book.registration_ready()?;
                 if let Some(request) = &self.request_export { request.empty_original(&self.book)?; }
                 // XNU gives opposite pipe endpoints different inode facts.
                 // Recheck each OWN original; remote endpoint numbers confer no authority.
@@ -3002,7 +3188,7 @@ mod installer {
                     && self.output_eof && self.output_close && self.command_close && !self.wait_unknown && self.errors.is_empty(),
                     "maintenance-original-join-required")?;
                 self.book.shared_deadline()?.check_work()?;
-                self.producer_post(false)?;
+                self.producer_post(false)?; self.book.registration_ready()?;
                 check(joined.observed_at < self.book.shared_deadline()?.original_endpoint(),"maintenance-original-join-deadline")?;
                 let observed = self.maintenance.as_mut().ok_or("maintenance-observation-missing")?;
                 let request = self.request_export.as_ref().ok_or("maintenance-request-missing")?;
@@ -3046,6 +3232,7 @@ mod installer {
                     "stateSha256":state.as_ref().map(transaction::StateData::digest_data),"capsuleSha256":hash(&capsule),
                     "payloadWriteCount":joined.outcome.writes,"payloadWriteBytes":joined.outcome.bytes,
                     "originalWriterJoined":true,"parentFinality":"pending-original-closes-and-outer-return",
+                    "registrationReservation":self.book.registration_record(),
                     "retainedGate":"parent-command-reference-until-kernel-exit","historicalOuterExit":"unverified"}))
             }
             fn record_maintenance_export(&mut self, joined: &JoinedWriter) -> Result<Value> {
@@ -3135,9 +3322,9 @@ mod installer {
             let index = inventory.index()?;
             check(index.payload_bytes.checked_add(inventory_bytes.len() as u64)
                 .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
-                .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .and_then(|n| n.checked_add((paths::MAINTENANCE_GATE_BYTES.len() + paths::REGISTRATION_GATE_BYTES.len()) as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT)
-                && index.files.len().checked_add(3).is_some_and(|n| n <= installation_record::FILE_LIMIT), "inventory-bound")?;
+                && index.files.len().checked_add(4).is_some_and(|n| n <= installation_record::FILE_LIMIT), "inventory-bound")?;
             let source = book.worker_source(&source_path,input)?;
             check(init["source"] == source_data(book,&source)?, "worker-source-binding")?;
             let support = book.support_root()?;
@@ -3208,6 +3395,11 @@ mod installer {
                     && result_endpoint == pipe_data(stdout.as_fd(),true,book.shared_deadline()?)?, "worker-pipe-post")?;
                 check(unistd::getppid().as_raw() == parent as i32, "worker-parent-changed")?;
                 book.worker_go_eof = true; // Actual complete GO and EOF, not parsed permission DATA alone.
+                let destination = match &prepared {
+                    PreparedWorker::Fresh(prepared) => prepared.destination,
+                    PreparedWorker::Maintenance(observed) => observed.prepared.destination,
+                };
+                book.registration_after_go(destination)?;
                 match prepared {
                     PreparedWorker::Fresh(prepared) => book.install_prepared(prepared,&args[3]),
                     PreparedWorker::Maintenance(observed) => maintenance::execute(&mut book,observed,&args[3]),

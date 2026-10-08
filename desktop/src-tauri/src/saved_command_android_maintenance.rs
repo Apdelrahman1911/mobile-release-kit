@@ -121,7 +121,7 @@ mod selected{
         pickers:[Option<Arc<crate::asset_session::OriginalWork>>;3],source_generation:u32,
         cohort:AdmissionCohort,control:Arc<Control>,reservation:OnceLock<usize>,
         signal:Arc<native::Signal>,clock:OnceLock<OriginalClock>,client:Mutex<Option<transport::Client>>,
-        preparation:service_setup::Preparation,
+        preparation:service_setup::MaintenancePreparation,
         worker:AsyncMutex<Option<JoinHandle<WorkerReturn>>>,returned:Mutex<Option<Result<WorkerReturn,tokio::task::JoinError>>>,
         worker_joined:AtomicBool,coordinator:Mutex<Option<JoinHandle<bool>>>,
         coordinator_return:Mutex<Option<Result<bool,tokio::task::JoinError>>>,coordinator_joined:AtomicBool,
@@ -374,7 +374,7 @@ mod selected{
             let whole=prior.checked_add(arc_bytes::<Original>().ok_or_else(unavailable)?)
                 .and_then(|bytes|bytes.checked_add(control.retained_bytes()?))
                 .and_then(|bytes|bytes.checked_add(arc_bytes::<native::Signal>()?))
-                .and_then(|bytes|bytes.checked_add(service_setup::Preparation::reservation_bytes()?))
+                .and_then(|bytes|bytes.checked_add(service_setup::MaintenancePreparation::reservation_bytes()?))
                 .and_then(|bytes|bytes.checked_add(transport::Client::project_owned_upper_bound()?))
                 .and_then(|bytes|bytes.checked_add(12*SIGNAL_STORAGE+TASK_STORAGE))
                 .filter(|bytes|*bytes<=OWNED_LIMIT).ok_or_else(unavailable)?;
@@ -443,7 +443,7 @@ mod selected{
                 || book.cohort.as_ref().is_some_and(|cohort|cohort.first.is_some())
                 || !registry.android_sources.same_census_originals(&original.pickers)
                 || registry.android_sources.census_generation()!=original.source_generation){return None;}
-            if !registry.android_registration.service.adopt_finalized_preparation(&original.preparation){
+            if !registry.android_registration.service.adopt_finalized_maintenance(&original.preparation){
                 drop(book);original.control.poisoned();return None;}
             let prepared=first.is_none() && returned.facts.prepared();
             let mut status=original.status();status.phase=if prepared{Phase::Prepared}else{Phase::Refused};
@@ -470,7 +470,7 @@ mod selected{
         }
         #[test]
         fn prepared_requires_all_original_facts_and_partial_unregister_never_reopens(){
-            let yes=service_setup::MaintenanceRun{known:true,checked:true,started_or_uncertain:true,tail_received:true,
+            let yes=service_setup::MaintenanceRun{branch:service_setup::MaintenanceBranch::Unregistered,known:true,checked:true,started_or_uncertain:true,tail_received:true,
                 unregister_accepted:true,not_registered:true,callback_retired:true,peer_ended:true,retained:Some(1)};
             assert!(yes.prepared());
             for value in [service_setup::MaintenanceRun{known:false,..yes},service_setup::MaintenanceRun{checked:false,..yes},
@@ -480,12 +480,24 @@ mod selected{
                 service_setup::MaintenanceRun{peer_ended:false,..yes},service_setup::MaintenanceRun{retained:None,..yes}]{
                 assert!(!value.prepared());
             }
+            let absent=service_setup::MaintenanceRun{branch:service_setup::MaintenanceBranch::ObservedAbsent,
+                started_or_uncertain:false,tail_received:false,unregister_accepted:false,peer_ended:false,..yes};
+            assert!(absent.prepared());
+            for bad in [service_setup::MaintenanceRun{branch:service_setup::MaintenanceBranch::Unselected,..absent},
+                service_setup::MaintenanceRun{started_or_uncertain:true,..absent},service_setup::MaintenanceRun{tail_received:true,..absent},
+                service_setup::MaintenanceRun{unregister_accepted:true,..absent},service_setup::MaintenanceRun{peer_ended:true,..absent},
+                service_setup::MaintenanceRun{known:false,..absent},service_setup::MaintenanceRun{checked:false,..absent},
+                service_setup::MaintenanceRun{callback_retired:false,..absent},service_setup::MaintenanceRun{not_registered:false,..absent},
+                service_setup::MaintenanceRun{retained:None,..absent}]{assert!(!bad.prepared());}
             let at=Instant::now();let status=Status{operation:[1;16],generation:1,phase:Phase::Refused,reason:wire::Reason::ServiceUnavailable,
                 started_or_uncertain:true,unregister_accepted:true,not_registered:true};
             let completion=Completion{status,at,endpoint:at+Duration::from_secs(1)};
             assert!(!completion.may_reopen() && !completion.request_quit());
             let closed=Completion{status:Status{phase:Phase::Prepared,..status},at,endpoint:at};
             assert!(!closed.request_quit()); // no fresh interval from a completion projection
+            let absent_completion=Completion{status:Status{phase:Phase::Prepared,started_or_uncertain:false,
+                unregister_accepted:false,not_registered:true,..status},at,endpoint:at+Duration::from_secs(1)};
+            assert!(!absent_completion.may_reopen() && absent_completion.request_quit());
         }
     }
 }

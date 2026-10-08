@@ -5620,7 +5620,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "cf51387b9e704db3c5375fed61aa4be91bf5f8bbd6fc3b4233055e64ca9f3050",
+    "desktop/tools/stage_macos_installed.py": "e02fca27200986a06cf6b321425112973c9801995ca680f4705e45261c4e75d3",
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }

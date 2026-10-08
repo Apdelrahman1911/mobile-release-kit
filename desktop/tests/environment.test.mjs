@@ -227,13 +227,13 @@ test('guided UI and synchronous workspace/bootstrap wiring preserve field help a
 
 test('installation description cannot turn layout DATA into verification or maintenance authority', () => {
   const value = { layout: 'fixed-macos', expectedLocation: '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app',
-    runtimeRelease: 'macos26-arm64-project-draft-01', installMode: 'fresh-only', maintenance: 'unavailable',
+    runtimeRelease: 'macos26-arm64-project-draft-01', installMode: 'verified-package-required', maintenance: 'unavailable',
     revealAvailable: true, assurance: 'profile-description-only' };
   assert.deepEqual(parseInstallationDescription(value), value);
   assert.notEqual(parseInstallationDescription(value), value);
   for (const change of [
     { expectedLocation: '/Applications/Other.app' }, { runtimeRelease: '../other' },
-    { maintenance: 'available' }, { installMode: 'repair' }, { assurance: 'verified' },
+    { maintenance: 'available' }, { installMode: 'repair' }, { installMode: 'fresh-only' }, { assurance: 'verified' },
     { installed: true }, { revealAvailable: 'true' },
   ]) assert.equal(parseInstallationDescription({ ...value, ...change }), null);
   assert.equal(parseInstallationDescription(undefined), null);
@@ -289,7 +289,7 @@ test('fixed Finder command is registered at all Tauri gates and explained withou
   assert.ok(shell.includes('state.document.reveal_installation()'));
   assert.ok(native.includes('activateFileViewerSelectingURLs:@[application]'));
   assert.ok(native.includes('@"/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app"'));
-  for (const text of ['Location policy · not an installation check', 'Fresh installation only.',
+  for (const text of ['Location policy · not an installation check', 'A verified Installer package is required.',
     'Finder visibility is unconfirmed', 'HelpButton content={installationLocationHelp}']) assert.ok(component.includes(text));
   assert.ok(read('../src/pages/Environment.tsx').includes('<InstallationDetails info={info} api={api}'));
   assert.ok(read('../src/App.tsx').includes('<Environment info={info} api={api}'));

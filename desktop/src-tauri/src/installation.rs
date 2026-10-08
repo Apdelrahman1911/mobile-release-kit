@@ -31,7 +31,7 @@ pub(crate) fn description(reveal_available: bool) -> Option<Description> {
         return Some(Description {
             layout: "fixed-macos", expected_location: crate::macos_install_paths::APP,
             runtime_release: crate::macos_install_paths::RELEASE,
-            install_mode: "fresh-only", maintenance: "unavailable",
+            install_mode: "verified-package-required", maintenance: "unavailable",
             reveal_available, assurance: "profile-description-only",
         });
     }
@@ -68,7 +68,7 @@ pub(crate) fn assert_installation_description_contract() {
         let value = serde_json::to_value(description(available)).unwrap();
         if NORMAL_MAC_PROFILE {
             assert_eq!(value["layout"], "fixed-macos");
-            assert_eq!(value["installMode"], "fresh-only");
+            assert_eq!(value["installMode"], "verified-package-required");
             assert_eq!(value["maintenance"], "unavailable");
             assert_eq!(value["assurance"], "profile-description-only");
             assert_eq!(value["revealAvailable"], available);

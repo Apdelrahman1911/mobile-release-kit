@@ -1,19 +1,21 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Mobile Release Kit installation</title></head>
 <body>
-<h1>Engineering fresh installation only</h1>
+<h1>Verified fixed-location installation</h1>
 <p>This package supports the fixed macOS 26 ARM64 profile. Installer obtains administrator authorization;
 only the fixed native installer writes the app and runtime. The application and Python never run as root.</p>
 <p>The app belongs at <code>/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app</code>.
 This is not a movable drag-copy installation. No other location is offered or searched.</p>
-<p><strong>Update, repair, restore, same-package reinstall and uninstall are unavailable in this engineering package.</strong>
-An occupied app or runtime is refused, not replaced. A Distribution wrapper does not change those rules.
-The existing engineering-v1 installation has no automatic migration route.</p>
+<p>The verified Installer checks whether it can perform a fresh installation, leave an exact same-package
+installation unchanged, restore a missing app at its fixed location, or update an explicitly authorized predecessor.
+These are not general repair or overwrite permissions. Modified, partial or unknown files may be refused.
+<strong>Uninstall is unavailable.</strong> The existing engineering-v1 installation has no automatic migration route.</p>
 <p>Quit Mobile Release Kit and finish its work before continuing. Installer's quit prompt does not prove
-that all original workers have settled or provide a maintenance live-use gate.</p>
+that all original workers have settled. The Installer must independently obtain its maintenance ownership.</p>
 <p>Keep projects, credential vault and Keychain records, signing originals, provider registrations,
 moved copies, unrelated files and partial-installation evidence. Do not delete the protected tree,
 change its permissions, or force-close processes to make a retry pass.</p>
-<p>For a missing, moved or conflicting installation, preserve the existing files and obtain a separately
-reviewed recovery route. This package does not search for, move or remove another copy.</p>
+<p>If the verified package refuses a missing, moved or conflicting installation, preserve the existing files
+and obtain a separately reviewed recovery route. This package does not search for, move or remove another copy.
+These instructions do not prove package signing, notarization or release readiness.</p>
 </body></html>

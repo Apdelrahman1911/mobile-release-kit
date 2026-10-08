@@ -83,6 +83,8 @@ PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
 BUNDLE_ID = "dev.mobile-release-kit.desktop"
 MAINTENANCE_GATE_NAME = "maintenance-gate-v1"
 MAINTENANCE_GATE_BYTES = b"MRK-MACOS-MAINTENANCE-GATE-v1\n"
+REGISTRATION_GATE_NAME = "registration-reservation-v1"
+REGISTRATION_GATE_BYTES = b"MRK-MACOS-REGISTRATION-RESERVATION-v1\n"
 INSTALLATION_INVENTORY_NAME = "install-inventory.json"
 INSTALLATION_RECORD_NAME = "installation-v1.json"
 INSTALLATION_RECORD_LIMIT = 8192
@@ -1721,6 +1723,9 @@ def preview_command(args):
     need(observed.get("maintenanceGate") == {
         "state": "protected-permanent-gate-data-correspondence", "bytes": len(MAINTENANCE_GATE_BYTES),
         "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-maintenance-gate-readback")
+    need(observed.get("registrationReservation") == {
+        "state": "protected-permanent-reservation-data-correspondence", "bytes": len(REGISTRATION_GATE_BYTES),
+        "exclusionObserved": False, "workerFinalityEstablished": False}, "preview-registration-reservation-readback")
     expected = observation_inventory(argparse.Namespace(input=work / "input",
         expected_inventory=observed["inventorySha256"], expected_manifest=observed["runtimeManifestSha256"], target=selection.target), selection=selection)
     need(observed.get("nonrootReadbackFileCount") == len(expected)
@@ -2092,11 +2097,11 @@ def input_command(args, *, ticket_expectations=None):
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
             files[prefix + name] = (body, expected_mode)
     rows = [{"path": path, "sha256": digest(body), "size": len(body), "executable": mode == 0o555} for path, (body, mode) in sorted(files.items())]
-    need(len(rows) <= MAX_FILES - 3, "installer-inventory-bound")
+    need(len(rows) <= MAX_FILES - 4, "installer-inventory-bound")
     inventory = canonical({"schemaVersion": 1, "release": selection.release, "runtimeManifestSha256": args.expected_manifest, "files": rows}) + b"\n"
     decode(inventory)
     need(sum(len(data) for data, _mode in files.values()) + len(inventory) + INSTALLATION_RECORD_LIMIT
-         + len(MAINTENANCE_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
+         + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES) <= MAX_BYTES, "installer-complete-byte-bound")
     files["install-inventory.json"] = (inventory, 0o444)
     write_tree(args.output, files)
     result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
@@ -2312,7 +2317,7 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
     need(type(inventory) is dict and set(inventory) == {"schemaVersion", "release", "runtimeManifestSha256", "files"}
          and type(inventory["schemaVersion"]) is int and inventory["schemaVersion"] == 1
          and inventory["release"] == selection.release and inventory["runtimeManifestSha256"] == expected_manifest
-         and type(inventory["files"]) is list and 0 < len(inventory["files"]) <= MAX_FILES - 3, "observation-inventory-shape")
+         and type(inventory["files"]) is list and 0 < len(inventory["files"]) <= MAX_FILES - 4, "observation-inventory-shape")
     rows = {}
     for row in inventory["files"]:
         need(type(row) is dict and set(row) == {"path", "sha256", "size", "executable"}
@@ -2845,7 +2850,7 @@ def maintenance_result_data(body, request_id):
     value = maintenance_json(body, INSTALLER_RESULT_BYTES)
     maintenance_map(value, ("schemaVersion", "kind", "invocation", "requestId", "resultName", "resultFinality", "action",
                            "writerState", "writerExit", "intentSha256", "stateSha256", "capsuleSha256", "payloadWriteCount",
-                           "payloadWriteBytes", "originalWriterJoined", "parentFinality", "retainedGate", "historicalOuterExit"),
+                           "payloadWriteBytes", "originalWriterJoined", "parentFinality", "retainedGate", "historicalOuterExit", "registrationReservation"),
                     "maintenance-export-shape")
     need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 2
          and value["kind"] == "maintenance-parent-pending-finalization"
@@ -2860,6 +2865,9 @@ def maintenance_result_data(body, request_id):
     need(type(value["action"]) is str and value["action"] in states and value["writerState"] == states[value["action"]],
          "maintenance-export-action")
     maintenance_write_data(value["payloadWriteCount"], value["payloadWriteBytes"], value["action"])
+    registration_reservation_result(value["registrationReservation"], entered=True)
+    need(value["registrationReservation"]["creation"] != "created" or value["action"] in ("fresh-install", "update"),
+         "registration-reservation-not-predecessor-creation")
     return value
 
 
@@ -3170,7 +3178,7 @@ def bound_original_result(result, expected, source, inventory, manifest, *, sele
     reason, runtime, app, state, verified, _exit = expected
     need(type(result) is dict and set(result) == {"schemaVersion", "state", "reason", "release", "runtimePublication", "appPublication",
          "staging", "payloadVerified", "payloadWritersSettled", "originalsSettled", "deadlineMetAfterFinalCloses", "createdAncestors",
-         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "installationMetadata", "maintenanceGate"}, "original-result-closed-shape")
+         "cleanup", "sourceCommit", "inventorySha256", "runtimeManifestSha256", "installationMetadata", "maintenanceGate", "registrationReservation"}, "original-result-closed-shape")
     need(type(result["schemaVersion"]) is int and result["schemaVersion"] == 1 and result["release"] == selection.release
          and result["sourceCommit"] == source and result["inventorySha256"] == inventory and result["runtimeManifestSha256"] == manifest
          and result["state"] == state and result["reason"] == reason and result["runtimePublication"] == runtime and result["appPublication"] == app
@@ -3180,6 +3188,7 @@ def bound_original_result(result, expected, source, inventory, manifest, *, sele
     stage = result["staging"]
     need(stage is None or type(stage) is str and re.fullmatch(r"\.install-[0-9a-f]{32}", stage), "original-staging-name")
     maintenance_gate_result(result["maintenanceGate"], entered=stage is not None)
+    registration_reservation_result(result["registrationReservation"], entered=stage is not None)
     need(type(result["createdAncestors"]) is list and len(result["createdAncestors"]) <= 4, "original-created-ancestors")
     for row in result["createdAncestors"]:
         need(type(row) is dict and set(row) == {"name", "state", "parentOriginal", "object"} and type(row["name"]) is str
@@ -3248,7 +3257,7 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
          "installation-record-inventory")
     rows = observation_inventory_bytes(inventory_body, inventory["sha256"], manifest, selection=selection)
     need(sum(row["size"] for row in rows.values()) + len(inventory_body) + INSTALLATION_RECORD_LIMIT
-         + len(MAINTENANCE_GATE_BYTES) <= MAX_BYTES, "installation-record-total-bound")
+         + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES) <= MAX_BYTES, "installation-record-total-bound")
     return record
 
 
@@ -3302,6 +3311,43 @@ def maintenance_gate_readback(root_fd):
     body, _info = installation_metadata_leaf(root_fd, MAINTENANCE_GATE_NAME, len(MAINTENANCE_GATE_BYTES))
     need(body == MAINTENANCE_GATE_BYTES, "maintenance-gate-content")
     return {"state": "protected-permanent-gate-data-correspondence", "bytes": len(body),
+            "exclusionObserved": False, "workerFinalityEstablished": False}
+
+
+def registration_reservation_result(value, *, entered):
+    """Parent original facts only; fixed readback cannot establish these facts."""
+    flags = ("entered", "sealed", "filePersisted", "parentPersisted", "verified", "exclusiveAttempted",
+             "exclusiveAcquired", "closedUnderMaintenance", "verifiedAfterGo")
+    need(type(entered) is bool and type(value) is dict and set(value) == {
+         "schemaVersion", "entered", "creation", "fixedBytes", "writtenBytes", "sealed", "filePersisted", "parentPersisted",
+         "writer", "verified", "exclusiveAttempted", "exclusiveAcquired", "participant", "closedUnderMaintenance", "verifiedAfterGo", "cleanup"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and type(value["fixedBytes"]) is int and value["fixedBytes"] == len(REGISTRATION_GATE_BYTES)
+         and type(value["writtenBytes"]) is int and all(type(value[key]) is bool for key in flags)
+         and value["entered"] is entered and value["cleanup"] == "original-closes-only-permanent-reservation-retained",
+         "registration-reservation-result")
+    if not entered:
+        need(value["creation"] == value["writer"] == value["participant"] == "not-attempted"
+             and value["writtenBytes"] == 0 and not any(value[key] for key in flags), "registration-reservation-unentered")
+        return
+    need(value["verified"] and value["participant"] == "closed" and value["closedUnderMaintenance"]
+         and not value["verifiedAfterGo"], "registration-reservation-parent-not-settled")
+    if value["creation"] == "created":
+        # Creation was authorized by actual M_EX, not a fictitious R_EX call.
+        need(value["writtenBytes"] == len(REGISTRATION_GATE_BYTES) and value["sealed"] and value["filePersisted"]
+             and value["parentPersisted"] and value["writer"] == "closed"
+             and not value["exclusiveAttempted"] and not value["exclusiveAcquired"], "registration-reservation-creation-incomplete")
+    else:
+        need(value["creation"] == "existing-not-modified" and value["writtenBytes"] == 0
+             and value["writer"] == "not-attempted" and not value["sealed"] and not value["filePersisted"]
+             and not value["parentPersisted"] and value["exclusiveAttempted"] and value["exclusiveAcquired"],
+             "registration-reservation-reuse-not-observed")
+
+
+def registration_reservation_readback(root_fd):
+    body, _info = installation_metadata_leaf(root_fd, REGISTRATION_GATE_NAME, len(REGISTRATION_GATE_BYTES))
+    need(body == REGISTRATION_GATE_BYTES, "registration-reservation-content")
+    return {"state": "protected-permanent-reservation-data-correspondence", "bytes": len(body),
             "exclusionObserved": False, "workerFinalityEstablished": False}
 
 
@@ -3429,7 +3475,7 @@ def maintenance_metadata_leaf(fd, name, limit, budget):
 
 
 def maintenance_roster_data(state, records, target):
-    names = {APP_NAME, "versions", MAINTENANCE_GATE_NAME, MAINTENANCE_STATE_NAME}
+    names = {APP_NAME, "versions", MAINTENANCE_GATE_NAME, REGISTRATION_GATE_NAME, MAINTENANCE_STATE_NAME}
     stages = set()
     for invocation, (intent, _old_state, _capsule) in records.items():
         names.update((".maintenance-" + invocation + ".intent.json", ".maintenance-" + invocation + ".capsule.json"))
@@ -3504,7 +3550,7 @@ def observation_command(args):
     producer, descriptor, signed = maintenance_producer_inputs(args, selection)
     source_inventory = read(Path(args.input) / INSTALLATION_INVENTORY_NAME, 1024 * 1024)
     observation_inventory_bytes(source_inventory, args.expected_inventory, args.expected_manifest, selection=selection)
-    budget = [(len(source_inventory) + len(descriptor) + len(signed)) * 8 + 3 * 4096]
+    budget = [(len(source_inventory) + len(descriptor) + len(signed) + len(MAINTENANCE_GATE_BYTES) + len(REGISTRATION_GATE_BYTES)) * 8 + 3 * 4096]
     need(budget[0] <= MAINTENANCE_METADATA_BYTES, "maintenance-metadata-budget")
     with installer_channel_parent(INSTALL_ROOT) as (outer, name):
         with maintenance_directory(outer, name, 0o755) as (root_fd, root_identity):
@@ -3531,6 +3577,7 @@ def observation_command(args):
                 need(identity["device"] == root_identity["device"], "maintenance-directory-volume")
                 stage_originals.append((stage, signature(info)))
             gate = maintenance_gate_readback(root_fd)
+            reservation = registration_reservation_readback(root_fd)
             generation_results = []
             with maintenance_directory(root_fd, "versions", 0o755) as (versions_fd, _versions_identity):
                 versions = {generation["release"]["release"] for generation in (current["current"], *current["retained"])}
@@ -3538,8 +3585,9 @@ def observation_command(args):
                 for index, generation in enumerate((current["current"], *current["retained"])):
                     generation_results.append(maintenance_generation_readback(root_fd, versions_fd, root_identity, generation, producer, budget,
                         current=index == 0, source_inventory=source_inventory, source_descriptor=descriptor, source_signature=signed))
-                    need(sum(row["declaredPayloadFiles"] for row in generation_results) <= MAX_FILES
-                         and sum(row["declaredBytes"] for row in generation_results) <= MAX_BYTES, "maintenance-declared-generation-bound")
+                    need(sum(row["declaredPayloadFiles"] for row in generation_results) + 2 <= MAX_FILES
+                         and sum(row["declaredBytes"] for row in generation_results) + len(MAINTENANCE_GATE_BYTES)
+                         + len(REGISTRATION_GATE_BYTES) <= MAX_BYTES, "maintenance-declared-generation-bound")
                 need(set(os.listdir(versions_fd)) == versions, "maintenance-versions-roster")
             # Pin the same requested current state throughout current-byte and
             # retained-metadata readback. A newer operation never substitutes.
@@ -3556,7 +3604,7 @@ def observation_command(args):
             "requestId": args.request_id, "invocation": current["invocation"], "originalInstallerReturnedZero": True,
             "originalWriterJoined": True, "nonrootReadbackFileCount": generation_results[0]["verifiedCurrentFiles"],
             "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": generation_results,
-            "maintenanceGate": gate, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
+            "maintenanceGate": gate, "registrationReservation": reservation, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
             "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
 
@@ -3674,10 +3722,13 @@ def fixture_observation_command(args):
             names = ({stage} if stage is not None else set()) | ({APP_NAME} if app_occupant else set()) | ({"versions"} if has_versions else set())
             if row["originalResult"]["maintenanceGate"]["entered"]:
                 names.add(MAINTENANCE_GATE_NAME)
+            if row["originalResult"]["registrationReservation"]["entered"]:
+                names.add(REGISTRATION_GATE_NAME)
             runtime_files = 0
             metadata_observation = None
             with fixture_directory(root, names) as fd:
                 gate = maintenance_gate_readback(fd) if MAINTENANCE_GATE_NAME in names else None
+                reservation = registration_reservation_readback(fd) if REGISTRATION_GATE_NAME in names else None
                 if stage is not None:
                     # Metadata only. Never open/chmod the root-owned0700 staging.
                     info = os.stat(stage, dir_fd=fd, follow_symlinks=False)
@@ -3702,7 +3753,7 @@ def fixture_observation_command(args):
                                         occupant=row["occupant"] if name == "metadata-descriptor-collision" else None, selection=selection)
             observations.append({"case": name, "accessibleOccupantChecked": visible_occupant(name, selection=selection) is not None,
                                  "runtimeReadbackFileCount": runtime_files, "protectedStagingOpened": False, "installationMetadata": metadata_observation,
-                                 "maintenanceGate": gate})
+                                 "maintenanceGate": gate, "registrationReservation": reservation})
     return {"schemaVersion": 1, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "originalFixtureResult": result, "installerResultExport": exported, "nonrootReadback": observations,
             "applicationLaunched": False, "guiSaveQualified": False, "genuineConcurrentRaceObserved": False,

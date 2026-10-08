@@ -531,7 +531,7 @@ impl InstallationSlots {
             }
         }
         let mut names = BTreeSet::from([paths::APP_NAME.to_owned(),"versions".to_owned(),
-            paths::MAINTENANCE_GATE_NAME.to_owned(),transaction::STATE_NAME.to_owned()]);
+            paths::MAINTENANCE_GATE_NAME.to_owned(),paths::REGISTRATION_GATE_NAME.to_owned(),transaction::STATE_NAME.to_owned()]);
         let current_controls = producer_data::installed_control_names_data(selected.target_data(),paths::RELEASE)
             .map_err(|_| Problem::RecordMismatch)?;
         names.insert(current_controls.0); names.insert(current_controls.1);
@@ -717,6 +717,13 @@ impl InstallationSlots {
             let gate_data = self.read_record(install, paths::MAINTENANCE_GATE_NAME, paths::MAINTENANCE_GATE_BYTES.len(), end, stop, publish)?;
             if gate_data != paths::MAINTENANCE_GATE_BYTES { return self.reject(Problem::RecordMismatch, Instant::now(), publish); }
         }
+        self.require_present(install, paths::REGISTRATION_GATE_NAME, Problem::Incomplete, end, stop, publish)?;
+        {
+            // One additional closed Book record; the fixed38B original is
+            // consumed before producer/payload work. This is not R_EX evidence.
+            let reservation_data = self.read_record(install, paths::REGISTRATION_GATE_NAME, paths::REGISTRATION_GATE_BYTES.len(), end, stop, publish)?;
+            if reservation_data != paths::REGISTRATION_GATE_BYTES { return self.reject(Problem::RecordMismatch, Instant::now(), publish); }
+        }
         let authenticated = self.installed_selection(install,supplied,end,stop,publish,cleanup_expired)?;
         let selected = authenticated.as_ref();
         if let Some(selected) = selected {
@@ -773,9 +780,10 @@ impl InstallationSlots {
         let generation = if let Some(selected) = selected {
             Some(self.v2_roster(install,versions,&record,install_root,release_directory,selected,planned,end,stop,publish)?)
         } else {
-            // Legacy engineering read-only behavior is preserved exactly. It
-            // cannot migrate/adopt a v2 layout or wildcard predecessor names.
-            self.match_fixed_roster(install, &[paths::APP_NAME, "versions", paths::MAINTENANCE_GATE_NAME], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
+            // Legacy engineering read-only roster remains closed; current code
+            // additionally requires permanent R. It cannot migrate/adopt a v2
+            // layout or wildcard predecessor names.
+            self.match_fixed_roster(install, &[paths::APP_NAME, "versions", paths::MAINTENANCE_GATE_NAME, paths::REGISTRATION_GATE_NAME], Some(&format!(".install-{}", record.instance())), end, stop, publish)?;
             self.match_fixed_roster(versions, &[paths::RELEASE], None, end, stop, publish)?;
             None
         };

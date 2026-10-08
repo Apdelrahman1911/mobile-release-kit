@@ -115,7 +115,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         self.assertEqual(root.find("readme").attrib, {"file": "InstallerReadMe.html", "mime-type": "text/html"})
         text = (INPUTS / "InstallerReadMe.html").read_text()
-        for term in ["fresh installation only", "unavailable", "engineering-v1", "credential vault", "Keychain",
+        for term in ["fresh installation", "exact same-package", "explicitly authorized predecessor", "Uninstall is unavailable", "engineering-v1", "credential vault", "Keychain",
                      "signing originals", "provider registrations", "moved copies", "partial-installation evidence",
                      "does not prove", "never run as root", "separately", "reviewed recovery route"]:
             self.assertIn(term, text)
@@ -136,7 +136,7 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn("pub use crate::macos_build_profile::MacBuildTarget as MaintenanceTargetData;", module)
         self.assertIn("pub fn parse_for_target_data", module)
         description = (ROOT / "desktop/src-tauri/src/installation.rs").read_text()
-        self.assertIn('install_mode: "fresh-only", maintenance: "unavailable"', description)
+        self.assertIn('install_mode: "verified-package-required", maintenance: "unavailable"', description)
         frontend = (ROOT / "desktop/src/installation.ts").read_text()
         self.assertIn("maintenance: 'unavailable'", frontend)
         record = (ROOT / "desktop/src-tauri/src/macos_install_record.rs").read_text()
@@ -219,13 +219,14 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         controller = (ROOT / 'desktop/src/installationController.ts').read_text().split('export class InstallationPreparationController', 1)[1]
         self.assertIn('type="checkbox"', ui)
         self.assertIn('HelpButton content={installationPreparationHelp}', ui)
-        self.assertIn('engineering Installer remains fresh-installation-only', ui)
+        self.assertIn('Preparing to quit does not authorize installation changes.', ui)
+        self.assertIn('Uninstall is not yet available', ui)
         self.assertIn('if (this.pending) { this.refreshAgain = true; return; }', controller)
         self.assertIn('next.operationId !== before.operationId', controller)
         self.assertIn("['prepared', 'refused', 'unknown'].includes(before.phase)", controller)
         for authority in ['invoke(', '.quit(', '.exit(', 'registerHelper', 'cancelInstallation']:
             self.assertNotIn(authority, controller)
-        self.assertIn('install_mode: "fresh-only", maintenance: "unavailable"', wire)
+        self.assertIn('install_mode: "verified-package-required", maintenance: "unavailable"', wire)
 
     def test_private_writer_keeps_original_custody_and_does_not_activate_maintenance(self):
         """SOURCE boundary, not proof of Darwin lock, child or package finality."""

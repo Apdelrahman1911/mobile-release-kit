@@ -75,6 +75,32 @@ PACKAGE_PRODUCER_RUST_TESTS = (
     "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
 )
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
+REGISTRATION_ARGUMENT = "--qualify-registration-reservation"
+REGISTRATION_SOURCE = "desktop/native/macos-installed-entry/registration_fixture.c"
+REGISTRATION_RUST_TESTS = (
+    "android_service_management::tests::native_report_cannot_fabricate_authority_or_inconsistent_phase_success",
+    "android_service_management::tests::actual_native_failure_precedes_return_callback_and_all_cleanup_gates",
+)
+REGISTRATION_APP_RUST_TESTS = (
+    'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound',
+    'saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::callback_stamp_needs_exclusive_capture_return_then_original_owner_finality',
+    'saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::maintenance_preserves_observed_not_registered_after_later_cleanup_unknown',
+    'saved_command_owner::android_registration::service_setup::callback_lifecycle_tests::register_observation_failure_is_at_real_return_and_stop_keeps_original_deadlines',
+    'saved_command_owner::android_registration::maintenance::selected::tests::prepared_requires_all_original_facts_and_partial_unregister_never_reopens',
+)
+REGISTRATION_ROLES = ("reservation-rust-tests", "installer-worker-rust-tests", "installed-reader-rust-tests",
+                      "registration-entry-build", "registration-fixture-build", "registration-fixture-run")
+REGISTRATION_FAILURES = (
+    "entry", "parent", "root-create", "root-admit", "leaf-create", "leaf-admit", "shared-pair",
+    "shared-contention", "shared-retire", "exclusive-acquire", "exclusive-refusal", "exclusive-retire",
+    "m-domain", "later-post", "later-retire", "root-post", "cleanup", "clock", "output",
+)
+REGISTRATION_FACTS = (
+    "sharedPairAcquired", "exclusiveBlockedBySharedPair", "exclusiveBlockedByRemainingShared",
+    "exclusiveAfterSharedRetirement", "sharedRefusedByExclusive", "sharedAfterExclusiveRetirement",
+    "separateMExclusiveWhileRShared", "laterMetadataRefused", "failedReservationRetainedKnown",
+    "failedReservationRetiredKnown", "exclusiveAfterFailedRetirement",
+)
 LAYOUT_ARGUMENT = "--observe-service-layout"
 COCOA_ARGUMENT = "--observe-service-cocoa-startup"
 COCOA_TYPE = "mrk-e2-service-cocoa-startup-observations-v1"
@@ -2225,7 +2251,7 @@ def package_producer_rust_test_record():
 def _rust_tests_data(value, expected, label):
     """Only fixed SOURCE wrappers supply this expected record; never output DATA."""
     count = len(expected["tests"])  # SOURCE-fixed wrapper record, not received DATA.
-    need(count in (1, 3, 6) and expected["passed"] == count, label + "-record")
+    need(count in (1, 2, 3, 5, 6) and expected["passed"] == count, label + "-record")
     need(type(value) is dict and set(value) == set(expected)
          and all(type(value[key]) is int and value[key] == expected[key]
                  for key in ("schemaVersion", "passed", "failed", "ignored", "measured"))
@@ -2265,7 +2291,7 @@ def package_producer_rust_tests_data(value):
 def _rust_test_output(stdout, expected_names, label):
     """Complete pinned libtest pretty output from an already-successful original."""
     count = len(expected_names)  # Only the fixed SOURCE tuples call this.
-    need(count in (1, 3, 6), label + "-roster")
+    need(count in (1, 2, 3, 5, 6), label + "-roster")
     need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), label + "-bound")
     lines = stdout.split(b"\n")
     need(len(lines) == count + 6 and lines[:2] == [b"", ("running 1 test" if count == 1 else "running %d tests" % count).encode("ascii")]
@@ -2305,6 +2331,174 @@ def producer_signing_rust_tests_result(stdout):
 def package_producer_rust_tests_result(stdout):
     _rust_test_output(stdout, PACKAGE_PRODUCER_RUST_TESTS, "package-producer-rust-test")
     return package_producer_rust_test_record()
+
+
+def registration_fixture_result(stdout, returncode, source):
+    """Only the complete same-original primitive result; never a live-app claim."""
+    need(identity(source, 40) and type(returncode) is int and returncode == 0
+         and type(stdout) is bytes and 0 < len(stdout) <= 4096 and stdout.isascii()
+         and stdout.endswith(b"\n") and stdout.count(b"\n") == 1, "registration-fixture-frame")
+    value = decode(stdout, 4096)
+    expected = {
+        "type": "mrk-macos-registration-reservation-fixture-v1", "schemaVersion": 1,
+        "target": TARGET, "sourceCommit": source, "outcome": "passed", "failure": None,
+        "workTimeoutSeconds": 20, "hardTimeoutSeconds": 22,
+        "facts": {name: True for name in REGISTRATION_FACTS},
+        "originals": {"opened": 61, "closedKnown": 61, "closeUnknown": False, "liveAtReturn": 0},
+        "rootCreated": True, "rootRetired": True, "internalAcquirePostCovered": False,
+        "serviceApiEntered": False, "unknownNativeFaultInjected": False, "productionIdentityQualified": False,
+    }
+    need(type(value) is dict and set(value) == set(expected), "registration-fixture-shape")
+    for key, wanted in expected.items():
+        actual = value[key]
+        need(type(actual) is type(wanted), "registration-fixture-type")
+        if type(wanted) is dict:
+            need(set(actual) == set(wanted) and all(type(actual[name]) is type(item) and actual[name] == item
+                 for name, item in wanted.items()), "registration-fixture-facts")
+        else:
+            need(actual == wanted, "registration-fixture-fact")
+    return value
+
+
+def registration_fixture_failure(stdout, returncode, source):
+    """Finite failed-original observations only; never relax the success parser."""
+    need(identity(source, 40) and type(returncode) is int and 0 < returncode <= 255
+         and type(stdout) is bytes and 0 < len(stdout) <= 4096 and stdout.isascii()
+         and stdout.endswith(b"\n") and stdout.count(b"\n") == 1, "registration-failure-frame")
+    value = decode(stdout, 4096)
+    keys = {"type", "schemaVersion", "target", "sourceCommit", "outcome", "failure", "workTimeoutSeconds",
+            "hardTimeoutSeconds", "facts", "originals", "rootCreated", "rootRetired", "internalAcquirePostCovered",
+            "serviceApiEntered", "unknownNativeFaultInjected", "productionIdentityQualified"}
+    need(type(value) is dict and set(value) == keys
+         and value["type"] == "mrk-macos-registration-reservation-fixture-v1"
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["target"] == TARGET and value["sourceCommit"] == source and value["outcome"] == "failed"
+         and type(value["failure"]) is str and value["failure"] in REGISTRATION_FAILURES
+         and type(value["workTimeoutSeconds"]) is int and value["workTimeoutSeconds"] == 20
+         and type(value["hardTimeoutSeconds"]) is int and value["hardTimeoutSeconds"] == 22,
+         "registration-failure-shape")
+    need(type(value["facts"]) is dict and set(value["facts"]) == set(REGISTRATION_FACTS)
+         and all(type(item) is bool for item in value["facts"].values())
+         and all(type(value[key]) is bool for key in ("rootCreated", "rootRetired"))
+         and (not value["rootRetired"] or value["rootCreated"])
+         and all(value[key] is False for key in ("internalAcquirePostCovered", "serviceApiEntered",
+                                                "unknownNativeFaultInjected", "productionIdentityQualified")),
+         "registration-failure-facts")
+    counts = value["originals"]
+    need(type(counts) is dict and set(counts) == {"opened", "closedKnown", "closeUnknown", "liveAtReturn"}
+         and type(counts["opened"]) is int and type(counts["closedKnown"]) is int
+         and 0 <= counts["closedKnown"] <= counts["opened"] <= 61 and type(counts["closeUnknown"]) is bool
+         and (counts["liveAtReturn"] is None or type(counts["liveAtReturn"]) is int
+              and 0 <= counts["liveAtReturn"] <= 21), "registration-failure-originals")
+    return value
+
+
+def registration_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-registration-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(REGISTRATION_RUST_TESTS),
+            "passed": 2, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def registration_rust_tests_result(stdout):
+    _rust_test_output(stdout, REGISTRATION_RUST_TESTS, "registration-rust-test")
+    return registration_rust_test_record()
+
+
+def registration_app_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-registration-app-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(REGISTRATION_APP_RUST_TESTS),
+            "passed": 5, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def registration_app_rust_tests_result(stdout):
+    _rust_test_output(stdout, REGISTRATION_APP_RUST_TESTS, "registration-app-rust-test")
+    return registration_app_rust_test_record()
+
+
+def registration_clock_data(value):
+    need(type(value) is dict and set(value) == {"clock", "startedNs", "deadlineNs", "lastNs", "closed"}
+         and value["clock"] == "CLOCK_MONOTONIC" and value["closed"] is True,
+         "registration-clock-shape")
+    start, deadline, last = (decimal(value[key]) for key in ("startedNs", "deadlineNs", "lastNs"))
+    need(0 < start <= last < deadline <= MAX_RAW and deadline - start == WORK_SECONDS * 1_000_000_000,
+         "registration-clock-record")
+    return deadline, last
+
+
+def registration_publication_tick(data, previous):
+    deadline, last = registration_clock_data(data["clock"])
+    now = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    need(type(previous) is int and type(now) is int and last <= previous <= now < deadline,
+         "registration-publication-clock")
+    return now
+
+
+def registration_reservation_result(result, source, rows):
+    """Closed selected-role projection. Caller success and publication closes remain required."""
+    need(type(result) is dict and identity(source, 40) and result.get("source") == source
+         and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
+         and result.get("outcome") == "passed" and result.get("passed") is True
+         and result.get("failure") is None and result.get("phase") == REGISTRATION_ROLES[-1],
+         "registration-owner-result")
+    need(all(result.get(key) is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown",
+                                               "scratchRetired", "protectedRootRetired"))
+         and result.get("cleanupErrors") == []
+         and all(result.get(key) is False for key in ("installerEntered", "installationReturnedSuccess",
+             "nativeEntered", "nativeOwnerReturned", "protectedRetentionRequired", "exactReceiptRetired",
+             "productionIdentityQualified", "actualAppIntegrationQualified", "distributionQualified"))
+         and all(result.get(key) is None for key in ("native", "nativeRustTests", "package", "producerSigningRustTests",
+                                                   "packageProducerRustTests", "contextReceiptDiagnostic", "installedReaderRustTests"))
+         and result.get("installedArtifactRoster") is None and result.get("receiptOriginals") == []
+         and result.get("protectedMetadataObservations") == [], "registration-owner-finality")
+    need(result["installerContext"]["started"] is False and result["installerContext"]["completed"] is False
+         and result["serviceLayoutObservation"]["selected"] is False
+         and result["serviceLayoutObservation"]["started"] is False, "registration-owner-scope")
+    artifacts = result.get("artifacts")
+    need(type(artifacts) is dict and set(artifacts) == {"registration-reservation"}, "registration-artifacts")
+    data = artifacts["registration-reservation"]
+    need(type(data) is dict and set(data) == {"clock", "rustTests", "appRustTests", "compiled", "sourceHashes", "native", "nativeFailure"},
+         "registration-record")
+    need(data["nativeFailure"] is None, "registration-owner-result")
+    registration_clock_data(data["clock"])
+    _rust_tests_data(data["rustTests"], registration_rust_test_record(), "registration-rust-test")
+    installer_worker_rust_tests_data(result["installerWorkerRustTests"])
+    _rust_tests_data(data["appRustTests"], registration_app_rust_test_record(), "registration-app-rust-test")
+    expected_sources = (REGISTRATION_SOURCE, "desktop/native/macos-installed-entry/entry.c",
+                        "desktop/native/macos-installed-entry/gate.c", "desktop/native/macos-installed-entry/gate.h",
+                        "desktop/native/macos-installed-entry/fixed_paths.h", NATIVE + "/src/native.m")
+    need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(expected_sources)
+         and all(identity(data["sourceHashes"][name], 64)
+                 and data["sourceHashes"][name] == rows[name]["sha256"] for name in expected_sources),
+         "registration-source-binding")
+    need(type(data["compiled"]) is dict and set(data["compiled"]) == {"entry", "fixture"}, "registration-compiled")
+    for item in data["compiled"].values():
+        need(type(item) is dict and set(item) == {"sha256", "bytes"} and identity(item["sha256"], 64)
+             and type(item["bytes"]) is int and 0 < item["bytes"] <= 1048576, "registration-compiled")
+    native = registration_fixture_result(canonical(data["native"]), 0, source)
+    calls = result.get("originalCalls")
+    need(type(calls) is list and len(calls) == 6
+         and [call.get("role") for call in calls] == list(REGISTRATION_ROLES), "registration-call-roster")
+    for call, cap, limit in zip(calls, (480, 480, 480, 30, 30, 25),
+                               (4194304, 4194304, 4194304, 65536, 65536, 8192)):
+        need(type(call) is dict and set(call) == {"role", "entered", "returned", "workTimeoutSeconds",
+             "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
+             and call["entered"] is True and call["returned"] is True
+             and type(call["returncode"]) is int and call["returncode"] == 0
+             and type(call["workTimeoutSeconds"]) is int and 0 < call["workTimeoutSeconds"] <= cap
+             and type(call["outputLimitBytes"]) is int and call["outputLimitBytes"] == limit
+             and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64),
+             "registration-call-finality")
+    need(calls[-1]["stderrSha256"] == digest(b""), "registration-native-stderr")
+    # The raw line's hash is separately bound below at original capture time;
+    # JSON field ordering is not treated as another native invocation.
+    return {"scope": "registration-reservation-primitives-and-compiled-data-only", "clock": data["clock"],
+            "native": native, "nativeRustTests": data["rustTests"],
+            "installerWorkerRustTests": result["installerWorkerRustTests"],
+            "appRustTests": data["appRustTests"],
+            "compiled": data["compiled"], "sourceHashes": data["sourceHashes"],
+            "nativeStdoutSha256": calls[-1]["stdoutSha256"], "nativeOriginalReturncode": 0,
+            "liveRegistrationQualified": False, "installerTransactionQualified": False,
+            "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
 
 
 def cargo_artifact(messages, role, checkout, target):
@@ -2981,7 +3175,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -3170,9 +3364,14 @@ class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
     def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
-                 service_cocoa=False):
+                 service_cocoa=False, registration_reservation=False):
         need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
-             and sum((service_layout, context_receipts, service_cocoa)) <= 1, "layout-operation-selector")
+             and type(registration_reservation) is bool
+             and sum((service_layout, context_receipts, service_cocoa, registration_reservation)) <= 1,
+             "layout-operation-selector")
+        self.registration_selected = registration_reservation
+        self.registration_deadline = self.registration_last = None
+        self.registration_clock_failed = False
         self.service_cocoa_selected = service_cocoa
         self.owner, self.source, self.stager = owner, source, stager
         self.work, self.environment = work, environment
@@ -4567,6 +4766,12 @@ class Operation:
                 and self.outputs_closed and self.protected_closed and native_finality and context_finality
                 and layout_finality and not self.cleanup_errors)
         self.scratch_retired = False
+        if safe and getattr(self, "registration_selected", False):
+            try:
+                self.registration_tick()  # Same deadline AFTER all original closes, before deletion.
+            except BaseException:
+                self.cleanup_errors.append("registration-clock-unconfirmed")
+                safe = False
         if safe:
             cleanup = Originals()
             try:
@@ -4642,7 +4847,158 @@ class Operation:
                 "rawOutputIncluded": False, "environmentValuesIncluded": False,
                 "outerReceiptWriteCloseAndOriginalCallerExitRequired": True, "passed": passed}
 
+    def registration_tick(self, cap=480):
+        """One endpoint through returned originals, all closes and final publication."""
+        now = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        valid = (type(now) is int and type(self.registration_last) is int
+                 and self.registration_last <= now < self.registration_deadline)
+        if not valid:
+            self.registration_clock_failed = True
+            raise Refused("registration-phase-clock")
+        self.registration_last = now
+        seconds = (self.registration_deadline - now) // 1_000_000_000
+        if seconds <= 0:
+            self.registration_clock_failed = True
+            raise Refused("registration-phase-deadline")
+        return min(cap, seconds)
+
+    def execute_registration(self):
+        # No Context, package, app, ServiceManagement or finally-BTM entry.
+        failure, fixture_entered, fixture_closed = None, False, False
+        self.scratch_retired = False
+        origin = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        need(type(origin) is int and 0 < origin <= MAX_RAW - WORK_SECONDS * 1000000000,
+             "registration-phase-origin")
+        self.registration_last, self.registration_deadline = origin, origin + WORK_SECONDS * 1000000000
+        data = {"clock": {"clock": "CLOCK_MONOTONIC", "startedNs": str(origin),
+                          "deadlineNs": str(self.registration_deadline), "lastNs": str(origin), "closed": False},
+                "rustTests": None, "appRustTests": None, "compiled": {}, "sourceHashes": {}, "native": None, "nativeFailure": None}
+        self.artifacts["registration-reservation"] = data
+        try:
+            self.registration_tick()
+            self.begin()
+            for relative in (REGISTRATION_SOURCE, "desktop/native/macos-installed-entry/entry.c",
+                             "desktop/native/macos-installed-entry/gate.c", "desktop/native/macos-installed-entry/gate.h",
+                             "desktop/native/macos-installed-entry/fixed_paths.h", NATIVE + "/src/native.m"):
+                data["sourceHashes"][relative] = digest(self.source.read(relative))
+            batches = (
+                (REGISTRATION_ROLES[0], NATIVE, ("--lib",), REGISTRATION_RUST_TESTS, registration_rust_tests_result),
+                (REGISTRATION_ROLES[1], INSTALLER, ("--features", "macos-installed-installer", "--bin", "mrk-macos-install"),
+                 INSTALLER_WORKER_RUST_TESTS, installer_worker_rust_tests_result),
+                (REGISTRATION_ROLES[2], INSTALLER, ("--lib",), REGISTRATION_APP_RUST_TESTS, registration_app_rust_tests_result),
+            )
+            for role, directory, flags, names, parser in batches:
+                self.registration_tick()
+                target = self.scratch / (role + "-target")
+                self.scratch_origins[target] = self.mkdir(target)["identity"]
+                record, primary = None, None
+                try:
+                    cargo, environment = self.compiler_environment(target)
+                    argv = [cargo, "test", "--manifest-path", str(CHECKOUT / directory / "Cargo.toml"),
+                            "--locked", "--offline", "--jobs", "1", "--target", TARGET,
+                            "--no-default-features", *flags, "--message-format=short", "--color", "never",
+                            "--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *names]
+                    result = self.command(role, argv, environment, cwd=CHECKOUT,
+                                          timeout=self.registration_tick(480), limit=4194304)
+                    self.registration_tick()
+                    record = parser(result.stdout)
+                    self.registration_tick()
+                except BaseException as error:
+                    primary = error
+                    raise
+                finally:
+                    try:
+                        if all(call["returned"] for call in self.calls) and not self.registration_clock_failed:
+                            self.registration_tick()
+                            self.retire_target(target)
+                            self.registration_tick()
+                    except BaseException:
+                        if primary is None:
+                            raise
+                if role == REGISTRATION_ROLES[0]:
+                    data["rustTests"] = record
+                elif role == REGISTRATION_ROLES[1]:
+                    self.installer_worker_rust_tests = record
+                else:
+                    data["appRustTests"] = record  # Legacy reader1 slot remains null for this route.
+            target = self.scratch / "registration-facade-target"
+            self.scratch_origins[target] = self.mkdir(target)["identity"]
+            source_directory = CHECKOUT / "desktop/native/macos-installed-entry"
+            originals = []
+            environment = dict(self.native_environment(), DEVELOPER_DIR=self.environment["DEVELOPER_DIR"])
+            for role, filename, name in ((REGISTRATION_ROLES[3], "entry.c", "entry"),
+                                         (REGISTRATION_ROLES[4], "registration_fixture.c", "fixture")):
+                output = target / name
+                argv = ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "-x", "c", "-std=c11",
+                        "-Wall", "-Wextra", "-Werror", "-O2", "-arch", "arm64", "-mmacosx-version-min=26.0",
+                        "-DMRK_ENTRY_METADATA_ONLY=1", "-DMRK_E2_NATIVE_FIXTURE=1",
+                        '-DMRK_IMAGE_SOURCE_COMMIT="' + self.environment["GITHUB_SHA"] + '"',
+                        '-DMRK_IMAGE_RELEASE_ID="' + self.release + '"', str(source_directory / filename),
+                        str(source_directory / "gate.c"), str(CHECKOUT / NATIVE / "src/native.m"), "-o", str(output)]
+                self.command(role, argv, environment, cwd=CHECKOUT, timeout=self.registration_tick(30))
+                self.registration_tick()
+                entry, body = self.outputs.file(output, 1048576, modes=(0o700, 0o755))
+                self.stager.entry_macho(body)
+                originals.append((entry, body))
+                data["compiled"][name] = {"sha256": digest(body), "bytes": len(body)}
+            self.outputs.check()
+            self.registration_tick()
+            need(all(self.outputs.read(entry) == body for entry, body in originals), "registration-image-post")
+            count = len(self.calls)
+            try:
+                result = self.call(REGISTRATION_ROLES[-1], ["/usr/bin/sudo", "-n", "--", str(target / "fixture")],
+                                      self.native_environment(), cwd=self.scratch / "cwd",
+                                      timeout=self.registration_tick(25), limit=8192)
+            finally:
+                fixture_entered = len(self.calls) > count
+            self.registration_tick()
+            if result.returncode != 0:
+                try:
+                    data["nativeFailure"] = registration_fixture_failure(result.stdout, result.returncode, self.environment["GITHUB_SHA"])
+                except BaseException:
+                    pass  # Optional finite diagnostic never masks the original failure.
+                raise Refused("original-command-failed")
+            need(len(result.stdout) <= 4096 and len(result.stderr) <= 4096 and not result.stderr,
+                 "registration-native-streams")
+            data["native"] = registration_fixture_result(result.stdout, result.returncode, self.environment["GITHUB_SHA"])
+            self.source.book.check()
+            need(all(self.outputs.read(entry) == body for entry, body in originals), "registration-image-post")
+            self.outputs.check()
+            self.registration_tick()
+            fixture_closed = True
+            self.retire_target(target)
+            self.registration_tick()
+        except BaseException as error:
+            failure = (error.args[0] if type(error) is Refused and len(error.args) == 1
+                       and type(error.args[0]) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,95}", error.args[0])
+                       else "registration-original-refused-or-unknown")
+        finally:
+            # Unknown native/report custody or deadline retains even private target outputs.
+            if fixture_entered and not fixture_closed:
+                self.cleanup_errors.append("registration-native-unconfirmed")
+            try:
+                self.registration_tick()
+            except BaseException:
+                self.cleanup_errors.append("registration-clock-unconfirmed")
+                if failure is None:
+                    failure = "registration-phase-clock"
+            self.finish()
+            try:
+                self.registration_tick()
+            except BaseException:
+                if failure is None:
+                    failure = "registration-phase-clock"
+        data["clock"].update(lastNs=str(self.registration_last), closed=(failure is None))
+        value = self.receipt(failure)
+        passed = (failure is None and fixture_closed and self.sources_closed and self.outputs_closed
+                  and self.protected_closed and self.scratch_retired and not self.cleanup_errors)
+        value.update(passed=passed, outcome="passed" if passed else "failed",
+                     protectedRootRetired=fixture_closed)
+        return value
+
     def execute(self):
+        if getattr(self, "registration_selected", False):
+            return self.execute_registration()
         failure = None
         self.scratch_retired = False
         try:
@@ -4715,7 +5071,8 @@ def main():
         operation = Operation(owner, source, stager, work, os.environ,
                               service_layout=sys.argv[1:] == [LAYOUT_ARGUMENT],
                               context_receipts=sys.argv[1:] == [CONTEXT_RECEIPT_ARGUMENT],
-                              service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT])
+                              service_cocoa=sys.argv[1:] == [COCOA_ARGUMENT],
+                              registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT])
         value = operation.execute()
     except BaseException:
         book.finish()
@@ -4739,6 +5096,9 @@ def main():
                 cocoa_completed = True
             except BaseException:
                 cocoa_completed = False  # Retain actual failure; never repair completion.
+        if operation.registration_selected and value["passed"]:
+            registration_reservation_result(value, os.environ["GITHUB_SHA"], source.rows)
+            operation.registration_tick()
         body = canonical(value)
         need(len(body) <= 65536, "owner-result-bound")
         report.publish(work / "e2-native-result.json", body)
@@ -4758,6 +5118,11 @@ def main():
         report.finish()
         print("E2 fixture evidence finalization failed; do not accept a provisional result.", file=sys.stderr)
         return 1
+    if operation.registration_selected and value["passed"]:
+        try:
+            operation.registration_tick()  # SAME endpoint after receipt and stdout closes/writes.
+        except BaseException:
+            return 1
     return 0 if value["passed"] or context_completed or cocoa_completed else 77 if value["outcome"] == "unavailable" else 1
 
 

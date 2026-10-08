@@ -6,7 +6,7 @@ export interface InstallationDescription {
   layout: 'fixed-macos';
   expectedLocation: string;
   runtimeRelease: string;
-  installMode: 'fresh-only';
+  installMode: 'verified-package-required';
   maintenance: 'unavailable';
   revealAvailable: boolean;
   assurance: 'profile-description-only';
@@ -37,10 +37,10 @@ export function parseInstallationDescription(value: unknown): InstallationDescri
   if (!row || row.layout !== 'fixed-macos'
     || row.expectedLocation !== '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app'
     || typeof row.runtimeRelease !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(row.runtimeRelease)
-    || row.installMode !== 'fresh-only' || row.maintenance !== 'unavailable'
+    || row.installMode !== 'verified-package-required' || row.maintenance !== 'unavailable'
     || typeof row.revealAvailable !== 'boolean' || row.assurance !== 'profile-description-only') return null;
   return { layout: 'fixed-macos', expectedLocation: row.expectedLocation, runtimeRelease: row.runtimeRelease,
-    installMode: 'fresh-only', maintenance: 'unavailable', revealAvailable: row.revealAvailable, assurance: 'profile-description-only' };
+    installMode: 'verified-package-required', maintenance: 'unavailable', revealAvailable: row.revealAvailable, assurance: 'profile-description-only' };
 }
 export function parseInstallationReveal(value: unknown): InstallationRevealResult | null {
   const row = record(value, ['state', 'finderVisibility']);

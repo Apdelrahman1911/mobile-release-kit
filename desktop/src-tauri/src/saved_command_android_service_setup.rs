@@ -102,7 +102,10 @@ const CALLBACK_RETIRED:u8=1;
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 const OWNER_FINALIZED:u8=2;
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+struct MaintenancePair { finalized:AtomicBool,continuation:std::sync::atomic::AtomicU8 }
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct Retirement {
+    pair:Option<Arc<MaintenancePair>>,predecessor:Option<Arc<Retirement>>,
     original:Arc<Control>,action:management::Action,require_enabled:bool,phase:std::sync::atomic::AtomicU8,
     retired_serial:std::sync::atomic::AtomicU32,maintenance:Option<MaintenanceTail>,
 }
@@ -125,8 +128,22 @@ impl MaintenanceTail {
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl Retirement {
+    fn extra_bytes(&self)->Option<usize>{
+        let mut bytes=if self.pair.is_some(){arc_bytes::<MaintenancePair>()?}else{0};
+        if let Some(previous)=&self.predecessor{
+            if previous.predecessor.is_some(){return None;}
+            bytes=bytes.checked_add(previous.retained_bytes()?)?;
+        }
+        Some(bytes)
+    }
     fn retained_bytes(&self)->Option<usize>{arc_bytes::<Self>()?.checked_add(self.original.retained_bytes()?)?
-        .checked_add(arc_bytes::<()>()?)} // The completed original still retains its own cohort allocation.
+        .checked_add(arc_bytes::<()>()?)?.checked_add(self.extra_bytes()?)}
+    fn owner_finalized(&self)->bool{
+        match &self.pair{
+            Some(pair)=>pair.finalized.load(Ordering::SeqCst) && self.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED,
+            None=>self.phase.load(Ordering::SeqCst)==OWNER_FINALIZED,
+        }
+    }
     fn callback_retired(&self,serial:u32,deferred:bool)->bool{
         if self.phase.load(Ordering::SeqCst)!=PENDING || serial==0 || serial==u32::MAX
             || self.retired_serial.compare_exchange(serial-1,serial,Ordering::SeqCst,Ordering::SeqCst).is_err(){return false;}
@@ -135,6 +152,8 @@ impl Retirement {
         self.phase.compare_exchange(PENDING,CALLBACK_RETIRED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
     }
     fn finalize(&self)->bool{
+        // A pair commits once at the whole original cut, never one member here.
+        if self.pair.is_some(){return false;}
         if self.maintenance.as_ref().is_some_and(|tail|!tail.retired.load(Ordering::SeqCst)){return false;}
         self.phase.compare_exchange(CALLBACK_RETIRED,OWNER_FINALIZED,Ordering::SeqCst,Ordering::SeqCst).is_ok()
     }
@@ -165,8 +184,23 @@ enum ExtractedCallback {
 struct MainBinding {retirement:Arc<Retirement>,serial:u32}
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MainBinding {
-    fn reusable(&self)->bool{self.retirement.phase.load(Ordering::SeqCst)==OWNER_FINALIZED
+    fn reusable(&self)->bool{self.retirement.owner_finalized()
         && !self.retirement.original.unknown.load(Ordering::SeqCst)}
+    fn continues_probe(&self,original:&CallbackOriginal,custody:management::Custody)->bool{
+        let Some(previous)=&original.retirement.predecessor else{return false;};
+        let (Some(pair),Some(next_pair))=(&previous.pair,&original.retirement.pair)else{return false;};
+        Arc::ptr_eq(previous,&self.retirement) && Arc::ptr_eq(pair,next_pair)
+            && previous.predecessor.is_none() && previous.action==management::Action::Observe
+            && previous.maintenance.is_none() && !previous.require_enabled
+            && previous.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED
+            && self.serial>0 && self.serial==previous.retired_serial.load(Ordering::SeqCst)
+            && pair.continuation.load(Ordering::SeqCst)==1 && !pair.finalized.load(Ordering::SeqCst)
+            && original.serial==1 && original.action==management::Action::UnregisterAfterQuiescence
+            && original.retirement.action==original.action && original.retirement.maintenance.is_some()
+            && Arc::ptr_eq(&previous.original,&original.gate.control)
+            && Arc::ptr_eq(&original.retirement.original,&original.gate.control)
+            && !previous.original.unknown.load(Ordering::SeqCst) && management_settled(custody)
+    }
     fn resumes(&self,original:&CallbackOriginal,custody:management::Custody)->bool{
         Arc::ptr_eq(&self.retirement,&original.retirement)
             && Arc::ptr_eq(&self.retirement.original,&original.gate.control)
@@ -236,6 +270,16 @@ impl CallbackOriginal {
         // Register requires an actual fresh Enabled observation, whereas the
         // separate setup Check successfully reports other known states. Latch
         // at this real native return, never after cleanup/IPC receipt.
+        if self.retirement.pair.is_some() && self.retirement.predecessor.is_none()
+            && self.action==management::Action::Observe && phase==Phase::ObserveStatus {
+            if let (Some(at),Some(observation))=(returned,custody.observation){
+                if !matches!(observation.status,management::Status::Enabled|management::Status::NotRegistered){
+                    failure.note(if observation.status==management::Status::RequiresApproval{
+                        wire::Reason::ApprovalRequired
+                    }else{wire::Reason::ServiceUnavailable},at);
+                }
+            }
+        }
         if self.retirement.require_enabled && phase==Phase::ObserveStatus {
             if let (Some(at),Some(observation))=(returned,custody.observation){
                 if observation.status!=management::Status::Enabled{
@@ -307,8 +351,9 @@ impl CallbackOriginal {
                 let custody=slot.manager.custody();
                 let resume=slot.binding.as_ref().is_some_and(|binding|binding.resumes(original,custody));
                 if !resume{
+                    let continuation=slot.binding.as_ref().is_some_and(|binding|binding.continues_probe(original,custody));
                     let retired=slot.binding.as_ref().is_none_or(MainBinding::reusable);
-                    if !retired || !management_settled(custody) || original.serial!=1
+                    if (!retired && !continuation) || !management_settled(custody) || original.serial!=1
                         || original.retirement.phase.load(Ordering::SeqCst)!=PENDING
                         || original.retirement.retired_serial.load(Ordering::SeqCst)!=0{return None;}
                     // Validate the new original before retiring the previous
@@ -318,12 +363,14 @@ impl CallbackOriginal {
                     // A known Stop between queueing and callback entry still
                     // runs the same engine's no-allocation settlement path.
                     // Unknown never binds or authorizes a native entry.
+                    if continuation && original.retirement.pair.as_ref().is_none_or(|pair|
+                        pair.continuation.compare_exchange(1,2,Ordering::SeqCst,Ordering::SeqCst).is_err()){return None;}
                     slot.binding=Some(MainBinding{retirement:original.retirement.clone(),serial:original.serial});
                 }else{slot.binding.as_mut().unwrap().serial=original.serial;}
                 let progress=slot.manager.perform_phased(original.action,&mut|point|original.gate(point,&mut failure));
                 Some((progress,slot.manager.custody()))
-                // The persistent binding is NEVER cleared here. Only exclusive
-                // callback extraction + original owner finality can permit reuse.
+                // Never clear the binding. The sole exception to fully-finalized
+                // reuse is the fixed same-original consumed probe continuation.
             }).ok().flatten()
         };
         // The native/TLS mutable borrow has actually ended before this sole
@@ -350,16 +397,28 @@ pub(super) struct Preparation {
 #[derive(Clone,Copy)]
 struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,retained:Option<usize>,maintenance:Option<MaintenanceRun>}
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+#[derive(Clone,Copy,Default,PartialEq,Eq,Debug)]
+pub(super) enum MaintenanceBranch { #[default] Unselected,ObservedAbsent,Unregistered }
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy,Default)]
 pub(super) struct MaintenanceRun {
+    pub(super) branch:MaintenanceBranch,
     pub(super) known:bool,pub(super) checked:bool,pub(super) started_or_uncertain:bool,
     pub(super) tail_received:bool,pub(super) unregister_accepted:bool,pub(super) not_registered:bool,
     pub(super) callback_retired:bool,pub(super) peer_ended:bool,pub(super) retained:Option<usize>,
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl MaintenanceRun {
-    pub(super) fn prepared(self)->bool{self.known && self.checked && self.started_or_uncertain && self.tail_received
-        && self.unregister_accepted && self.not_registered && self.callback_retired && self.peer_ended && self.retained.is_some()}
+    pub(super) fn prepared(self)->bool{
+        self.known && self.checked && self.not_registered && self.callback_retired && self.retained.is_some()
+            && match self.branch {
+                MaintenanceBranch::Unselected=>false,
+                MaintenanceBranch::ObservedAbsent=>!self.started_or_uncertain && !self.tail_received
+                    && !self.unregister_accepted && !self.peer_ended,
+                MaintenanceBranch::Unregistered=>self.started_or_uncertain && self.tail_received
+                    && self.unregister_accepted && self.peer_ended,
+            }
+    }
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 impl Preparation {
@@ -372,12 +431,16 @@ impl Preparation {
     pub(super) fn for_registration(gate:WorkGate,dispatcher:Arc<Dispatcher>)->Self{
         Self::create(gate,dispatcher,management::Action::Observe,true,None)
     }
-    pub(super) fn for_maintenance(gate:WorkGate,dispatcher:Arc<Dispatcher>,operation:[u8;16])->Self{
-        Self::create(gate,dispatcher,management::Action::UnregisterAfterQuiescence,true,Some(operation))
+    pub(super) fn for_maintenance(gate:WorkGate,dispatcher:Arc<Dispatcher>,operation:[u8;16])->MaintenancePreparation{
+        MaintenancePreparation::new(gate,dispatcher,operation)
     }
     fn create(gate:WorkGate,dispatcher:Arc<Dispatcher>,action:management::Action,require_enabled:bool,operation:Option<[u8;16]>)->Self{
+        Self::create_bound(gate,dispatcher,action,require_enabled,operation,None,None)
+    }
+    fn create_bound(gate:WorkGate,dispatcher:Arc<Dispatcher>,action:management::Action,require_enabled:bool,operation:Option<[u8;16]>,
+        pair:Option<Arc<MaintenancePair>>,predecessor:Option<Arc<Retirement>>)->Self{
         let retirement=Arc::new(Retirement{original:gate.control.clone(),action,require_enabled,phase:std::sync::atomic::AtomicU8::new(PENDING),
-            retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:operation.map(MaintenanceTail::new)});
+            retired_serial:std::sync::atomic::AtomicU32::new(0),pair,predecessor,maintenance:operation.map(MaintenanceTail::new)});
         Self{identity:Mutex::new(AndroidServiceIdentitySlots::new(gate.clone())),gate,dispatcher,retirement,
             requested:AtomicBool::new(false),main:Mutex::new(MainState::Dormant),returned:Mutex::new(None)}
     }
@@ -685,7 +748,7 @@ impl Preparation {
         let callback_retired=self.retirement.maintenance.as_ref().is_some_and(|tail|tail.retired.load(Ordering::SeqCst));
         let known=files_known && main.0 && callback_retired && client_known && retained.is_some()
             && !self.gate.control.unknown.load(Ordering::SeqCst) && Instant::now()<self.gate.control.endpoint();
-        let result=MaintenanceRun{known,checked,started_or_uncertain,tail_received,unregister_accepted,not_registered,
+        let result=MaintenanceRun{branch:MaintenanceBranch::Unregistered,known,checked,started_or_uncertain,tail_received,unregister_accepted,not_registered,
             callback_retired,peer_ended,retained};
         // A valid private native result is still not overall Prepared. Both
         // original worker/coordinator handles and the document cut remain owed.
@@ -711,8 +774,35 @@ impl Preparation {
         let returned=(*self.returned.try_lock().ok()?)?;
         Some(WorkerReturn{known:returned.known,first:self.gate.control.failure(),observation:returned.observation,retained:returned.retained})
     }
-    pub(super) fn finalize(&self)->bool{
+    fn finalization_ready(&self)->bool{
         if !self.known_return(){return false;}
+        let Ok(main)=self.main.try_lock()else{return false;};
+        let tail=self.retirement.maintenance.as_ref().is_none_or(|tail|tail.retired.load(Ordering::SeqCst));
+        match &*main{
+            MainState::Dormant if !self.requested.load(Ordering::SeqCst)=>tail,
+            MainState::Skipped=>tail,
+            MainState::Finished(_)=>tail && self.retirement.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED,
+            _=>false,
+        }
+    }
+    fn inert(&self)->bool{
+        !self.requested.load(Ordering::SeqCst)
+            && self.main.try_lock().is_ok_and(|main|matches!(*main,MainState::Dormant))
+            && self.returned.try_lock().is_ok_and(|returned|returned.is_none())
+            && self.retirement.phase.load(Ordering::SeqCst)==PENDING
+            && self.retirement.retired_serial.load(Ordering::SeqCst)==0
+            && self.retirement.maintenance.as_ref().is_some_and(|tail|tail.cutoff.get().is_none()
+                && !tail.retired.load(Ordering::SeqCst) && tail.original.try_lock().is_ok_and(|original|original.is_none()))
+    }
+    fn settle_inert(&self)->Option<usize>{
+        if !self.inert(){self.gate.control.poisoned();return None;}
+        let mut identity=self.identity.try_lock().ok()?;
+        if !identity.settle(){return None;}
+        self.settled_storage(identity.retained_bytes()?)
+    }
+    fn inert_settled(&self)->bool{self.inert() && self.identity.try_lock().is_ok_and(|identity|identity.settled())}
+    pub(super) fn finalize(&self)->bool{
+        if self.retirement.pair.is_some() || !self.known_return(){return false;}
         let main=match self.main.try_lock(){Ok(main)=>main,Err(_)=>return false,};
         match &*main{
             MainState::Dormant if !self.requested.load(Ordering::SeqCst)=>self.retirement.maintenance.as_ref().is_none_or(|tail|tail.retired.load(Ordering::SeqCst)),
@@ -727,10 +817,122 @@ impl Preparation {
     }
     fn settled_storage(&self,identity_bytes:usize)->Option<usize>{
         std::mem::size_of::<Self>().checked_add(identity_bytes)?
-            .checked_add(arc_bytes::<Retirement>()?)?.checked_add(arc_bytes::<Dispatcher>()?)?
-            .checked_add(arc_bytes::<CallbackOriginal>()?.checked_mul(2)?)?
+            .checked_add(arc_bytes::<Retirement>()?)?.checked_add(self.retirement.extra_bytes()?)?
+            .checked_add(arc_bytes::<Dispatcher>()?)?.checked_add(arc_bytes::<CallbackOriginal>()?.checked_mul(2)?)?
             .checked_add(management::ServiceManager::project_owned_upper_bound()?)?
             .checked_add(std::mem::size_of::<MainSlot>())?.checked_add(4*SIGNAL_STORAGE)
+    }
+}
+
+// The fixed pair shares the original worker, coordinator and clock. Its probe
+// has no service tail; its enabled successor never runs for an absence result.
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+pub(super) struct MaintenancePreparation {
+    probe:Preparation,enabled:Preparation,pair:Arc<MaintenancePair>,enabled_entered:AtomicBool,
+    returned:Mutex<Option<MaintenanceRun>>,
+}
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+impl MaintenancePreparation {
+    fn new(gate:WorkGate,dispatcher:Arc<Dispatcher>,operation:[u8;16])->Self{
+        let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(0)});
+        let probe=Preparation::create_bound(gate.clone(),dispatcher.clone(),management::Action::Observe,false,None,Some(pair.clone()),None);
+        let enabled=Preparation::create_bound(gate,dispatcher,management::Action::UnregisterAfterQuiescence,true,Some(operation),
+            Some(pair.clone()),Some(probe.retirement.clone()));
+        Self{probe,enabled,pair,enabled_entered:AtomicBool::new(false),returned:Mutex::new(None)}
+    }
+    pub(super) fn reservation_bytes()->Option<usize>{
+        Preparation::reservation_bytes()?.checked_mul(2)?.checked_add(std::mem::size_of::<Self>())?
+            .checked_add(arc_bytes::<MaintenancePair>()?)
+    }
+    pub(super) fn tick(&self,allow_dispatch:bool){
+        self.probe.tick(allow_dispatch);self.enabled.tick(allow_dispatch);
+    }
+    fn observed_branch(observed:Option<wire::ServiceObservation>,checked:bool)->MaintenanceBranch{
+        let Some(value)=observed.filter(|value|checked && value.outcome==wire::ServiceOutcome::Observed
+            && value.native_settled && !value.mutation_entered && !value.mutation_returned && !value.mutation_uncertain)
+            else{return MaintenanceBranch::Unselected;};
+        match value.state{
+            wire::ServiceState::NotRegistered=>MaintenanceBranch::ObservedAbsent,
+            wire::ServiceState::Enabled=>MaintenanceBranch::Unregistered,
+            _=>MaintenanceBranch::Unselected,
+        }
+    }
+    fn probe_observation(&self)->Option<wire::ServiceObservation>{
+        let returned=*self.probe.returned.try_lock().ok()?;
+        let value=returned?.observation?;
+        (value.outcome==wire::ServiceOutcome::Observed && value.native_settled
+            && !value.mutation_entered && !value.mutation_returned && !value.mutation_uncertain).then_some(value)
+    }
+    pub(super) fn maintenance_partial(&self)->(bool,bool){
+        if self.enabled_entered.load(Ordering::SeqCst){self.enabled.maintenance_partial()}
+        else{(false,self.probe_observation().is_some_and(|value|value.state==wire::ServiceState::NotRegistered))}
+    }
+    pub(super) fn maintenance_return(&self)->Option<MaintenanceRun>{*self.returned.try_lock().ok()?}
+    pub(super) fn known_return(&self)->bool{
+        !self.probe.gate.control.unknown.load(Ordering::SeqCst) && self.probe.known_return()
+            && self.returned.try_lock().is_ok_and(|returned|returned.is_some_and(|value|value.known && value.retained.is_some()))
+            && if self.enabled_entered.load(Ordering::SeqCst){self.enabled.known_return()}else{self.enabled.inert_settled()}
+    }
+    pub(super) fn run_maintenance(&self,client:&mut maintenance_native::Client,
+        clock:&maintenance::OriginalClock,signal:&registration_native::Signal)->MaintenanceRun{
+        if self.returned.try_lock().map_or(true,|returned|returned.is_some()){
+            self.probe.gate.control.poisoned();return MaintenanceRun::default();
+        }
+        let control=&self.probe.gate.control;
+        let probe_ok=self.probe.run_once();clock.synchronize(control,signal);
+        let observed=self.probe_observation();
+        let checked=probe_ok && self.probe.known_return() && self.probe.finalization_ready()
+            && self.probe.gate.source_work().is_ok() && signal.admitted(false)
+            && Instant::now()<control.work;
+        let branch=Self::observed_branch(observed,checked);
+        let enabled=branch==MaintenanceBranch::Unregistered;
+        let absent=branch==MaintenanceBranch::ObservedAbsent;
+        let mut result;
+        let enabled_retained;
+        if enabled && self.pair.continuation.compare_exchange(0,1,Ordering::SeqCst,Ordering::SeqCst).is_ok()
+            && !self.enabled_entered.swap(true,Ordering::SeqCst){
+            // Same actual original. No finalization of the probe occurs here.
+            result=self.enabled.run_maintenance(client,clock,signal);
+            enabled_retained=self.enabled.retained_bytes();
+        }else{
+            if !absent && control.failure().is_none(){control.stop_at(wire::Reason::ServiceUnavailable,Instant::now());}
+            // No native/resource entry in this successor; settle only its
+            // genuinely empty identity book. Never fabricate a tail retirement.
+            enabled_retained=self.enabled.settle_inert();
+            let client_known=client.release() && client.settled();clock.synchronize(control,signal);
+            let not_registered=observed.is_some_and(|value|value.state==wire::ServiceState::NotRegistered);
+            result=MaintenanceRun{branch:if absent{MaintenanceBranch::ObservedAbsent}else{MaintenanceBranch::Unselected},
+                known:self.probe.known_return() && enabled_retained.is_some() && client_known,
+                checked,not_registered,callback_retired:self.probe.retirement.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED,
+                ..MaintenanceRun::default()};
+        }
+        let retained=self.probe.retained_bytes().and_then(|bytes|bytes.checked_add(enabled_retained?))
+            .and_then(|bytes|bytes.checked_add(client.retained_bytes()?))
+            .and_then(|bytes|bytes.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|bytes|bytes.checked_add(arc_bytes::<MaintenancePair>()?));
+        if retained.is_none_or(|bytes|bytes>Preparation::SETTLED_BYTES){
+            control.stop_at(wire::Reason::ResultLimit,Instant::now());
+        }
+        clock.synchronize(control,signal);
+        result.retained=retained;
+        result.known &= retained.is_some() && !control.unknown.load(Ordering::SeqCst)
+            && Instant::now()<control.endpoint();
+        match self.returned.try_lock(){Ok(mut output) if output.is_none()=>*output=Some(result),
+            _=>{control.poisoned();result.known=false;}}
+        result
+    }
+    fn finalize(&self)->bool{
+        if !self.known_return() || !self.probe.finalization_ready(){return false;}
+        if self.enabled_entered.load(Ordering::SeqCst){
+            if !self.enabled.finalization_ready(){return false;}
+        }else if !self.enabled.inert_settled(){return false;}
+        // Only called at original worker/coordinator/cohort/document final cut.
+        // One common publication, never a partially finalized predecessor.
+        self.pair.finalized.compare_exchange(false,true,Ordering::SeqCst,Ordering::SeqCst).is_ok()
+    }
+    fn last_retirement(&self)->Option<&Arc<Retirement>>{
+        if self.enabled.retirement.retired_serial.load(Ordering::SeqCst)>0{Some(&self.enabled.retirement)}
+        else if self.probe.retirement.retired_serial.load(Ordering::SeqCst)>0{Some(&self.probe.retirement)}else{None}
     }
 }
 
@@ -758,7 +960,7 @@ impl CatalogueServiceData {
         // State/Completed, Preparation, ServiceManager or finality is made.
         Self{data,retirement:Arc::new(Retirement{original:control,action:management::Action::Observe,
             require_enabled:false,phase:std::sync::atomic::AtomicU8::new(PENDING),
-            retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:None})}
+            retired_serial:std::sync::atomic::AtomicU32::new(0),pair:None,predecessor:None,maintenance:None})}
     }
     pub(super) fn retained_bytes(&self)->Option<usize>{
         assert_eq!(self.retirement.phase.load(Ordering::SeqCst),PENDING);
@@ -827,7 +1029,7 @@ impl State {
         let mut bytes=completed_state_allocation_bytes(self.last.as_ref().map(|last|&last.data))?;
         #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
         if let Some(retirement)=&self.retirement{
-            if retirement.phase.load(Ordering::SeqCst)!=OWNER_FINALIZED{return None;}
+            if !retirement.owner_finalized(){return None;}
             // The persistent settled TLS manager survives Preparation itself.
             // Count it for inspection/other admissions, not only a next setup.
             bytes=bytes.checked_add(persistent_manager_allocation_bytes(retirement)?)?;
@@ -837,8 +1039,17 @@ impl State {
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn adopt_finalized_preparation(&mut self,preparation:&Preparation)->bool{
         if !preparation.finalize(){return false;}
-        if preparation.retirement.phase.load(Ordering::SeqCst)==OWNER_FINALIZED{
+        if preparation.retirement.owner_finalized(){
             self.retirement=Some(preparation.retirement.clone());
+        }
+        true
+    }
+#[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
+    pub(super) fn adopt_finalized_maintenance(&mut self,preparation:&MaintenancePreparation)->bool{
+        if !preparation.finalize(){return false;}
+        if let Some(retirement)=preparation.last_retirement(){
+            if !retirement.owner_finalized(){preparation.probe.gate.control.poisoned();return false;}
+            self.retirement=Some(retirement.clone());
         }
         true
     }
@@ -1168,7 +1379,7 @@ mod callback_lifecycle_tests {
 
     fn callback(gate:WorkGate,require_enabled:bool)->(Arc<Retirement>,Arc<CallbackOriginal>){
         let retirement=Arc::new(Retirement{original:gate.control.clone(),action:Action::Observe,require_enabled,
-            phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),maintenance:None});
+            phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),pair:None,predecessor:None,maintenance:None});
         let original=Arc::new(CallbackOriginal{gate,action:Action::Observe,serial:1,
             retirement:retirement.clone(),returned:Mutex::new(None)});
         (retirement,original)
@@ -1207,6 +1418,41 @@ mod callback_lifecycle_tests {
         assert!(!retirement.callback_retired(serial,false));
         assert!(retirement.finalize());assert!(binding.reusable());assert!(!retirement.finalize());
         control.unknown.store(true,Ordering::SeqCst);assert!(!binding.reusable());
+
+        // Fixed pair DATA, not native qualification: callback retirement alone
+        // permits only the exact same-original one-use continuation, never an
+        // unrelated setup or whole-owner finality.
+        let (_,control,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Maintenance);
+        let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(1)});
+        let probe=Arc::new(Retirement{original:control.clone(),action:Action::Observe,require_enabled:false,
+            phase:std::sync::atomic::AtomicU8::new(CALLBACK_RETIRED),retired_serial:std::sync::atomic::AtomicU32::new(1),
+            maintenance:None,pair:Some(pair.clone()),predecessor:None});
+        let successor=Arc::new(Retirement{original:control.clone(),action:Action::UnregisterAfterQuiescence,require_enabled:true,
+            phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),
+            maintenance:Some(MaintenanceTail::new([1;16])),pair:Some(pair.clone()),predecessor:Some(probe.clone())});
+        let mut next=CallbackOriginal{gate,action:Action::UnregisterAfterQuiescence,serial:1,
+            retirement:successor.clone(),returned:Mutex::new(None)};
+        let pair_binding=MainBinding{retirement:probe.clone(),serial:1};
+        let settled=self::returned(Instant::now()).native.unwrap().1;
+        assert!(pair_binding.continues_probe(&next,settled));
+        assert!(!pair_binding.reusable() && !probe.finalize() && !successor.finalize());
+        for wrong in [management::Custody{unknown:true,..settled},management::Custody{cell:CellCustody::Owned,..settled},
+            management::Custody{service:ServiceCustody::Owned,..settled},management::Custody{in_call:true,..settled}]{
+            assert!(!pair_binding.continues_probe(&next,wrong));
+        }
+        next.serial=2;assert!(!pair_binding.continues_probe(&next,settled));next.serial=1;
+        next.action=Action::RequestRegistration;assert!(!pair_binding.continues_probe(&next,settled));next.action=Action::UnregisterAfterQuiescence;
+        let saved=next.gate.clone();let (_,_,_foreign_cohort,foreign)=control_in_lane(Instant::now(),ControlLane::Maintenance);
+        next.gate=foreign;assert!(!pair_binding.continues_probe(&next,settled));next.gate=saved;
+        assert!(successor.retained_bytes().unwrap()>probe.retained_bytes().unwrap());
+        assert!(pair.continuation.compare_exchange(1,2,Ordering::SeqCst,Ordering::SeqCst).is_ok());
+        assert!(!pair_binding.continues_probe(&next,settled));assert!(!pair_binding.reusable());
+        assert!(!probe.owner_finalized() && !successor.owner_finalized());
+        successor.phase.store(CALLBACK_RETIRED,Ordering::SeqCst);
+        assert!(!probe.owner_finalized() && !successor.owner_finalized());
+        pair.finalized.store(true,Ordering::SeqCst); // Models the single whole-cut publication.
+        assert!(pair_binding.reusable() && successor.owner_finalized());
+        control.unknown.store(true,Ordering::SeqCst);assert!(!pair_binding.reusable());
 
         for poisoned in [false,true]{
             let (_,_,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Service);
@@ -1272,7 +1518,7 @@ mod callback_lifecycle_tests {
             assert!(!management_settled(custody));
             // Even all other positive DATA cannot turn unsettled native custody
             // into Prepared; these flags do not authorize an actual operation.
-            let facts=MaintenanceRun{known:management_settled(custody),checked:true,started_or_uncertain:true,
+            let facts=MaintenanceRun{branch:MaintenanceBranch::Unregistered,known:management_settled(custody),checked:true,started_or_uncertain:true,
                 tail_received:true,unregister_accepted,not_registered,callback_retired:true,peer_ended:true,retained:Some(1)};
             assert!(!facts.prepared());
             for (observation,expected) in [
@@ -1286,6 +1532,22 @@ mod callback_lifecycle_tests {
             }
         }
         assert_eq!(Preparation::maintenance_observation(None),(false,false));
+        let absent=wire::ServiceObservation{state:wire::ServiceState::NotRegistered,outcome:wire::ServiceOutcome::Observed,
+            mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true};
+        assert_eq!(MaintenancePreparation::observed_branch(Some(absent),true),MaintenanceBranch::ObservedAbsent);
+        assert_eq!(MaintenancePreparation::observed_branch(Some(wire::ServiceObservation{state:wire::ServiceState::Enabled,..absent}),true),
+            MaintenanceBranch::Unregistered);
+        // Failed current identity, source/document cut, interrupted/late work
+        // never authorizes an otherwise plausible old observation.
+        assert_eq!(MaintenancePreparation::observed_branch(Some(absent),false),MaintenanceBranch::Unselected);
+        assert_eq!(MaintenancePreparation::observed_branch(None,true),MaintenanceBranch::Unselected);
+        for wrong in [wire::ServiceObservation{state:wire::ServiceState::NotFound,..absent},
+            wire::ServiceObservation{state:wire::ServiceState::RequiresApproval,..absent},
+            wire::ServiceObservation{outcome:wire::ServiceOutcome::Stopped,..absent},
+            wire::ServiceObservation{mutation_entered:true,..absent},wire::ServiceObservation{mutation_returned:true,..absent},
+            wire::ServiceObservation{mutation_uncertain:true,..absent},wire::ServiceObservation{native_settled:false,..absent}]{
+            assert_eq!(MaintenancePreparation::observed_branch(Some(wrong),true),MaintenanceBranch::Unselected);
+        }
     }
 
     #[test]
@@ -1298,7 +1560,7 @@ mod callback_lifecycle_tests {
             if case!=0 { tail.cutoff.set(if case==3{admitted+Duration::from_secs(1)}else{control.hard}).unwrap(); }
             let action=if case==1{Action::Observe}else{Action::UnregisterAfterQuiescence};
             let retirement=Arc::new(Retirement{original:control.clone(),action,require_enabled:true,
-                phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),
+                phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),pair:None,predecessor:None,
                 maintenance:Some(tail)});
             let original=CallbackOriginal{gate,action,serial:1,retirement:retirement.clone(),returned:Mutex::new(None)};
             if case==2 { control.stop_at(wire::Reason::Cancelled,admitted+Duration::from_secs(1)); }
@@ -1340,6 +1602,24 @@ mod callback_lifecycle_tests {
     #[test]
     fn register_observation_failure_is_at_real_return_and_stop_keeps_original_deadlines(){
         let admitted=Instant::now()-Duration::from_millis(100);let returned_at=admitted+Duration::from_millis(1);
+        // The maintenance probe latches unsupported service state at the real
+        // Observe return, not after identity/native cleanup or branch selection.
+        for (state,why) in [(management::Status::NotRegistered,None),(management::Status::Enabled,None),
+            (management::Status::NotFound,Some(wire::Reason::ServiceUnavailable)),
+            (management::Status::RequiresApproval,Some(wire::Reason::ApprovalRequired))]{
+            let (_,control,_cohort,gate)=control_in_lane(admitted,ControlLane::Maintenance);
+            let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(0)});
+            let retirement=Arc::new(Retirement{original:control.clone(),action:Action::Observe,require_enabled:false,
+                phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),
+                maintenance:None,pair:Some(pair),predecessor:None});
+            let original=CallbackOriginal{gate,action:Action::Observe,serial:1,retirement,returned:Mutex::new(None)};
+            let custody=management::Custody{phase:Some(Phase::ObserveStatus),action_admitted:true,
+                service:ServiceCustody::Owned,observation:Some(observed(state)),..deferred()};
+            let mut failure=CapturedFailure::default();
+            assert_eq!(original.gate(Checkpoint::Returned{phase:Phase::ObserveStatus,at:returned_at,custody},&mut failure),
+                if why.is_some(){Decision::Stop}else{Decision::Proceed});
+            assert_eq!(control.failure(),why.map(|why|(why,returned_at)));
+        }
         for require_enabled in [false,true]{
             let (_,control,_cohort,gate)=control_in_lane(admitted,ControlLane::Service);
             let (_,original)=callback(gate,require_enabled);let mut failure=CapturedFailure::default();

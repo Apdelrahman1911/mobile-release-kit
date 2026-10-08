@@ -64,7 +64,7 @@ jobs:
         run: |
           builtin source ./desktop/tools/macos_maintenance_fixture_prepare.sh
 
-      - name: Observe fixed service status before and after Cocoa startup
+      - name: Qualify only fixed registration reservation primitives
         id: native
         timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -73,9 +73,9 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # One fixed installed client, one original 15s/2048B status-only
-          # comparison. No Context, native lifecycle, register or settings call.
-          # Diagnostic completion is NOT production/service qualification.
+          # Six fixed originals share990s: three compile/DATA graphs, two C
+          # links, one genuine APFS/flock primitive fixture. No app/SM/Installer.
+          # Original25s fixture is20swork+2ssettlement; no full E2 qualification.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
             GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
@@ -87,7 +87,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-service-cocoa-startup
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-registration-reservation
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -111,18 +111,18 @@ jobs:
           retention-days: 14
           compression-level: 1
 
-      - name: Require closed diagnostic completion without qualification
+      - name: Require closed scoped qualification without full E2 acceptance
         if: always() && !cancelled()
         shell: bash
         env:
           ACCEPTED: ${{ steps.publication.outputs.accepted }}
-          DIAGNOSTIC_CAPTURED: ${{ steps.publication.outputs.diagnostic_captured }}
+          REGISTRATION_QUALIFIED: ${{ steps.publication.outputs.registration_qualified }}
           PREPARATION_OUTCOME: ${{ steps.prepare.outcome }}
           NATIVE_OUTCOME: ${{ steps.native.outcome }}
           PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
         run: |
           set -euo pipefail
-          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$DIAGNOSTIC_CAPTURED" == true && "$ACCEPTED" == false ]]
-          # No protected-root/receipt removal, adoption or process scan here.
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REGISTRATION_QUALIFIED" == true && "$ACCEPTED" == false ]]
+          # No protected-root/receipt adoption or process scan here.
           # Owner retirement is immediate and original-finality-gated. Shared
           # Cargo/Rust/Python homes and required evidence remain untouched.

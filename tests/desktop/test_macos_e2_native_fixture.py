@@ -105,6 +105,102 @@ class NativeResultTests(unittest.TestCase):
                     with self.assertRaises(fixture.Refused):
                         parse(value)
 
+        # Fixed DATA parser coverage; only the separate admitted Darwin original
+        # can establish the real locks/metadata/consuming-close facts below.
+        reservation = {
+            "schemaVersion": 1, "type": "mrk-macos-registration-reservation-fixture-v1",
+            "sourceCommit": SOURCE, "target": "aarch64-apple-darwin", "outcome": "passed",
+            "failure": None, "workTimeoutSeconds": 20, "hardTimeoutSeconds": 22,
+            "facts": {key: True for key in (
+                "sharedPairAcquired", "exclusiveBlockedBySharedPair", "exclusiveBlockedByRemainingShared",
+                "exclusiveAfterSharedRetirement", "sharedRefusedByExclusive", "sharedAfterExclusiveRetirement",
+                "separateMExclusiveWhileRShared", "laterMetadataRefused", "failedReservationRetainedKnown",
+                "failedReservationRetiredKnown", "exclusiveAfterFailedRetirement")},
+            "originals": {"opened": 61, "closedKnown": 61, "closeUnknown": False, "liveAtReturn": 0},
+            "rootCreated": True, "rootRetired": True, "internalAcquirePostCovered": False,
+            "serviceApiEntered": False, "unknownNativeFaultInjected": False,
+            "productionIdentityQualified": False,
+        }
+        def reservation_parse(value, code=0, source=SOURCE):
+            return fixture.registration_fixture_result(fixture.canonical(value), code, source)
+        self.assertEqual(reservation_parse(reservation), reservation)
+        for key in reservation:
+            value = copy.deepcopy(reservation)
+            del value[key]
+            with self.subTest(missing=key), self.assertRaises(fixture.Refused):
+                reservation_parse(value)
+        for key in reservation["facts"]:
+            for replacement in (False, 1, None):
+                value = copy.deepcopy(reservation)
+                value["facts"][key] = replacement
+                with self.subTest(fact=key, replacement=replacement), self.assertRaises(fixture.Refused):
+                    reservation_parse(value)
+            value = copy.deepcopy(reservation)
+            del value["facts"][key]
+            with self.subTest(missing_fact=key), self.assertRaises(fixture.Refused):
+                reservation_parse(value)
+        for key, replacements in (
+            ("schemaVersion", (True, 2)), ("target", ("x86_64-apple-darwin", "arm64")),
+            ("sourceCommit", ("b" * 40, SOURCE.upper())), ("outcome", ("failed", "unavailable")),
+            ("failure", ("later-post", "cleanup")), ("workTimeoutSeconds", (19, 21, True)),
+            ("hardTimeoutSeconds", (21, 23)), ("rootCreated", (False, 1)), ("rootRetired", (False, 1)),
+            ("internalAcquirePostCovered", (True, 0)), ("serviceApiEntered", (True, 0)),
+            ("unknownNativeFaultInjected", (True, 0)), ("productionIdentityQualified", (True, 0)),
+        ):
+            for replacement in replacements:
+                value = copy.deepcopy(reservation)
+                value[key] = replacement
+                with self.subTest(field=key, replacement=replacement), self.assertRaises(fixture.Refused):
+                    reservation_parse(value)
+        for key, replacements in (
+            ("opened", (60, 62, True)), ("closedKnown", (0, 60, 62, True)),
+            ("closeUnknown", (True, 0)), ("liveAtReturn", (1, None, False)),
+        ):
+            for replacement in replacements:
+                value = copy.deepcopy(reservation)
+                value["originals"][key] = replacement
+                with self.subTest(original=key, replacement=replacement), self.assertRaises(fixture.Refused):
+                    reservation_parse(value)
+            value = copy.deepcopy(reservation)
+            del value["originals"][key]
+            with self.subTest(missing_original=key), self.assertRaises(fixture.Refused):
+                reservation_parse(value)
+        for container in (None, "facts", "originals"):
+            value = copy.deepcopy(reservation)
+            (value if container is None else value[container])["extra"] = False
+            with self.subTest(extra=container), self.assertRaises(fixture.Refused):
+                reservation_parse(value)
+        for code in (1, 65, -1, False, None):
+            with self.subTest(code=code), self.assertRaises(fixture.Refused):
+                reservation_parse(reservation, code)
+        body = fixture.canonical(reservation)
+        for raw in (body + body, b'{"schemaVersion":1,' + body[1:], b" " * 4097,
+                    body.rstrip(b"\n") + b"\x00\n", b"\xff", b"[]\n"):
+            with self.subTest(raw_kind=raw[:16]), self.assertRaises(fixture.Refused):
+                fixture.registration_fixture_result(raw, 0, SOURCE)
+        with self.assertRaises(fixture.Refused):
+            reservation_parse(reservation, source="b" * 40)
+        # No production hook or real close-error injection: Unknown policy is
+        # the existing separate Native6 DATA test, not a manufactured Darwin pass.
+        front = (PATH.parent.parent / "native/macos-installed-entry/registration_fixture.c").read_text()
+        self.assertLessEqual(len(front.encode()), 32768)
+        self.assertIn("MRK_E2_NATIVE_FIXTURE != 1", front)
+        self.assertIn("!defined(MRK_ENTRY_METADATA_ONLY)", front)
+        self.assertIn("EXPECTED_OPENS = 61", front)
+        self.assertIn("sizeof(struct fixture) <= 8192", front)
+        self.assertIn("argc == 1", front)
+        self.assertIn("fchown(f->root, (uid_t)-1, (gid_t)0)", front)
+        self.assertIn("fchmod(p->book.gate, 0400)", front)
+        self.assertIn("fchmod(p->book.gate, 0444)", front)
+        self.assertIn("mrk_entry_gate_matches(&p->book, FD_CLOEXEC) == 0", front)
+        self.assertIn("Creator fact ONLY; failed participant stays failed", front)
+        self.assertIn("Deliberately LATER than acquire_shared", front)
+        self.assertIn("mrk_registration_retire(&p->book)", front)
+        self.assertIn("MRK_INSTALLED_ROOT_LEAF, AT_REMOVEDIR", front)
+        for forbidden in ("#define flock", "#define close", "SMAppService", "LOCK_UN", "F_DUPFD",
+                          "dup(", "dup2(", "fork(", "pthread_create(", "system(", "popen("):
+            self.assertNotIn(forbidden, front)
+
     def test_failed_admission_cannot_publish_tested_unregister_or_swap_cleanup(self):
         for field in ("tailAdmissionIssued", "testedUnregisterEntered"):
             value = result()

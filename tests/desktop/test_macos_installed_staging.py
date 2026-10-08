@@ -806,7 +806,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "writerState": "installed", "writerExit": 0, "intentSha256": "3" * 64, "stateSha256": "4" * 64,
             "capsuleSha256": "5" * 64, "payloadWriteCount": 1, "payloadWriteBytes": 10, "originalWriterJoined": True,
             "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
-            "historicalOuterExit": "unverified"}
+            "historicalOuterExit": "unverified", "registrationReservation": reservation_result_data()}
         observed = {"schemaVersion": 2, "sourceCommit": "a" * 40, "release": selected.release,
             "requestId": request, "invocation": invocation, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
@@ -4179,6 +4179,18 @@ def package_data(*, uid=0, gid=0, root=".", file_owner=None, fixture=False, sele
     return files, {"PackageInfo": info, "Scripts": archive + odc("TRAILER!!!", 0)}
 
 
+def reservation_result_data(*, entered=True, created=True):
+    # Synthetic parser DATA only, never an original native lock/close fact.
+    return {"schemaVersion": 1, "entered": entered,
+            "creation": ("created" if created else "existing-not-modified") if entered else "not-attempted",
+            "fixedBytes": 38, "writtenBytes": 38 if entered and created else 0,
+            "sealed": entered and created, "filePersisted": entered and created, "parentPersisted": entered and created,
+            "writer": "closed" if entered and created else "not-attempted", "verified": entered,
+            "exclusiveAttempted": entered and not created, "exclusiveAcquired": entered and not created,
+            "participant": "closed" if entered else "not-attempted", "closedUnderMaintenance": entered,
+            "verifiedAfterGo": False, "cleanup": "original-closes-only-permanent-reservation-retained"}
+
+
 def original_result(expected, *, stage=".install-" + "d" * 32, selection=None):
     selection = TOOL.selected_build(selection)
     reason, runtime, app, state, verified, _exit = expected
@@ -4192,6 +4204,7 @@ def original_result(expected, *, stage=".install-" + "d" * 32, selection=None):
             "runtimePublication": runtime, "appPublication": app, "staging": stage, "payloadVerified": verified,
             "payloadWritersSettled": True, "originalsSettled": True, "deadlineMetAfterFinalCloses": True, "createdAncestors": [],
             "cleanup": "original-closes-only-no-deletion", "sourceCommit": "a" * 40, "inventorySha256": "b" * 64, "runtimeManifestSha256": "c" * 64, "installationMetadata": metadata,
+            "registrationReservation": reservation_result_data(entered=stage is not None),
             "maintenanceGate": {"schemaVersion": 1, "entered": stage is not None,
                 "creation": "created" if stage else "not-attempted", "fixedBytes": 30, "writtenBytes": 30 if stage else 0,
                 "sealed": stage is not None, "filePersisted": stage is not None, "parentPersisted": stage is not None,
@@ -4308,7 +4321,8 @@ def maintenance_documents(actions=("fresh-install",), *, target="aarch64-apple-d
               "writerState": {"fresh-install": "installed", "update": "installed", "same-package-noop": "same-package", "restore-fixed-app": "restored-app"}[action],
               "writerExit": 0, **hashes, "payloadWriteCount": count, "payloadWriteBytes": count, "originalWriterJoined": True,
               "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
-              "historicalOuterExit": "unverified"}
+              "historicalOuterExit": "unverified",
+              "registrationReservation": reservation_result_data(created=actions[-1] == "fresh-install")}
     return producer, records, result
 
 
@@ -5396,6 +5410,30 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
             with self.subTest(change=change), self.assertRaises(TOOL.Refused):
                 TOOL.maintenance_history_data(exported, bodies, selected)
 
+        # An existing source-approved generation is not silently repaired: only
+        # genuine fresh/update parent routes may report creation, never no-op/restore.
+        for action in ("fresh-install", "update", "same-package-noop", "restore-fixed-app"):
+            actions = (action,) if action == "fresh-install" else ("fresh-install", action)
+            _producer, _records, valid = maintenance_documents(actions)
+            for created in (False, True):
+                changed = {**valid, "registrationReservation": reservation_result_data(created=created)}
+                if not created or action in ("fresh-install", "update"):
+                    self.assertEqual(TOOL.maintenance_result_data(TOOL.canonical(changed) + b"\n", changed["requestId"]), changed)
+                else:
+                    with self.assertRaisesRegex(TOOL.Refused, "registration-reservation-not-predecessor-creation"):
+                        TOOL.maintenance_result_data(TOOL.canonical(changed) + b"\n", changed["requestId"])
+            state, parsed = TOOL.maintenance_history_data(valid, _records, _producer)
+            names, _stages = TOOL.maintenance_roster_data(state, parsed, TOOL.ARM_TARGET)
+            self.assertIn(TOOL.REGISTRATION_GATE_NAME, names)
+            self.assertIn(TOOL.MAINTENANCE_GATE_NAME, names)
+            self.assertNotIn("registration-reservation-v2", names)
+        for key, value in (("participant", "owned"), ("participant", "unknown"), ("closedUnderMaintenance", False),
+                           ("verifiedAfterGo", True), ("exclusiveAcquired", False)):
+            changed = {**valid, "registrationReservation": {**reservation_result_data(created=False), key: value}}
+            with self.subTest(parent_reservation=key), self.assertRaises(TOOL.Refused):
+                TOOL.maintenance_result_data(TOOL.canonical(changed) + b"\n", changed["requestId"])
+
+
     def test_installer_export_absence_accepts_only_enoent_and_settled_parents(self):
         args = result_args()
         path = TOOL.installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest, request_id=args.request_id)
@@ -5742,6 +5780,63 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
         self.assertIn('"installationMetadata":self.metadata.snapshot', source)
         self.assertIn('"maintenanceGate":self.gate_record()', source)
 
+        # R and M must be separate real original ledgers. Existing R_EX is
+        # acquired BEFORE M_EX, consumed only while actual M_EX is held, and
+        # workers authenticate R only AFTER their actual parent GO+EOF.
+        reservation = source.split("fn registration_before_maintenance(", 1)[1].split("fn registration_complete_admitted(", 1)[0]
+        self.assertIn("!self.registration.entered && !self.gate.entered", reservation)
+        self.assertIn("fcntl::FlockArg::LockExclusiveNonblock", reservation)
+        self.assertLess(reservation.index("self.registration_open(destination)?"), reservation.index("fcntl::flock"))
+        self.assertLess(reservation.index("self.registration.exclusive_acquired = true"), reservation.index("self.clock()?; self.registration_protected"))
+        self.assertNotIn("create_file", reservation)
+        complete = source.split("fn registration_complete_admitted(", 1)[1].split("fn registration_after_go(", 1)[0]
+        ordered = ("self.gate.verified && self.gate.lock_attempted && self.gate.exclusive_acquired",
+                   "self.gate_protected(maintenance)?", "matches!(action, ActionData::FreshInstall | ActionData::Update)",
+                   "self.create_file(destination, paths::REGISTRATION_GATE_NAME, Role::ReservationWriter)",
+                   "self.write_all(writer, paths::REGISTRATION_GATE_BYTES)", "self.seal_file(writer, false)",
+                   "self.persist(destination, false)", "self.registration_open(destination)", "self.close(reader)",
+                   "self.registration.closed_under_maintenance = true", "self.registration_ready()")
+        self.assertEqual([complete.index(token) for token in ordered], sorted(complete.index(token) for token in ordered))
+        self.assertNotIn("self.gate.participant =", complete)
+        self.assertNotIn("LockShared", complete)
+        worker = source.split("fn registration_after_go(", 1)[1].split("fn registration_ready(", 1)[0]
+        self.assertIn("self.worker_go_eof && self.worker_deadline.is_some()", worker)
+        self.assertIn("!self.gate.lock_attempted", worker)
+        self.assertIn("self.registration_open(destination)?", worker)
+        self.assertNotIn("flock", worker)
+        self.assertLess(source.index("book.worker_go_eof = true; // Actual complete GO and EOF"),
+                        source.index("book.registration_after_go(destination)?"))
+        self.assertLess(admission.index("self.registration_before_maintenance(destination)?"), admission.index("self.maintenance_gate(destination)?"))
+        self.assertLess(admission.index("maintenance::fresh_registration_roster(self, destination, versions)?"),
+                        admission.index("self.registration_complete_admitted(destination, ActionData::FreshInstall)?"))
+        selected = source.split("self.book.registration_complete_admitted(observed.prepared.destination, observed.action)?", 1)[0]
+        self.assertLess(selected.rindex("maintenance::observe("), selected.rindex("observed.incoming_controls("))
+        self.assertIn("selected.predecessor_data().contains(generation.release_data())", source)
+        ready = source.split("fn registration_ready(", 1)[1].split("fn gate_protected(", 1)[0]
+        for token in ("State::Closed", "self.originals[reader].fd.is_none()", "Identity::of(&named) == self.identity(reader)?", "named.st_flags == 0"):
+            self.assertIn(token, ready)
+        self.assertIn('"registrationReservation":self.registration_record()', source)
+        self.assertIn('"registrationReservation":self.book.registration_record()', source)
+        self.assertIn("Role::ReservationWriter", source)
+        self.assertIn("Role::ReservationParticipant", source)
+        self.assertIn("checked_add(4)", admission)
+        self.assertIn("root_cost.files.checked_add(2)", source)
+        self.assertIn("paths::REGISTRATION_GATE_BYTES.len()", source)
+        # Current application readback is the same bounded Book, not a lock
+        # claim, new root, payload count, or silent old-layout fallback.
+        observer = (Path(__file__).absolute().parents[2] / "desktop/src-tauri/src/installation_observation_macos.rs").read_text(encoding="utf-8")
+        inspect = observer.split("    fn inspect(", 1)[1].split("    pub(crate) fn run(", 1)[0]
+        self.assertLess(inspect.index("self.read_record(install, paths::MAINTENANCE_GATE_NAME"),
+                        inspect.index("self.read_record(install, paths::REGISTRATION_GATE_NAME"))
+        self.assertLess(inspect.index("self.read_record(install, paths::REGISTRATION_GATE_NAME"), inspect.index("self.installed_selection("))
+        self.assertIn("paths::MAINTENANCE_GATE_NAME, paths::REGISTRATION_GATE_NAME],", inspect)
+        self.assertIn("paths::MAINTENANCE_GATE_NAME.to_owned(),paths::REGISTRATION_GATE_NAME.to_owned(),", observer)
+        self.assertIn("const RECORDS: usize = 8256;", observer)
+        self.assertNotIn("flock", inspect)
+        reader = observer.split("    fn read_record(", 1)[1].split("    fn control_present(", 1)[0]
+        self.assertLess(reader.index("self.held_record("), reader.index("self.close(index, end, stop, publish)?"))
+
+
     def test_macho_header_data_refuses_an_unreviewed_target_or_minimum(self):
         for target, other, cpu, subtype in (("aarch64-apple-darwin", "x86_64-apple-darwin", 0x0100000C, 0),
                                            ("x86_64-apple-darwin", "aarch64-apple-darwin", 0x01000007, 3)):
@@ -5846,6 +5941,59 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
         with self.assertRaises(TOOL.Refused):
             TOOL.bound_original_result(dict(intel, originalsSettled=False), expected, "a" * 40, "b" * 64, "c" * 64, selection=selection)
 
+        # R has its own closed creation/existing ledger, and no worker-read-only
+        # observation or lost close may stand in for the parent's actual overlap.
+        reservation = result["registrationReservation"]
+        for key, value in (("schemaVersion", True), ("entered", False), ("fixedBytes", True), ("fixedBytes", 37),
+                           ("writtenBytes", True), ("writtenBytes", 37), ("sealed", False), ("filePersisted", False),
+                           ("parentPersisted", False), ("writer", "owned"), ("verified", False),
+                           ("exclusiveAttempted", True), ("exclusiveAcquired", True), ("participant", "unknown"),
+                           ("participant", "kernel-exit-retained"), ("closedUnderMaintenance", False),
+                           ("closedUnderMaintenance", 1), ("verifiedAfterGo", True), ("cleanup", "deleted"), ("extra", True)):
+            with self.subTest(reservation=key, value=value), self.assertRaises(TOOL.Refused):
+                TOOL.bound_original_result({**result, "registrationReservation": {**reservation, key: value}}, expected,
+                                           "a" * 40, "b" * 64, "c" * 64)
+        for key in reservation:
+            missing = dict(reservation); del missing[key]
+            with self.subTest(missing_reservation=key), self.assertRaises(TOOL.Refused):
+                TOOL.registration_reservation_result(missing, entered=True)
+        missing = dict(result); del missing["registrationReservation"]
+        with self.assertRaises(TOOL.Refused):
+            TOOL.bound_original_result(missing, expected, "a" * 40, "b" * 64, "c" * 64)
+        reused_r = reservation_result_data(created=False)
+        TOOL.bound_original_result({**result, "registrationReservation": reused_r}, expected, "a" * 40, "b" * 64, "c" * 64)
+        for key, value in (("writtenBytes", 38), ("sealed", True), ("filePersisted", True), ("parentPersisted", True),
+                           ("writer", "closed"), ("exclusiveAttempted", False), ("exclusiveAcquired", False)):
+            with self.subTest(reused_reservation=key), self.assertRaises(TOOL.Refused):
+                TOOL.registration_reservation_result({**reused_r, key: value}, entered=True)
+        empty_r = reservation_result_data(entered=False)
+        TOOL.registration_reservation_result(empty_r, entered=False)
+        for key in ("entered", "sealed", "filePersisted", "parentPersisted", "verified", "exclusiveAttempted",
+                    "exclusiveAcquired", "closedUnderMaintenance", "verifiedAfterGo"):
+            with self.subTest(unentered_reservation=key), self.assertRaises(TOOL.Refused):
+                TOOL.registration_reservation_result({**empty_r, key: True}, entered=False)
+        # Small genuine parser boundary cases charge the new file/38B without
+        # allocating a large fixture or changing the real production caps.
+        record, inventory_body, root_data, release_data = installation_record_fixture()
+        rows = json.loads(inventory_body)["files"]
+        for extra, passed in ((4, True), (3, False)):
+            with mock.patch.object(TOOL, "MAX_FILES", len(rows) + extra):
+                if passed:
+                    self.assertEqual(len(TOOL.observation_inventory_bytes(inventory_body, TOOL.digest(inventory_body), "c" * 64)), len(rows))
+                else:
+                    with self.assertRaisesRegex(TOOL.Refused, "observation-inventory-shape"):
+                        TOOL.observation_inventory_bytes(inventory_body, TOOL.digest(inventory_body), "c" * 64)
+        total = sum(row["size"] for row in rows) + len(inventory_body) + TOOL.INSTALLATION_RECORD_LIMIT + 30 + 38
+        for maximum, passed in ((total, True), (total - 1, False)):
+            with mock.patch.object(TOOL, "MAX_BYTES", maximum):
+                arguments = (TOOL.canonical(record), inventory_body, "a" * 40, "c" * 64, root_data, release_data, record["instance"])
+                if passed:
+                    self.assertEqual(TOOL.installation_record_data(*arguments), record)
+                else:
+                    with self.assertRaisesRegex(TOOL.Refused, "installation-record-total-bound"):
+                        TOOL.installation_record_data(*arguments)
+
+
     def test_fixture_result_exact_eight_cases_never_promotes_actual_uncertainty(self):
         self.assertEqual(tuple(TOOL.FIXTURE_CASES), ("occupied-app", "occupied-release", "runtime-publication-collision", "staging-file-collision",
                          "first-publication-second-refusal", "prepublication-persistence-report", "postruntime-persistence-report", "metadata-descriptor-collision"))
@@ -5947,6 +6095,7 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                   mock.patch.object(TOOL, "observe_occupant") as occupant_read,
                   mock.patch.object(TOOL, "tree", return_value={"data": (b"X", 0o444)}) as runtime_read,
                   mock.patch.object(TOOL, "maintenance_gate_readback", return_value={"state": "synthetic-gate-DATA"}),
+                  mock.patch.object(TOOL, "registration_reservation_readback", return_value={"state": "synthetic-R-DATA"}) as reservation_read,
                   mock.patch.object(TOOL, "installation_metadata_readback", return_value={"state": "synthetic-metadata-DATA"}) as metadata_read):
                 result = TOOL.fixture_observation_command(args)
                 selected.assert_called_once_with(target)
@@ -5962,6 +6111,13 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                       "postruntime-persistence-report", "metadata-descriptor-collision")])
                 self.assertTrue(all(other.release not in path.parts and not path.name.startswith(".install-") for path, _ in visited))
                 self.assertEqual(stage_stat.call_count, 6)
+                self.assertEqual(reservation_read.call_args_list, [mock.call(91)] * 6)
+                for path, names in visited:
+                    if path.parent == base:
+                        self.assertEqual(TOOL.REGISTRATION_GATE_NAME in names,
+                                         path.name not in ("occupied-app", "occupied-release"))
+                self.assertEqual([row["registrationReservation"] for row in result["nonrootReadback"]],
+                                 [None, None] + [{"state": "synthetic-R-DATA"}] * 6)
                 self.assertTrue(all(call.kwargs == {"dir_fd": 91, "follow_symlinks": False} for call in stage_stat.call_args_list))
                 self.assertEqual(runtime_read.call_count, 3)
                 self.assertTrue(all(call.kwargs == {"installed": True} for call in runtime_read.call_args_list))
@@ -6261,6 +6417,42 @@ class MacInstallationMetadataData(unittest.TestCase):
                 if problem == "missing": close.assert_not_called()
                 else: close.assert_called_once_with(91)
 
+        # The SAME real leaf/readback functions, inert numerical FD consumers.
+        # Before-open refusals must not fabricate a close; adopted originals
+        # consume exactly once even on content, POST, attributes or close faults.
+        raw = TOOL.REGISTRATION_GATE_BYTES
+        self.assertEqual(raw, b"MRK-MACOS-REGISTRATION-RESERVATION-v1\n")
+        self.assertEqual(len(raw), 38)
+        for problem in ("none", "content", "short", "overflow", "size", "symlink", "links", "flags", "mode", "owner",
+                        "group", "replacement", "named-replacement", "attributes", "missing", "close"):
+            before = log_info(len(raw) + (1 if problem == "size" else 0),
+                              st_mode=(stat.S_IFLNK if problem == "symlink" else stat.S_IFREG) | (0o644 if problem == "mode" else 0o444),
+                              st_uid=501 if problem == "owner" else 0, st_gid=20 if problem == "group" else 0,
+                              st_nlink=2 if problem == "links" else 1, st_flags=1 if problem == "flags" else 0)
+            replaced = SimpleNamespace(**{**vars(before), "st_ino": before.st_ino + 1})
+            data = b"x" * len(raw) if problem == "content" else raw[:-1] if problem == "short" else raw + b"x" if problem == "overflow" else raw
+            with (mock.patch.object(TOOL.os, "stat", side_effect=FileNotFoundError() if problem == "missing" else
+                                    [before, replaced if problem == "named-replacement" else before]) as named,
+                  mock.patch.object(TOOL.os, "open", return_value=91) as opened,
+                  mock.patch.object(TOOL.os, "fstat", side_effect=[before, replaced if problem == "replacement" else before]),
+                  mock.patch.object(TOOL.os, "read", side_effect=[data, b""]),
+                  mock.patch.object(TOOL, "no_xattrs", side_effect=TOOL.Refused("synthetic-attributes") if problem == "attributes" else None),
+                  mock.patch.object(TOOL, "close_once", side_effect=TOOL.Refused("synthetic-close-unknown") if problem == "close" else None) as close):
+                if problem == "none":
+                    self.assertEqual(TOOL.registration_reservation_readback(90), {
+                        "state": "protected-permanent-reservation-data-correspondence", "bytes": 38,
+                        "exclusionObserved": False, "workerFinalityEstablished": False})
+                else:
+                    with self.subTest(reservation_read=problem), self.assertRaises((TOOL.Refused, FileNotFoundError)):
+                        TOOL.registration_reservation_readback(90)
+                named.assert_any_call(TOOL.REGISTRATION_GATE_NAME, dir_fd=90, follow_symlinks=False)
+                if problem in ("size", "symlink", "links", "flags", "missing"):
+                    opened.assert_not_called(); close.assert_not_called()
+                else:
+                    opened.assert_called_once_with(TOOL.REGISTRATION_GATE_NAME, TOOL.READ_FLAGS, dir_fd=90)
+                    close.assert_called_once_with(91)
+
+
     def test_metadata_parent_cleanup_consumes_all_originals_and_gates_result(self):
         for target, release in (("aarch64-apple-darwin", TOOL.RELEASE), ("x86_64-apple-darwin", "macos26-x86_64-synthetic-01")):
             selection = TOOL.BuildSelection(target, TOOL.PACKAGE_VERSION, release)
@@ -6360,7 +6552,18 @@ class MacInstallationMetadataData(unittest.TestCase):
         terminal = ui.split("private func completeNormalQuit(", 1)[1].split("private func acceptFinalScenario()", 1)[0]
         self.assertNotIn("app.launch()", ui)
         self.assertEqual(basic.count("try launchOrdinaryApplication()"), 1)
-        self.assertEqual(ui.count("NSWorkspace.shared.openApplication(at: Self.outerURL"), 1)
+        # The shared launcher has one actual request. Its ordinary branch still
+        # selects only the fixed outer app, with no engineering environment.
+        request = ui.split("        func requestAndAwait() throws {", 1)[1].split("        func observeNormalTermination(", 1)[0]
+        ordinary_request = request.split("            case .ordinary:\n", 1)[1].split("            case .engineeringMain(", 1)[0]
+        self.assertEqual(ui.count("NSWorkspace.shared.openApplication("), 1)
+        self.assertIn("NSWorkspace.shared.openApplication(at: requestURL, configuration: configuration)", request)
+        self.assertEqual(ordinary_request.count("requestURL = Self.outerURL"), 1)
+        self.assertNotIn("configuration.environment", ordinary_request)
+        self.assertIn("init(clock: CaseClock, profile: LaunchProfile = .ordinary)", ui)
+        self.assertIn("let owner = OrdinaryLaunch(clock: clock)", launch)
+        self.assertIn('ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil', launch)
+        self.assertLess(request.index("requested = true"), request.index("NSWorkspace.shared.openApplication("))
         self.assertIn("XCUIApplication(url: OrdinaryLaunch.payloadURL)", launch)
         self.assertIn('try nativeSheet(window, title: "Choose a mobile project folder")', basic)
         self.assertEqual(basic.count("try gate.probe(busy: true)"), 2)
@@ -6375,6 +6578,15 @@ class MacInstallationMetadataData(unittest.TestCase):
         reused = next(node for node in supplier.body if isinstance(node, ast.FunctionDef) and node.name == "reused_runtime")
         self.assertIn("HISTORICAL_SUPPLIER_RELEASE", {node.id for node in ast.walk(reused) if isinstance(node, ast.Name)})
         self.assertNotIn("RELEASE", {node.id for node in ast.walk(reused) if isinstance(node, ast.Name)})
+
+        self.assertEqual(TOOL.REGISTRATION_GATE_NAME, "registration-reservation-v1")
+        self.assertEqual(TOOL.REGISTRATION_GATE_BYTES, b"MRK-MACOS-REGISTRATION-RESERVATION-v1\n")
+        self.assertEqual(len(TOOL.REGISTRATION_GATE_BYTES), 38)
+        self.assertIn('pub const REGISTRATION_GATE_NAME: &str = "registration-reservation-v1";', paths)
+        self.assertIn('pub const REGISTRATION_GATE_BYTES: &[u8] = b"MRK-MACOS-REGISTRATION-RESERVATION-v1\\n";', paths)
+        self.assertIn('#define MRK_REGISTRATION_GATE_NAME "registration-reservation-v1"', fixed)
+        self.assertIn('#define MRK_REGISTRATION_GATE_BYTES "MRK-MACOS-REGISTRATION-RESERVATION-v1\\n"', fixed)
+
 
 
 
@@ -8108,12 +8320,14 @@ class MacNormalPreviewData(unittest.TestCase):
             "writerState": "installed", "writerExit": 0, "intentSha256": "3" * 64, "stateSha256": "4" * 64,
             "capsuleSha256": "5" * 64, "payloadWriteCount": 1, "payloadWriteBytes": 10, "originalWriterJoined": True,
             "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
-            "historicalOuterExit": "unverified"}
+            "historicalOuterExit": "unverified", "registrationReservation": reservation_result_data()}
         observed = {"schemaVersion": 2, "sourceCommit": "a" * 40, "release": selection.release,
             "requestId": request, "invocation": invocation, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
             "completedPackageSha256": TOOL.digest(package), "runtimeManifestSha256": "c" * 64, "inventorySha256": "d" * 64,
             "nonrootReadbackFileCount": len(expected), "originalInstallerResult": result,
+            "registrationReservation": {"state": "protected-permanent-reservation-data-correspondence", "bytes": 38,
+                                        "exclusionObserved": False, "workerFinalityEstablished": False},
             "maintenanceGate": {"state": "protected-permanent-gate-data-correspondence", "bytes": len(TOOL.MAINTENANCE_GATE_BYTES),
                                 "exclusionObserved": False, "workerFinalityEstablished": False},
             "installationMetadata": [{"release": selection.release, "instance": invocation, "inventoryBytes": 6,
@@ -8332,6 +8546,10 @@ class MacNormalPreviewData(unittest.TestCase):
             ("installation-observation.json", "runtimeManifestSha256", "f" * 64),
             ("installation-observation.json", "nonrootReadbackFileCount", 1),
             ("installation-observation.json", "maintenanceGate", None),
+            ("installation-observation.json", "registrationReservation", None),
+            ("installation-observation.json", ("registrationReservation", "exclusionObserved"), True),
+            ("installation-observation.json", ("registrationReservation", "workerFinalityEstablished"), True),
+            ("installation-observation.json", ("originalInstallerResult", "registrationReservation", "closedUnderMaintenance"), False),
             ("app-result.json", "entryBundleIdentifier", TOOL.BUNDLE_ID),
             ("app-result.json", "entryBinarySha256BeforeSigning", None),
             ("package-audit.json", "packageSha256", "f" * 64),

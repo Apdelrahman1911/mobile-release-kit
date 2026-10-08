@@ -261,7 +261,7 @@ does not move. Helper authentication compares the actual executing payload to it
 static payload signature, never the entry signature. Android's `BundleProgram`
 remains payload-relative `Contents/Helpers/mrk-android-register`.
 
-The existing fresh-only Installer provisions or strictly admits the permanent
+The Installer provisions or strictly admits the permanent
 `maintenance-gate-v1` at the installation root: exact30B
 `MRK-MACOS-MAINTENANCE-GATE-v1\n`, root:wheel0444, one regular link, empty
 ACL/xattrs and protected local APFS ancestry. It never repairs, replaces or
@@ -413,17 +413,26 @@ successful installation, open Finder, choose **Go → Go to Folder**, enter
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`, and open
 the app. This does not require a terminal, copying assets or moving the bundle.
 
-The Environment page describes this fixed location and the current fresh-only
-installation policy. Its **Show in Finder** action accepts no renderer path and
+The Environment page describes this fixed location and the requirement for a
+verified Installer package. Its **Show in Finder** action accepts no renderer path and
 uses the ordinary user's fixed native Finder request under the original document
 lifecycle gate. “Request sent” does not prove Finder became visible or validate
 the installed bytes, signing, notarization, or release readiness.
 
-This engineering package does not yet repair, update or uninstall an occupied
-installation. Rerunning the same package is not a repair operation. Retain partial
-installation evidence; do not delete protected installation directories to bypass
-a refusal. These presentation changes do not add maintenance, a package wrapper,
-LaunchServices registration, auto-launch, or a privileged application process.
+The verified package, not the Environment card or preparation status, determines
+which action is eligible. The existing Installer can admit a fresh installation,
+leave an exact same-package installation unchanged, restore only a missing app at
+its fixed location, or update an explicitly authorized predecessor. These are not
+general repair or overwrite permissions: modified, partial or unknown trees may
+be refused. Retain partial-installation evidence and unknown files; do not delete
+protected directories to bypass a refusal. Uninstall is not yet available.
+
+The presentation contract uses `installMode: verified-package-required` and retains
+`maintenance: unavailable` and `assurance: profile-description-only`. It grants no
+Installer authority and is not evidence of package signing, notarization, successful
+installation or native qualification. **Prepare and quit** only prepares the current
+app; any later package operation must independently authenticate its inputs and
+acquire its own maintenance ownership.
 
 ## Installer entry and bounded diagnostics
 

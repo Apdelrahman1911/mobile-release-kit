@@ -107,6 +107,11 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         || action==Action::Observe && (raw.entered!=0 || raw.returned!=0)
         || raw.unknown==0 && matches!(raw.service_state,0|1|3|5) { return None; }
     if matches!(phase,Phase::AcquireService|Phase::ObserveStatus) && raw.entered!=0 { return None; }
+    let reservation_action=matches!(action,Action::RequestRegistration|Action::OpenApprovalSettings);
+    let reservation_refused=reservation_action && phase==Phase::Mutate && raw.outcome==6
+        && raw.service_state==2 && raw.entered==0 && raw.returned==0
+        && match action {Action::RequestRegistration=>raw.status==0,
+            Action::OpenApprovalSettings=>raw.status<=3,_=>false};
     if raw.unknown==0 {
         if phase==Phase::ReleaseService {
             if raw.cleanup_known!=1 || raw.service_state!=4 { return None; }
@@ -114,10 +119,10 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         match phase {
             Phase::AcquireService if raw.status!=4 || raw.entered!=0 || raw.returned!=0
                 || !((raw.service_state==2 && raw.outcome==0)
-                    || (raw.service_state==4 && raw.outcome==7)) => return None,
+                    || (raw.service_state==4 && (raw.outcome==7 || reservation_action && raw.outcome==6))) => return None,
             Phase::ObserveStatus if raw.service_state!=2 || raw.entered!=0 || raw.returned!=0
                 || raw.status==4 => return None,
-            Phase::Mutate if raw.service_state!=2 || raw.entered!=1 || raw.returned!=1
+            Phase::Mutate if raw.service_state!=2 || !reservation_refused && (raw.entered!=1 || raw.returned!=1)
                 || action==Action::Observe => return None,
             Phase::ObserveResult if raw.service_state!=2 || raw.entered!=1 || raw.returned!=1
                 || action!=Action::RequestRegistration || raw.status==4 => return None,
@@ -130,7 +135,7 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
             } };
             if raw.outcome!=expected { return None; }
         }
-        if phase==Phase::Mutate && match action {
+        if phase==Phase::Mutate && !reservation_refused && match action {
             Action::RequestRegistration=>raw.status!=0 || !matches!(raw.outcome,2|3|4|7|9),
             Action::OpenApprovalSettings=>raw.status>3 || raw.outcome!=5,
             Action::Observe|Action::UnregisterAfterQuiescence=>true,
@@ -374,6 +379,10 @@ impl ServiceManager {
         in_call:false,in_gate:false,unknown:false,stopped:false,deferred:false,first:None,_main:PhantomData,
         #[cfg(feature="e2-native-fixture")] fixture_identity_address:0,
     } }
+    /// The C cell includes four held protected ancestors plus one R gate for
+    /// Register/Approval only. All five originals settle before cell retirement;
+    /// unknown close retains the native cell. No extra heap/provider budget.
+    pub const REGISTRATION_RESERVATION_ORIGINALS: usize = 5;
     /// Supplied C cell + complete Rust owner only, not framework/RSS storage.
     pub fn project_owned_upper_bound()->Option<usize> { 1024_usize.checked_add(std::mem::size_of::<Self>()) }
     /// The current original fixture Observe only; no FFI or new authority.
@@ -789,6 +798,7 @@ mod tests {
     struct NativeData {
         report:Report,entries:Vec<Phase>,bad_mutation_return:bool,error_status:bool,
         refused_status:bool,nil_acquire:bool,unentered_retired:bool,
+        reservation_refused_at:Option<Phase>,bad_retire:bool,
     }
     impl Native for NativeData {
         fn allocate(&mut self,action:u32)->*mut c_void {
@@ -818,6 +828,11 @@ mod tests {
                 Phase::ReleaseService=>{ self.report.service_state=4;self.report.cleanup_known=1; },
                 _=>unreachable!(),
             }
+            if self.reservation_refused_at==Some(stage) {
+                assert!(matches!(stage,Phase::AcquireService|Phase::Mutate));
+                self.report.entered=0;self.report.returned=0;self.report.outcome=6;
+                if stage==Phase::AcquireService {self.report.service_state=4;}
+            }
             *output=self.report;
             if self.bad_mutation_return && stage==Phase::Mutate { 0 } else { 1 }
         }
@@ -825,7 +840,7 @@ mod tests {
             self.entries.push(Phase::RetireCell);self.unentered_retired=unentered;
             if unentered { assert_eq!(self.report.called,0);assert_eq!(self.report.service_state,0); }
             else { assert_eq!(self.report.phase,6);assert_eq!(self.report.service_state,4); }
-            1
+            i32::from(!self.bad_retire)
         }
     }
     #[test]
@@ -901,6 +916,28 @@ mod tests {
     }
     #[test]
     fn actual_native_failure_precedes_return_callback_and_all_cleanup_gates() {
+        for action in [Action::RequestRegistration,Action::OpenApprovalSettings] {
+            for refused in [Phase::AcquireService,Phase::Mutate] {
+                let mut manager=ServiceManager::new();
+                let mut native=NativeData {reservation_refused_at:Some(refused),..NativeData::default()};
+                let result=manager.perform_with(action,&mut |_|Decision::Proceed,&mut native);
+                assert!(matches!(result,Progress::Finished(Observation {outcome:Outcome::Refused,
+                    mutation_entered:false,mutation_returned:false,native_settled:true,..})));
+                assert!(!native.entries.contains(&Phase::ObserveResult));
+                if refused==Phase::AcquireService {assert!(!native.entries.contains(&Phase::Mutate));}
+                assert_eq!(native.entries.last(),Some(&Phase::RetireCell));
+                assert_eq!(manager.custody().cell,CellCustody::Consumed);
+            }
+        }
+        // Native reservation-close uncertainty is a refused cell consumption,
+        // not permission to allocate/retry another action through the same TLS.
+        let mut manager=ServiceManager::new();
+        let mut native=NativeData {bad_retire:true,..NativeData::default()};
+        assert!(matches!(manager.perform_with(Action::RequestRegistration,&mut |_|Decision::Proceed,&mut native),Progress::Unknown(_)));
+        assert_eq!(manager.custody().cell,CellCustody::Unknown);
+        let entries=native.entries.clone();
+        assert!(matches!(manager.perform_with(Action::RequestRegistration,&mut |_|Decision::Proceed,&mut native),Progress::Unknown(_)));
+        assert_eq!(native.entries,entries);
         for expected in [Outcome::Error,Outcome::Refused] {
             let mut manager=ServiceManager::new();
             let mut native=NativeData {
@@ -968,6 +1005,24 @@ mod tests {
     }
     #[test]
     fn native_report_cannot_fabricate_authority_or_inconsistent_phase_success() {
+        // A refused R admission is not a registration call or successful
+        // cleanup. Observe/Unregister never gain this registration-only shape.
+        for action in [Action::RequestRegistration,Action::OpenApprovalSettings] {
+            let acquired=Report {version:2,action:action.code(),status:4,outcome:6,
+                phase:2,service_state:4,called:1,..Report::default()};
+            let actual=decode(acquired,action,Phase::AcquireService).unwrap();
+            assert_eq!(actual.outcome,Outcome::Refused);
+            assert!(!actual.mutation_entered && !actual.mutation_returned && !actual.native_settled);
+            let refused=Report {status:0,phase:4,service_state:2,..acquired};
+            assert_eq!(decode(refused,action,Phase::Mutate).unwrap().outcome,Outcome::Refused);
+            for bad in [Report {entered:1,..refused},Report {returned:1,..refused},
+                Report {service_state:4,..refused},Report {cleanup_known:1,..refused},
+                Report {status:4,..refused},Report {status:5,..refused}] {
+                assert!(decode(bad,action,Phase::Mutate).is_none());
+            }
+            assert!(decode(Report {action:0,..acquired},Action::Observe,Phase::AcquireService).is_none());
+            assert!(decode(refused,Action::UnregisterAfterQuiescence,Phase::Mutate).is_none());
+        }
         assert_eq!(std::mem::size_of::<Report>(),if cfg!(feature="e2-native-fixture") {64}else{48});
         let observed=Report { version:2,action:0,status:1,outcome:1,phase:3,service_state:2,called:1,..Report::default() };
         let result=decode(observed,Action::Observe,Phase::ObserveStatus).unwrap();
