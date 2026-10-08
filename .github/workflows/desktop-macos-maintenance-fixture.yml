@@ -64,7 +64,7 @@ jobs:
         run: |
           builtin source ./desktop/tools/macos_maintenance_fixture_prepare.sh
 
-      - name: Compile and test Parent2 and NativeRecovery4 DATA groups
+      - name: Compile and test changed Parent2 DATA groups
         id: native
         timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -73,7 +73,7 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # Two fixed Cargo originals share990s: Parent2/NativeRecovery4 DATA only.
+          # One existing Cargo original within990s: changed Parent2 DATA only.
           # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
@@ -86,7 +86,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-recovery-data
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -126,7 +126,7 @@ jobs:
           PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
         run: |
           set -euo pipefail
-          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == true && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == true && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]
           # No protected-root/receipt adoption or process scan here.
           # Owner retirement is immediate and original-finality-gated. Shared
           # Cargo/Rust/Python homes and required evidence remain untouched.

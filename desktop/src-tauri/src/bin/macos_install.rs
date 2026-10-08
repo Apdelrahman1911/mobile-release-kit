@@ -69,7 +69,7 @@ mod installer {
         // Parent debits native peer and retained-source costs in the SAME book.
         removal_live_reserved: usize, removal_control_reserved: u64, removal_original_storage_reserved:u64,
         removal_snapshot_capture: Option<maintenance::RemovalSnapshotCapture>,
-        removal_snapshot_work_reserved: bool,
+        removal_snapshot_work_reserved: bool, archived_install_reserved:bool,
         removal_payload_plan:Option<maintenance::RemovalPayloadPlan>,
         removal_observation_control:Option<u64>,removal_observation_reserved:u64,
         removal_archive_scan: Option<maintenance::RemovalArchiveScan>,
@@ -363,7 +363,7 @@ mod installer {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
-                removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
+                removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
                 gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
@@ -1217,7 +1217,7 @@ mod installer {
             pub prepared: PreparedFresh, pub selected: ReleaseSetData, pub action: ActionData,
             pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
             pub intent: Option<IntentData>, pub intent_original: Option<usize>,
-            controls: Option<ProducerControls>,
+            controls: Option<ProducerControls>, pub(super) archives:Option<InstallArchiveObservation>,
         }
         // Same-book originals, not installed-file trust. An old pair is only
         // bounded retained DATA; the new package selects eligible generations.
@@ -1275,6 +1275,168 @@ mod installer {
             pub(super) fn shape_tag_data(&self)->u8 { match self.shape {
                 RemovalArchiveShape::WritingPrefix=>1,RemovalArchiveShape::SealedBody=>2 } }
         }
+        const REHOME_RETRY_LIMIT:usize=transaction::INVOCATION_LIMIT;
+        const REHOME_RETRY_NAME:&str="fresh-retry-";
+        const REHOME_RETRY_NAMES_WORK:usize=8192;
+        const REHOME_RETRY_SCALAR_WORK:usize=32*1024;
+        // The evaluator's scalar reference describes only its own actual
+        // prefix reads. A source-selecting adapter may also read an Intent and
+        // authenticate a complete retained generation. Persist BOTH totals so
+        // future scan/POST quotes cannot silently omit that work. Neither cost
+        // tuple grants source, filesystem or mutation authority. All four
+        // counts exclude exactly the scanner's one retry-directory open.
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        pub(super) struct RehomeRetryReferenceData {
+            reference:PartialFreshRetryReferenceData,observed:usize,quoted:usize,
+        }
+        impl RehomeRetryReferenceData {
+            fn new_data(reference:PartialFreshRetryReferenceData,observed:usize,quoted:usize)->Result<Self> {
+                PartialFreshRetryReferenceData::from_fields_data(reference.fields_data())?;
+                check(reference.observed_originals_data()<=observed && reference.post_originals_data()<=quoted
+                    && observed<=quoted && quoted<=24576,"rehome-retry-outer-cost")?;
+                Ok(Self{reference,observed,quoted})
+            }
+            fn same_input_data(reference:PartialFreshRetryReferenceData)->Result<Self> {
+                Self::new_data(reference,reference.observed_originals_data(),reference.post_originals_data())
+            }
+            fn reference_data(&self)->&PartialFreshRetryReferenceData {&self.reference}
+            fn post_originals_data(&self)->usize {self.quoted}
+            fn observed_originals_data(&self)->usize {self.observed}
+            fn root_data(&self)->Identity {self.reference.root_data()}
+            fn invocation_data(&self)->&[u8;16] {self.reference.invocation_data()}
+            fn request_data(&self)->&[u8;16] {self.reference.request_data()}
+            fn complete_data(&self)->bool {self.reference.complete_data()}
+            fn storage_bytes_data(&self)->u64 {self.reference.storage_bytes_data()}
+            fn current_bytes_data(&self)->u64 {self.reference.current_bytes_data()}
+            fn matches_data(&self,other:&Self)->bool {self==other}
+        }
+        // A logical Install invocation may occur in several authenticated
+        // historical snapshots. Consistent references count once; conflicting
+        // request/content, cross-role ID reuse and replay do not disappear in
+        // a set insertion. These fixed DATA rows carry NO source authority.
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        struct InstallInvocationFactData {invocation:[u8;16],request:[u8;16],intent:[u8;32]}
+        impl InstallInvocationFactData {
+            fn new(invocation:[u8;16],request:[u8;16],intent:[u8;32])->Result<Self> {
+                check(invocation!=[0;16] && request!=[0;16] && invocation!=request && intent!=[0;32],
+                    "rehome-invocation-shape")?;Ok(Self{invocation,request,intent})
+            }
+            fn intent(value:&IntentData)->Result<Self> {
+                Self::new(archive_hex_data(value.invocation_data())?,archive_hex_data(value.request_id_data())?,
+                    archive_hex_data(value.digest_data())?)
+            }
+            fn retry(value:&PartialFreshRetryReferenceData)->Result<Self> {
+                Self::new(*value.invocation_data(),*value.request_data(),*value.intent_sha256_data())
+            }
+            fn disjoint(self,invocation:[u8;16],request:Option<[u8;16]>)->bool {
+                self.invocation!=invocation && self.request!=invocation
+                    && request.is_none_or(|r|r!=self.request && r!=self.invocation)
+            }
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        struct InstallInvocationSetData {rows:[Option<InstallInvocationFactData>;transaction::INVOCATION_LIMIT],len:usize}
+        impl InstallInvocationSetData {
+            fn empty()->Self {Self{rows:[None;transaction::INVOCATION_LIMIT],len:0}}
+            fn insert(&mut self,fact:InstallInvocationFactData)->Result<bool> {
+                let mut at=0;
+                for old in self.rows[..self.len].iter().flatten() {
+                    if old.invocation==fact.invocation {
+                        check(*old==fact,"rehome-invocation-conflict")?;return Ok(false);
+                    }
+                    check(old.disjoint(fact.invocation,Some(fact.request)),"rehome-invocation-replay")?;
+                    if old.invocation<fact.invocation {at+=1;}
+                }
+                check(self.len<transaction::INVOCATION_LIMIT,"rehome-invocation-count")?;
+                for index in (at..self.len).rev() {self.rows[index+1]=self.rows[index];}
+                self.rows[at]=Some(fact);self.len+=1;Ok(true)
+            }
+            fn merge(&mut self,other:&Self)->Result<()> {
+                for fact in other.rows[..other.len].iter().flatten(){self.insert(*fact)?;}Ok(())
+            }
+            fn commitment(&self)->[u8;32] {
+                let mut out=Sha256::new();out.update(b"MRK-REHOME-INSTALL-INVOCATIONS-v1\0");out.update((self.len as u16).to_be_bytes());
+                for fact in self.rows[..self.len].iter().flatten(){out.update(fact.invocation);out.update(fact.request);out.update(fact.intent);}
+                out.finalize().into()
+            }
+        }
+        fn rehome_retry_invocation_data(name:&str)->Result<&str> {
+            let value=name.strip_prefix(REHOME_RETRY_NAME).ok_or("rehome-retry-name")?;
+            check(name.len()==REHOME_RETRY_NAME.len()+32 && component(name) && worker::invocation_valid(value),
+                "rehome-retry-name")?;Ok(value)
+        }
+        fn rehome_retry_role_data(retry:Identity,versions:Option<(Identity,u32)>)->Result<PartialFreshRetryAuditRole> {
+            match versions {
+                Some((identity,flags))=>{
+                    check(archive_directory_data(identity,flags,false) && identity.dev==retry.dev,
+                        "rehome-retry-versions-shape")?;Ok(PartialFreshRetryAuditRole::PreservedOnly)
+                },
+                None=>Ok(PartialFreshRetryAuditRole::CurrentUnion),
+            }
+        }
+        // Comparison-only policy. The physical caller chooses Contextual ONLY
+        // when it holds the concrete ReinstallInputRead, never a request flag.
+        #[derive(Clone,Copy)]
+        enum RehomeRetryPolicyData {Plain,Contextual}
+        fn rehome_cohort_shape_data(plan:&RehomeMoveSetData<'_>,rows:&[(String,u64)],policy:RehomeRetryPolicyData)->Result<(usize,usize)> {
+            check(rows.len()<=REHOME_TOP_LIMIT+REHOME_RETRY_LIMIT && rows.windows(2).all(|p|p[0].0<p[1].0)
+                && rows.iter().all(|r|r.1!=0),"rehome-retry-roster")?;
+            let mut old=0usize;let mut retries=0usize;
+            for (name,_) in rows {
+                if plan.moves.iter().any(|spec|spec.name==*name) {old+=1;}
+                else {check(matches!(policy,RehomeRetryPolicyData::Contextual),"rehome-retry-source-required")?;
+                    rehome_retry_invocation_data(name)?;retries+=1;}
+            }
+            check(retries<=REHOME_RETRY_LIMIT && old<=plan.moves.len()
+                && plan.moves[..old].iter().all(|spec|removal_archive_inode(rows,&spec.name).is_some()),
+                "rehome-retry-old-prefix")?;Ok((old,retries))
+        }
+        fn rehome_retry_heap_data(capacity:usize)->Result<usize> {
+            check(capacity<=REHOME_RETRY_LIMIT && std::mem::size_of::<RehomeRetryReferenceData>()<=512,
+                "rehome-retry-memory")?;
+            capacity.checked_mul(std::mem::size_of::<RehomeRetryReferenceData>()).ok_or("rehome-retry-memory")
+        }
+        fn rehome_retry_rows_data(rows:&[RehomeRetryReferenceData])->Result<()> {
+            check(rows.len()<=REHOME_RETRY_LIMIT && rows.windows(2).all(|p|p[0].invocation_data()<p[1].invocation_data()),
+                "rehome-retry-order")?;
+            let mut facts=InstallInvocationSetData::empty();let mut pending=0usize;
+            for row in rows {
+                RehomeRetryReferenceData::new_data(row.reference,row.observed,row.quoted)?;
+                check(facts.insert(InstallInvocationFactData::retry(row.reference_data())?)?,"rehome-retry-duplicate")?;
+                pending+=usize::from(!row.complete_data());
+            }
+            check(pending<=1,"rehome-retry-pending-ambiguous")
+        }
+        // One canonical fixed scalar encoding is shared by the snapshot writer
+        // and the private Parent/worker commitment. No raw body or allocation.
+        fn rehome_retry_wire_data(row:&RehomeRetryReferenceData,mut put:impl FnMut(&[u8])) {
+            let f=row.reference.fields_data();let id=f.root;
+            put(&id.dev.to_be_bytes());put(&id.ino.to_be_bytes());
+            for value in [id.mode,id.uid,id.gid,0] {put(&value.to_be_bytes());}
+            put(&id.links.to_be_bytes());
+            for value in [id.size,id.mtime,id.mtime_ns,id.ctime,id.ctime_ns] {put(&value.to_be_bytes());}
+            put(&f.invocation);put(&f.request);
+            for value in [f.intent,f.selection,f.producer,f.signature,f.inventory,f.content] {put(&value);}
+            put(&[match f.role{PartialFreshRetryAuditRole::PreservedOnly=>1,PartialFreshRetryAuditRole::CurrentUnion=>2}]);
+            put(&(f.prefix as u16).to_be_bytes());put(&(f.tops as u16).to_be_bytes());
+            for value in f.archived.into_iter().chain(f.current) {put(&value.to_be_bytes());}
+            put(&(f.originals as u32).to_be_bytes());put(&(f.quote as u32).to_be_bytes());
+            put(&(row.observed as u32).to_be_bytes());put(&(row.quoted as u32).to_be_bytes());
+        }
+        fn parse_rehome_retry_data<F:FnMut(u64,&mut [u8])->Result<usize>>(cursor:&mut ArchiveCursor<F>)->ArchiveParse<RehomeRetryReferenceData> {
+            let (root,flags)=cursor.identity(&[0o040700])?;archive_require(flags==0,"rehome-retry-identity")?;
+            let invocation=cursor.array()?;let request=cursor.array()?;
+            let intent=cursor.array()?;let selection=cursor.array()?;let producer=cursor.array()?;
+            let signature=cursor.array()?;let inventory=cursor.array()?;let content=cursor.array()?;
+            let role=match cursor.byte()? {1=>PartialFreshRetryAuditRole::PreservedOnly,2=>PartialFreshRetryAuditRole::CurrentUnion,
+                _=>return Err(ArchiveParseError::Refused("rehome-retry-role"))};
+            let prefix=cursor.u16()?;let tops=cursor.u16()?;let mut archived=[0;4];let mut current=[0;4];
+            for value in &mut archived {*value=cursor.u64()?;}for value in &mut current {*value=cursor.u64()?;}
+            let originals=cursor.u32()? as usize;let quote=cursor.u32()? as usize;
+            let observed=cursor.u32()? as usize;let quoted=cursor.u32()? as usize;
+            let reference=PartialFreshRetryReferenceData::from_fields_data(PartialFreshRetryFieldsData{root,invocation,request,intent,selection,
+                producer,signature,inventory,content,archived,current,prefix,tops,originals,quote,role})?;
+            Ok(RehomeRetryReferenceData::new_data(reference,observed,quoted)?)
+        }
         #[derive(PartialEq,Eq)]
         pub(super) struct RemovalArchiveReference {
             name:String,identity:Identity,flags:u32,files:[Option<RemovalArchiveFileReference>;6],
@@ -1294,14 +1456,14 @@ mod installer {
             pub(super) fn attempt_data(&self)->Option<&RemovalAttemptData> {self.attempt.as_ref()}
         }
         #[derive(PartialEq,Eq)]
-        pub(super) struct RemovalArchiveCensus { rows:Vec<RemovalArchiveReference>,storage_bytes:u64,root:usize }
+        pub(super) struct RemovalArchiveCensus { rows:Vec<RemovalArchiveReference>,storage_bytes:u64,root:usize,install_invocations:InstallInvocationSetData }
         impl RemovalArchiveCensus {
             fn empty(root:usize)->Result<Self> {
                 check(std::mem::size_of::<RemovalArchiveReference>().checked_mul(REMOVAL_ARCHIVE_COUNT)
                     .and_then(|n|n.checked_add(std::mem::size_of::<Self>())).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),
                     "removal-prior-memory")?;
                 let mut rows=Vec::new();rows.try_reserve_exact(REMOVAL_ARCHIVE_COUNT).map_err(|_|"removal-prior-allocation")?;
-                let value=Self {rows,storage_bytes:0,root};value.owned_bytes()?;Ok(value)
+                let value=Self {rows,storage_bytes:0,root,install_invocations:InstallInvocationSetData::empty()};value.owned_bytes()?;Ok(value)
             }
             pub(super) fn rows(&self)->&[RemovalArchiveReference] { &self.rows }
             pub(super) fn storage_bytes(&self)->u64 { self.storage_bytes }
@@ -1323,7 +1485,10 @@ mod installer {
                 let mut count=std::mem::size_of::<Self>().checked_add(self.rows.capacity()
                     .checked_mul(std::mem::size_of::<RemovalArchiveReference>()).ok_or("removal-prior-memory")?)
                     .ok_or("removal-prior-memory")?;
-                for row in &self.rows { count=count.checked_add(row.name.capacity()).ok_or("removal-prior-memory")?; }
+                for row in &self.rows {
+                    count=count.checked_add(row.name.capacity()).ok_or("removal-prior-memory")?;
+                    if let Some(child)=&row.rehome {count=count.checked_add(child.retry_heap_data()?).ok_or("removal-prior-memory")?;}
+                }
                 check(count<=REMOVAL_ARCHIVE_TABLE,"removal-prior-memory")?;Ok(count)
             }
             fn add(&mut self,row:RemovalArchiveReference)->Result<()> {
@@ -1333,129 +1498,99 @@ mod installer {
                 let mut total=self.storage_bytes;
                 for file in row.files.iter().flatten() { total=removal_archive_storage_sum_data(total,file.len)?; }
                 if let Some(child)=&row.rehome {total=removal_archive_storage_sum_data(total,child.storage_bytes_data())?;}
-                check(self.owned_bytes()?.checked_add(row.name.capacity()).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),"removal-prior-memory")?;
+                let added=row.name.capacity().checked_add(row.rehome.as_ref().map(RehomeReferenceData::retry_heap_data).transpose()?.unwrap_or(0))
+                    .ok_or("removal-prior-memory")?;
+                check(self.owned_bytes()?.checked_add(added).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),"removal-prior-memory")?;
                 self.rows.push(row);self.storage_bytes=total;self.owned_bytes()?;Ok(())
             }
+            fn invocation_union(&self)->Result<InstallInvocationSetData> {
+                check(self.rows.len()<=REMOVAL_ARCHIVE_COUNT,"rehome-invocation-count")?;
+                let mut out=self.install_invocations;let mut retry_ids=InstallInvocationSetData::empty();let mut pending=0usize;
+                for child in self.rows.iter().filter_map(|row|row.rehome.as_ref()) {
+                    rehome_retry_rows_data(child.retries_data())?;
+                    for retry in child.retries_data() {
+                        let fact=InstallInvocationFactData::retry(retry.reference_data())?;
+                        check(retry_ids.insert(fact)? && retry.root_data().dev==child.root.dev
+                            && retry.root_data().ino!=child.root.ino,"rehome-retry-duplicate")?;
+                        for previous in self.rows.iter().filter_map(|r|r.rehome.as_ref()).flat_map(|r|r.retries_data()) {
+                            if previous.invocation_data()==retry.invocation_data(){continue;}
+                            check(previous.root_data().dev!=retry.root_data().dev || previous.root_data().ino!=retry.root_data().ino,
+                                "rehome-retry-original-alias")?;
+                        }
+                        pending+=usize::from(!retry.complete_data());out.insert(fact)?;
+                    }
+                }
+                check(pending<=1,"rehome-retry-pending-ambiguous")?;
+                for fact in out.rows[..out.len].iter().flatten() {self.removal_ids_disjoint(*fact)?;}
+                check(self.rows.len().checked_add(out.len).is_some_and(|n|n<=transaction::INVOCATION_LIMIT),
+                    "rehome-invocation-count")?;Ok(out)
+            }
+            fn removal_pair_disjoint(&self,invocation:[u8;16],request:[u8;16])->Result<()> {
+                for row in &self.rows {
+                    let prior=archive_hex_data::<16>(&row.name[8..])?;
+                    check(invocation!=prior && request!=prior && row.request.is_none_or(|r|r!=invocation && r!=request),
+                        "rehome-invocation-removal-replay")?;
+                }Ok(())
+            }
+            fn removal_ids_disjoint(&self,fact:InstallInvocationFactData)->Result<()> {
+                self.removal_pair_disjoint(fact.invocation,fact.request)
+            }
+            pub(super) fn install_invocation_commitment_data(&self)->[u8;32] {self.install_invocations.commitment()}
+            pub(super) fn retries_complete_data(&self)->bool {
+                self.rows.iter().all(|row|row.pending_rehome.is_none() && row.rehome.as_ref().is_none_or(|c|c.retries_complete_data()))
+            }
+            fn retry_count(&self)->Result<usize> {
+                self.rows.iter().filter_map(|r|r.rehome.as_ref()).try_fold(0usize,|n,c|n.checked_add(c.retries.len())
+                    .filter(|n|*n<=REHOME_RETRY_LIMIT).ok_or("rehome-retry-count"))
+            }
+            pub(super) fn find_retry_data(&self,request:&str,invocation:&str)
+                ->Result<Option<((Identity,u32),&PartialFreshRetryReferenceData)>> {
+                let request=archive_hex_data::<16>(request)?;let invocation=archive_hex_data::<16>(invocation)?;
+                check(request!=[0;16] && invocation!=[0;16] && request!=invocation,"rehome-retry-lookup")?;
+                self.invocation_union()?;let mut found=None;
+                for child in self.rows.iter().filter_map(|row|row.rehome.as_ref()) {
+                    for retry in child.retries_data() {
+                        if *retry.invocation_data()==invocation || *retry.request_data()==request {
+                            check(*retry.invocation_data()==invocation && *retry.request_data()==request && found.is_none(),
+                                "rehome-retry-lookup-collision")?;found=Some((child.root_data(),retry.reference_data()));
+                        }
+                    }
+                }Ok(found)
+            }
+            pub(super) fn fresh_retry(&self,request:&str,invocation:&str,child:(Identity,u32),
+                existing:&PartialFreshRetryReferenceData)->Result<()> {
+                // Only one EXACT previously observed member is exempt. The
+                // caller must separately re-audit the same current original,
+                // source and its own returned-effect ledger; this is DATA.
+                let (actual,stored)=self.find_retry_data(request,invocation)?.ok_or("rehome-retry-not-observed")?;
+                check(actual==child && stored.matches_data(existing),"rehome-retry-member-changed")?;
+                self.removal_ids_disjoint(InstallInvocationFactData::retry(stored)?)
+            }
+            pub(super) fn install_invocation_union_data<'a>(&self,current:impl Iterator<Item=&'a IntentData>,new:Option<&IntentData>)->Result<usize> {
+                let mut out=self.invocation_union()?;
+                for intent in current {
+                    let fact=InstallInvocationFactData::intent(intent)?;self.removal_ids_disjoint(fact)?;out.insert(fact)?;
+                }
+                if let Some(intent)=new {
+                    let fact=InstallInvocationFactData::intent(intent)?;self.removal_ids_disjoint(fact)?;
+                    check(out.rows[..out.len].iter().flatten().all(|old|old.disjoint(fact.invocation,Some(fact.request))),
+                        "rehome-new-invocation-reused")?;out.insert(fact)?;
+                }
+                let total=self.rows.len().checked_add(out.len).filter(|n|*n<=transaction::INVOCATION_LIMIT)
+                    .ok_or("rehome-invocation-count")?;Ok(total)
+            }
             pub(super) fn fresh(&self,request:&str,nonce:&str)->Result<()> {
-                let request=archive_hex_data::<16>(request)?;
-                check(worker::invocation_valid(nonce) && self.rows.iter().all(|row|
-                    &row.name[8..]!=nonce && row.request!=Some(request)),"removal-prior-reused-request")
+                let request=archive_hex_data::<16>(request)?;let invocation=archive_hex_data::<16>(nonce)?;
+                check(worker::invocation_valid(nonce) && request!=[0;16] && request!=invocation,"removal-prior-reused-request")?;
+                // A prospective new operation has no Intent body yet. Its IDs
+                // must nevertheless be disjoint from every observed logical
+                // invocation and leave a slot for the eventual canonical body.
+                self.removal_pair_disjoint(invocation,request)?;
+                let out=self.invocation_union()?;
+                check(out.rows[..out.len].iter().flatten().all(|old|old.disjoint(invocation,Some(request)))
+                    && self.rows.len().checked_add(out.len).is_some_and(|n|n<transaction::INVOCATION_LIMIT),
+                    "removal-prior-reused-request")
             }
-        }
-        fn removal_archive_storage_sum_data(before:u64,bytes:u64)->Result<u64> {
-            before.checked_add(bytes).filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-prior-storage")
-        }
-        #[derive(Clone,Copy,PartialEq,Eq)]
-        enum RemovalArchivePhase { FirstReading,FirstComplete,SecondReading,SecondComplete,Taken,PostReading,PostComplete,Refused }
-        pub(super) struct RemovalArchiveScan {
-            root:usize,phase:RemovalArchivePhase,first:Option<RemovalArchiveCensus>,current:Option<RemovalArchiveCensus>,
-        }
-        impl RemovalArchiveScan {
-            fn first(root:usize)->Self { Self {root,phase:RemovalArchivePhase::FirstReading,first:None,current:None} }
-            fn second(&mut self)->Result<()> {
-                if self.phase!=RemovalArchivePhase::FirstComplete || self.first.is_some() || self.current.is_none() {
-                    self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");
-                }
-                self.first=self.current.take();self.phase=RemovalArchivePhase::SecondReading;Ok(())
-            }
-            fn install(&mut self,value:RemovalArchiveCensus)->Result<()> {
-                let result=(|| {
-                    check(matches!(self.phase,RemovalArchivePhase::FirstReading|RemovalArchivePhase::SecondReading)
-                        && self.current.is_none() && value.root==self.root,"removal-prior-stage")?;
-                    let incoming=value.owned_bytes()?;
-                    let retained=self.first.as_ref().map(RemovalArchiveCensus::owned_bytes).transpose()?.unwrap_or(0);
-                    check(incoming.checked_add(retained).and_then(|n|n.checked_add(std::mem::size_of::<Self>()))
-                        .is_some_and(|n|n<=2*REMOVAL_ARCHIVE_TABLE),"removal-prior-memory")?;
-                    if self.phase==RemovalArchivePhase::SecondReading {
-                        check(self.first.as_ref().is_some_and(|first|first==&value),"removal-prior-changed")?;
-                    } Ok(())
-                })();
-                if let Err(why)=result {self.phase=RemovalArchivePhase::Refused;return Err(why);}
-                self.current=Some(value);Ok(())
-            }
-            fn complete(&mut self)->Result<()> {
-                if self.current.is_none() {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
-                self.phase=match self.phase { RemovalArchivePhase::FirstReading=>RemovalArchivePhase::FirstComplete,
-                    RemovalArchivePhase::SecondReading=>RemovalArchivePhase::SecondComplete,_=>{
-                        self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");} };
-                Ok(())
-            }
-            fn begin_post(&mut self,root:usize,initial:bool)->Result<()> {
-                let expected=if initial {RemovalArchivePhase::Taken}else{RemovalArchivePhase::PostComplete};
-                if self.root!=root || self.phase!=expected {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
-                self.phase=RemovalArchivePhase::PostReading;Ok(())
-            }
-            fn complete_post(&mut self,result:Result<()>)->Result<()> {
-                if let Err(why)=result {self.phase=RemovalArchivePhase::Refused;return Err(why);}
-                if self.phase!=RemovalArchivePhase::PostReading {self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");}
-                self.phase=RemovalArchivePhase::PostComplete;Ok(())
-            }
-            fn take(&mut self)->Result<RemovalArchiveCensus> {
-                if self.phase!=RemovalArchivePhase::SecondComplete || self.first.is_none() || self.current.is_none() {
-                    self.phase=RemovalArchivePhase::Refused;return Err("removal-prior-stage");
-                }
-                // The snapshot capture charges both tables while !complete.
-                // Drop the first before moving the SAME second, once only.
-                drop(self.first.take());self.phase=RemovalArchivePhase::Taken;
-                self.current.take().ok_or("removal-prior-stage")
-            }
-        }
-        fn archive_admission_chunk_data(expected:&[u8],offset:usize,bytes:&[u8])->bool {
-            offset.checked_add(bytes.len()).filter(|end|*end<=expected.len())
-                .is_some_and(|end|expected.get(offset..end)==Some(bytes))
-        }
-        fn archive_hex_data<const N:usize>(value:&str)->Result<[u8;N]> {
-            check(value.len()==N*2 && value.bytes().all(|b|b.is_ascii_digit()||(b'a'..=b'f').contains(&b))
-                && value.bytes().any(|b|b!=b'0'),"removal-prior-hex")?;
-            let mut out=[0;N];for (i,byte) in out.iter_mut().enumerate() {
-                *byte=u8::from_str_radix(&value[i*2..i*2+2],16).map_err(|_|"removal-prior-hex")?;
-            } Ok(out)
-        }
-        fn archive_directory_data(id:Identity,flags:u32,private:bool)->bool {
-            id.ino!=0 && id.mode==(if private {0o040700}else{0o040755}) && id.uid==0 && id.gid==0
-                && id.links>0 && id.size>=0 && flags==0
-        }
-        fn archive_file_data(id:Identity,flags:u32,slot:usize)->bool {
-            slot<6 && id.ino!=0 && id.uid==0 && id.gid==0 && id.links==1 && flags==0
-                && matches!(id.mode,0o100600|0o100444) && id.size>=0
-                && (id.size as u64)<=(if slot==0 {REMOVAL_SNAPSHOT_LIMIT}else{mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64})
-                && (id.mode==0o100600 || id.size>0)
-        }
-        fn archive_preadmission_shape_data(snapshot:Option<(u32,bool)>,admission:Option<u32>)->bool {
-            match (snapshot,admission) {
-                (None,None)=>true,(Some((0o100600,_)),None)=>true,
-                (Some((0o100444,true)),None|Some(0o100600))=>true,_=>false,
-            }
-        }
-        // Fixed linked-history comparison DATA. No shape, digest, index or
-        // record returned here is a signature, EX, peer, or payload authority.
-        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-        pub(super) struct RemovalHistoryBindingData {
-            target:mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData,
-            source:[u8;20],digests:[[u8;32];5],
-        }
-        impl RemovalHistoryBindingData {
-            fn from_record_binding(value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<Self> {
-                Ok(Self {target:value.target,source:archive_hex_data(value.source_commit)?,digests:[
-                    archive_hex_data(value.removal_descriptor_sha256)?,archive_hex_data(value.installed_producer_sha256)?,
-                    archive_hex_data(value.installed_inventory_sha256)?,archive_hex_data(value.installation_state_sha256)?,
-                    archive_hex_data(value.payload_roster_sha256)?]})
-            }
-            pub(super) fn target_data(&self)->mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData {self.target}
-            pub(super) fn source_data(&self)->&[u8;20] {&self.source}
-            pub(super) fn digests_data(&self)->&[[u8;32];5] {&self.digests}
-            pub(super) fn matches_data(&self,value:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->bool {
-                Self::from_record_binding(value).is_ok_and(|other|other==*self)
-            }
-            pub(super) fn with_binding<T>(&self,call:impl FnOnce(mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)->Result<T>)->Result<T> {
-                let source=archive_hex_text_data(&self.source);let digests=self.digests.map(|sha|archive_hex_text_data(&sha));
-                call(mobile_release_desktop::macos_remove_record::RemovalBindingData {target:self.target,source_commit:&source,
-                    removal_descriptor_sha256:&digests[0],installed_producer_sha256:&digests[1],installed_inventory_sha256:&digests[2],
-                    installation_state_sha256:&digests[3],payload_roster_sha256:&digests[4]})
-            }
-        }
-        fn archive_hex_text_data(bytes:&[u8])->String {
-            let mut out=String::with_capacity(bytes.len()*2);for byte in bytes {use std::fmt::Write;let _=write!(&mut out,"{byte:02x}");}out
         }
         #[derive(Clone,Copy,Debug,PartialEq,Eq)]
         struct RemovalPreviousData {request:[u8;16],nonce:[u8;16],tip:[u8;32]}
@@ -1752,6 +1887,9 @@ mod installer {
                     .chain(self.prior.iter().map(|r|&r.name)) {
                     bytes=bytes.checked_add(path.capacity()).ok_or("removal-history-span-memory")?;
                 }
+                for row in &self.prior {if let Some(child)=&row.rehome {
+                    bytes=bytes.checked_add(child.retry_heap_data()?).ok_or("removal-history-span-memory")?;
+                }}
                 check(bytes<=REMOVAL_HISTORY_SPANS,"removal-history-span-memory")?;Ok(bytes)
             }
             fn reserve(&mut self,count:usize)->Result<()> {
@@ -1784,7 +1922,9 @@ mod installer {
             }
             fn prior(&mut self,row:RemovalPriorReferenceData)->Result<()> {
                 check(self.prior.len()<self.prior.capacity() && self.prior.len()<REMOVAL_ARCHIVE_COUNT,"removal-history-prior-count")?;
-                self.memory(row.name.capacity())?;self.prior.push(row);self.memory(0)?;Ok(())
+                let extra=row.name.capacity().checked_add(row.rehome.as_ref().map(RehomeReferenceData::retry_heap_data).transpose()?.unwrap_or(0))
+                    .ok_or("removal-history-span-memory")?;
+                self.memory(extra)?;self.prior.push(row);self.memory(0)?;Ok(())
             }
             fn push(&mut self,row:RemovalControlSpanData)->Result<()> {
                 check(self.controls.len()<self.controls.capacity(),"removal-history-span-count")?;
@@ -1975,7 +2115,8 @@ mod installer {
             }
             let prior=cursor.u16()?;archive_require(prior<=REMOVAL_ARCHIVE_COUNT && prior==root_prior.len(),"removal-prior-reference-count")?;
             if let Some(spans)=spans.as_deref_mut(){spans.reserve_prior(prior)?;}
-            let mut prior_bytes=0u64;
+            let mut prior_bytes=0u64;let mut retry_count=0usize;let mut retry_pending=0usize;
+            let mut retry_ids=InstallInvocationSetData::empty();
             for expected in &root_prior {
                 if let Some(spans)=spans.as_deref_mut(){spans.memory(40)?;}
                 let name=cursor.string(40,false,false)?;
@@ -2008,9 +2149,30 @@ mod installer {
                     let prefix=cursor.u16()?;let total=cursor.u16()?;let directories=cursor.u16()?;let file_count=cursor.u16()?;
                     let bytes=cursor.u64()?;let digest=cursor.array::<32>()?;
                     let reference=RehomeReferenceData::wire_data(root,root_flags,prefix,total,directories,file_count,bytes,digest)?;
+                    let count=cursor.u16()?;
+                    retry_count=retry_count.checked_add(count).filter(|n|*n<=REHOME_RETRY_LIMIT).ok_or("rehome-retry-count")?;
+                    archive_require(prior.checked_add(retry_count).is_some_and(|n|n<=transaction::INVOCATION_LIMIT),"rehome-retry-count")?;
+                    let heap=rehome_retry_heap_data(count)?;
+                    if let Some(spans)=spans.as_deref_mut(){spans.memory(heap.checked_add(name.capacity()).ok_or("rehome-retry-memory")?)?;}
+                    let mut retries=Vec::new();retries.try_reserve_exact(count).map_err(|_|"rehome-retry-allocation")?;
+                    rehome_retry_heap_data(retries.capacity())?;
+                    if let Some(spans)=spans.as_deref_mut(){spans.memory(rehome_retry_heap_data(retries.capacity())?
+                        .checked_add(name.capacity()).ok_or("rehome-retry-memory")?)?;}
+                    for _ in 0..count {
+                        let value=parse_rehome_retry_data(cursor)?;
+                        let fact=InstallInvocationFactData::retry(value.reference_data())?;
+                        archive_require(retry_ids.insert(fact)?,"rehome-retry-duplicate")?;
+                        for prior in &root_prior {archive_require(fact.disjoint(archive_hex_data(&prior.0[8..])?,None),"rehome-invocation-removal-replay")?;}
+                        let head=header.as_ref().ok_or("removal-prior-header")?;
+                        archive_require(fact.disjoint(archive_hex_data(&head.values[1])?,Some(archive_hex_data(&head.values[0])?)),
+                            "rehome-invocation-removal-replay")?;
+                        retry_pending+=usize::from(!value.complete_data());archive_require(retry_pending<=1,"rehome-retry-pending-ambiguous")?;
+                        retries.push(value);
+                    }
+                    let reference=reference.with_retries_data(retries)?;
                     archive_require(app.is_none() && files[3].as_ref().is_some_and(|f|f.shape==RemovalArchiveShape::SealedBody),
                         "rehome-prior-reference-shape")?;
-                    prior_bytes=removal_archive_storage_sum_data(prior_bytes,bytes)?;Some(reference)
+                    prior_bytes=removal_archive_storage_sum_data(prior_bytes,reference.storage_bytes_data())?;Some(reference)
                 },_=>return Err(ArchiveParseError::Refused("rehome-prior-reference-tag"))};
                 if let Some(spans)=spans.as_deref_mut(){spans.prior(RemovalPriorReferenceData{name,identity,flags,files,app,rehome})?;}
             }
@@ -2092,12 +2254,12 @@ mod installer {
             rows.binary_search_by(|row|row.0.as_str().cmp(name)).ok().map(|at|rows[at].1)
         }
         #[derive(Clone,Copy,PartialEq,Eq)]
-        enum RemovalRosterKind {InstalledRoot,Archive,Rehome,Versions,Release,InstallPhases,RestorePhases}
+        enum RemovalRosterKind {InstalledRoot,Archive,Rehome,RehomeWithRetries,Versions,Release,InstallPhases,RestorePhases}
         impl RemovalRosterKind {
-            fn limit(self)->usize {match self {Self::InstalledRoot=>350,Self::Archive=>7,Self::Rehome=>REHOME_TOP_LIMIT,
+            fn limit(self)->usize {match self {Self::InstalledRoot=>350,Self::Archive=>7,Self::Rehome=>REHOME_TOP_LIMIT,Self::RehomeWithRetries=>REHOME_TOP_LIMIT+REHOME_RETRY_LIMIT,
                 Self::Versions=>9,Self::Release=>2,Self::InstallPhases=>4,Self::RestorePhases=>3}}
             fn mode(self)->u32 {match self {Self::InstalledRoot|Self::Versions|Self::Release=>0o755,_=>0o700}}
-            fn work(self)->usize {match self {Self::InstalledRoot|Self::Rehome=>256*1024,_=>128*1024}}
+            fn work(self)->usize {match self {Self::InstalledRoot|Self::Rehome|Self::RehomeWithRetries=>256*1024,_=>128*1024}}
         }
         fn removal_fixed_roster_quote_data(kind:RemovalRosterKind,capacity:usize,names:usize,prospective:usize)->Result<usize> {
             check(capacity<=kind.limit(),"removal-prior-roster-bound")?;
@@ -2325,6 +2487,16 @@ mod installer {
         // The caller separately holds its live-source or recovery-source and R/M
         // capability. No returned comparison row manufactures that authority.
         pub(super) fn read_removal_archive_census(book:&mut Install,root:usize,wanted:&BTreeSet<String>)->Result<RemovalArchiveCensus> {
+            read_removal_archive_census_inner(book,root,wanted,None)
+        }
+        pub(super) fn read_removal_archive_census_with_retries(book:&mut Install,root:usize,wanted:&BTreeSet<String>,
+            input:&worker::ReinstallInputRead<'_>)->Result<RemovalArchiveCensus> {
+            input.post_source(book)?;check(input.root_original()==root,"rehome-retry-source-root")?;
+            let result=read_removal_archive_census_inner(book,root,wanted,Some(input));
+            let post=input.post_source(book);let value=result?;post?;Ok(value)
+        }
+        fn read_removal_archive_census_inner(book:&mut Install,root:usize,wanted:&BTreeSet<String>,
+            input:Option<&worker::ReinstallInputRead<'_>>)->Result<RemovalArchiveCensus> {
             book.clock()?;check(book.gate.parent==Some(root) && wanted.len()<=286
                 && wanted.iter().all(|name|!name.starts_with(".remove-")),"removal-prior-root-original")?;
             reserve_removal_snapshot_work(book)?;
@@ -2342,7 +2514,7 @@ mod installer {
             }
             drop(actual);
             table.resolve_history_data()?;removal_archive_pending_admissions(book,&mut table)?;
-            read_rehome_children(book,&mut table)?;book.clock()?;Ok(table)
+            read_rehome_children(book,&mut table,input)?;table.invocation_union()?;book.clock()?;Ok(table)
         }
         fn removal_archive_root_names(book:&mut Install,root:usize,wanted:&mut BTreeSet<String>)->Result<()> {
             let Some(scan)=book.removal_archive_scan.as_ref() else {return Ok(());};
@@ -2370,10 +2542,23 @@ mod installer {
         // decoder and SOURCE child auditor (2H+sum(2D+F)). No historical
         // signature authority, arbitrary path descent or app-directory open.
         pub(super) fn post_removal_archive_references(book:&mut Install,census:&RemovalArchiveCensus)->Result<()> {
-            book.clock()?;check(book.gate.parent==Some(census.root),"removal-prior-root-original")?;
+            check(census.retry_count()?==0,"rehome-retry-source-required")?;
+            post_removal_archive_references_inner(book,census,None)
+        }
+        pub(super) fn post_removal_archive_references_with_retries(book:&mut Install,census:&RemovalArchiveCensus,
+            input:&worker::ReinstallInputRead<'_>)->Result<()> {
+            input.post_source(book)?;check(input.root_original()==census.root,"rehome-retry-source-root")?;
+            let result=post_removal_archive_references_inner(book,census,Some(input));
+            let post=input.post_source(book);result?;post
+        }
+        fn post_removal_archive_references_inner(book:&mut Install,census:&RemovalArchiveCensus,
+            input:Option<&worker::ReinstallInputRead<'_>>)->Result<()> {
+            book.clock()?;census.invocation_union()?;check(book.gate.parent==Some(census.root),"removal-prior-root-original")?;
             let quote=census.post_originals_data()?;
             reserve_removal_original_storage(book,book.originals.len().checked_add(quote).ok_or("removal-history-original-bound")?)?;
             removal_archive_memory(book,128*1024)?;
+            let names=if input.is_some(){Some(rehome_archive_names(census)?)}else{None};
+            let mut observed_invocations=InstallInvocationSetData::empty();
             for (index,row) in census.rows().iter().enumerate() {
                 removal_archive_scope(book,|book| {
                     let directory=book.open(Some(census.root),row.name(),true)?;
@@ -2400,14 +2585,17 @@ mod installer {
                         }
                     }
                     if let Some(child)=&row.rehome {
-                        rehome_audit_census_child(book,census,index,directory,child.root_data(),Some(child))?;
+                        let context=input.map(|input|RehomeRetryRead{input,archives:names.as_deref().unwrap_or(&[]),
+                            limit:child.retries.len(),heap_limit:REMOVAL_ARCHIVE_TABLE});
+                        let (_,keys)=rehome_audit_census_child(book,census,index,directory,child.root_data(),Some(child),context)?;
+                        observed_invocations.merge(&keys)?;
                         check(rehome_pending_stat(book,directory,child.root_data().0.ino)?==child.root_data(),"rehome-prior-child-post")?;
                     }
                     if let Some(app)=row.app {check(removal_archive_app_stat(book,directory,app.0.ino)?==app,"removal-history-app-post")?;}
                     check(removal_archive_stat(book,directory,true,0o700)?==(row.identity,row.flags),"removal-prior-post-directory")?;Ok(())
                 })?;
             }
-            book.clock()
+            check(observed_invocations==census.install_invocations,"rehome-invocation-post")?;book.clock()
         }
         fn removal_archive_staged_post(book:&mut Install,census:&RemovalArchiveCensus,initial:bool)->Result<()> {
             book.clock()?;book.removal_archive_scan.as_mut().ok_or("removal-prior-stage")?.begin_post(census.root,initial)?;
@@ -2447,7 +2635,7 @@ mod installer {
         }
         struct RehomeReleaseData {name:String,inventory:[u8;32]}
         pub(super) struct RehomeMoveSetData<'a> {
-            genesis:&'a RemovalGenesisData,moves:Vec<RehomeMoveData>,releases:Vec<RehomeReleaseData>,files:usize,bytes:u64,
+            genesis:&'a RemovalGenesisData,moves:Vec<RehomeMoveData>,releases:Vec<RehomeReleaseData>,files:usize,bytes:u64,invocations:InstallInvocationSetData,
         }
         impl<'a> RehomeMoveSetData<'a> {
             fn memory(&self,extra:usize)->Result<usize> {
@@ -2503,7 +2691,7 @@ mod installer {
                 check(initial<=REHOME_WORK,"rehome-data-memory")?;
                 moves.try_reserve_exact(REHOME_TOP_LIMIT).map_err(|_|"rehome-data-allocation")?;
                 releases.try_reserve_exact(9).map_err(|_|"rehome-data-allocation")?;
-                let mut value=Self{genesis,moves,releases,files:0,bytes:0};value.memory(selected_raw.capacity()+4096)?;
+                let mut value=Self{genesis,moves,releases,files:0,bytes:0,invocations:InstallInvocationSetData::empty()};value.memory(selected_raw.capacity()+4096)?;
                 drop(selected_raw);
                 value.metadata(transaction::STATE_NAME.to_owned(),Some(state.digest_data()))?;
                 value.add("versions".to_owned(),RehomeKindData::Versions)?;
@@ -2519,6 +2707,7 @@ mod installer {
                 if let Some(evidence)=evidence {check(evidence.intent_sha256==intent.digest_data(),"rehome-data-history-hash")?;}
                 else {check(intent.action_data()==state.action_data() && intent.request_id_data()==state.request_id_data()
                     && intent.next_data()==state.current_data().release_data(),"rehome-data-current-intent")?;}
+                check(self.invocations.insert(InstallInvocationFactData::intent(intent)?)?,"rehome-data-invocation")?;
                 self.memory(4096+3*255)?;
                 self.metadata(data(transaction::intent_name_data(id))?,Some(intent.digest_data()))?;
                 self.metadata(data(transaction::capsule_name_data(id))?,evidence.map(|old|old.capsule_sha256))?;
@@ -2714,15 +2903,25 @@ mod installer {
         #[derive(PartialEq,Eq)]
         pub(super) struct RehomeReferenceData {
             root:Identity,flags:u32,prefix:usize,total:usize,directories:usize,files:usize,bytes:u64,digest:[u8;32],
+            retries:Vec<RehomeRetryReferenceData>,
         }
         impl RehomeReferenceData {
+            // The original empty-cohort DATA constructor remains exact for
+            // existing callers. A parsed or observed cohort uses the checked
+            // fixed extension below, never an extra-directory allow flag.
             fn wire_data(root:Identity,flags:u32,prefix:usize,total:usize,directories:usize,files:usize,bytes:u64,digest:[u8;32])->Result<Self> {
                 check(archive_directory_data(root,flags,true) && (1..=REHOME_TOP_LIMIT).contains(&total) && prefix<=total
                     && (1..=SNAPSHOT_DIRECTORIES).contains(&directories) && files<=SNAPSHOT_CONTROLS-4
                     && bytes<=installation_record::PAYLOAD_LIMIT && digest.iter().any(|b|*b!=0)
                     && (prefix!=0 || directories==1 && files==0 && bytes==0)
                     && (files!=0 || bytes==0),"rehome-data-child-reference")?;
-                Ok(Self{root,flags,prefix,total,directories,files,bytes,digest})
+                Ok(Self{root,flags,prefix,total,directories,files,bytes,digest,retries:Vec::new()})
+            }
+            fn with_retries_data(mut self,retries:Vec<RehomeRetryReferenceData>)->Result<Self> {
+                rehome_retry_rows_data(&retries)?;rehome_retry_heap_data(retries.capacity())?;
+                check(retries.is_empty() || self.complete_data(),"rehome-retry-before-old-complete")?;
+                retries.iter().try_fold(self.bytes,|n,r|removal_archive_storage_sum_data(n,r.storage_bytes_data()))?;
+                self.retries=retries;Ok(self)
             }
             pub(super) fn observed_data(plan:&RehomeMoveSetData<'_>,root:Identity,flags:u32,prefix:usize,
                 directories:usize,files:usize,bytes:u64,digest:[u8;32])->Result<Self> {
@@ -2730,19 +2929,39 @@ mod installer {
                 Self::wire_data(root,flags,prefix,plan.moves.len(),directories,files,bytes,digest)
             }
             pub(super) fn matches_data(&self,other:&Self)->bool {self==other}
+            // Old skeleton completion is deliberately separate from completion
+            // of preserved retries; the early partial-root reader needs both
+            // states, whereas final strong-clean requires the latter as well.
             pub(super) fn complete_data(&self)->bool {self.prefix==self.total}
-            pub(super) fn storage_bytes_data(&self)->u64 {self.bytes}
+            pub(super) fn retries_complete_data(&self)->bool {self.retries.iter().all(|r|r.complete_data())}
+            pub(super) fn storage_bytes_data(&self)->u64 {
+                // Both private constructors checked the same bounded sum.
+                self.bytes+self.retries.iter().map(|r|r.storage_bytes_data()).sum::<u64>()
+            }
             pub(super) fn root_data(&self)->(Identity,u32) {(self.root,self.flags)}
             pub(super) fn prefix_data(&self)->usize {self.prefix}
             pub(super) fn total_data(&self)->usize {self.total}
             pub(super) fn counts_data(&self)->(usize,usize,u64) {(self.directories,self.files,self.bytes)}
             pub(super) fn digest_data(&self)->&[u8;32] {&self.digest}
+            fn retries_data(&self)->&[RehomeRetryReferenceData] {&self.retries}
+            fn retry_heap_data(&self)->Result<usize> {rehome_retry_heap_data(self.retries.capacity())}
+            pub(super) fn retry_commitment_data(&self)->[u8;32] {
+                let mut out=Sha256::new();out.update(b"MRK-REHOME-RETRY-COHORT-v1\0");out.update((self.retries.len() as u16).to_be_bytes());
+                for row in &self.retries {rehome_retry_wire_data(row,|bytes|out.update(bytes));}out.finalize().into()
+            }
             pub(super) fn audit_originals_data(&self)->Result<usize> {
-                self.directories.checked_mul(2).and_then(|n|n.checked_add(self.files)).ok_or("rehome-audit-original-budget")
+                let old=self.directories.checked_mul(2).and_then(|n|n.checked_add(self.files)).ok_or("rehome-audit-original-budget")?;
+                self.retries.iter().try_fold(old,|n,r|n.checked_add(1).and_then(|n|n.checked_add(r.post_originals_data()))
+                    .filter(|n|*n<=24576).ok_or("rehome-audit-original-budget"))
             }
             fn encode(&self,out:&mut SnapshotBytes)->Result<()> {
+                rehome_retry_rows_data(&self.retries)?;
                 out.identity(self.root,self.flags)?;out.u16(self.prefix)?;out.u16(self.total)?;
-                out.u16(self.directories)?;out.u16(self.files)?;out.put(&self.bytes.to_be_bytes())?;out.put(&self.digest)
+                out.u16(self.directories)?;out.u16(self.files)?;out.put(&self.bytes.to_be_bytes())?;out.put(&self.digest)?;
+                out.u16(self.retries.len())?;
+                for row in &self.retries {
+                    let mut result=Ok(());rehome_retry_wire_data(row,|bytes|{if result.is_ok(){result=out.put(bytes);}});result?;
+                }Ok(())
             }
         }
         // Exact primitive-count quote for ONE proposed complete nested audit:
@@ -2949,7 +3168,8 @@ mod installer {
         // Returned comparison DATA only; neither a valid range nor a complete
         // old skeleton can assert that the remaining new root is absent.
         pub(super) struct RehomeAuditData {root:Identity,flags:u32,start:usize,end:usize,total:usize,
-            side:RehomeAuditSideData,directories:usize,files:usize,bytes:u64,digest:[u8;32]}
+            side:RehomeAuditSideData,directories:usize,files:usize,bytes:u64,digest:[u8;32],
+            retries:Vec<RehomeRetryReferenceData>,invocations:InstallInvocationSetData}
         impl RehomeAuditData {
             pub(super) fn root_data(&self)->(Identity,u32) {(self.root,self.flags)}
             pub(super) fn counts_data(&self)->(usize,usize,u64) {(self.directories,self.files,self.bytes)}
@@ -2958,7 +3178,8 @@ mod installer {
             pub(super) fn into_reference_data(self,plan:&RehomeMoveSetData<'_>)->Result<RehomeReferenceData> {
                 check(self.side==RehomeAuditSideData::ArchivedPrefix(self.end) && self.start==0
                     && self.total==plan.moves.len(),"rehome-audit-reference-range")?;
-                RehomeReferenceData::observed_data(plan,self.root,self.flags,self.end,self.directories,self.files,self.bytes,self.digest)
+                RehomeReferenceData::observed_data(plan,self.root,self.flags,self.end,self.directories,self.files,self.bytes,self.digest)?
+                    .with_retries_data(self.retries)
             }
         }
         fn rehome_directory_correspondence_data(old:Identity,old_flags:u32,current:Identity,flags:u32,mode:u32)->bool {
@@ -2976,8 +3197,15 @@ mod installer {
             rows.iter().try_fold(base,|n,row|n.checked_add(row.0.capacity()).ok_or("rehome-audit-memory"))
         }
         fn rehome_roster_work_data(retained:usize,kind:RemovalRosterKind)->Result<()> {
+            // Four fixed union/return-comparison cells, two validated scalar
+            // rows and their field views fit this fixed subquote. No guessed
+            // allocator/RSS credit, and no increase to the containing2MiB.
+            let scalars=4usize.checked_mul(std::mem::size_of::<InstallInvocationSetData>())
+                .and_then(|n|n.checked_add(2*std::mem::size_of::<RehomeRetryReferenceData>()))
+                .and_then(|n|n.checked_add(2*std::mem::size_of::<PartialFreshRetryFieldsData>())).ok_or("rehome-retry-memory")?;
+            check(scalars<=REHOME_RETRY_SCALAR_WORK,"rehome-retry-memory")?;
             let future=kind.limit().checked_mul(std::mem::size_of::<(String,u64)>()+255).ok_or("rehome-audit-memory")?;
-            check(retained.checked_add(future).and_then(|n|n.checked_add(65536+8192)).is_some_and(|n|n<=REHOME_WORK),
+            check(retained.checked_add(future).and_then(|n|n.checked_add(65536+8192+REHOME_RETRY_NAMES_WORK+REHOME_RETRY_SCALAR_WORK)).is_some_and(|n|n<=REHOME_WORK),
                 "rehome-audit-memory")
         }
         fn rehome_path_data(parts:&[&str])->Result<String> {
@@ -3025,7 +3253,7 @@ mod installer {
                 let (start,end)=side.range(plan.moves.len())?;
                 check((self.directories,self.files,self.bytes)==plan.range_counts(start,end)?,"rehome-audit-count")?;
                 Ok(RehomeAuditData{root,flags,start,end,total:plan.moves.len(),side,directories:self.directories,
-                    files:self.files,bytes:self.bytes,digest:self.digest.finalize().into()})
+                    files:self.files,bytes:self.bytes,digest:self.digest.finalize().into(),retries:Vec::new(),invocations:plan.invocations})
             }
         }
         fn rehome_directory_span<'a>(plan:&'a RehomeMoveSetData<'_>,path:&str)->Result<&'a RemovalDirectorySpanData> {
@@ -3106,6 +3334,92 @@ mod installer {
                 check(removal_archive_stat(book,directory,true,spec.kind.mode()&0o7777)?==before,"rehome-audit-directory-post")
             })
         }
+        // The optional context is a borrowed actual new-input admission. No
+        // parsed retry, renderer bool or source hash can construct that view.
+        // Archive names below are actual discovery facts, NOT a forged final
+        // census. Final signatures/R/M/whole namespace remain caller duties.
+        #[derive(Clone,Copy)]
+        struct RehomeRetryRead<'a,'source> {
+            input:&'a worker::ReinstallInputRead<'source>,archives:&'a[(String,u64)],limit:usize,heap_limit:usize,
+        }
+        fn rehome_archive_names(census:&RemovalArchiveCensus)->Result<Vec<(String,u64)>> {
+            let quote=std::mem::size_of::<Vec<(String,u64)>>().checked_add(census.rows.len()
+                .checked_mul(std::mem::size_of::<(String,u64)>()+40).ok_or("rehome-retry-memory")?)
+                .ok_or("rehome-retry-memory")?;
+            check(quote<=REHOME_RETRY_NAMES_WORK,"rehome-retry-memory")?;
+            let mut names=Vec::new();names.try_reserve_exact(census.rows.len()).map_err(|_|"rehome-retry-allocation")?;
+            check(names.capacity()<=REMOVAL_ARCHIVE_COUNT,"rehome-retry-memory")?;
+            for row in census.rows() {
+                let mut name=String::new();name.try_reserve_exact(row.name.len()).map_err(|_|"rehome-retry-allocation")?;
+                check(name.capacity()<=40,"rehome-retry-memory")?;name.push_str(row.name());names.push((name,row.identity.ino));
+                check(rehome_roster_bytes_data(&names,names.capacity())?<=REHOME_RETRY_NAMES_WORK,"rehome-retry-memory")?;
+            }Ok(names)
+        }
+        fn rehome_retry_read_post(book:&Install,read:RehomeRetryRead<'_,'_>)->Result<()> {
+            read.input.post_source(book)?;
+            check(book.gate.parent==Some(read.input.root_original()) && read.archives.len()<=REMOVAL_ARCHIVE_COUNT
+                && read.limit<=REHOME_RETRY_LIMIT && read.heap_limit<=REMOVAL_ARCHIVE_TABLE && read.archives.windows(2).all(|p|p[0].0<p[1].0)
+                && read.archives.iter().all(|r|worker::removal_archive_name_data(&r.0) && r.1!=0),
+                "rehome-retry-source-root")?;book.clock()
+        }
+        fn rehome_retry_role(book:&Install,retry:usize)->Result<PartialFreshRetryAuditRole> {
+            let before=removal_archive_stat(book,retry,true,0o700)?;
+            book.clock()?;let named=book.named(Some(retry),"versions");book.clock()?;
+            let versions=match named {
+                Ok(raw)=>Some((Identity::of(&raw),raw.st_flags)),
+                Err(Errno::ENOENT)=>None,
+                Err(_)=>return Err("rehome-retry-versions-original"),
+            };
+            let role=rehome_retry_role_data(before.0,versions)?;
+            check(removal_archive_stat(book,retry,true,0o700)?==before,"rehome-retry-original-post")?;Ok(role)
+        }
+        fn read_rehome_retry_cohort(book:&mut Install,root:usize,roster:&[(String,u64)],plan:&RehomeMoveSetData<'_>,
+            read:RehomeRetryRead<'_,'_>,count:usize)->Result<Vec<RehomeRetryReferenceData>> {
+            rehome_retry_read_post(book,read)?;
+            check(count<=read.limit && count<=REHOME_RETRY_LIMIT,"rehome-retry-count")?;
+            let heap=rehome_retry_heap_data(count)?;check(heap<=read.heap_limit,"rehome-retry-memory")?;
+            // The pending vector is part of the next128KiB census, not a
+            // third table. Old/next table overlap was charged before scanning.
+            check(heap.checked_add(std::mem::size_of::<RehomeReferenceData>()).is_some_and(|n|n<=REMOVAL_ARCHIVE_TABLE),
+                "rehome-retry-memory")?;
+            let q=if count==0{0}else{partial_fresh_retry_quote(book,read.input)?};
+            let quote=q.checked_add(1).and_then(|n|n.checked_mul(count)).ok_or("rehome-retry-original-budget")?;
+            let end=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("rehome-retry-original-budget")?;
+            reserve_removal_original_storage(book,end)?;
+            // Reservation changes the effective pool; recheck the evaluator's
+            // actual SOURCE work quote after that debit, still before opens.
+            if count!=0 {check(partial_fresh_retry_quote(book,read.input)?==q,"rehome-retry-source-quote")?;}
+            let before=removal_archive_stat(book,root,true,0o700)?;
+            let mut rows=Vec::new();rows.try_reserve_exact(count).map_err(|_|"rehome-retry-allocation")?;
+            check(rehome_retry_heap_data(rows.capacity())?<=read.heap_limit,"rehome-retry-memory")?;
+            for (name,inode) in roster {
+                if plan.moves.iter().any(|spec|spec.name==*name){continue;}
+                let invocation=rehome_retry_invocation_data(name)?;
+                check(rows.len()<count && rows.len()<rows.capacity(),"rehome-retry-count")?;
+                let start=book.originals.len();
+                check(start.checked_add(1+q).is_some_and(|n|n<=end),"rehome-retry-original-budget")?;
+                let reference=removal_archive_scope(book,|book| {
+                    let retry=book.open(Some(root),name,true)?;
+                    let identity=removal_archive_stat(book,retry,true,0o700)?;
+                    check(identity.0.ino==*inode && identity.0.dev==before.0.dev,"rehome-retry-original")?;
+                    let role=rehome_retry_role(book,retry)?;
+                    let value=audit_partial_fresh_retry(book,read.input,root,read.archives,retry,invocation,role)?;
+                    check(value.root_data()==identity.0 && value.role_data()==role && value.post_originals_data()==q
+                        && value.invocation_data()==&archive_hex_data::<16>(invocation)?
+                        && book.originals.len().checked_sub(start)==Some(1+value.observed_originals_data()),
+                        "rehome-retry-original-budget")?;
+                    check(removal_archive_stat(book,retry,true,0o700)?==identity,"rehome-retry-original-post")?;
+                    RehomeRetryReferenceData::same_input_data(value)
+                })?;
+                check(book.originals.len().checked_sub(start).is_some_and(|n|n<=1+q)
+                    && book.originals[start..].iter().all(|o|o.name.len()<=255 && o.name.capacity()<=255),
+                    "rehome-retry-original-budget")?;
+                rows.push(reference);
+            }
+            check(rows.len()==count,"rehome-retry-count")?;rehome_retry_rows_data(&rows)?;
+            check(removal_archive_stat(book,root,true,0o700)?==before,"rehome-retry-child-post")?;
+            rehome_retry_read_post(book,read)?;Ok(rows)
+        }
         enum RehomeAuditLocation {Held(usize),Child{archive:usize,expected:(Identity,u32)}}
         fn rehome_archive_location(book:&Install,archive:usize)->Result<()> {
             let original=book.originals.get(archive).ok_or("rehome-audit-location")?;
@@ -3113,7 +3427,8 @@ mod installer {
             removal_archive_stat(book,archive,true,0o700)?;Ok(())
         }
         fn rehome_audit_inner(book:&mut Install,location:RehomeAuditLocation,plan:&RehomeMoveSetData<'_>,
-            selected:Option<RehomeAuditSideData>)->Result<RehomeAuditData> {
+            selected:Option<RehomeAuditSideData>,context:Option<RehomeRetryRead<'_,'_>>)->Result<RehomeAuditData> {
+            if let Some(read)=context {rehome_retry_read_post(book,read)?;}
             book.clock()?;rehome_plan_work(book,plan.genesis,plan.owned_bytes_data()?,REHOME_WORK)?;
             // None is private inferred ArchivedPrefix only, never a public
             // bypass or sentinel integer. Its fresh exact roster selects k.
@@ -3142,12 +3457,15 @@ mod installer {
                 check(before.0.dev==old_root.identity_data().dev,"rehome-audit-root-device")?;
                 if !archived {check(rehome_directory_correspondence_data(old_root.identity_data(),old_root.flags_data(),before.0,before.1,0o755),
                     "rehome-audit-current-root")?;}
-                let kind=if archived{RemovalRosterKind::Rehome}else{RemovalRosterKind::InstalledRoot};
+                let kind=if archived {if context.is_some(){RemovalRosterKind::RehomeWithRetries}else{RemovalRosterKind::Rehome}}
+                    else{RemovalRosterKind::InstalledRoot};
                 rehome_roster_work_data(0,kind)?;let roster=removal_fixed_roster(book,root,kind)?;
-                let side=match selected {Some(side)=>side,None=>RehomeAuditSideData::ArchivedPrefix(roster.len())};
+                let shape=if archived {Some(rehome_cohort_shape_data(plan,&roster,if context.is_some(){RehomeRetryPolicyData::Contextual}
+                    else{RehomeRetryPolicyData::Plain})?)}else{None};
+                let side=match selected {Some(side)=>side,None=>RehomeAuditSideData::ArchivedPrefix(shape.ok_or("rehome-audit-location")?.0)};
                 let (first,end)=side.range(plan.moves.len())?;
                 if matches!(side,RehomeAuditSideData::ArchivedPrefix(_)) {
-                    check(rehome_exact_names_data(&roster,plan.moves[..end].iter().map(|r|r.name.as_str())),"rehome-audit-prefix-roster")?;
+                    check(shape.is_some_and(|(prefix,_)|prefix==end),"rehome-audit-prefix-roster")?;
                 }
                 let (directories,files,_)=plan.range_counts(first,end)?;
                 let count=directories.checked_mul(2).and_then(|n|n.checked_add(files)).ok_or("rehome-audit-original-budget")?;
@@ -3168,16 +3486,35 @@ mod installer {
                     rehome_originals_after(book,entry_start,entry)?;
                 }
                 check(removal_archive_stat(book,root,true,mode)?==before,"rehome-audit-root-post")?;
-                let observed=fold.finish(plan,side,before.0,before.1)?;
-                rehome_originals_after(book,start,count)?;Ok(observed)
+                let mut observed=fold.finish(plan,side,before.0,before.1)?;
+                // The old skeleton's exact2D+F is closed before the separate
+                // cohort opens. Q costs cannot hide missing/extra old readers.
+                rehome_originals_after(book,start,count)?;
+                if matches!(side,RehomeAuditSideData::ArchivedPrefix(_)) {
+                    if let Some(read)=context {
+                        let retries=shape.ok_or("rehome-audit-location")?.1;
+                        check(retries==0 || end==plan.moves.len(),"rehome-retry-before-old-complete")?;
+                        observed.retries=read_rehome_retry_cohort(book,root,&roster,plan,read,retries)?;
+                    }
+                }
+                check(removal_archive_stat(book,root,true,mode)?==before,"rehome-audit-root-post")?;Ok(observed)
             });
             // Scope closes all newly adopted originals before any result can
             // reach the caller. An error/unknown close cannot mint a reference.
-            let value=result?;book.clock()?;Ok(value)
+            let value=result?;if let Some(read)=context {rehome_retry_read_post(book,read)?;}book.clock()?;Ok(value)
         }
         pub(super) fn audit_rehome_controls(book:&mut Install,parent:usize,plan:&RehomeMoveSetData<'_>,
             side:RehomeAuditSideData)->Result<RehomeAuditData> {
-            side.range(plan.moves.len())?;rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side))
+            side.range(plan.moves.len())?;rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),None)
+        }
+        pub(super) fn audit_rehome_controls_with_retries(book:&mut Install,parent:usize,plan:&RehomeMoveSetData<'_>,
+            side:RehomeAuditSideData,input:&worker::ReinstallInputRead<'_>,census:&RemovalArchiveCensus)->Result<RehomeAuditData> {
+            side.range(plan.moves.len())?;input.post_source(book)?;
+            check(input.root_original()==census.root && book.gate.parent==Some(census.root),"rehome-retry-source-root")?;
+            census.invocation_union()?;let names=rehome_archive_names(census)?;
+            let read=RehomeRetryRead{input,archives:&names,limit:REHOME_RETRY_LIMIT,heap_limit:REMOVAL_ARCHIVE_TABLE};
+            let result=rehome_audit_inner(book,RehomeAuditLocation::Held(parent),plan,Some(side),Some(read));
+            let post=input.post_source(book);let value=result?;post?;Ok(value)
         }
 
         fn rehome_pending_stat(book:&Install,archive:usize,inode:u64)->Result<(Identity,u32)> {
@@ -3224,20 +3561,22 @@ mod installer {
             })
         }
         fn rehome_audit_census_child(book:&mut Install,census:&RemovalArchiveCensus,index:usize,archive:usize,
-            expected:(Identity,u32),prior:Option<&RehomeReferenceData>)->Result<RehomeReferenceData> {
+            expected:(Identity,u32),prior:Option<&RehomeReferenceData>,context:Option<RehomeRetryRead<'_,'_>>)
+            ->Result<(RehomeReferenceData,InstallInvocationSetData)> {
             check(book.originals.get(archive).is_some_and(|original|original.parent==Some(census.root)
                 && original.name==census.rows[index].name),"rehome-prior-child-location")?;
             let value=with_rehome_census_genesis(book,census,index,|book,snapshot,genesis| {
                 with_rehome_plan(book,snapshot,genesis,|book,_,_,plan| {
                     let side=prior.map(|reference|RehomeAuditSideData::ArchivedPrefix(reference.prefix_data()));
-                    let audit=rehome_audit_inner(book,RehomeAuditLocation::Child{archive,expected},plan,side)?;
-                    audit.into_reference_data(plan)
+                    let audit=rehome_audit_inner(book,RehomeAuditLocation::Child{archive,expected},plan,side,context)?;
+                    let keys=audit.invocations;Ok((audit.into_reference_data(plan)?,keys))
                 })
             })?;
-            if let Some(prior)=prior {check(value.matches_data(prior),"rehome-prior-child-changed")?;}
+            if let Some(prior)=prior {check(value.0.matches_data(prior),"rehome-prior-child-changed")?;}
             Ok(value)
         }
-        fn read_rehome_children(book:&mut Install,census:&mut RemovalArchiveCensus)->Result<()> {
+        fn read_rehome_children(book:&mut Install,census:&mut RemovalArchiveCensus,input:Option<&worker::ReinstallInputRead<'_>>)->Result<()> {
+            let names=if input.is_some(){Some(rehome_archive_names(census)?)}else{None};
             let count=census.rows.iter().filter(|row|row.pending_rehome.is_some()).count();
             let pending=census.rows.iter().filter(|row|row.files[0].is_none() && row.files[1].as_ref()
                 .is_some_and(|f|f.shape==RemovalArchiveShape::WritingPrefix)).count();
@@ -3250,17 +3589,21 @@ mod installer {
                 let Some(expected)=census.rows[index].pending_rehome else {continue;};
                 rehome_history_node_data(census,index)?;
                 let start=rehome_originals_before(book,1)?;
-                let value=removal_archive_scope(book,|book| {
+                let remaining=REHOME_RETRY_LIMIT.checked_sub(census.retry_count()?).ok_or("rehome-retry-count")?;
+                let heap_limit=REMOVAL_ARCHIVE_TABLE.checked_sub(census.owned_bytes()?).ok_or("rehome-retry-memory")?;
+                let context=input.map(|input|RehomeRetryRead{input,archives:names.as_deref().unwrap_or(&[]),limit:remaining,heap_limit});
+                let (value,keys)=removal_archive_scope(book,|book| {
                     let row=&census.rows[index];let archive=book.open(Some(census.root),row.name(),true)?;
                     check(removal_archive_stat(book,archive,true,0o700)?==(row.identity,row.flags)
                         && rehome_pending_stat(book,archive,expected.0.ino)?==expected,"rehome-prior-child-original")?;
                     rehome_originals_after(book,start,1)?;
-                    let value=rehome_audit_census_child(book,census,index,archive,expected,None)?;
+                    let value=rehome_audit_census_child(book,census,index,archive,expected,None,context)?;
                     check(removal_archive_stat(book,archive,true,0o700)?==(row.identity,row.flags)
                         && rehome_pending_stat(book,archive,expected.0.ino)?==expected,"rehome-prior-child-post")?;Ok(value)
                 })?;
                 census.storage_bytes=removal_archive_storage_sum_data(census.storage_bytes,value.storage_bytes_data())?;
                 census.rows[index].rehome=Some(value);census.rows[index].pending_rehome=None;
+                census.install_invocations.merge(&keys)?;census.invocation_union()?;census.owned_bytes()?;
             }
             check(census.rows.iter().all(|row|row.pending_rehome.is_none()),"rehome-prior-child-incomplete")?;
             census.owned_bytes()?;book.clock()
@@ -3348,9 +3691,1651 @@ mod installer {
                 let at=at as usize;let count=out.len().min(raw.len()-at).min(13);out[..count].copy_from_slice(&raw[at..at+count]);Ok(count)
             }).unwrap();(genesis,selected,state,intent,raw)
         }
+        // Partial Fresh observations are comparison/effect DATA only. They do
+        // not authenticate a package, own R/M, or permit transport. The private
+        // new-Install/rehome caller retains all of that actual authority.
+        const PARTIAL_FRESH_WORK:usize=256*1024;
+        const PARTIAL_FRESH_BLOCK:usize=65536;
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshFileState { Unfinished, Complete }
+        #[derive(Clone,Copy)]
+        struct PartialFreshFileObserved {
+            identity:Identity, flags:u32, digest:[u8;32], state:PartialFreshFileState,
+        }
+        fn partial_fresh_file_shape_data(id:Identity,flags:u32,expected:u64,executable:bool)
+            ->Result<PartialFreshFileState> {
+            check(id.dev>0 && id.ino>0 && id.uid==0 && id.gid==0 && id.links==1 && flags==0
+                && id.size>=0 && (id.size as u64)<=expected && expected<=installation_record::PAYLOAD_LIMIT,
+                "partial-fresh-file-shape")?;
+            let sealed=if executable {0o100555}else{0o100444};
+            match id.mode {
+                0o100600=>Ok(PartialFreshFileState::Unfinished),
+                mode if mode==sealed && id.size as u64==expected=>Ok(PartialFreshFileState::Complete),
+                _=>Err("partial-fresh-file-mode"),
+            }
+        }
+        // Actual production streaming predicate. Both readers supply bytes
+        // from already held originals; the wrapper below authenticates and
+        // compares originals before/after. This generic byte engine itself is
+        // not an FD/source capability and tests never supply a fake native fd.
+        fn partial_fresh_prefix_bytes<F,G,C>(source_len:u64,prefix_len:u64,expected:[u8;32],
+            mut source:F,mut prefix:G,mut cut:C)->Result<[u8;32]>
+        where F:FnMut(u64,&mut [u8])->Result<usize>,G:FnMut(u64,&mut [u8])->Result<usize>,C:FnMut()->Result<()> {
+            check(prefix_len<=source_len && source_len<=installation_record::PAYLOAD_LIMIT,
+                "partial-fresh-prefix-size")?;
+            let mut whole=Sha256::new();let mut actual=Sha256::new();
+            let mut input=[0u8;PARTIAL_FRESH_BLOCK];let mut output=[0u8;PARTIAL_FRESH_BLOCK];
+            let mut at=0u64;
+            while at<source_len {
+                cut()?;
+                let wanted=usize::try_from((source_len-at).min(PARTIAL_FRESH_BLOCK as u64))
+                    .map_err(|_|"partial-fresh-prefix-size")?;
+                let count=source(at,&mut input[..wanted])?;
+                check(count>0 && count<=wanted,"partial-fresh-source-short")?;
+                cut()?;whole.update(&input[..count]);
+                let compare=usize::try_from(prefix_len.saturating_sub(at).min(count as u64))
+                    .map_err(|_|"partial-fresh-prefix-size")?;
+                let mut used=0usize;
+                while used<compare {
+                    cut()?;
+                    let n=prefix(at+used as u64,&mut output[used..compare])?;
+                    check(n>0 && n<=compare-used,"partial-fresh-output-short")?;
+                    cut()?;used+=n;
+                }
+                check(input[..compare]==output[..compare],"partial-fresh-prefix-content")?;
+                actual.update(&output[..compare]);at=at.checked_add(count as u64).ok_or("partial-fresh-prefix-size")?;
+            }
+            cut()?;check(source(source_len,&mut input[..1])?==0,"partial-fresh-source-extra")?;
+            cut()?;check(prefix(prefix_len,&mut output[..1])?==0,"partial-fresh-output-extra")?;
+            cut()?;check(<[u8;32]>::from(whole.finalize())==expected,"partial-fresh-source-hash")?;
+            Ok(actual.finalize().into())
+        }
+        fn partial_fresh_raw_post(book:&Install,n:usize,identity:Identity,flags:u32)->Result<()> {
+            book.clock()?;book.check_name(n,true)?;
+            let current=stat::fstat(book.fd(n)?).map_err(|_|"partial-fresh-file-stat")?;
+            check(Identity::of(&current)==identity && current.st_flags==flags && flags==0,"partial-fresh-file-post")?;
+            native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"partial-fresh-file-attributes")?;
+            book.protected(n,false,Some(identity.mode&0o7777))?;book.check_name(n,true)
+        }
+        fn partial_fresh_copy_prefix(book:&mut Install,source_parent:usize,output_parent:usize,
+            leaf:&str,item:&Entry)->Result<PartialFreshFileObserved> {
+            // Path comes only from the caller's independently authenticated
+            // input index. Every actual named parent is held by the same Book.
+            check(component(leaf) && item.path.rsplit('/').next()==Some(leaf) && sha(&item.sha256),
+                "partial-fresh-input-leaf")?;
+            book.clock()?;book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;
+            let source=book.open(Some(source_parent),leaf,false)?;
+            let source_id=book.identity(source)?;
+            check(source_id.size>=0 && source_id.size as u64==item.size,"partial-fresh-source-size")?;
+            let sealed=if item.executable {0o555}else{0o444};
+            book.protected(source,false,Some(sealed))?;
+            partial_fresh_raw_post(book,source,source_id,0)?;
+            let output=book.open(Some(output_parent),leaf,false)?;
+            let actual=stat::fstat(book.fd(output)?).map_err(|_|"partial-fresh-file-stat")?;
+            let id=Identity::of(&actual);let state=partial_fresh_file_shape_data(id,actual.st_flags,item.size,item.executable)?;
+            partial_fresh_raw_post(book,output,id,actual.st_flags)?;
+            let expected=archive_hex_data::<32>(&item.sha256)?;
+            // Both original FDs stay in Book, including every error path. The
+            // caller has debited these128KiB inside PARTIAL_FRESH_WORK before
+            // traversal; neither reader can outlive native borrowed backing.
+            let digest=partial_fresh_prefix_bytes(item.size,id.size as u64,expected,
+                |at,bytes|nix::sys::uio::pread(book.fd(source)?,bytes,at as i64).map_err(|_|"partial-fresh-source-read"),
+                |at,bytes|nix::sys::uio::pread(book.fd(output)?,bytes,at as i64).map_err(|_|"partial-fresh-output-read"),
+                ||book.clock())?;
+            partial_fresh_raw_post(book,source,source_id,0)?;partial_fresh_raw_post(book,output,id,actual.st_flags)?;
+            book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;
+            book.forward_close(output,"partial-fresh-output-close")?;
+            book.forward_close(source,"partial-fresh-source-close")?;
+            book.clock()?;Ok(PartialFreshFileObserved {identity:id,flags:actual.st_flags,digest,state})
+        }
+        // Only an already attributed fixed SOURCE writer slot may call this
+        // reader. Unknown names and the sole unparseable intent are rejected
+        // above it; opaque bytes never become receipt/finality authority.
+        fn partial_fresh_writer_bytes(book:&mut Install,parent:usize,leaf:&str,limit:usize)
+            ->Result<(usize,Vec<u8>,PartialFreshFileObserved)> {
+            check(component(leaf) && limit>0 && limit<=installation_record::INVENTORY_LIMIT,
+                "partial-fresh-writer-bound")?;
+            book.clock()?;book.check_name(parent,true)?;
+            let reader=book.open(Some(parent),leaf,false)?;
+            let stat=stat::fstat(book.fd(reader)?).map_err(|_|"partial-fresh-file-stat")?;
+            let id=Identity::of(&stat);
+            check(id.mode==0o100600 || id.mode==0o100444,"partial-fresh-writer-mode")?;
+            check(id.size>=0 && id.size as u64<=limit as u64 && (id.mode==0o100600 || id.size>0),"partial-fresh-writer-bound")?;
+            let state=partial_fresh_file_shape_data(id,stat.st_flags,id.size as u64,false)?;
+            partial_fresh_raw_post(book,reader,id,stat.st_flags)?;
+            let len=usize::try_from(id.size).map_err(|_|"partial-fresh-writer-bound")?;
+            let mut bytes=Vec::new();bytes.try_reserve_exact(len).map_err(|_|"partial-fresh-memory")?;
+            check(bytes.capacity()<=limit,"partial-fresh-memory")?;bytes.resize(len,0);
+            let mut used=0usize;
+            while used<len {
+                book.clock()?;
+                let n=nix::sys::uio::pread(book.fd(reader)?,&mut bytes[used..],used as i64)
+                    .map_err(|_|"partial-fresh-output-read")?;
+                check(n>0 && n<=len-used,"partial-fresh-output-short")?;used+=n;
+            }
+            let mut extra=[0u8;1];book.clock()?;
+            check(nix::sys::uio::pread(book.fd(reader)?,&mut extra,len as i64)
+                .map_err(|_|"partial-fresh-output-read")?==0,"partial-fresh-output-extra")?;
+            partial_fresh_raw_post(book,reader,id,stat.st_flags)?;book.check_name(parent,true)?;
+            let digest=Sha256::digest(&bytes).into();
+            Ok((reader,bytes,PartialFreshFileObserved {identity:id,flags:stat.st_flags,digest,state}))
+        }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshPresence { Absent,Unfinished,Complete }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshCut { Intent,Copying,Prepared,Runtime,Metadata,App,State,Recorded }
+        // Observation reducer only. No field is an EX/source/finality witness.
+        // In particular recorded_history is supplied ONLY by the unchanged
+        // strict current-history observer, not from a capsule's outcome text.
+        #[derive(Clone,Copy)]
+        struct PartialFreshCutInput {
+            stage:bool,staged_app:PartialFreshPresence,staged_runtime:PartialFreshPresence,
+            root_app:PartialFreshPresence,root_runtime:PartialFreshPresence,
+            inventory:PartialFreshPresence,record:PartialFreshPresence,state:PartialFreshPresence,
+            producer:PartialFreshPresence,signature:PartialFreshPresence,capsule:PartialFreshPresence,
+            recorded_history:bool,
+        }
+        fn partial_fresh_cut_data(v:PartialFreshCutInput)->Result<PartialFreshCut> {
+            use PartialFreshPresence::{Absent as A,Unfinished as U,Complete as C};
+            check(v.root_app!=U && v.root_runtime!=U,"partial-fresh-published-incomplete")?;
+            check(!(v.root_app!=A && v.staged_app!=A) && !(v.root_runtime!=A && v.staged_runtime!=A),
+                "partial-fresh-payload-duplicate")?;
+            check(v.stage || [v.staged_app,v.staged_runtime,v.root_app,v.root_runtime,v.inventory,v.record,
+                v.state,v.producer,v.signature].iter().all(|x|*x==A),"partial-fresh-stage-required")?;
+            check(v.staged_runtime==A || v.staged_app==C,"partial-fresh-copy-order")?;
+            check(v.root_runtime==A || v.staged_app==C || v.root_app==C,"partial-fresh-runtime-order")?;
+            check(v.inventory==A || v.root_runtime==C,"partial-fresh-inventory-order")?;
+            check(v.record==A || v.inventory==C,"partial-fresh-record-order")?;
+            check(v.root_app==A || v.inventory==C && v.record==C && v.root_runtime==C,
+                "partial-fresh-app-order")?;
+            check(v.state==A || v.root_app==C && v.root_runtime==C,"partial-fresh-state-order")?;
+            check(v.producer==A || v.state==C,"partial-fresh-producer-order")?;
+            check(v.signature==A || v.producer==C,"partial-fresh-signature-order")?;
+            // Failure/partial capsules may be written after a genuinely joined
+            // failed worker, so capsule presence is not a success-order signal.
+            if v.recorded_history {
+                check(v.root_app==C && v.root_runtime==C && v.state==C && v.producer==C
+                    && v.signature==C && v.capsule==C,"partial-fresh-recorded-incomplete")?;
+                return Ok(PartialFreshCut::Recorded);
+            }
+            Ok(if !v.stage {PartialFreshCut::Intent}
+                else if v.root_app==C {if v.state==C {PartialFreshCut::State}else{PartialFreshCut::App}}
+                else if v.root_runtime==C {if v.record==C {PartialFreshCut::Metadata}else{PartialFreshCut::Runtime}}
+                else if v.staged_app==C && v.staged_runtime==C {PartialFreshCut::Prepared}
+                else {PartialFreshCut::Copying})
+        }
+        // Freshly observed placement, not remembered old return values.
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshSide { Current,Preserved }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshTop {
+            Intent,Stage,Capsule,App,State,Producer,Signature,Versions,
+        }
+        fn partial_fresh_name_data(slot:PartialFreshTop,invocation:&str,selected:&ReleaseSetData)->Result<String> {
+            check(worker::invocation_valid(invocation),"partial-fresh-invocation")?;
+            Ok(match slot {
+                PartialFreshTop::Intent=>data(transaction::intent_name_data(invocation))?,
+                PartialFreshTop::Stage=>format!(".install-{invocation}"),
+                PartialFreshTop::Capsule=>data(transaction::capsule_name_data(invocation))?,
+                PartialFreshTop::App=>paths::APP_NAME.to_owned(),
+                PartialFreshTop::State=>transaction::STATE_NAME.to_owned(),
+                PartialFreshTop::Producer=>control_names(selected,selected.current_data().binding_data().release)?.0,
+                PartialFreshTop::Signature=>control_names(selected,selected.current_data().binding_data().release)?.1,
+                PartialFreshTop::Versions=>"versions".to_owned(),
+            })
+        }
+        fn partial_fresh_retry_name_data(invocation:&str)->Result<String> {
+            check(worker::invocation_valid(invocation),"partial-fresh-invocation")?;
+            Ok(format!("fresh-retry-{invocation}"))
+        }
+        fn partial_fresh_intent_data(raw:&[u8],invocation:&str,selected:&ReleaseSetData)->Result<IntentData> {
+            let intent=data(IntentData::parse_data(raw,selected))?;
+            check(intent.invocation_data()==invocation && intent.action_data()==ActionData::FreshInstall
+                && intent.previous_data().is_none() && intent.previous_state_data().is_none()
+                && intent.request_id_data()!=invocation,"partial-fresh-intent-binding")?;
+            let expected=data(IntentData::encode_data(invocation,intent.request_id_data(),ActionData::FreshInstall,None,selected))?;
+            check(raw==expected,"partial-fresh-intent-canonical")?;Ok(intent)
+        }
+        fn partial_fresh_prefix_data(sides:&[PartialFreshSide])->Result<usize> {
+            check(!sides.is_empty() && sides.len()<=8,"partial-fresh-transport-bound")?;
+            let prefix=sides.iter().take_while(|side|**side==PartialFreshSide::Preserved).count();
+            check(sides[prefix..].iter().all(|side|*side==PartialFreshSide::Current),
+                "partial-fresh-transport-interleaved")?;Ok(prefix)
+        }
+        #[derive(Clone,Copy)]
+        struct PartialFreshCostData {
+            prior_invocations:usize,retry_count:usize,physical_bytes:u64,incoming_bytes:u64,
+            evidence_bytes:u64,producer_bytes:u64,control_bytes:u64,records:usize,live:usize,
+            audits:usize,directories:usize,files:usize,retained_work:usize,transient_work:usize,
+        }
+        fn partial_fresh_cost_data(v:PartialFreshCostData)->Result<()> {
+            // Retried invocations are already included in prior_invocations.
+            // Both +1 values reserve the genuinely new attempt, never credit
+            // a previous incomplete attempt or count retry slots as free.
+            check(v.retry_count<=v.prior_invocations && v.prior_invocations<transaction::INVOCATION_LIMIT
+                && v.retry_count<transaction::INVOCATION_LIMIT,"partial-fresh-attempt-bound")?;
+            check(v.physical_bytes.checked_add(v.incoming_bytes).and_then(|n|n.checked_add(v.evidence_bytes))
+                .and_then(|n|n.checked_add(v.producer_bytes)).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+                && v.control_bytes<=16*1024*1024,"partial-fresh-storage-bound")?;
+            let additional=v.directories.checked_mul(2).and_then(|n|n.checked_add(v.files))
+                .and_then(|n|n.checked_mul(v.audits));
+            check(additional.and_then(|n|n.checked_add(v.records)).is_some_and(|n|n<=24576)
+                && v.live<=96,"partial-fresh-original-bound")?;
+            check(v.retained_work.checked_add(v.transient_work).is_some_and(|n|n<=PARTIAL_FRESH_WORK),
+                "partial-fresh-memory")
+        }
+        struct PartialFreshTreeWork { retained:usize, outer:usize }
+        impl PartialFreshTreeWork {
+            fn new(outer:usize)->Result<Self> {
+                let value=Self{retained:0,outer};value.check(2*PARTIAL_FRESH_BLOCK)?;Ok(value)
+            }
+            fn check(&self,transient:usize)->Result<()> {
+                check(self.outer.checked_add(self.retained).and_then(|n|n.checked_add(transient))
+                    .and_then(|n|n.checked_add(8192)).is_some_and(|n|n<=PARTIAL_FRESH_WORK),"partial-fresh-tree-memory")
+            }
+            fn add(&mut self,bytes:usize)->Result<()> {
+                self.check(bytes.checked_add(2*PARTIAL_FRESH_BLOCK).ok_or("partial-fresh-tree-memory")?)?;
+                self.retained=self.retained.checked_add(bytes).ok_or("partial-fresh-tree-memory")?;Ok(())
+            }
+            fn release(&mut self,bytes:usize)->Result<()> {
+                self.retained=self.retained.checked_sub(bytes).ok_or("partial-fresh-tree-memory")?;Ok(())
+            }
+        }
+        fn partial_fresh_directory(book:&Install,n:usize)->Result<Identity> {
+            book.clock()?;let id=book.identity(n)?;
+            check(matches!(id.mode,0o040700|0o040555) && id.dev>0 && id.ino>0 && id.uid==0 && id.gid==0,
+                "partial-fresh-directory-shape")?;
+            check(removal_archive_stat(book,n,true,id.mode&0o7777)?==(id,0),"partial-fresh-directory-post")?;Ok(id)
+        }
+        fn partial_fresh_children<'a>(path:&str,index:&'a installation_record::InventoryIndex<'_>,work:&mut PartialFreshTreeWork)
+            ->Result<Vec<&'a str>> {
+            let direct=|name:&str|name.rsplit_once('/').is_some_and(|(parent,_)|parent==path);
+            let count=index.files.keys().filter(|name|direct(name)).count()
+                .checked_add(index.directories.iter().filter(|name|direct(name)).count()).ok_or("partial-fresh-tree-count")?;
+            check(count<=installation_record::FILE_LIMIT*2,"partial-fresh-tree-count")?;
+            work.add(count.checked_mul(std::mem::size_of::<&str>()).ok_or("partial-fresh-tree-memory")?)?;
+            let mut names=Vec::new();names.try_reserve_exact(count).map_err(|_|"partial-fresh-tree-allocation")?;
+            check(names.capacity()<=count,"partial-fresh-tree-memory")?;
+            // Entry.path and the inventory directory strings survive in the
+            // parent's authenticated input. No target pathname is retained.
+            for entry in index.files.values(){if direct(&entry.path){names.push(entry.path.as_str());}}
+            for name in &index.directories {if direct(name){names.push(name.as_str());}}
+            names.sort_unstable();check(names.windows(2).all(|v|v[0]<v[1]),"partial-fresh-input-duplicate")?;
+            Ok(names)
+        }
+        fn partial_fresh_roster_data(expected:&[&str],seen:&mut [u64],block:&[u8],
+            index:&installation_record::InventoryIndex<'_>)->Result<()> {
+            check(expected.len()==seen.len() && block.len()<=PARTIAL_FRESH_BLOCK,"partial-fresh-roster-bound")?;
+            let mut offset=0usize;
+            while offset<block.len() {
+                check(block.len()-offset>=11,"partial-fresh-roster-record")?;
+                let inode=u64::from_ne_bytes(block[offset..offset+8].try_into().map_err(|_|"partial-fresh-roster-record")?);
+                let kind=block[offset+8];let len=u16::from_ne_bytes(block[offset+9..offset+11].try_into().map_err(|_|"partial-fresh-roster-record")?) as usize;
+                let end=offset.checked_add(11+len).filter(|n|*n<=block.len()).ok_or("partial-fresh-roster-record")?;
+                let name=std::str::from_utf8(&block[offset+11..end]).map_err(|_|"partial-fresh-roster-name")?;offset=end;
+                if name=="." || name==".."{continue;}
+                check(component(name) && inode!=0,"partial-fresh-roster-name")?;
+                let at=expected.binary_search_by(|path|path.rsplit('/').next().unwrap_or("").cmp(name))
+                    .map_err(|_|"partial-fresh-roster-foreign")?;
+                let wanted=if index.files.contains_key(expected[at]){nix::libc::DT_REG}else{nix::libc::DT_DIR};
+                check(kind==wanted && seen[at]==0,"partial-fresh-roster-type-or-duplicate")?;seen[at]=inode;
+            }
+            Ok(())
+        }
+        fn partial_fresh_roster(book:&mut Install,root:usize,expected:&[&str],
+            index:&installation_record::InventoryIndex<'_>,work:&mut PartialFreshTreeWork)->Result<Vec<u64>> {
+            check(expected.len()<=installation_record::FILE_LIMIT*2,"partial-fresh-roster-bound")?;
+            let bytes=expected.len().checked_mul(std::mem::size_of::<u64>()).ok_or("partial-fresh-tree-memory")?;
+            work.add(bytes)?;
+            let held=partial_fresh_directory(book,root)?;
+            let parent=book.originals[root].parent;let name=book.originals[root].name.clone();
+            check(name.capacity()<=255,"partial-fresh-tree-memory")?;
+            let result=removal_archive_scope(book,|book|{
+                let reader=book.open(parent,&name,true)?;
+                check(partial_fresh_directory(book,reader)?==held,"partial-fresh-roster-original")?;
+                let mut seen=Vec::new();seen.try_reserve_exact(expected.len()).map_err(|_|"partial-fresh-tree-allocation")?;
+                check(seen.capacity()<=expected.len(),"partial-fresh-tree-memory")?;seen.resize(expected.len(),0);
+                work.check(PARTIAL_FRESH_BLOCK+name.capacity())?;let mut block=[0u8;PARTIAL_FRESH_BLOCK];
+                loop {
+                    book.clock()?;let n=native::directory_block(book.fd(reader)?.as_fd(),&mut block)
+                        .map_err(|_|"partial-fresh-roster-read")?;book.clock()?;
+                    check(n<=block.len(),"partial-fresh-roster-bound")?;if n==0{break;}
+                    partial_fresh_roster_data(expected,&mut seen,&block[..n],index)?;
+                }
+                check(partial_fresh_directory(book,reader)?==held,"partial-fresh-roster-post")?;Ok(seen)
+            });
+            let after=partial_fresh_directory(book,root);
+            let rows=result?;check(after?==held,"partial-fresh-roster-post")?;Ok(rows)
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        struct PartialFreshTreeObserved {
+            identity:Identity,digest:[u8;32],state:PartialFreshFileState,files:u64,directories:u64,bytes:u64,
+        }
+        fn partial_fresh_identity_digest(out:&mut Sha256,id:Identity) {
+            out.update(id.dev.to_le_bytes());out.update(id.ino.to_le_bytes());out.update(id.mode.to_le_bytes());
+            out.update(id.uid.to_le_bytes());out.update(id.gid.to_le_bytes());out.update(id.links.to_le_bytes());
+            out.update(id.size.to_le_bytes());out.update(id.mtime.to_le_bytes());out.update(id.mtime_ns.to_le_bytes());
+            out.update(id.ctime.to_le_bytes());out.update(id.ctime_ns.to_le_bytes());
+        }
+        fn partial_fresh_content_identity(out:&mut Sha256,id:Identity,movable_top:bool) {
+            // Exactly a known moved top may change ctime. Its full named/held
+            // identity is checked independently; every descendant stays exact.
+            partial_fresh_identity_digest(out,if movable_top{Identity{ctime:0,ctime_ns:0,..id}}else{id});
+        }
+        // A node is either fully sealed or the last entered source-order node.
+        // Missing/unfinished closes the frontier; no later sibling may exist.
+        fn partial_fresh_frontier_data(frontier:&mut bool,presence:PartialFreshPresence)->Result<()> {
+            check(!*frontier || presence==PartialFreshPresence::Absent,"partial-fresh-copy-prefix-order")?;
+            if presence!=PartialFreshPresence::Complete {*frontier=true;}Ok(())
+        }
+        fn partial_fresh_payload_tree(book:&mut Install,source_parent:usize,source_leaf:&str,output_parent:usize,output_leaf:&str,
+            path:&str,index:&installation_record::InventoryIndex<'_>,depth:usize,movable_top:bool,work:&mut PartialFreshTreeWork)
+            ->Result<PartialFreshTreeObserved> {
+            check(depth<=16 && path.len()<=1024 && index.directories.contains(path),"partial-fresh-tree-source")?;
+            let leaf=path.rsplit('/').next().ok_or("partial-fresh-tree-source")?;
+            let retained=source_leaf.strip_prefix(".retained-app-").is_some_and(worker::invocation_valid);
+            check(component(leaf) && component(source_leaf) && (source_leaf==leaf || depth==0 && path=="app"
+                && (source_leaf==paths::APP_NAME || retained)) && (output_leaf==leaf || depth==0 && path=="app" && output_leaf==paths::APP_NAME),
+                "partial-fresh-tree-output")?;
+            // Entire scope consumes every newly adopted reader even on error;
+            // no removal, chmod, reseal, baseline refresh or writer is invoked.
+            removal_archive_scope(book,|book|{
+                book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;
+                let source=book.open(Some(source_parent),source_leaf,true)?;
+                let source_id=partial_fresh_directory(book,source)?;
+                check(source_id.mode==0o040555,"partial-fresh-source-mode")?;
+                let output=book.open(Some(output_parent),output_leaf,true)?;
+                let actual=partial_fresh_directory(book,output)?;
+                check(actual.dev==book.identity(output_parent)?.dev,"partial-fresh-output-filesystem")?;
+                let retained_before=work.retained;
+                let result=(||{
+                    let names=partial_fresh_children(path,index,work)?;
+                    let inputs=partial_fresh_roster(book,source,&names,index,work)?;
+                    check(inputs.iter().all(|inode|*inode!=0),"partial-fresh-source-roster")?;
+                    let source_bytes=inputs.capacity()*std::mem::size_of::<u64>();drop(inputs);work.release(source_bytes)?;
+                    let outputs=partial_fresh_roster(book,output,&names,index,work)?;
+                    let mut out=Sha256::new();out.update(b"MRK-PARTIAL-FRESH-PAYLOAD-V1\0");
+                    partial_fresh_content_identity(&mut out,actual,movable_top);
+                    let mut frontier=false;let(mut files,mut directories,mut bytes)=(0u64,1u64,0u64);
+                    for (child,&inode) in names.iter().zip(&outputs) {
+                        book.clock()?;out.update((child.len() as u64).to_le_bytes());out.update(child.as_bytes());
+                        let name=child.rsplit('/').next().ok_or("partial-fresh-tree-source")?;
+                        if inode==0 {
+                            book.absent(output,name)?;partial_fresh_frontier_data(&mut frontier,PartialFreshPresence::Absent)?;
+                            out.update([0]);continue;
+                        }
+                        check(!frontier,"partial-fresh-copy-prefix-order")?;
+                        if let Some(item)=index.files.get(*child) {
+                            work.check(2*PARTIAL_FRESH_BLOCK)?;
+                            let observed=partial_fresh_copy_prefix(book,source,output,name,item)?;
+                            check(observed.identity.ino==inode && observed.identity.dev==actual.dev,"partial-fresh-file-roster-original")?;
+                            out.update([1]);partial_fresh_identity_digest(&mut out,observed.identity);out.update(observed.digest);
+                            out.update(observed.flags.to_le_bytes());
+                            files=files.checked_add(1).ok_or("partial-fresh-tree-count")?;
+                            bytes=bytes.checked_add(observed.identity.size as u64).ok_or("partial-fresh-tree-count")?;
+                            partial_fresh_frontier_data(&mut frontier,if observed.state==PartialFreshFileState::Complete {
+                                PartialFreshPresence::Complete}else{PartialFreshPresence::Unfinished})?;
+                        } else {
+                            let observed=partial_fresh_payload_tree(book,source,name,output,name,child,index,depth+1,false,work)?;
+                            check(observed.identity.ino==inode && observed.identity.dev==actual.dev,"partial-fresh-directory-roster-original")?;
+                            out.update([2]);out.update(observed.digest);
+                            files=files.checked_add(observed.files).ok_or("partial-fresh-tree-count")?;
+                            directories=directories.checked_add(observed.directories).ok_or("partial-fresh-tree-count")?;
+                            bytes=bytes.checked_add(observed.bytes).ok_or("partial-fresh-tree-count")?;
+                            partial_fresh_frontier_data(&mut frontier,if observed.state==PartialFreshFileState::Complete {
+                                PartialFreshPresence::Complete}else{PartialFreshPresence::Unfinished})?;
+                        }
+                    }
+                    check(actual.mode!=0o040555 || !frontier,"partial-fresh-sealed-tree-incomplete")?;
+                    let state=if actual.mode==0o040555 {PartialFreshFileState::Complete}else{PartialFreshFileState::Unfinished};
+                    check(files<=installation_record::FILE_LIMIT as u64 && directories<=installation_record::FILE_LIMIT as u64
+                        && bytes<=installation_record::PAYLOAD_LIMIT,"partial-fresh-tree-count")?;
+                    check(partial_fresh_directory(book,source)?==source_id && partial_fresh_directory(book,output)?==actual,
+                        "partial-fresh-tree-post")?;
+                    book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;
+                    Ok(PartialFreshTreeObserved {identity:actual,digest:out.finalize().into(),state,files,directories,bytes})
+                })();
+                // The actual Vecs above have been dropped before releasing their
+                // temporary quote. Error does not refund originals or time.
+                work.retained=retained_before;result
+            })
+        }
+        fn partial_fresh_expected_file(book:&mut Install,parent:usize,leaf:&str,expected:&[u8])
+            ->Result<PartialFreshFileObserved> {
+            check(component(leaf) && !expected.is_empty() && expected.len()<=installation_record::INVENTORY_LIMIT,
+                "partial-fresh-control-bound")?;
+            removal_archive_scope(book,|book|{
+                book.clock()?;book.check_name(parent,true)?;let reader=book.open(Some(parent),leaf,false)?;
+                let info=stat::fstat(book.fd(reader)?).map_err(|_|"partial-fresh-file-stat")?;let id=Identity::of(&info);
+                let state=partial_fresh_file_shape_data(id,info.st_flags,expected.len() as u64,false)?;
+                partial_fresh_raw_post(book,reader,id,info.st_flags)?;
+                let mut block=[0u8;PARTIAL_FRESH_BLOCK];let mut at=0usize;let mut hash=Sha256::new();
+                while at<id.size as usize {
+                    book.clock()?;let wanted=(id.size as usize-at).min(block.len());
+                    let n=nix::sys::uio::pread(book.fd(reader)?,&mut block[..wanted],at as i64)
+                        .map_err(|_|"partial-fresh-output-read")?;book.clock()?;
+                    check(n>0 && n<=wanted && block[..n]==expected[at..at+n],"partial-fresh-control-content")?;
+                    hash.update(&block[..n]);at+=n;
+                }
+                check(nix::sys::uio::pread(book.fd(reader)?,&mut block[..1],id.size)
+                    .map_err(|_|"partial-fresh-output-read")?==0,"partial-fresh-output-extra")?;
+                partial_fresh_raw_post(book,reader,id,info.st_flags)?;book.check_name(parent,true)?;
+                Ok(PartialFreshFileObserved {identity:id,flags:info.st_flags,digest:hash.finalize().into(),state})
+            })
+        }
+        const PARTIAL_FRESH_RECEIPTS:[&str;4]=["staging-created","prepared","runtime-publication-confirmed","both-publications-confirmed"];
+        fn partial_fresh_json(raw:&[u8])->Result<Option<serde_json::Value>> {
+            match mobile_release_desktop::protocol::strict_json(raw) {
+                Ok(value)=>Ok(Some(value)),
+                Err(_)=>match serde_json::from_slice::<serde::de::IgnoredAny>(raw) {
+                    Err(error) if error.is_eof()=>Ok(None),
+                    _=>Err("partial-fresh-writer-json-corrupt"),
+                },
+            }
+        }
+        fn partial_fresh_receipt_data(raw:&[u8],phase:usize,intent:&IntentData)->Result<bool> {
+            check(phase<PARTIAL_FRESH_RECEIPTS.len() && raw.len()<=transaction::STATE_LIMIT,"partial-fresh-receipt-bound")?;
+            let Some(value)=partial_fresh_json(raw)? else {return Ok(false);};
+            // Same existing stage_roster binding checks, no historical native
+            // state imported. A complete contradictory record cannot become a
+            // transportable torn record by discarding its decoded fields.
+            let required=["schemaVersion","release","phase","runtimePublication","appPublication","payloadVerified",
+                "payloadWritersSettled","installationMetadata","maintenanceGate","registrationReservation","originalSettlement",
+                "stage","runtime","app","createdAncestors","inventorySha256"];
+            let object=value.as_object().ok_or("partial-fresh-receipt-shape")?;
+            check(object.len()==required.len() && required.iter().all(|key|object.contains_key(*key))
+                && value["schemaVersion"]==1 && value["phase"]==PARTIAL_FRESH_RECEIPTS[phase]
+                && value["release"]==intent.next_data().binding_data().release
+                && value["inventorySha256"]==intent.next_data().binding_data().inventory_sha256
+                && value["originalSettlement"]=="pending-final-closes","partial-fresh-receipt-binding")?;
+            check(value["payloadVerified"].is_boolean() && value["payloadWritersSettled"].is_boolean()
+                && value["installationMetadata"].is_object() && value["maintenanceGate"].is_object()
+                && value["registrationReservation"].is_object() && value["createdAncestors"].as_array().is_some_and(|a|a.len()<=4)
+                && ["stage","runtime","app"].iter().all(|name|value[*name].is_null()
+                    || value[*name].as_object().is_some_and(|row|row.len()==2
+                        && row.get("device").and_then(|v|v.as_i64()).is_some_and(|n|n>0)
+                        && row.get("inode").and_then(|v|v.as_u64()).is_some_and(|n|n>0))),"partial-fresh-receipt-shape")?;
+            let runtime=if phase<2{"not-attempted"}else{"confirmed"};
+            let app=if phase<3{"not-attempted"}else{"confirmed"};
+            // Source creates each receipt only after the indicated milestone.
+            check(value["runtimePublication"]==runtime && value["appPublication"]==app
+                && value["payloadVerified"]==(phase!=0),"partial-fresh-receipt-order")?;
+            Ok(true)
+        }
+        fn partial_fresh_receipts_order_data(receipts:[PartialFreshPresence;4],
+            staged_app:PartialFreshPresence,staged_runtime:PartialFreshPresence,
+            root_app:PartialFreshPresence,root_runtime:PartialFreshPresence,metadata:PartialFreshPresence,
+            state:PartialFreshPresence)->Result<()> {
+            use PartialFreshPresence::{Absent as A,Complete as C};
+            let mut frontier=false;for row in receipts{partial_fresh_frontier_data(&mut frontier,row)?;}
+            check(receipts[0]==C || [staged_app,staged_runtime,root_app,root_runtime,metadata,state].iter().all(|v|*v==A),
+                "partial-fresh-stage-receipt-order")?;
+            check(receipts[1]==A || (staged_app==C || root_app==C) && (staged_runtime==C || root_runtime==C),
+                "partial-fresh-prepared-receipt-order")?;
+            check(root_runtime==A || receipts[1]==C,"partial-fresh-runtime-receipt-order")?;
+            check(receipts[2]==A || root_runtime==C,"partial-fresh-runtime-receipt-order")?;
+            check(metadata==A || receipts[2]==C,"partial-fresh-metadata-receipt-order")?;
+            check(receipts[3]==A || root_app==C,"partial-fresh-app-receipt-order")?;
+            check(state==A || receipts[3]==C,"partial-fresh-state-receipt-order")
+        }
+        fn partial_fresh_capsule_data(raw:&[u8],intent:&IntentData,selected:&ReleaseSetData,
+            state:Option<&StateData>)->Result<bool> {
+            match partial_fresh_json(raw)? {
+                None=>Ok(false),
+                Some(_)=>{
+                    let capsule=data(CapsuleData::parse_data(raw,selected))?;
+                    check(capsule.invocation_data()==intent.invocation_data() && capsule.request_id_data()==intent.request_id_data()
+                        && capsule.intent_digest_data()==intent.digest_data(),"partial-fresh-capsule-binding")?;
+                    check(!matches!(transaction::correspondence_data(intent,None,state,Some(&capsule)),
+                        CorrespondenceData::Mismatch|CorrespondenceData::InverseRecorded),"partial-fresh-capsule-correspondence")?;
+                    Ok(true)
+                }
+            }
+        }
+        fn partial_fresh_receipt(book:&mut Install,stage:usize,phase:usize,intent:&IntentData)->Result<PartialFreshFileObserved> {
+            check(phase<4,"partial-fresh-receipt-bound")?;
+            removal_archive_scope(book,|book|{
+                let name=format!("{}.json",PARTIAL_FRESH_RECEIPTS[phase]);
+                let (_reader,raw,mut observed)=partial_fresh_writer_bytes(book,stage,&name,transaction::STATE_LIMIT)?;
+                let complete=partial_fresh_receipt_data(&raw,phase,intent)?;
+                check(complete || observed.state==PartialFreshFileState::Unfinished,"partial-fresh-sealed-receipt-invalid")?;
+                // A complete JSON still in the SOURCE600 writer mode remains
+                // an unfinished writer, not evidence that seal/close returned.
+                if !complete {observed.state=PartialFreshFileState::Unfinished;}Ok(observed)
+            })
+        }
+        #[cfg(test)]
+        fn partial_fresh_data_checks() {
+            use PartialFreshPresence::{Absent as A,Unfinished as U,Complete as C};
+            let none=PartialFreshCutInput{stage:false,staged_app:A,staged_runtime:A,root_app:A,root_runtime:A,
+                inventory:A,record:A,state:A,producer:A,signature:A,capsule:A,recorded_history:false};
+            let copying=PartialFreshCutInput{stage:true,staged_app:U,..none};
+            let prepared=PartialFreshCutInput{staged_app:C,staged_runtime:C,..copying};
+            let runtime=PartialFreshCutInput{staged_runtime:A,root_runtime:C,..prepared};
+            let metadata=PartialFreshCutInput{inventory:C,record:C,..runtime};
+            let app=PartialFreshCutInput{staged_app:A,root_app:C,..metadata};
+            let state=PartialFreshCutInput{state:C,..app};
+            let recorded=PartialFreshCutInput{producer:C,signature:C,capsule:C,recorded_history:true,..state};
+            for (value,wanted) in [(none,PartialFreshCut::Intent),(copying,PartialFreshCut::Copying),
+                (prepared,PartialFreshCut::Prepared),(runtime,PartialFreshCut::Runtime),(metadata,PartialFreshCut::Metadata),
+                (app,PartialFreshCut::App),(state,PartialFreshCut::State),(recorded,PartialFreshCut::Recorded)] {
+                assert_eq!(partial_fresh_cut_data(value).unwrap(),wanted);
+            }
+            // A real failure capsule may exist at an early cut; existence is
+            // neither old worker success nor a permission to invent State.
+            assert_eq!(partial_fresh_cut_data(PartialFreshCutInput{capsule:C,..none}).unwrap(),PartialFreshCut::Intent);
+            assert_eq!(partial_fresh_cut_data(PartialFreshCutInput{recorded_history:false,..recorded}).unwrap(),PartialFreshCut::State);
+            for bad in [PartialFreshCutInput{root_app:C,..none},PartialFreshCutInput{staged_runtime:U,..copying},
+                PartialFreshCutInput{root_runtime:U,..runtime},PartialFreshCutInput{staged_runtime:C,..runtime},
+                PartialFreshCutInput{inventory:U,..prepared},PartialFreshCutInput{record:C,inventory:U,..metadata},
+                PartialFreshCutInput{staged_app:C,..app},PartialFreshCutInput{state:C,..metadata},
+                PartialFreshCutInput{producer:C,state:U,..state},PartialFreshCutInput{signature:C,..state},
+                PartialFreshCutInput{capsule:U,..recorded},PartialFreshCutInput{signature:A,..recorded}] {
+                assert!(partial_fresh_cut_data(bad).is_err());
+            }
+            for order in [vec![A,A],vec![C,A],vec![C,C],vec![C,U,A]] {
+                let mut frontier=false;for item in order{partial_fresh_frontier_data(&mut frontier,item).unwrap();}
+            }
+            for order in [[A,C],[U,C],[U,U]] {let mut frontier=false;
+                partial_fresh_frontier_data(&mut frontier,order[0]).unwrap();
+                assert!(partial_fresh_frontier_data(&mut frontier,order[1]).is_err());}
+            let id=Identity{dev:1,ino:2,mode:0o100600,uid:0,gid:0,links:1,size:3,
+                mtime:1,mtime_ns:0,ctime:1,ctime_ns:0};
+            assert_eq!(partial_fresh_file_shape_data(id,0,5,false).unwrap(),PartialFreshFileState::Unfinished);
+            assert_eq!(partial_fresh_file_shape_data(Identity{mode:0o100444,size:5,..id},0,5,false).unwrap(),PartialFreshFileState::Complete);
+            assert_eq!(partial_fresh_file_shape_data(Identity{mode:0o100555,size:5,..id},0,5,true).unwrap(),PartialFreshFileState::Complete);
+            for bad in [Identity{size:6,..id},Identity{links:2,..id},Identity{uid:501,..id},Identity{gid:20,..id},
+                Identity{mode:0o100644,..id},Identity{mode:0o100444,..id},Identity{mode:0o040700,..id}] {
+                assert!(partial_fresh_file_shape_data(bad,0,5,false).is_err());}
+            assert!(partial_fresh_file_shape_data(id,1,5,false).is_err());
+            fn read(bytes:&[u8],at:u64,out:&mut[u8])->Result<usize> {
+                let at=usize::try_from(at).map_err(|_|"data-offset")?;
+                check(at<=bytes.len(),"data-offset")?;let n=out.len().min(bytes.len()-at).min(7919);
+                out[..n].copy_from_slice(&bytes[at..at+n]);Ok(n)
+            }
+            let source:Vec<u8>=(0..PARTIAL_FRESH_BLOCK+41).map(|n|(n%251)as u8).collect();
+            let hash=<[u8;32]>::from(Sha256::digest(&source));
+            for cut in [0,1,PARTIAL_FRESH_BLOCK-1,PARTIAL_FRESH_BLOCK,source.len()] {
+                let prefix=&source[..cut];let mut calls=0;
+                let got=partial_fresh_prefix_bytes(source.len()as u64,cut as u64,hash,
+                    |at,out|read(&source,at,out),|at,out|read(prefix,at,out),||{calls+=1;Ok(())}).unwrap();
+                assert_eq!(got,<[u8;32]>::from(Sha256::digest(prefix)));assert!(calls>=5);
+            }
+            let mut changed=source.clone();changed[PARTIAL_FRESH_BLOCK]=255;
+            assert!(partial_fresh_prefix_bytes(source.len()as u64,source.len()as u64,hash,
+                |at,out|read(&source,at,out),|at,out|read(&changed,at,out),||Ok(())).is_err());
+            assert!(partial_fresh_prefix_bytes(source.len()as u64,3,hash,|_,_|Ok(0),|at,out|read(&source[..3],at,out),||Ok(())).is_err());
+            assert!(partial_fresh_prefix_bytes(source.len()as u64,3,[9;32],|at,out|read(&source,at,out),
+                |at,out|read(&source[..3],at,out),||Ok(())).is_err());
+            assert!(partial_fresh_prefix_bytes(source.len()as u64,3,hash,|at,out|read(&source,at,out),
+                |at,out|read(&source[..4],at,out),||Ok(())).is_err());
+            let mut cuts=0;
+            assert!(partial_fresh_prefix_bytes(source.len()as u64,3,hash,|at,out|read(&source,at,out),
+                |at,out|read(&source[..3],at,out),||{cuts+=1;if cuts==4{Err("same-original-late")}else{Ok(())}}).is_err());
+            for prefix in 0..=4 {
+                let mut sides=vec![PartialFreshSide::Preserved;prefix];sides.extend(vec![PartialFreshSide::Current;4-prefix]);
+                assert_eq!(partial_fresh_prefix_data(&sides).unwrap(),prefix);
+            }
+            assert!(partial_fresh_prefix_data(&[]).is_err());
+            assert!(partial_fresh_prefix_data(&[PartialFreshSide::Current,PartialFreshSide::Preserved]).is_err());
+            assert!(partial_fresh_prefix_data(&[PartialFreshSide::Current;9]).is_err());
+            let cost=PartialFreshCostData{prior_invocations:1,retry_count:0,physical_bytes:0,incoming_bytes:10,
+                evidence_bytes:10,producer_bytes:10,control_bytes:10,records:100,live:40,audits:2,directories:3,files:4,
+                retained_work:0,transient_work:2*PARTIAL_FRESH_BLOCK};
+            partial_fresh_cost_data(cost).unwrap();
+            for bad in [PartialFreshCostData{prior_invocations:64,..cost},PartialFreshCostData{retry_count:2,..cost},
+                PartialFreshCostData{physical_bytes:installation_record::PAYLOAD_LIMIT,..cost},
+                PartialFreshCostData{evidence_bytes:u64::MAX,..cost},PartialFreshCostData{records:24576,..cost},
+                PartialFreshCostData{audits:usize::MAX,..cost},PartialFreshCostData{live:97,..cost},
+                PartialFreshCostData{retained_work:PARTIAL_FRESH_WORK,..cost}] {assert!(partial_fresh_cost_data(bad).is_err());}
+            assert!(partial_fresh_json(b"{").unwrap().is_none());
+            assert!(partial_fresh_json(b"not-json").is_err());
+            assert!(partial_fresh_json(br#"{"a":1,"a":2}"#).is_err());
+            assert!(partial_fresh_json(b"{} extra").is_err());
+            assert!(partial_fresh_json(b"{}").unwrap().is_some());
+            fn frame(name:&str,inode:u64,kind:u8)->Vec<u8>{
+                let mut out=inode.to_ne_bytes().to_vec();out.push(kind);out.extend((name.len()as u16).to_ne_bytes());out.extend(name.as_bytes());out
+            }
+            for role in [PartialFreshFixedRole::Stage,PartialFreshFixedRole::Retry,PartialFreshFixedRole::Versions,PartialFreshFixedRole::Release] {
+                let mut rows=Vec::with_capacity(role.bound());
+                for i in 0..role.bound(){partial_fresh_fixed_roster_data(role,&mut rows,&frame(&format!("f{i}"),1+i as u64,nix::libc::DT_REG)).unwrap();}
+                assert!(partial_fresh_fixed_roster_data(role,&mut rows,&frame("extra",99,nix::libc::DT_REG)).is_err());
+                let mut rows=Vec::with_capacity(role.bound());
+                let valid=frame("known",3,nix::libc::DT_DIR);partial_fresh_fixed_roster_data(role,&mut rows,&valid).unwrap();
+                assert!(partial_fresh_fixed_roster_data(role,&mut rows,&valid).is_err());
+                for invalid in [frame("link",4,nix::libc::DT_LNK),frame("zero",0,nix::libc::DT_REG),
+                    frame("../foreign",4,nix::libc::DT_REG),valid[..valid.len()-1].to_vec(),vec![0;10]] {
+                    assert!(partial_fresh_fixed_roster_data(role,&mut Vec::with_capacity(role.bound()),&invalid).is_err());
+                }
+            }
+            let entry=Entry{path:"app/a".to_owned(),sha256:"1".repeat(64),size:3,executable:false};
+            let index=installation_record::InventoryIndex{files:[(entry.path.clone(),&entry)].into_iter().collect(),
+                directories:["app".to_owned(),"app/sub".to_owned(),"runtime".to_owned()].into_iter().collect(),payload_bytes:3};
+            let mut work=PartialFreshTreeWork::new(0).unwrap();
+            let names=partial_fresh_children("app",&index,&mut work).unwrap();assert_eq!(names,vec!["app/a","app/sub"]);
+            let mut seen=[0u64;2];
+            partial_fresh_roster_data(&names,&mut seen,&frame("a",7,nix::libc::DT_REG),&index).unwrap();
+            partial_fresh_roster_data(&names,&mut seen,&frame("sub",8,nix::libc::DT_DIR),&index).unwrap();assert_eq!(seen,[7,8]);
+            assert!(partial_fresh_roster_data(&names,&mut seen,&frame("a",7,nix::libc::DT_REG),&index).is_err());
+            for bad in [frame("a",7,nix::libc::DT_DIR),frame("sub",8,nix::libc::DT_REG),frame("unknown",9,nix::libc::DT_REG)] {
+                assert!(partial_fresh_roster_data(&names,&mut[0;2],&bad,&index).is_err());
+            }
+            for (slot,before) in [(PartialFreshTop::Intent,Identity{size:0,..id}),
+                (PartialFreshTop::State,Identity{mode:0o100444,..id}),
+                (PartialFreshTop::Stage,Identity{mode:0o040700,links:2,..id}),
+                (PartialFreshTop::App,Identity{mode:0o040555,links:2,..id}),
+                (PartialFreshTop::Versions,Identity{mode:0o040755,links:2,..id})] {
+                let after=Identity{ctime:before.ctime+1,..before};
+                assert!(partial_fresh_rebind_data(slot,before,0,after,0,after,0));
+                for bad in [Identity{ino:after.ino+1,..after},Identity{mode:after.mode|0o022,..after},
+                    Identity{uid:501,..after},Identity{gid:20,..after},Identity{links:after.links+1,..after},
+                    Identity{size:after.size+1,..after},Identity{mtime:after.mtime+1,..after},Identity{ctime_ns:1_000_000_000,..after}] {
+                    assert!(!partial_fresh_rebind_data(slot,before,0,bad,0,bad,0));
+                }
+                assert!(!partial_fresh_rebind_data(slot,before,0,after,0,before,0));
+                assert!(!partial_fresh_rebind_data(slot,before,0,after,1,after,1));
+            }
+            // Production-used complete future physical quote, not a detached
+            // model: exact limit, one-over, arithmetic overflow and raw bounds.
+            let future=partial_fresh_storage_data(0,0,0,1,1,1).unwrap();
+            let fixed=(transaction::INTENT_LIMIT+transaction::CAPSULE_LIMIT+transaction::STATE_LIMIT
+                +installation_record::RECORD_LIMIT+4*transaction::STATE_LIMIT+transaction::REQUEST_EXPORT_LIMIT
+                +paths::REGISTRATION_GATE_BYTES.len()+paths::MAINTENANCE_GATE_BYTES.len())as u64;
+            assert_eq!(future,fixed+3);
+            assert_eq!(partial_fresh_storage_data(installation_record::PAYLOAD_LIMIT-future,0,0,1,1,1).unwrap(),installation_record::PAYLOAD_LIMIT);
+            assert!(partial_fresh_storage_data(installation_record::PAYLOAD_LIMIT-future+1,0,0,1,1,1).is_err());
+            assert!(partial_fresh_storage_data(u64::MAX,1,0,1,1,1).is_err());
+            assert!(partial_fresh_storage_data(0,u64::MAX,1,1,1,1).is_err());
+            for (inventory,producer,signature) in [(0,1,1),(1,0,1),(1,1,0),
+                (installation_record::INVENTORY_LIMIT+1,1,1),
+                (1,mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT+1,1),
+                (1,1,mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT+1)] {
+                assert!(partial_fresh_storage_data(0,0,0,inventory,producer,signature).is_err());
+            }
+            for intel in [false,true] {
+                let (snapshot,_)=removal_archive_test_snapshot(intel,0);
+                let (_,header,_)=removal_archive_test_parse(&snapshot,true).unwrap();let header=header.unwrap();
+                let spans=parse_removal_genesis_data(snapshot.len()as u64,&"2".repeat(32),|at,out|read(&snapshot,at,out)).unwrap();
+                let selected=ReleaseSetData::parse_for_target_data(spans.selected_bytes_data(),header.target).unwrap();
+                let invocation="4".repeat(32);let request="5".repeat(32);
+                let raw=IntentData::encode_data(&invocation,&request,ActionData::FreshInstall,None,&selected).unwrap();
+                let intent=partial_fresh_intent_data(&raw,&invocation,&selected).unwrap();
+                assert!(partial_fresh_intent_data(&raw,&"6".repeat(32),&selected).is_err());
+                let mut padded=raw.clone();padded.push(b' ');assert!(partial_fresh_intent_data(&padded,&invocation,&selected).is_err());
+                for cut in [0,raw.len()/2,raw.len()-1] {assert!(partial_fresh_intent_data(&raw[..cut],&invocation,&selected).is_err());}
+                assert_eq!(partial_fresh_retry_name_data(&invocation).unwrap(),format!("fresh-retry-{invocation}"));
+                assert!(partial_fresh_retry_name_data("../known-looking").is_err());
+                assert_eq!(partial_fresh_name_data(PartialFreshTop::Intent,&invocation,&selected).unwrap(),
+                    transaction::intent_name_data(&invocation).unwrap());
+                let receipt=serde_json::json!({"schemaVersion":1,"release":intent.next_data().binding_data().release,
+                    "phase":"staging-created","runtimePublication":"not-attempted","appPublication":"not-attempted",
+                    "payloadVerified":false,"payloadWritersSettled":true,"installationMetadata":{},"maintenanceGate":{},
+                    "registrationReservation":{},"originalSettlement":"pending-final-closes","stage":{"device":1,"inode":2},
+                    "runtime":null,"app":null,"createdAncestors":[],"inventorySha256":intent.next_data().binding_data().inventory_sha256});
+                assert!(partial_fresh_receipt_data(&serde_json::to_vec(&receipt).unwrap(),0,&intent).unwrap());
+                let mut foreign=receipt.clone();foreign["inventorySha256"]=serde_json::json!("9".repeat(64));
+                assert!(partial_fresh_receipt_data(&serde_json::to_vec(&foreign).unwrap(),0,&intent).is_err());
+                assert!(partial_fresh_receipt_data(b"{",0,&intent).unwrap()==false);
+                // Real production effect reducer, inert indices only: no
+                // Source/EX/FD owner or native call can be constructed here.
+                let ledger=||PartialFreshPreservation{invocation:invocation.clone(),request:request.clone(),
+                    intent:partial_fresh_intent_data(&raw,&invocation,&selected).unwrap(),
+                    initial:PartialFreshAttemptFacts{root:id,stage:None,versions:None,release:None,cut:PartialFreshCut::Intent,
+                        digest:[1;32],payload_bytes:0,control_bytes:3,files:1,directories:0},root:1,child:2,retry:None,collision:None,retry_quote:200,
+                    slots:vec![PartialFreshTopOriginal{slot:PartialFreshTop::Intent,identity:id,side:PartialFreshSide::Current,
+                        original:None,counts:PartialFreshTopCounts{bytes:3,files:1,directories:0,controls:3}}],
+                    prefix:0,pending:None,unknown:false,first:None,returned_settled:false};
+                assert_eq!(partial_fresh_retry_original_quote_data(3,2).unwrap(),206);
+                assert!(partial_fresh_retry_original_quote_data(usize::MAX,2).is_err());
+                assert!(partial_fresh_retry_original_quote_data(2,usize::MAX).is_err());
+                assert_eq!(ledger().planned_retry_post_originals_data().unwrap(),201);
+                assert_eq!(ledger().planned_preservation_originals_data().unwrap(),990);
+                assert_eq!(ledger().planned_fresh_originals_data().unwrap(),264);
+                let mut state=ledger();state.entered(PartialFreshEffectKind::CreateRetry,id,None,None).unwrap();
+                assert!(state.after_post(PartialFreshEffectKind::CreateRetry,Some(3),None).is_err());
+                state.returned(PartialFreshEffectKind::CreateRetry,PartialFreshEffectReturn::KnownSuccess).unwrap();
+                assert!(state.returned(PartialFreshEffectKind::CreateRetry,PartialFreshEffectReturn::KnownSuccess).is_err());
+                assert!(state.entered(PartialFreshEffectKind::CreateRetry,id,None,None).is_err());
+                state.after_post(PartialFreshEffectKind::CreateRetry,Some(3),None).unwrap();
+                state.slots[0].original=Some(8);
+                state.entered(PartialFreshEffectKind::Move(0),id,Some(id),Some(8)).unwrap();
+                state.returned(PartialFreshEffectKind::Move(0),PartialFreshEffectReturn::KnownSuccess).unwrap();
+                state.after_post(PartialFreshEffectKind::Move(0),Some(3),Some(Identity{ctime:2,..id})).unwrap();
+                assert!(!state.placement_complete_data());assert!(state.settle_return_data().is_err());
+                state.slots[0].original=None;assert!(state.placement_complete_data());
+                assert!(!state.returned_settled_data());state.settle_return_data().unwrap();
+                assert!(state.returned_settled_data());assert!(state.settle_return_data().is_err());
+                state.fail("actual-final-source-post");assert!(!state.returned_settled_data());
+                for returned in [PartialFreshEffectReturn::KnownRefusal,PartialFreshEffectReturn::Unknown] {
+                    let mut state=ledger();state.entered(PartialFreshEffectKind::CreateRetry,id,None,None).unwrap();
+                    state.returned(PartialFreshEffectKind::CreateRetry,returned).unwrap();
+                    assert!(state.failed_data());assert!(!state.placement_complete_data());
+                    assert!(state.after_post(PartialFreshEffectKind::CreateRetry,Some(3),None).is_err());
+                    assert!(state.pending.is_some());assert_eq!(state.unknown,returned==PartialFreshEffectReturn::Unknown);
+                }
+                let mut late=ledger();late.entered(PartialFreshEffectKind::CreateRetry,id,None,None).unwrap();
+                late.returned(PartialFreshEffectKind::CreateRetry,PartialFreshEffectReturn::KnownSuccess).unwrap();
+                late.fail("actual-post-late");late.fail("later-secondary");
+                assert_eq!(late.first,Some("actual-post-late"));
+                assert_eq!(late.pending.as_ref().unwrap().returned,PartialFreshEffectReturn::KnownSuccess);
+                assert!(late.after_post(PartialFreshEffectKind::CreateRetry,Some(3),None).is_err());
+                let fields=||PartialFreshRetryFieldsData{root:Identity{mode:0o040700,links:2,..id},
+                    invocation:[4;16],request:[5;16],intent:[1;32],selection:[2;32],producer:[3;32],signature:[4;32],
+                    inventory:[5;32],content:[6;32],archived:[3,1,1,3],current:[0;4],prefix:1,tops:1,originals:20,quote:200,
+                    role:PartialFreshRetryAuditRole::PreservedOnly};
+                let reference=PartialFreshRetryReferenceData::from_fields_data(fields()).unwrap();
+                assert!(reference.matches_data(&PartialFreshRetryReferenceData::from_fields_data(reference.fields_data()).unwrap()));
+                assert_eq!(reference.storage_bytes_data(),3);assert_eq!(reference.control_bytes_data(),3);
+                assert_eq!(reference.files_data(),1);assert_eq!(reference.directories_data(),2);assert!(reference.complete_data());
+                let hashes=[[1;32],[2;32],[3;32],[4;32],[5;32],[6;32]];
+                assert!(partial_fresh_existing_binding_data(&reference,[4;16],[5;16],hashes,200,reference.root_data()));
+                for at in 0..6 {let mut wrong=hashes;wrong[at][0]^=1;
+                    assert!(!partial_fresh_existing_binding_data(&reference,[4;16],[5;16],wrong,200,reference.root_data()));}
+                assert!(!partial_fresh_existing_binding_data(&reference,[6;16],[5;16],hashes,200,reference.root_data()));
+                assert!(!partial_fresh_existing_binding_data(&reference,[4;16],[6;16],hashes,200,reference.root_data()));
+                assert!(!partial_fresh_existing_binding_data(&reference,[4;16],[5;16],hashes,202,reference.root_data()));
+                assert!(!partial_fresh_existing_binding_data(&reference,[4;16],[5;16],hashes,200,Identity{ino:3,..reference.root_data()}));
+                // Same-object DATA alone is never an initial full-original
+                // match. This predicate is followed by complete Initial facts
+                // or the same Parent's actual known-effect original ledger.
+                assert!(partial_fresh_existing_binding_data(&reference,[4;16],[5;16],hashes,200,Identity{ctime:9,..reference.root_data()}));
+                let mut value=fields();value.request=value.invocation;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.current=[1,1,0,1];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.archived[3]=4;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.originals=24577;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.prefix=2;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.root.mode=0o040755;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.quote=19;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.quote=24577;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.invocation=[0;16];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.content=[0;32];assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+                let mut value=fields();value.root.ctime_ns=-1;assert!(PartialFreshRetryReferenceData::from_fields_data(value).is_err());
+
+
+
+            }
+            partial_fresh_receipts_order_data([C,A,A,A],U,A,A,A,A,A).unwrap();
+            partial_fresh_receipts_order_data([C,C,A,A],C,C,A,A,A,A).unwrap();
+            partial_fresh_receipts_order_data([C,C,C,C],A,A,C,C,C,C).unwrap();
+            for receipts in [[A,A,A,A],[U,A,A,A],[C,A,C,A]] {
+                assert!(partial_fresh_receipts_order_data(receipts,U,A,A,A,A,A).is_err());}
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        struct PartialFreshAttemptFacts {
+            root:Identity,stage:Option<Identity>,versions:Option<Identity>,release:Option<Identity>,
+            cut:PartialFreshCut,digest:[u8;32],payload_bytes:u64,control_bytes:u64,files:u64,directories:u64,
+        }
+        struct PartialFreshAttemptAudit {
+            invocation:String,request:String,intent:IntentData,facts:PartialFreshAttemptFacts,
+            slots:Vec<PartialFreshTopOriginal>,retry:Option<usize>,
+            collision:Option<((Identity,u32),PartialFreshRetryReferenceData)>,retry_quote:usize,
+        }
+        pub(super) struct PartialFreshAttemptObserved<'a> {
+            old:&'a worker::ReinstallOldControlsObserved<'a>,audit:PartialFreshAttemptAudit,
+        }
+        fn partial_fresh_presence(value:Option<PartialFreshFileState>)->PartialFreshPresence {
+            match value {None=>PartialFreshPresence::Absent,Some(PartialFreshFileState::Unfinished)=>PartialFreshPresence::Unfinished,
+                Some(PartialFreshFileState::Complete)=>PartialFreshPresence::Complete}
+        }
+        fn partial_fresh_fact_file(out:&mut Sha256,name:&str,file:PartialFreshFileObserved,movable_top:bool,bytes:&mut u64,files:&mut u64)->Result<()> {
+            out.update((name.len()as u64).to_le_bytes());out.update(name.as_bytes());partial_fresh_content_identity(out,file.identity,movable_top);
+            out.update(file.flags.to_le_bytes());out.update(file.digest);
+            *bytes=bytes.checked_add(file.identity.size as u64).ok_or("partial-fresh-control-count")?;
+            *files=files.checked_add(1).ok_or("partial-fresh-control-count")?;
+            check(*bytes<=16*1024*1024,"partial-fresh-control-count")
+        }
+        fn partial_fresh_fact_tree(out:&mut Sha256,name:&str,tree:PartialFreshTreeObserved,
+            bytes:&mut u64,files:&mut u64,directories:&mut u64)->Result<()> {
+            out.update((name.len()as u64).to_le_bytes());out.update(name.as_bytes());out.update(tree.digest);
+            *bytes=bytes.checked_add(tree.bytes).ok_or("partial-fresh-payload-count")?;
+            *files=files.checked_add(tree.files).ok_or("partial-fresh-payload-count")?;
+            *directories=directories.checked_add(tree.directories).ok_or("partial-fresh-payload-count")?;
+            check(*bytes<=installation_record::PAYLOAD_LIMIT,"partial-fresh-payload-count")
+        }
+        pub(super) fn partial_fresh_current_attempt<'a>(book:&mut Install,old:&'a worker::ReinstallOldControlsObserved<'a>,
+            invocation:&str)->Result<PartialFreshAttemptObserved<'a>> {
+            old.post(book)?;let child=old.child_original()?;let name=partial_fresh_retry_name_data(invocation)?;
+            let retry=match book.named(Some(child),&name) {Err(Errno::ENOENT)=>None,
+                Err(_)=>return Err("partial-fresh-retry-observation"),Ok(_)=>{
+                    let original=book.open(Some(child),&name,true)?;
+                    removal_archive_stat(book,original,true,0o700)?;Some(original)}};
+            let audit=partial_fresh_attempt(book,PartialFreshSource::Early(old),invocation,retry)?;
+            old.post(book)?;Ok(PartialFreshAttemptObserved{old,audit})
+        }
+        fn partial_fresh_attempt(book:&mut Install,old:PartialFreshSource<'_>,invocation:&str,retry:Option<usize>)
+            ->Result<PartialFreshAttemptAudit> {
+            old.post(book)?;check(worker::invocation_valid(invocation),"partial-fresh-invocation")?;
+            let selected=old.new_selection(book)?;let root=old.root_original();
+            let (_,inventory,raw_inventory)=old.incoming(book)?;
+            let (app_source,app_leaf)=old.payload_origin(book,PartialFreshPayloadKind::App)?;
+            let (runtime_source,runtime_leaf)=old.payload_origin(book,PartialFreshPayloadKind::Runtime)?;
+            let (producer,signature)=old.incoming_controls(book)?;
+
+            let result=removal_archive_scope(book,|book|{
+                let root_identity=removal_archive_stat(book,root,true,0o755)?.0;
+                let mut out=Sha256::new();out.update(b"MRK-PARTIAL-FRESH-CURRENT-V1\0");
+                // Root parent metadata changes only through actual own-effect
+                // rebinding; it is not part of immutable transported content.
+                out.update(root_identity.dev.to_le_bytes());out.update(root_identity.ino.to_le_bytes());
+                let root_rows=if old.preserved_only(){Vec::new()}else{removal_archive_roster(book,root,false,350)?};
+                let intent_name=data(transaction::intent_name_data(invocation))?;
+                let stage_name=format!(".install-{invocation}");let capsule_name=data(transaction::capsule_name_data(invocation))?;
+                let (producer_name,signature_name)=control_names(selected,selected.current_data().binding_data().release)?;
+                let names=[intent_name.as_str(),stage_name.as_str(),capsule_name.as_str(),paths::APP_NAME,transaction::STATE_NAME,
+                    producer_name.as_str(),signature_name.as_str(),"versions"];
+                let retry_identity=retry.map(|n|removal_archive_stat(book,n,true,0o700).map(|v|v.0)).transpose()?;
+                if let Some(n)=retry {
+                    check(book.originals[n].parent==Some(old.child_original()?)
+                        && book.originals[n].name==partial_fresh_retry_name_data(invocation)?,"partial-fresh-retry-original")?;
+                }
+                let retry_rows=if let Some(n)=retry{partial_fresh_fixed_roster(book,n,PartialFreshFixedRole::Retry)?}else{Vec::new()};
+                check(retry_rows.iter().all(|row|names.contains(&row.0.as_str())),"partial-fresh-retry-foreign")?;
+                check(names.iter().all(|name|!(removal_archive_inode(&root_rows,name).is_some()
+                    && removal_archive_inode(&retry_rows,name).is_some())),"partial-fresh-duplicate-top")?;
+                let has=|name:&str|removal_archive_inode(&root_rows,name).is_some() || removal_archive_inode(&retry_rows,name).is_some();
+                let at=|slot:PartialFreshTop|->Result<usize>{
+                    if removal_archive_inode(&retry_rows,names[slot as usize]).is_some(){retry.ok_or("partial-fresh-retry-original")}
+                    else{Ok(root)}};
+                let inode=|name:&str|removal_archive_inode(&root_rows,name).or_else(||removal_archive_inode(&retry_rows,name));
+                check(has(&intent_name),"partial-fresh-intent-required")?;
+                if old.preserved_only(){check(retry.is_some() && removal_archive_inode(&retry_rows,"versions").is_some(),
+                    "partial-fresh-complete-retry-required")?;}else{old.root_archives(book,&root_rows,&names)?;}
+                let (_intent_original,intent_bytes,intent_file)=partial_fresh_writer_bytes(book,at(PartialFreshTop::Intent)?,&intent_name,transaction::INTENT_LIMIT)?;
+                let intent=partial_fresh_intent_data(&intent_bytes,invocation,selected)?;
+                let request=intent.request_id_data().to_owned();
+                let(mut payload_bytes,mut control_bytes,mut files,mut directories)=(0u64,0u64,0u64,0u64);
+                let mut top_counts=[PartialFreshTopCounts::default();8];
+                top_counts[PartialFreshTop::Intent as usize].add(intent_file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::Intent as usize].control(intent_file.identity.size as u64)?;
+                partial_fresh_fact_file(&mut out,&intent_name,intent_file,true,&mut control_bytes,&mut files)?;
+                // Actual containing pool admission precedes the existing
+                // index allocation. This is an allocation quote, not a new
+                // process/RSS cap or credit for earlier temporary originals.
+                let (source_files,source_dirs,index_peak)=old.incoming_index_peak(book)?;
+                let concurrent=PARTIAL_FRESH_WORK.checked_add(2*transaction::INTENT_LIMIT)
+                    .and_then(|n|n.checked_add(2*transaction::STATE_LIMIT))
+                    .and_then(|n|n.checked_add(2*transaction::CAPSULE_LIMIT))
+                    .and_then(|n|n.checked_add(index_peak)).ok_or("partial-fresh-memory")?;
+                check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
+                    .is_some_and(|n|n<=16*1024*1024),"partial-fresh-memory")?;
+                let index=inventory.index()?;
+                check(index.files.len()==source_files && index.directories.len()==source_dirs,
+                    "partial-fresh-index-quote")?;
+                let rows_bytes=root_rows.capacity().checked_mul(std::mem::size_of::<(String,u64)>())
+                    .and_then(|n|n.checked_add(root_rows.iter().map(|row|row.0.capacity()).sum::<usize>()))
+                    .and_then(|n|n.checked_add(intent_bytes.capacity()+8192)).ok_or("partial-fresh-memory")?;
+                let mut tree_work=PartialFreshTreeWork::new(rows_bytes)?;
+                let mut receipt_states=[PartialFreshPresence::Absent;4];
+                let mut staged_app=None;let mut staged_runtime=None;let mut root_app=None;let mut root_runtime=None;
+                let mut stage_identity=None;let mut versions_identity=None;let mut release_identity=None;
+                if has(&stage_name) {
+                    let stage=book.open(Some(at(PartialFreshTop::Stage)?),&stage_name,true)?;
+                    let actual=removal_archive_stat(book,stage,true,0o700)?.0;
+                    check(actual.ino==inode(&stage_name).ok_or("partial-fresh-stage-original")?,
+                        "partial-fresh-stage-original")?;stage_identity=Some(actual);directories+=1;
+                    top_counts[PartialFreshTop::Stage as usize].add(0,0,1)?;
+                    partial_fresh_content_identity(&mut out,actual,true);
+                    let rows=partial_fresh_fixed_roster(book,stage,PartialFreshFixedRole::Stage)?;
+                    for (name,_) in &rows {
+                        check(name=="app" || name=="runtime" || PARTIAL_FRESH_RECEIPTS.iter().any(|phase|name==&format!("{phase}.json")),
+                            "partial-fresh-stage-foreign")?;
+                    }
+                    for (phase,state) in receipt_states.iter_mut().enumerate() {
+                        let name=format!("{}.json",PARTIAL_FRESH_RECEIPTS[phase]);
+                        if removal_archive_inode(&rows,&name).is_some() {
+                            let file=partial_fresh_receipt(book,stage,phase,&intent)?;
+                            *state=partial_fresh_presence(Some(file.state));
+                            top_counts[PartialFreshTop::Stage as usize].add(file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::Stage as usize].control(file.identity.size as u64)?;
+                            partial_fresh_fact_file(&mut out,&name,file,false,&mut control_bytes,&mut files)?;
+                        }
+                    }
+                    if removal_archive_inode(&rows,"app").is_some() {
+                        let tree=partial_fresh_payload_tree(book,app_source,app_leaf,stage,"app","app",&index,0,false,&mut tree_work)?;
+                        top_counts[PartialFreshTop::Stage as usize].add(tree.bytes,tree.files,tree.directories)?;
+                        partial_fresh_fact_tree(&mut out,"stage/app",tree,&mut payload_bytes,&mut files,&mut directories)?;staged_app=Some(tree);
+                    }
+                    if removal_archive_inode(&rows,"runtime").is_some() {
+                        let tree=partial_fresh_payload_tree(book,runtime_source,runtime_leaf,stage,"runtime","runtime",&index,0,false,&mut tree_work)?;
+                        top_counts[PartialFreshTop::Stage as usize].add(tree.bytes,tree.files,tree.directories)?;
+                        partial_fresh_fact_tree(&mut out,"stage/runtime",tree,&mut payload_bytes,&mut files,&mut directories)?;staged_runtime=Some(tree);
+                    }
+                    check(removal_archive_stat(book,stage,true,0o700)?.0==actual,"partial-fresh-stage-post")?;
+                }
+                let mut inventory_file=None;let mut metadata_file=None;let mut release_original=None;
+                if has("versions") {
+                    let versions=book.open(Some(at(PartialFreshTop::Versions)?),"versions",true)?;
+                    let actual=removal_archive_stat(book,versions,true,0o755)?.0;
+                    check(actual.ino==inode("versions").ok_or("partial-fresh-versions-original")?,
+                        "partial-fresh-versions-original")?;versions_identity=Some(actual);directories+=1;
+                    top_counts[PartialFreshTop::Versions as usize].add(0,0,1)?;
+                    partial_fresh_content_identity(&mut out,actual,true);
+                    let rows=partial_fresh_fixed_roster(book,versions,PartialFreshFixedRole::Versions)?;
+                    let release=selected.current_data().binding_data().release;
+                    check(rows.iter().all(|row|row.0==release),"partial-fresh-versions-foreign")?;
+                    if !rows.is_empty() {
+                        let current=book.open(Some(versions),release,true)?;
+                        let actual=removal_archive_stat(book,current,true,0o755)?.0;
+                        check(actual.ino==rows[0].1,"partial-fresh-release-original")?;release_identity=Some(actual);release_original=Some(current);directories+=1;
+                        top_counts[PartialFreshTop::Versions as usize].add(0,0,1)?;
+                        partial_fresh_identity_digest(&mut out,actual);
+                        let rows=partial_fresh_fixed_roster(book,current,PartialFreshFixedRole::Release)?;
+                        check(rows.iter().all(|row|["runtime",installation_record::INVENTORY_NAME,installation_record::RECORD_NAME].contains(&row.0.as_str())),
+                            "partial-fresh-release-foreign")?;
+                        if removal_archive_inode(&rows,"runtime").is_some() {
+                            let tree=partial_fresh_payload_tree(book,runtime_source,runtime_leaf,current,"runtime","runtime",&index,0,false,&mut tree_work)?;
+                            check(tree.state==PartialFreshFileState::Complete,"partial-fresh-published-runtime-incomplete")?;
+                            top_counts[PartialFreshTop::Versions as usize].add(tree.bytes,tree.files,tree.directories)?;
+                            partial_fresh_fact_tree(&mut out,"release/runtime",tree,&mut payload_bytes,&mut files,&mut directories)?;root_runtime=Some(tree);
+                        }
+                        if removal_archive_inode(&rows,installation_record::INVENTORY_NAME).is_some() {
+                            let file=partial_fresh_expected_file(book,current,installation_record::INVENTORY_NAME,raw_inventory)?;
+                            top_counts[PartialFreshTop::Versions as usize].add(file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::Versions as usize].control(file.identity.size as u64)?;
+                            partial_fresh_fact_file(&mut out,"release/inventory",file,false,&mut control_bytes,&mut files)?;inventory_file=Some(file);
+                        }
+                        if removal_archive_inode(&rows,installation_record::RECORD_NAME).is_some() {
+                            let binding=selected.current_data().binding_data();
+                            let expected=installation_record::Expected{kind:installation_record::Kind::Ordinary,
+                                source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
+                                install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(current)?};
+                            let raw=installation_record::Record::encode(invocation,raw_inventory,&expected)?;
+                            let file=partial_fresh_expected_file(book,current,installation_record::RECORD_NAME,&raw)?;
+                            top_counts[PartialFreshTop::Versions as usize].add(file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::Versions as usize].control(file.identity.size as u64)?;
+                            partial_fresh_fact_file(&mut out,"release/record",file,false,&mut control_bytes,&mut files)?;metadata_file=Some(file);
+                        }
+                        check(removal_archive_stat(book,current,true,0o755)?.0==actual,"partial-fresh-release-post")?;
+                    }
+                    check(removal_archive_stat(book,versions,true,0o755)?.0==actual,"partial-fresh-versions-post")?;
+                }
+                let mut app_original=None;
+                if has(paths::APP_NAME) {
+                    let tree=partial_fresh_payload_tree(book,app_source,app_leaf,at(PartialFreshTop::App)?,paths::APP_NAME,"app",&index,0,true,&mut tree_work)?;
+                    check(tree.state==PartialFreshFileState::Complete,"partial-fresh-published-app-incomplete")?;
+                    top_counts[PartialFreshTop::App as usize].add(tree.bytes,tree.files,tree.directories)?;
+                    partial_fresh_fact_tree(&mut out,"root/app",tree,&mut payload_bytes,&mut files,&mut directories)?;root_app=Some(tree);
+                    let app=book.open(Some(at(PartialFreshTop::App)?),paths::APP_NAME,true)?;
+                    check(book.identity(app)?==tree.identity,"partial-fresh-app-original")?;app_original=Some(app);
+                }
+                let mut state_file=None;let mut state_data=None;
+                if has(transaction::STATE_NAME) {
+                    let release=release_original.ok_or("partial-fresh-state-generation")?;
+                    let app=app_original.ok_or("partial-fresh-state-generation")?;
+                    let generation=data(GenerationData::from_original_fields_data(selected,selected.current_data(),invocation,
+                        book.recorded_directory(release)?,app_identity(book,app)?))?;
+                    let expected=data(StateData::encode_applied_data(&intent,None,&generation,selected))?;
+                    let file=partial_fresh_expected_file(book,at(PartialFreshTop::State)?,transaction::STATE_NAME,&expected)?;
+                    if file.state==PartialFreshFileState::Complete {state_data=Some(data(StateData::parse_data(&expected,selected))?);}
+                    top_counts[PartialFreshTop::State as usize].add(file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::State as usize].control(file.identity.size as u64)?;
+                    partial_fresh_fact_file(&mut out,transaction::STATE_NAME,file,true,&mut control_bytes,&mut files)?;state_file=Some(file);
+                }
+                let mut producer_file=None;let mut signature_file=None;let mut capsule_file=None;
+                for (name,raw,slot,kind) in [(&producer_name,producer,&mut producer_file,PartialFreshTop::Producer),
+                    (&signature_name,signature,&mut signature_file,PartialFreshTop::Signature)] {
+                    if has(name) {let file=partial_fresh_expected_file(book,at(kind)?,name,raw)?;
+                        top_counts[kind as usize].add(file.identity.size as u64,1,0)?;
+                        top_counts[kind as usize].control(file.identity.size as u64)?;
+                        partial_fresh_fact_file(&mut out,name,file,true,&mut control_bytes,&mut files)?;*slot=Some(file);}
+                }
+                if has(&capsule_name) {
+                    let (_reader,raw,file)=partial_fresh_writer_bytes(book,at(PartialFreshTop::Capsule)?,&capsule_name,transaction::CAPSULE_LIMIT)?;
+                    let complete=partial_fresh_capsule_data(&raw,&intent,selected,state_data.as_ref())?;
+                    check(complete || file.state==PartialFreshFileState::Unfinished,"partial-fresh-sealed-capsule-invalid")?;
+                    top_counts[PartialFreshTop::Capsule as usize].add(file.identity.size as u64,1,0)?;
+                    top_counts[PartialFreshTop::Capsule as usize].control(file.identity.size as u64)?;
+                    partial_fresh_fact_file(&mut out,&capsule_name,file,true,&mut control_bytes,&mut files)?;capsule_file=Some(file);
+                }
+                let input=PartialFreshCutInput{stage:stage_identity.is_some(),
+                    staged_app:partial_fresh_presence(staged_app.map(|v|v.state)),staged_runtime:partial_fresh_presence(staged_runtime.map(|v|v.state)),
+                    root_app:partial_fresh_presence(root_app.map(|v|v.state)),root_runtime:partial_fresh_presence(root_runtime.map(|v|v.state)),
+                    inventory:partial_fresh_presence(inventory_file.map(|v|v.state)),record:partial_fresh_presence(metadata_file.map(|v|v.state)),
+                    state:partial_fresh_presence(state_file.map(|v|v.state)),producer:partial_fresh_presence(producer_file.map(|v|v.state)),
+                    signature:partial_fresh_presence(signature_file.map(|v|v.state)),capsule:partial_fresh_presence(capsule_file.map(|v|v.state)),recorded_history:false};
+                partial_fresh_receipts_order_data(receipt_states,input.staged_app,input.staged_runtime,input.root_app,input.root_runtime,input.inventory,input.state)?;
+                check(versions_identity.is_some(),"partial-fresh-versions-required")?;
+                check(release_identity.is_none() || receipt_states[1]==PartialFreshPresence::Complete
+                    && (input.staged_app==PartialFreshPresence::Complete || input.root_app==PartialFreshPresence::Complete)
+                    && (input.staged_runtime==PartialFreshPresence::Complete || input.root_runtime==PartialFreshPresence::Complete),
+                    "partial-fresh-release-creation-order")?;
+                let mut cut=partial_fresh_cut_data(input)?;
+                check(intent_file.state==PartialFreshFileState::Complete || cut==PartialFreshCut::Intent
+                    && release_identity.is_none() && input.capsule==PartialFreshPresence::Absent,
+                    "partial-fresh-unsealed-intent-effects")?;
+
+                if retry_rows.is_empty() && input.state==PartialFreshPresence::Complete && input.producer==PartialFreshPresence::Complete
+                    && input.signature==PartialFreshPresence::Complete && input.capsule==PartialFreshPresence::Complete {
+                    // Real current-history reader, same raw originals. Neither
+                    // a success string nor caller DATA can mark cut8 recorded.
+                    let history=read_history(book,root,selected)?;
+                    check(history.originals.is_empty() && history.current.intent.invocation_data()==invocation
+                        && history.current.intent.digest_data()==intent.digest_data(),"partial-fresh-history-binding")?;
+                    cut=partial_fresh_cut_data(PartialFreshCutInput{recorded_history:true,..input})?;
+                }
+                let mut slots=Vec::new();slots.try_reserve_exact(8).map_err(|_|"partial-fresh-memory")?;
+                check(slots.capacity()<=8,"partial-fresh-memory")?;
+                for slot in [PartialFreshTop::Intent,PartialFreshTop::Stage,PartialFreshTop::Capsule,PartialFreshTop::App,
+                    PartialFreshTop::State,PartialFreshTop::Producer,PartialFreshTop::Signature,PartialFreshTop::Versions] {
+                    let name=partial_fresh_name_data(slot,invocation,selected)?;
+                    if !has(&name){continue;}
+                    let parent=at(slot)?;
+                    let actual=book.named(Some(parent),&name).map_err(|_|"partial-fresh-top-original")?;
+                    let identity=Identity::of(&actual);
+                    check(inode(&name)==Some(identity.ino) && actual.st_flags==0,
+                        "partial-fresh-top-original")?;
+                    slots.push(PartialFreshTopOriginal{slot,identity,side:if parent==root{PartialFreshSide::Current}
+                        else{PartialFreshSide::Preserved},original:None,counts:top_counts[slot as usize]});
+                }
+                let mut total=PartialFreshTopCounts::default();
+                for slot in &slots{total.add(slot.counts.bytes,slot.counts.files,slot.counts.directories)?;total.control(slot.counts.controls)?;}
+                check(total.bytes==payload_bytes.checked_add(control_bytes).ok_or("partial-fresh-top-count")?
+                    && total.files==files && total.directories==directories && total.controls==control_bytes,"partial-fresh-top-count")?;
+                // Exact fixed SOURCE names sorted bytewise, versions always last.
+                // No caller-selected path or mutable alphabetical roster grants a slot.
+                slots.sort_by(|a,b|(a.slot==PartialFreshTop::Versions).cmp(&(b.slot==PartialFreshTop::Versions))
+                    .then_with(||names[a.slot as usize].cmp(names[b.slot as usize])));
+                partial_fresh_prefix_data(&slots.iter().map(|v|v.side).collect::<Vec<_>>())?;
+                if let Some(n)=retry{check(Some(removal_archive_stat(book,n,true,0o700)?.0)==retry_identity,
+                    "partial-fresh-retry-post")?;}
+                check(removal_archive_stat(book,root,true,0o755)?.0==root_identity,"partial-fresh-root-post")?;
+                old.post(book)?;
+                let facts=PartialFreshAttemptFacts{root:root_identity,stage:stage_identity,versions:versions_identity,release:release_identity,
+                    cut,digest:out.finalize().into(),payload_bytes,control_bytes,files,directories};
+                Ok((intent,request,facts,slots))
+            })?;
+            old.post(book)?;let (quote_files,quote_dirs,_)=old.incoming_index_peak(book)?;
+            let retry_quote=partial_fresh_retry_original_quote_data(quote_files,quote_dirs)?;
+            let mut actual=PartialFreshAttemptAudit{invocation:invocation.to_owned(),request:result.1,intent:result.0,
+                facts:result.2,slots:result.3,retry,collision:None,retry_quote};
+            actual.collision=old.check_attempt(book,&actual)?;old.post(book)?;Ok(actual)
+        }
+        // Owned by the existing Parent/ReinstallEffects before a single effect.
+        // No Clone/public constructor/serialized success token exists.
+        pub(super) struct PartialFreshPreservation {
+            invocation:String,request:String,intent:IntentData,initial:PartialFreshAttemptFacts,
+            root:usize,child:usize,retry:Option<usize>,slots:Vec<PartialFreshTopOriginal>,
+            collision:Option<((Identity,u32),PartialFreshRetryReferenceData)>,retry_quote:usize,
+            prefix:usize,pending:Option<PartialFreshEffect>,unknown:bool,first:Option<&'static str>,returned_settled:bool,
+        }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshEffectKind { CreateRetry,Move(usize) }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum PartialFreshEffectReturn { Pending,KnownSuccess,KnownRefusal,Unknown }
+        struct PartialFreshEffect {
+            kind:PartialFreshEffectKind,returned:PartialFreshEffectReturn,
+            left:Identity,right:Option<Identity>,original:Option<usize>,
+        }
+        #[derive(Clone,Copy,Default,PartialEq,Eq)]
+        struct PartialFreshTopCounts {bytes:u64,files:u64,directories:u64,controls:u64}
+        impl PartialFreshTopCounts {
+            fn control(&mut self,bytes:u64)->Result<()> {
+                self.controls=self.controls.checked_add(bytes).filter(|n|*n<=16*1024*1024).ok_or("partial-fresh-control-count")?;Ok(())
+            }
+            fn add(&mut self,bytes:u64,files:u64,directories:u64)->Result<()> {
+                self.bytes=self.bytes.checked_add(bytes).ok_or("partial-fresh-top-count")?;
+                self.files=self.files.checked_add(files).ok_or("partial-fresh-top-count")?;
+                self.directories=self.directories.checked_add(directories).ok_or("partial-fresh-top-count")?;
+                check(self.bytes<=installation_record::PAYLOAD_LIMIT && self.files<=4096 && self.directories<=4096,
+                    "partial-fresh-top-count")
+            }
+        }
+        #[derive(Clone,Copy)]
+        struct PartialFreshTopOriginal {
+            slot:PartialFreshTop,identity:Identity,side:PartialFreshSide,original:Option<usize>,counts:PartialFreshTopCounts,
+        }
+        impl PartialFreshAttemptObserved<'_> {
+            pub(super) fn into_preservation(self)->Result<PartialFreshPreservation> {
+                let root=self.old.root_original();let child=self.old.child_original()?;let value=self.audit;
+                check(value.facts.cut!=PartialFreshCut::Recorded,"partial-fresh-recorded-use-current")?;
+                check(value.slots.len()<=8 && !value.slots.is_empty() && value.slots.iter().any(|v|v.slot==PartialFreshTop::Intent),
+                    "partial-fresh-proof-roster")?;
+                let prefix=partial_fresh_prefix_data(&value.slots.iter().map(|v|v.side).collect::<Vec<_>>())?;
+                Ok(PartialFreshPreservation{invocation:value.invocation,request:value.request,intent:value.intent,
+                    initial:value.facts,root,child,retry:value.retry,collision:value.collision,retry_quote:value.retry_quote,
+                    slots:value.slots,prefix,pending:None,unknown:false,first:None,returned_settled:false})
+            }
+        }
+        impl PartialFreshPreservation {
+            pub(super) fn retry_original_data(&self)->Option<usize>{self.retry}
+            pub(super) fn invocation_data(&self)->&str{&self.invocation}
+            pub(super) fn request_data(&self)->&str{&self.request}
+            pub(super) fn retry_name_data(&self)->Result<String>{partial_fresh_retry_name_data(&self.invocation)}
+            pub(super) fn root_original_data(&self)->usize{self.root}
+            pub(super) fn child_original_data(&self)->usize{self.child}
+            // Additional one complete future retry audit, including its
+            // caller-owned retry open. Parent adds this to—not substitutes it
+            // for—the existing full-census/root/closure quote before effects.
+            pub(super) fn planned_retry_post_originals_data(&self)->Result<usize> {
+                self.retry_quote.checked_add(1).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+            }
+            pub(super) fn planned_preservation_originals_data(&self)->Result<usize> {
+                let source_half=self.retry_quote.checked_sub(192).filter(|n|n%2==0)
+                    .map(|n|n/2).ok_or("partial-fresh-original-budget")?;
+                let output_files=usize::try_from(self.initial.files).map_err(|_|"partial-fresh-original-budget")?;
+                let output_dirs=usize::try_from(self.initial.directories).map_err(|_|"partial-fresh-original-budget")?;
+                let per=output_dirs.checked_mul(2).and_then(|n|n.checked_add(output_files))
+                    .and_then(|n|n.checked_add(source_half)).and_then(|n|n.checked_add(160))
+                    .ok_or("partial-fresh-original-budget")?;
+                let audits=self.slots.len().checked_sub(self.prefix).and_then(|n|n.checked_mul(2))
+                    .and_then(|n|n.checked_add(4)).ok_or("partial-fresh-original-budget")?;
+                audits.checked_mul(per).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+            }
+            pub(super) fn planned_fresh_originals_data(&self)->Result<usize> {
+                // Same source-based existing Fresh worker/capsule allowance;
+                // separate from transport and final full census/POST phases.
+                self.retry_quote.checked_add(64).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")
+            }
+            pub(super) fn failed_data(&self)->bool{self.first.is_some() || self.unknown}
+            fn fail(&mut self,why:&'static str){self.first.get_or_insert(why);}
+            fn entered(&mut self,kind:PartialFreshEffectKind,left:Identity,right:Option<Identity>,original:Option<usize>)->Result<()> {
+                check(!self.failed_data() && !self.returned_settled && self.pending.is_none(),"partial-fresh-effect-order")?;
+                match kind {
+                    PartialFreshEffectKind::CreateRetry=>check(self.retry.is_none() && self.prefix==0 && right.is_none()
+                        && original.is_none(),"partial-fresh-create-once")?,
+                    PartialFreshEffectKind::Move(at)=>check(self.retry.is_some() && at==self.prefix && at<self.slots.len()
+                        && self.slots[at].side==PartialFreshSide::Current && self.slots[at].original==original
+                        && original.is_some() && right.is_some(),"partial-fresh-move-order")?,
+                }
+                self.pending=Some(PartialFreshEffect{kind,returned:PartialFreshEffectReturn::Pending,left,right,original});Ok(())
+            }
+            fn returned(&mut self,kind:PartialFreshEffectKind,value:PartialFreshEffectReturn)->Result<()> {
+                let effect=self.pending.as_mut().ok_or("partial-fresh-effect-missing")?;
+                check(effect.kind==kind && effect.returned==PartialFreshEffectReturn::Pending
+                    && value!=PartialFreshEffectReturn::Pending,"partial-fresh-effect-return-once")?;
+                effect.returned=value;
+                if value==PartialFreshEffectReturn::Unknown {self.unknown=true;self.fail("partial-fresh-effect-unknown");}
+                if value==PartialFreshEffectReturn::KnownRefusal {self.fail("partial-fresh-effect-refused");}
+                Ok(())
+            }
+            fn after_post(&mut self,kind:PartialFreshEffectKind,retry:Option<usize>,moved:Option<Identity>)->Result<()> {
+                let effect=self.pending.as_ref().ok_or("partial-fresh-effect-missing")?;
+                check(effect.kind==kind && effect.returned==PartialFreshEffectReturn::KnownSuccess
+                    && !self.failed_data(),"partial-fresh-effect-post")?;
+                match kind {
+                    PartialFreshEffectKind::CreateRetry=>{check(retry.is_some() && moved.is_none(),"partial-fresh-created-original")?;self.retry=retry;},
+                    PartialFreshEffectKind::Move(at)=>{
+                        let actual=moved.ok_or("partial-fresh-moved-original")?;
+                        check(retry==self.retry && partial_fresh_rebind_data(self.slots[at].slot,self.slots[at].identity,0,actual,0,actual,0),
+                            "partial-fresh-moved-original")?;
+                        self.slots[at].identity=actual;self.slots[at].side=PartialFreshSide::Preserved;self.prefix+=1;
+                    }
+                }
+                self.pending=None;Ok(())
+            }
+            fn settle_return_data(&mut self)->Result<()> {
+                check(!self.returned_settled && self.placement_complete_data(),"partial-fresh-return-not-settled")?;
+                self.returned_settled=true;Ok(())
+            }
+            // Necessary same-call return/POST/consuming-close fact only. The
+            // Parent still owes its actual full census/root/outer finality.
+            pub(super) fn returned_settled_data(&self)->bool {
+                self.returned_settled && self.placement_complete_data()
+            }
+            // Namespace observation only; Parent still owes full Consumer
+            // actual retry census, clean root and real original settlement.
+            pub(super) fn placement_complete_data(&self)->bool {
+                !self.failed_data() && self.pending.is_none() && self.retry.is_some() && self.prefix==self.slots.len()
+                    && self.slots.iter().all(|v|v.side==PartialFreshSide::Preserved && v.original.is_none())
+            }
+        }
+        #[derive(Clone,Copy)]
+        enum PartialFreshFixedRole { Stage,Retry,Versions,Release }
+        impl PartialFreshFixedRole {
+            fn bound(self)->usize{match self{Self::Stage=>6,Self::Retry=>8,Self::Versions=>1,Self::Release=>3}}
+            fn mode(self)->u32{match self{Self::Stage|Self::Retry=>0o700,Self::Versions|Self::Release=>0o755}}
+        }
+        // Fixed construction roles only. No widening of the archive parser's
+        // private7/installed350 contract, no caller-selected arbitrary limit.
+        fn partial_fresh_fixed_roster_data(role:PartialFreshFixedRole,rows:&mut Vec<(String,u64)>,block:&[u8])->Result<()> {
+            check(block.len()<=16384 && rows.len()<=role.bound(),"partial-fresh-fixed-roster-bound")?;
+            let mut at=0usize;
+            while at<block.len() {
+                check(block.len()-at>=11,"partial-fresh-fixed-roster-record")?;
+                let inode=u64::from_ne_bytes(block[at..at+8].try_into().map_err(|_|"partial-fresh-fixed-roster-record")?);
+                let kind=block[at+8];let len=u16::from_ne_bytes(block[at+9..at+11].try_into().map_err(|_|"partial-fresh-fixed-roster-record")?)as usize;
+                let end=at.checked_add(11+len).filter(|n|*n<=block.len()).ok_or("partial-fresh-fixed-roster-record")?;
+                let name=std::str::from_utf8(&block[at+11..end]).map_err(|_|"partial-fresh-fixed-roster-name")?;at=end;
+                if name=="." || name==".."{continue;}
+                check(inode>0 && component(name) && name.len()<=255 && (kind==nix::libc::DT_REG || kind==nix::libc::DT_DIR)
+                    && rows.len()<role.bound() && !rows.iter().any(|row|row.0==name),"partial-fresh-fixed-roster-shape")?;
+                let owned=name.to_owned();check(owned.capacity()<=255,"partial-fresh-fixed-roster-memory")?;
+                rows.push((owned,inode));
+            }
+            Ok(())
+        }
+        fn partial_fresh_fixed_roster(book:&mut Install,parent:usize,role:PartialFreshFixedRole)->Result<Vec<(String,u64)>> {
+            let before=removal_archive_stat(book,parent,true,role.mode())?;
+            let ancestor=book.originals[parent].parent;let leaf=book.originals[parent].name.clone();
+            check(leaf.capacity()<=255,"partial-fresh-fixed-roster-memory")?;
+            let result=removal_archive_scope(book,|book|{
+                let reader=book.open(ancestor,&leaf,true)?;
+                check(removal_archive_stat(book,reader,true,role.mode())?==before,"partial-fresh-fixed-roster-original")?;
+                let mut rows=Vec::new();rows.try_reserve_exact(role.bound()).map_err(|_|"partial-fresh-fixed-roster-memory")?;
+                check(rows.capacity()<=role.bound(),"partial-fresh-fixed-roster-memory")?;
+                let mut block=[0u8;16384];
+                loop {book.clock()?;let got=native::directory_block(book.fd(reader)?.as_fd(),&mut block)
+                    .map_err(|_|"partial-fresh-fixed-roster-read")?;book.clock()?;
+                    check(got<=block.len(),"partial-fresh-fixed-roster-bound")?;if got==0{break;}
+                    partial_fresh_fixed_roster_data(role,&mut rows,&block[..got])?;
+                }
+                check(removal_archive_stat(book,reader,true,role.mode())?==before,"partial-fresh-fixed-roster-post")?;
+                rows.sort_by(|a,b|a.0.cmp(&b.0));Ok(rows)
+            });
+            let post=removal_archive_stat(book,parent,true,role.mode());
+            let rows=result?;check(post?==before,"partial-fresh-fixed-roster-post")?;book.clock()?;Ok(rows)
+        }
+        #[derive(Clone,Copy)]
+        pub(super) enum PartialFreshPayloadKind { App,Runtime }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        pub(super) enum PartialFreshRetryAuditRole { PreservedOnly,CurrentUnion }
+        struct PartialFreshCensusInput<'a> {
+            read:&'a worker::ReinstallInputRead<'a>,child:usize,archives:&'a[(String,u64)],role:PartialFreshRetryAuditRole,
+        }
+        // Three caller-owned views, not a third owner or an authority factory.
+        // Early full-child observation is used only before effects; during a
+        // known own-effect sequence the SAME Parent supplies source-only POST.
+        enum PartialFreshSource<'a> {
+            Early(&'a worker::ReinstallOldControlsObserved<'a>),
+            Effect(&'a worker::ReinstallPreservationContext<'a>),
+            Census(PartialFreshCensusInput<'a>),
+        }
+        impl PartialFreshSource<'_> {
+            fn post(&self,book:&Install)->Result<()> {match self {Self::Early(v)=>v.post(book),Self::Effect(v)=>v.post_source(book),Self::Census(v)=>v.read.post_source(book)}}
+            fn root_original(&self)->usize{match self{Self::Early(v)=>v.root_original(),Self::Effect(v)=>v.root_original(),Self::Census(v)=>v.read.root_original()}}
+            fn child_original(&self)->Result<usize>{match self{Self::Early(v)=>v.child_original(),Self::Effect(v)=>v.child_original(),Self::Census(v)=>Ok(v.child)}}
+            fn new_selection<'a>(&'a self,book:&Install)->Result<&'a ReleaseSetData>{match self{
+                Self::Early(v)=>v.new_selection(book),Self::Effect(v)=>v.new_selection(book),Self::Census(v)=>v.read.new_selection(book)}}
+            fn incoming<'a>(&'a self,book:&Install)->Result<(usize,&'a Inventory,&'a[u8])>{match self{
+                Self::Early(v)=>v.incoming(book),Self::Effect(v)=>v.incoming(book),Self::Census(v)=>v.read.incoming(book)}}
+            fn payload_origin(&self,book:&Install,kind:PartialFreshPayloadKind)->Result<(usize,&str)> {
+                let (root,_,_)=self.incoming(book)?;
+                Ok((root,match kind{PartialFreshPayloadKind::App=>"app",PartialFreshPayloadKind::Runtime=>"runtime"}))
+            }
+            fn incoming_controls<'a>(&'a self,book:&Install)->Result<(&'a[u8],&'a[u8])>{match self{
+                Self::Early(v)=>v.incoming_controls(book),Self::Effect(v)=>v.incoming_controls(book),Self::Census(v)=>v.read.incoming_controls(book)}}
+            fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)>{match self{
+                Self::Early(v)=>v.incoming_index_peak(book),Self::Effect(v)=>v.incoming_index_peak(book),Self::Census(v)=>v.read.incoming_index_peak(book)}}
+            fn preserved_only(&self)->bool {matches!(self,Self::Census(v) if v.role==PartialFreshRetryAuditRole::PreservedOnly)}
+            fn root_archives(&self,book:&Install,rows:&[(String,u64)],names:&[&str])->Result<()> {
+                self.post(book)?;
+                let check_rows=|archives:&[(String,u64)]|->Result<()> {
+                    for (name,inode) in rows {
+                        if names.contains(&name.as_str()) || name==paths::MAINTENANCE_GATE_NAME || name==paths::REGISTRATION_GATE_NAME {continue;}
+                        check(archives.iter().any(|row|row.0==*name && row.1==*inode),"partial-fresh-root-foreign")?;
+                    }
+                    check(archives.iter().all(|row|removal_archive_inode(rows,&row.0)==Some(row.1)),"partial-fresh-root-archive-missing")
+                };
+                match self {
+                    Self::Census(v)=>check_rows(v.archives),
+                    _=>{
+                        let census=match self{Self::Early(v)=>v.archive_census(book)?,Self::Effect(v)=>v.archive_census(book)?,_=>unreachable!()};
+                        for (name,inode) in rows {
+                            if names.contains(&name.as_str()) || name==paths::MAINTENANCE_GATE_NAME || name==paths::REGISTRATION_GATE_NAME{continue;}
+                            let prior=census.rows().iter().find(|row|row.name()==name).ok_or("partial-fresh-root-foreign")?;
+                            check(prior.identity().ino==*inode,"partial-fresh-root-archive-original")?;
+                        }
+                        check(census.rows().iter().all(|row|removal_archive_inode(rows,row.name())==Some(row.identity().ino)),
+                            "partial-fresh-root-archive-missing")
+                    }
+                }
+            }
+            fn check_attempt(&self,book:&Install,actual:&PartialFreshAttemptAudit)
+                ->Result<Option<((Identity,u32),PartialFreshRetryReferenceData)>> {
+                self.post(book)?;
+                match self {
+                    // The preliminary readonly audit is NOT a completed
+                    // census or grant. Consumer checks all compact references
+                    // and current IDs before admitting its completed census.
+                    Self::Census(_)=>Ok(None),
+                    Self::Early(value)=>{
+                        let census=value.archive_census(book)?;
+                        match census.find_retry_data(&actual.request,&actual.invocation)? {
+                            None=>{
+                                check(actual.retry.is_none(),"partial-fresh-existing-retry-not-censused")?;
+                                census.fresh(&actual.request,&actual.invocation)?;Ok(None)
+                            },
+                            Some((child,reference))=>{
+                                check(removal_archive_stat(book,value.child_original()?,true,0o700)?==child,
+                                    "partial-fresh-existing-child-original")?;
+                                partial_fresh_existing_reference(book,self,actual,reference,true)?;
+                                census.fresh_retry(&actual.request,&actual.invocation,child,reference)?;
+                                Ok(Some((child,*reference)))
+                            }
+                        }
+                    },
+                    Self::Effect(value)=>{
+                        let census=value.archive_census(book)?;let ledger=value.preservation();
+                        check(actual.request==ledger.request && actual.invocation==ledger.invocation,
+                            "partial-fresh-effect-attempt")?;
+                        if let Some((child,reference))=&ledger.collision {
+                            // Exact original member retained BEFORE effects.
+                            // Its old metadata is collision DATA only; current
+                            // originals/content are independently audited and
+                            // compared to the same Parent effect ledger.
+                            partial_fresh_existing_reference(book,self,actual,reference,false)?;
+                            census.fresh_retry(&actual.request,&actual.invocation,*child,reference)?;
+                            Ok(Some((*child,*reference)))
+                        }else{
+                            census.fresh(&actual.request,&actual.invocation)?;Ok(None)
+                        }
+                    }
+                }
+            }
+
+        }
+        fn partial_fresh_rebind_data(slot:PartialFreshTop,before:Identity,flags:u32,
+            held:Identity,held_flags:u32,named:Identity,named_flags:u32)->bool {
+            let mode_ok=match slot {
+                PartialFreshTop::Stage=>before.mode==0o040700,
+                PartialFreshTop::Versions=>before.mode==0o040755,
+                PartialFreshTop::App=>before.mode==0o040555,
+                _=>(before.mode==0o100600 || before.mode==0o100444) && before.links==1
+                    && (before.mode==0o100600 || before.size>0),
+            };
+            mode_ok && before.dev>0 && before.ino>0 && before.uid==0 && before.gid==0 && before.links>0
+                && before.size>=0 && flags==0 && held_flags==0 && named_flags==0 && held==named
+                && (0..1_000_000_000).contains(&held.ctime_ns)
+                && (Identity{ctime:held.ctime,ctime_ns:held.ctime_ns,..before})==held
+        }
+        fn partial_fresh_equivalent(ledger:&PartialFreshPreservation,actual:&PartialFreshAttemptAudit,
+            next_prefix:usize)->Result<()> {
+            check(ledger.invocation==actual.invocation && ledger.request==actual.request
+                && ledger.intent.digest_data()==actual.intent.digest_data() && ledger.initial.cut==actual.facts.cut
+                && ledger.initial.digest==actual.facts.digest && ledger.initial.payload_bytes==actual.facts.payload_bytes
+                && ledger.initial.control_bytes==actual.facts.control_bytes && ledger.initial.files==actual.facts.files
+                && ledger.initial.directories==actual.facts.directories && ledger.slots.len()==actual.slots.len(),
+                "partial-fresh-current-content-changed")?;
+            check(next_prefix<=actual.slots.len(),"partial-fresh-current-prefix")?;
+            for (index,(old,new)) in ledger.slots.iter().zip(&actual.slots).enumerate() {
+                check(old.slot==new.slot && old.identity==new.identity && old.counts==new.counts && new.side==if index<next_prefix {
+                    PartialFreshSide::Preserved}else{PartialFreshSide::Current},"partial-fresh-current-original-changed")?;
+            }
+            Ok(())
+        }
+        pub(super) fn partial_fresh_storage_data(prior:u64,suffix:u64,payload:u64,inventory:usize,producer:usize,signature:usize)->Result<u64> {
+            check(inventory>0 && inventory<=installation_record::INVENTORY_LIMIT
+                && producer>0 && producer<=mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT
+                && signature>0 && signature<=mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT,
+                "partial-fresh-future-control-bound")?;
+            // Exact future raw pair, four bounded SOURCE stage receipts and
+            // the request export plus permanent R/M are physical bytes. The input
+            // inventory and full new payload are added separately exactly once.
+            let fixed=(transaction::INTENT_LIMIT as u64).checked_add(transaction::CAPSULE_LIMIT as u64)
+                .and_then(|n|n.checked_add(transaction::STATE_LIMIT as u64))
+                .and_then(|n|n.checked_add(installation_record::RECORD_LIMIT as u64))
+                .and_then(|n|n.checked_add((transaction::STATE_LIMIT as u64).checked_mul(4)?))
+                .and_then(|n|n.checked_add(transaction::REQUEST_EXPORT_LIMIT as u64))
+                .and_then(|n|n.checked_add(paths::REGISTRATION_GATE_BYTES.len() as u64))
+                .and_then(|n|n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
+                .and_then(|n|n.checked_add(producer as u64)).and_then(|n|n.checked_add(signature as u64))
+                .ok_or("partial-fresh-storage-budget")?;
+            prior.checked_add(suffix).and_then(|n|n.checked_add(payload))
+                .and_then(|n|n.checked_add(inventory as u64)).and_then(|n|n.checked_add(fixed))
+                .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("partial-fresh-storage-budget")
+        }
+        fn partial_fresh_quote(book:&mut Install,context:&worker::ReinstallPreservationContext<'_>)->Result<()> {
+            context.post_source(book)?;let ledger=context.preservation();let census=context.archive_census(book)?;
+            let (source_files,source_dirs,index_peak)=context.incoming_index_peak(book)?;
+            // One cumulative future quote. No independent max/reservation can
+            // turn the same unused ledger capacity into two phase credits.
+            let records=book.originals.len().checked_add(ledger.planned_preservation_originals_data()?)
+                .and_then(|n|n.checked_add(ledger.planned_fresh_originals_data().ok()?))
+                .and_then(|n|n.checked_add(census.post_originals_data().ok()?.checked_mul(2)?))
+                .and_then(|n|n.checked_add(ledger.planned_retry_post_originals_data().ok()?.checked_mul(2)?))
+                .and_then(|n|n.checked_add(16)).ok_or("partial-fresh-original-budget")?;
+            check(records<=24576 && book.originals.iter().filter(|v|v.fd.is_some()).count()
+                .checked_add(72).is_some_and(|n|n<=96),"partial-fresh-original-budget")?;
+            reserve_removal_original_storage(book,records)?;
+            let (_,inventory,raw_inventory)=context.incoming(book)?;
+            let concurrent=index_peak.checked_add(PARTIAL_FRESH_WORK)
+                .and_then(|n|n.checked_add(2*transaction::INTENT_LIMIT+2*transaction::STATE_LIMIT+2*transaction::CAPSULE_LIMIT))
+                .ok_or("partial-fresh-memory")?;
+            check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
+                .is_some_and(|n|n<=16*1024*1024),"partial-fresh-memory")?;
+            let index=inventory.index()?;
+            check(index.files.len()==source_files && index.directories.len()==source_dirs,"partial-fresh-index-quote")?;
+            // Current-root suffix alone is additional storage. Existing retry
+            // prefix is already physically counted by the authenticated census.
+            let extra=ledger.slots.iter().filter(|v|v.side==PartialFreshSide::Current).try_fold(0u64,|n,v|
+                n.checked_add(v.counts.bytes).ok_or("partial-fresh-storage-budget"))?;
+            let (producer,signature)=context.incoming_controls(book)?;
+            partial_fresh_storage_data(census.storage_bytes(),extra,index.payload_bytes,raw_inventory.len(),producer.len(),signature.len())?;
+            context.post_source(book)
+        }
+        pub(super) fn preserve_partial_fresh(book:&mut Install,context:&mut worker::ReinstallPreservationContext<'_>)->Result<()> {
+            let result=preserve_partial_fresh_inner(book,context).and_then(|()|context.post_source(book))
+                .and_then(|()|context.preservation_mut().settle_return_data());
+            if let Err(why)=result {context.preservation_mut().fail(why);return Err(why);}
+            Ok(())
+        }
+        fn preserve_partial_fresh_inner(book:&mut Install,context:&mut worker::ReinstallPreservationContext<'_>)->Result<()> {
+            context.post_source(book)?;check(!context.preservation().failed_data(),"partial-fresh-prior-failure")?;
+            let invocation=context.preservation().invocation.clone();check(invocation.capacity()<=32,"partial-fresh-memory")?;
+            let initial=partial_fresh_attempt(book,PartialFreshSource::Effect(context),&invocation,
+                context.preservation().retry_original_data())?;
+            partial_fresh_equivalent(context.preservation(),&initial,context.preservation().prefix)?;drop(initial);
+            partial_fresh_quote(book,context)?;
+            if context.preservation().retry.is_none() {
+                let child=context.child_original()?;let name=context.preservation().retry_name_data()?;
+                book.absent(child,&name)?;let before=context.parent_before(book,child)?;
+                context.preservation_mut().entered(PartialFreshEffectKind::CreateRetry,before.0,None,None)?;
+                // Existing Book records its actual mkdir/normalization phases
+                // and retains originals even if a later return is interrupted.
+                let actual=book.directory(child,&name,true,0o700);
+                let returned=if actual.is_ok(){PartialFreshEffectReturn::KnownSuccess}else{PartialFreshEffectReturn::Unknown};
+                context.preservation_mut().returned(PartialFreshEffectKind::CreateRetry,returned)?;
+                if returned==PartialFreshEffectReturn::Unknown{book.unknown=true;}
+                let retry=actual?;context.preservation_mut().retry=Some(retry);
+                context.returned_parent(book,child,before)?;
+                check(partial_fresh_fixed_roster(book,retry,PartialFreshFixedRole::Retry)?.is_empty(),"partial-fresh-new-retry-not-empty")?;
+                context.post_source(book)?;
+                context.preservation_mut().after_post(PartialFreshEffectKind::CreateRetry,Some(retry),None)?;
+            }
+            while context.preservation().prefix<context.preservation().slots.len() {
+                context.post_source(book)?;let at=context.preservation().prefix;
+                let before_audit=partial_fresh_attempt(book,PartialFreshSource::Effect(context),&invocation,
+                    context.preservation().retry_original_data())?;
+                partial_fresh_equivalent(context.preservation(),&before_audit,at)?;drop(before_audit);
+                let slot=context.preservation().slots[at];let root=context.root_original();
+                let retry=context.preservation().retry.ok_or("partial-fresh-retry-original")?;
+                let name=partial_fresh_name_data(slot.slot,&invocation,context.new_selection(book)?)?;
+                let directory=slot.identity.mode&0o170000==0o040000;
+                let original=book.open(Some(root),&name,directory)?;
+                context.preservation_mut().slots[at].original=Some(original);
+                check(book.identity(original)?==slot.identity,"partial-fresh-move-original")?;
+                book.check_name(original,true)?;book.absent(retry,&name)?;
+                let left=context.parent_before(book,root)?;
+                let right=context.parent_before(book,retry)?;
+                check(slot.identity.dev==left.0.dev && slot.identity.dev==right.0.dev,"partial-fresh-move-volume")?;
+                context.preservation_mut().entered(PartialFreshEffectKind::Move(at),left.0,Some(right.0),Some(original))?;
+                book.clock()?;
+                let actual=native::publish_directory(book.fd(root)?.as_fd(),&name,book.fd(retry)?.as_fd(),&name);
+                let returned=match &actual{Ok(())=>PartialFreshEffectReturn::KnownSuccess,
+                    Err(v) if v.raw_os_error()==Some(Errno::EEXIST as i32)=>PartialFreshEffectReturn::KnownRefusal,
+                    Err(_)=>PartialFreshEffectReturn::Unknown};
+                context.preservation_mut().returned(PartialFreshEffectKind::Move(at),returned)?;
+                if returned==PartialFreshEffectReturn::Unknown{book.unknown=true;}
+                actual.map_err(|_|"partial-fresh-exclusive-move")?;book.clock()?;
+                let held=stat::fstat(book.fd(original)?).map_err(|_|"partial-fresh-moved-stat")?;
+                let named=book.named(Some(retry),&name).map_err(|_|"partial-fresh-moved-name")?;
+                check(partial_fresh_rebind_data(slot.slot,slot.identity,0,Identity::of(&held),held.st_flags,
+                    Identity::of(&named),named.st_flags),"partial-fresh-moved-original")?;
+                book.originals[original].parent=Some(retry);book.originals[original].identity=Some(Identity::of(&held));
+                context.preservation_mut().slots[at].identity=Identity::of(&held);
+                book.absent(root,&name)?;context.returned_parent(book,root,left)?;context.returned_parent(book,retry,right)?;
+                let post=partial_fresh_attempt(book,PartialFreshSource::Effect(context),&invocation,Some(retry))?;
+                partial_fresh_equivalent(context.preservation(),&post,at+1)?;drop(post);
+                book.check_name(original,true)?;book.persist(root,false)?;book.persist(retry,false)?;
+                book.forward_close(original,"partial-fresh-moved-close")?;
+                context.preservation_mut().slots[at].original=None;context.post_source(book)?;
+                context.preservation_mut().after_post(PartialFreshEffectKind::Move(at),Some(retry),Some(Identity::of(&held)))?;
+            }
+            check(context.preservation().placement_complete_data(),"partial-fresh-placement-incomplete")?;
+            // This return is not Fresh readiness. Same Parent must consume a
+            // complete actual Consumer retry cohort/census and exact clean root.
+            context.post_source(book)
+        }
+        // Compact DATA only. Consumer may retain <=64 values, never the eight
+        // transient top arrays per archive. Every POST repeats actual audit;
+        // neither this commitment nor its invocation is source/mutation proof.
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        pub(super) struct PartialFreshRetryReferenceData {
+            root:Identity,invocation:[u8;16],request:[u8;16],intent:[u8;32],selection:[u8;32],
+            producer:[u8;32],signature:[u8;32],inventory:[u8;32],content:[u8;32],
+            archived:PartialFreshTopCounts,current:PartialFreshTopCounts,control_bytes:u64,
+            prefix:usize,tops:usize,originals:usize,quote:usize,role:PartialFreshRetryAuditRole,
+        }
+        // Sole snapshot codec uses this closed scalar shape. Constructing
+        // parsed DATA never validates source, directory custody or a retry.
+        pub(super) struct PartialFreshRetryFieldsData {
+            pub root:Identity,pub invocation:[u8;16],pub request:[u8;16],pub intent:[u8;32],pub selection:[u8;32],
+            pub producer:[u8;32],pub signature:[u8;32],pub inventory:[u8;32],pub content:[u8;32],
+            pub archived:[u64;4],pub current:[u64;4],pub prefix:usize,pub tops:usize,pub originals:usize,pub quote:usize,
+            pub role:PartialFreshRetryAuditRole,
+        }
+        impl PartialFreshRetryReferenceData {
+            pub(super) fn fields_data(&self)->PartialFreshRetryFieldsData {
+                PartialFreshRetryFieldsData{root:self.root,invocation:self.invocation,request:self.request,intent:self.intent,
+                    selection:self.selection,producer:self.producer,signature:self.signature,inventory:self.inventory,content:self.content,
+                    archived:[self.archived.bytes,self.archived.files,self.archived.directories,self.archived.controls],
+                    current:[self.current.bytes,self.current.files,self.current.directories,self.current.controls],
+                    prefix:self.prefix,tops:self.tops,originals:self.originals,quote:self.quote,role:self.role}
+            }
+            pub(super) fn from_fields_data(value:PartialFreshRetryFieldsData)->Result<Self> {
+                let valid_counts=|v:[u64;4]|v[0]<=installation_record::PAYLOAD_LIMIT && v[1]<=4096 && v[2]<=4096
+                    && v[3]<=16*1024*1024 && v[3]<=v[0] && (v[1]>0 || v[0]==0);
+                check(value.root.dev>0 && value.root.ino>0 && value.root.mode==0o040700 && value.root.uid==0 && value.root.gid==0
+                    && value.root.links>0 && value.root.size>=0 && (0..1_000_000_000).contains(&value.root.mtime_ns)
+                    && (0..1_000_000_000).contains(&value.root.ctime_ns) && value.invocation!=value.request && value.invocation!=[0;16] && value.request!=[0;16]
+                    && [value.intent,value.selection,value.producer,value.signature,value.inventory,value.content].iter().all(|v|*v!=[0;32])
+                    && (1..=8).contains(&value.tops) && value.prefix<=value.tops && value.originals<=value.quote && value.quote<=24576
+                    && valid_counts(value.archived) && valid_counts(value.current)
+                    && value.archived[0].checked_add(value.current[0]).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+                    && value.archived[3].checked_add(value.current[3]).is_some_and(|n|n<=16*1024*1024)
+                    && (value.role!=PartialFreshRetryAuditRole::PreservedOnly || value.prefix==value.tops && value.current==[0;4]),
+                    "partial-fresh-reference-shape")?;
+                let [bytes,files,directories,controls]=value.archived;let archived=PartialFreshTopCounts{bytes,files,directories,controls};
+                let [bytes,files,directories,controls]=value.current;let current=PartialFreshTopCounts{bytes,files,directories,controls};
+                Ok(Self{root:value.root,invocation:value.invocation,request:value.request,intent:value.intent,selection:value.selection,
+                    producer:value.producer,signature:value.signature,inventory:value.inventory,content:value.content,
+                    archived,current,control_bytes:archived.controls,prefix:value.prefix,tops:value.tops,originals:value.originals,quote:value.quote,role:value.role})
+            }
+            pub(super) fn top_range_data(&self)->(usize,usize){(self.prefix,self.tops)}
+            pub(super) fn role_data(&self)->PartialFreshRetryAuditRole{self.role}
+            pub(super) fn current_counts_data(&self)->(u64,u64,u64,u64){(self.current.bytes,self.current.files,self.current.directories,self.current.controls)}
+            pub(super) fn root_data(&self)->Identity{self.root}
+            pub(super) fn invocation_data(&self)->&[u8;16]{&self.invocation}
+            pub(super) fn request_data(&self)->&[u8;16]{&self.request}
+            pub(super) fn intent_sha256_data(&self)->&[u8;32]{&self.intent}
+            pub(super) fn selection_sha256_data(&self)->&[u8;32]{&self.selection}
+            pub(super) fn producer_sha256_data(&self)->&[u8;32]{&self.producer}
+            pub(super) fn signature_sha256_data(&self)->&[u8;32]{&self.signature}
+            pub(super) fn inventory_sha256_data(&self)->&[u8;32]{&self.inventory}
+            pub(super) fn content_sha256_data(&self)->&[u8;32]{&self.content}
+            pub(super) fn storage_bytes_data(&self)->u64{self.archived.bytes}
+            pub(super) fn current_bytes_data(&self)->u64{self.current.bytes}
+            pub(super) fn control_bytes_data(&self)->u64{self.control_bytes}
+            pub(super) fn files_data(&self)->u64{self.archived.files}
+            pub(super) fn directories_data(&self)->u64{self.archived.directories+1}
+            pub(super) fn post_originals_data(&self)->usize{self.quote}
+            pub(super) fn observed_originals_data(&self)->usize{self.originals}
+            pub(super) fn complete_data(&self)->bool{self.role==PartialFreshRetryAuditRole::PreservedOnly && self.prefix==self.tops}
+            pub(super) fn matches_data(&self,other:&Self)->bool{self==other}
+            pub(super) fn owned_bytes_data(&self)->usize{std::mem::size_of::<Self>()}
+        }
+        fn partial_fresh_retry_original_quote_data(files:usize,dirs:usize)->Result<usize> {
+            dirs.checked_mul(4).and_then(|n|n.checked_add(files.checked_mul(2)?))
+                .and_then(|n|n.checked_add(192)).filter(|n|*n<24576).ok_or("partial-fresh-original-budget")
+        }
+        fn partial_fresh_existing_binding_data(reference:&PartialFreshRetryReferenceData,
+            invocation:[u8;16],request:[u8;16],hashes:[[u8;32];6],quote:usize,retry:Identity)->bool {
+            reference.invocation==invocation && reference.request==request
+                && [reference.intent,reference.selection,reference.producer,reference.signature,reference.inventory,reference.content]==hashes
+                && reference.quote==quote && reference.root.dev==retry.dev && reference.root.ino==retry.ino
+        }
+        fn partial_fresh_existing_reference(book:&Install,source:&PartialFreshSource<'_>,actual:&PartialFreshAttemptAudit,
+            reference:&PartialFreshRetryReferenceData,initial:bool)->Result<()> {
+            source.post(book)?;
+            let retry=actual.retry.ok_or("partial-fresh-existing-retry-original")?;
+            let observed=removal_archive_stat(book,retry,true,0o700)?.0;
+            let selected=source.new_selection(book)?.encode_data().map_err(|_|"partial-fresh-selection")?;
+            check(selected.capacity()<=mobile_release_desktop::macos_install_maintenance::INPUT_LIMIT,
+                "partial-fresh-selection-bound")?;
+            let selection:[u8;32]=Sha256::digest(&selected).into();
+            let (producer,signature)=source.incoming_controls(book)?;let (_,_,inventory)=source.incoming(book)?;
+            let producer:[u8;32]=Sha256::digest(producer).into();let signature:[u8;32]=Sha256::digest(signature).into();
+            let inventory:[u8;32]=Sha256::digest(inventory).into();
+            let (files,dirs,_)=source.incoming_index_peak(book)?;
+            let quote=partial_fresh_retry_original_quote_data(files,dirs)?;
+            check(partial_fresh_existing_binding_data(reference,archive_hex_data(&actual.invocation)?,archive_hex_data(&actual.request)?,
+                [archive_hex_data(actual.intent.digest_data())?,selection,producer,signature,inventory,actual.facts.digest],quote,observed),
+                "partial-fresh-existing-reference-binding")?;
+            if initial {
+                let mut archived=PartialFreshTopCounts::default();let mut current=PartialFreshTopCounts::default();
+                for top in &actual.slots {
+                    let out=if top.side==PartialFreshSide::Preserved{&mut archived}else{&mut current};
+                    out.add(top.counts.bytes,top.counts.files,top.counts.directories)?;out.control(top.counts.controls)?;
+                }
+                let prefix=partial_fresh_prefix_data(&actual.slots.iter().map(|v|v.side).collect::<Vec<_>>())?;
+                // Observed per-call original count may differ with enclosing
+                // callers. Q, source/content, placement/counts and ALL original
+                // metadata must agree. The unchanged stored member—not a
+                // synthesized current replacement—is passed to the census.
+                check(reference.root==observed && reference.archived==archived && reference.current==current
+                    && reference.prefix==prefix && reference.tops==actual.slots.len(),"partial-fresh-existing-reference-observation")?;
+            }
+            source.post(book)
+        }
+        pub(super) fn partial_fresh_retry_quote(book:&Install,input:&worker::ReinstallInputRead<'_>)->Result<usize> {
+            input.post_source(book)?;let (files,dirs,peak)=input.incoming_index_peak(book)?;
+            let originals=partial_fresh_retry_original_quote_data(files,dirs)?;
+            let concurrent=peak.checked_add(PARTIAL_FRESH_WORK)
+                .and_then(|n|n.checked_add(2*transaction::INTENT_LIMIT+2*transaction::STATE_LIMIT+2*transaction::CAPSULE_LIMIT))
+                .ok_or("partial-fresh-memory")?;
+            check(removal_effective_control_bytes(book)?.checked_add(concurrent as u64)
+                .is_some_and(|n|n<=16*1024*1024) && originals<=24576
+                && book.originals.iter().filter(|v|v.fd.is_some()).count().checked_add(72).is_some_and(|n|n<=96),
+                "partial-fresh-cohort-bound")?;Ok(originals)
+        }
+        pub(super) fn audit_partial_fresh_retry<'a>(book:&mut Install,input:&'a worker::ReinstallInputRead<'a>,
+            child:usize,archives:&'a[(String,u64)],retry:usize,invocation:&str,role:PartialFreshRetryAuditRole)
+            ->Result<PartialFreshRetryReferenceData> {
+            input.post_source(book)?;
+            check(worker::invocation_valid(invocation) && archives.len()<=transaction::INVOCATION_LIMIT,
+                "partial-fresh-cohort-bound")?;
+            let before=removal_archive_stat(book,retry,true,0o700)?.0;
+            let quote=partial_fresh_retry_quote(book,input)?;
+            let bound=book.originals.len().checked_add(quote).filter(|n|*n<=24576).ok_or("partial-fresh-original-budget")?;
+            reserve_removal_original_storage(book,bound)?;let start=book.originals.len();
+            let source=PartialFreshSource::Census(PartialFreshCensusInput{read:input,child,archives,role});
+            let actual=partial_fresh_attempt(book,source,invocation,Some(retry))?;
+            let mut archived=PartialFreshTopCounts::default();let mut current=PartialFreshTopCounts::default();
+            for top in &actual.slots {
+                let out=if top.side==PartialFreshSide::Preserved{&mut archived}else{&mut current};
+                out.add(top.counts.bytes,top.counts.files,top.counts.directories)?;out.control(top.counts.controls)?;
+            }
+            let prefix=partial_fresh_prefix_data(&actual.slots.iter().map(|v|v.side).collect::<Vec<_>>())?;
+            check(role!=PartialFreshRetryAuditRole::PreservedOnly || prefix==actual.slots.len(),"partial-fresh-complete-cohort")?;
+            let selection=input.new_selection(book)?.encode_data().map_err(|_|"partial-fresh-selection")?;
+            check(selection.capacity()<=mobile_release_desktop::macos_install_maintenance::INPUT_LIMIT,"partial-fresh-selection-bound")?;
+            let (_,_,inventory)=input.incoming(book)?;let (producer,signature)=input.incoming_controls(book)?;
+            check(removal_archive_stat(book,retry,true,0o700)?.0==before,"partial-fresh-cohort-post")?;
+            input.post_source(book)?;
+            let result=PartialFreshRetryReferenceData{root:before,invocation:archive_hex_data(invocation)?,
+                request:archive_hex_data(&actual.request)?,intent:archive_hex_data(actual.intent.digest_data())?,
+                selection:Sha256::digest(&selection).into(),producer:Sha256::digest(producer).into(),
+                signature:Sha256::digest(signature).into(),inventory:Sha256::digest(inventory).into(),content:actual.facts.digest,
+                archived,current,control_bytes:archived.controls,prefix,tops:actual.slots.len(),
+                originals:book.originals.len().checked_sub(start).ok_or("partial-fresh-original-budget")?,quote,role};
+            check(result.originals<=quote && result.owned_bytes_data()<=512,"partial-fresh-cohort-bound")?;
+            PartialFreshRetryReferenceData::from_fields_data(result.fields_data())
+        }
+
         #[cfg(test)]
         pub(super) fn removal_rehome_data_checks() {
-            rehome_original_storage_data_checks();rehome_child_audit_data_checks();
+            partial_fresh_data_checks();
+            rehome_original_storage_data_checks();rehome_child_audit_data_checks();rehome_retry_cohort_data_checks();
             use {RehomeSideData as Side,RehomeBoundaryData as Boundary,RehomeStateData as S,
                 RehomeFreshData as F,RehomeVersionsData as V};
             let (genesis,selected,state,intent)=rehome_test_fixture();
@@ -3598,6 +5583,200 @@ mod installer {
             assert!(RehomeMoveSetData::from_genesis_data(&bad,&selected,&state,&[&intent]).is_err());
         }
 
+        #[cfg(test)]
+        fn rehome_retry_test_reference(id:u8,pending:bool)->RehomeRetryReferenceData {
+            RehomeRetryReferenceData::same_input_data(PartialFreshRetryReferenceData::from_fields_data(PartialFreshRetryFieldsData{
+                root:Identity{dev:1,ino:2000+id as u64,mode:0o040700,uid:0,gid:0,links:2,size:64,
+                    mtime:1,mtime_ns:2,ctime:3,ctime_ns:4},
+                invocation:[id;16],request:[id+80;16],intent:[1;32],selection:[2;32],producer:[3;32],
+                signature:[4;32],inventory:[5;32],content:[6;32],archived:[17,1,1,3],
+                current:if pending{[19,1,1,5]}else{[0;4]},prefix:if pending{1}else{2},tops:2,originals:20,quote:220,
+                role:if pending{PartialFreshRetryAuditRole::CurrentUnion}else{PartialFreshRetryAuditRole::PreservedOnly},
+            }).unwrap()).unwrap()
+        }
+        #[cfg(test)]
+        fn rehome_retry_test_decode(raw:&[u8])->Result<RehomeRetryReferenceData> {
+            let mut cursor=ArchiveCursor::new(raw.len() as u64,|at:u64,out:&mut [u8]|{
+                let at=usize::try_from(at).map_err(|_|"test-retry-offset")?;check(at<=raw.len(),"test-retry-offset")?;
+                let count=out.len().min(raw.len()-at).min(7);out[..count].copy_from_slice(&raw[at..at+count]);Ok(count)});
+            let value=parse_rehome_retry_data(&mut cursor).map_err(|_|"test-retry-decode")?;cursor.eof()?;Ok(value)
+        }
+        #[cfg(test)]
+        fn rehome_retry_cohort_data_checks() {
+            // Existing real fixed encoders/parsers/reducers only, inert DATA.
+            // No filesystem/source signature/close/Ready claim from this group.
+            let (genesis,selected,state,intent)=rehome_test_fixture();
+            let plan=RehomeMoveSetData::from_genesis_data(&genesis,&selected,&state,&[&intent]).unwrap();
+            let total=plan.moves.len();let old=rehome_audit_test_fold(&plan,RehomeAuditSideData::ArchivedPrefix(total));
+            let child=old.root_data();let plain=old.into_reference_data(&plan).unwrap();
+            let retry=rehome_retry_test_reference(10,false);
+            let with=plain.with_retries_data(vec![retry]).unwrap();
+            assert!(with.complete_data() && with.retries_complete_data());
+            assert_eq!(with.counts_data(),plan.prefix_counts(total).unwrap());
+            assert_eq!(with.storage_bytes_data(),plan.bytes_data()+17);
+            assert_eq!(with.audit_originals_data().unwrap(),2*plan.directories_data()+plan.files_data()+1+220);
+            assert_eq!(with.retries[0].current_bytes_data(),0);
+            let pending=rehome_retry_test_reference(11,true);
+            let old=rehome_audit_test_fold(&plan,RehomeAuditSideData::ArchivedPrefix(total)).into_reference_data(&plan).unwrap();
+            let pending_child=old.with_retries_data(vec![pending]).unwrap();
+            assert!(pending_child.complete_data());assert!(!pending_child.retries_complete_data());
+            assert_eq!(pending_child.storage_bytes_data(),plan.bytes_data()+17); // root19 is NOT archived storage
+            let incomplete=rehome_audit_test_fold(&plan,RehomeAuditSideData::ArchivedPrefix(total-1)).into_reference_data(&plan).unwrap();
+            assert!(incomplete.with_retries_data(vec![retry]).is_err());
+            assert!(rehome_retry_rows_data(&[pending,rehome_retry_test_reference(12,true)]).is_err());
+            assert!(rehome_retry_rows_data(&[retry,retry]).is_err());
+            assert!(rehome_retry_rows_data(&[pending,retry]).is_err());
+            assert!(rehome_retry_heap_data(65).is_err());
+            let sixty_four=(1..=64).map(|id|rehome_retry_test_reference(id,false)).collect::<Vec<_>>();
+            rehome_retry_rows_data(&sixty_four).unwrap();
+            let mut too_many=sixty_four.clone();too_many.push(retry);assert!(rehome_retry_rows_data(&too_many).is_err());
+            let versions=Identity{ino:3000,mode:0o040755,..retry.root_data()};
+            assert!(rehome_retry_role_data(retry.root_data(),None).unwrap()==PartialFreshRetryAuditRole::CurrentUnion);
+            assert!(rehome_retry_role_data(retry.root_data(),Some((versions,0))).unwrap()==PartialFreshRetryAuditRole::PreservedOnly);
+            for (id,flags) in [(Identity{dev:2,..versions},0),(Identity{mode:0o120755,..versions},0),
+                (Identity{mode:0o040700,..versions},0),(Identity{uid:1,..versions},0),(Identity{gid:1,..versions},0),
+                (Identity{ino:0,..versions},0),(versions,1)] {
+                assert!(rehome_retry_role_data(retry.root_data(),Some((id,flags))).is_err());
+            }
+            assert_eq!(RemovalRosterKind::Rehome.limit(),275);assert_eq!(RemovalRosterKind::RehomeWithRetries.limit(),339);
+            assert!(rehome_roster_work_data(0,RemovalRosterKind::RehomeWithRetries).is_ok());
+            for prefix in 0..=total {
+                let mut roster=plan.moves[..prefix].iter().map(|r|(r.name.clone(),1)).collect::<Vec<_>>();
+                roster.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+                assert_eq!(rehome_cohort_shape_data(&plan,&roster,RehomeRetryPolicyData::Plain).unwrap(),(prefix,0));
+                roster.push((format!("{REHOME_RETRY_NAME}{}","a".repeat(32)),500));roster.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+                assert!(rehome_cohort_shape_data(&plan,&roster,RehomeRetryPolicyData::Plain).is_err());
+                assert_eq!(rehome_cohort_shape_data(&plan,&roster,RehomeRetryPolicyData::Contextual).unwrap(),(prefix,1));
+                roster.push(("foreign".into(),501));roster.sort_unstable_by(|a,b|a.0.cmp(&b.0));
+                assert!(rehome_cohort_shape_data(&plan,&roster,RehomeRetryPolicyData::Contextual).is_err());
+            }
+            for name in ["fresh-retry-".to_owned(),format!("fresh-retry-{}","0".repeat(32)),
+                format!("fresh-retry-{}","A".repeat(32)),format!("fresh-retry-{}/next","a".repeat(32)),
+                format!(".remove-{}","a".repeat(32)),format!("reinstall-v1/fresh-retry-{}","a".repeat(32))] {
+                assert!(rehome_retry_invocation_data(&name).is_err());
+            }
+            let mut body=SnapshotBytes::new(512).unwrap();let mut encoded=Ok(());
+            rehome_retry_wire_data(&pending,|bytes|{if encoded.is_ok(){encoded=body.put(bytes);}});encoded.unwrap();
+            assert_eq!(body.0.len(),389);assert!(rehome_retry_test_decode(&body.0).unwrap().matches_data(&pending));
+            for cut in 0..body.0.len(){assert!(rehome_retry_test_decode(&body.0[..cut]).is_err());}
+            let mut extra=body.0.clone();extra.push(0);assert!(rehome_retry_test_decode(&extra).is_err());
+            for (offset,value) in [(28,1),(304,0),(304,3)] {
+                let mut changed=body.0.clone();changed[offset]=value;assert!(rehome_retry_test_decode(&changed).is_err());
+            }
+            let mut zero=body.0.clone();zero[80..96].fill(0);assert!(rehome_retry_test_decode(&zero).is_err());
+            let mut over=body.0.clone();over[377..381].copy_from_slice(&24577u32.to_be_bytes());assert!(rehome_retry_test_decode(&over).is_err());
+            for (offset,value) in [(381,19u32),(385,219),(385,24577),(381,u32::MAX),(385,u32::MAX)] {
+                let mut changed=body.0.clone();changed[offset..offset+4].copy_from_slice(&value.to_be_bytes());
+                assert!(rehome_retry_test_decode(&changed).is_err());
+            }
+            let one=|value:RehomeRetryReferenceData|RehomeReferenceData::wire_data(child.0,child.1,total,total,
+                plan.directories_data(),plan.files_data(),plan.bytes_data(),[9;32]).unwrap().with_retries_data(vec![value]).unwrap();
+            let baseline=one(pending).retry_commitment_data();
+            // Every variable scalar category in the canonical row contributes.
+            // Root mode/uid/gid/flags and zero values instead have strict refusal.
+            for change in 0..30 {
+                let mut f=pending.reference_data().fields_data();
+                match change {
+                    0=>f.root.dev+=1,1=>f.root.ino+=1,2=>f.root.links+=1,3=>f.root.size+=1,
+                    4=>f.root.mtime+=1,5=>f.root.mtime_ns+=1,6=>f.root.ctime+=1,7=>f.root.ctime_ns+=1,
+                    8=>f.invocation[0]^=64,9=>f.request[0]^=64,10=>f.intent[0]^=64,11=>f.selection[0]^=64,
+                    12=>f.producer[0]^=64,13=>f.signature[0]^=64,14=>f.inventory[0]^=64,15=>f.content[0]^=64,
+                    16=>f.prefix=0,17=>f.tops=3,18=>f.archived[0]+=1,19=>f.archived[1]+=1,
+                    20=>f.archived[2]+=1,21=>f.archived[3]+=1,22=>f.current[0]+=1,23=>f.current[1]+=1,
+                    24=>f.current[2]+=1,25=>f.current[3]+=1,26=>f.originals+=1,27=>f.quote+=1,
+                    28=>{f.role=PartialFreshRetryAuditRole::PreservedOnly;f.prefix=f.tops;f.current=[0;4];},
+                    29=>f.root.mtime=-1,_=>unreachable!(),
+                }
+                let changed=PartialFreshRetryReferenceData::from_fields_data(f).unwrap();
+                assert_ne!(baseline,one(RehomeRetryReferenceData::same_input_data(changed).unwrap()).retry_commitment_data());
+            }
+            for invalid in 0..9 {
+                let mut f=pending.reference_data().fields_data();match invalid {0=>f.root.mode=0o120700,1=>f.root.uid=1,2=>f.root.gid=1,
+                    3=>f.root.mtime_ns=1_000_000_000,4=>f.request=f.invocation,5=>f.intent=[0;32],6=>f.originals=f.quote+1,
+                    7=>f.archived[3]=f.archived[0]+1,8=>f.role=PartialFreshRetryAuditRole::PreservedOnly,_=>unreachable!()}
+                assert!(PartialFreshRetryReferenceData::from_fields_data(f).is_err());
+            }
+            // Production uses this same checked outer constructor: direct C
+            // has no prelude, while the source-selecting C path reads one
+            // original Intent before learning C. B includes ALL wrapper stages.
+            // The scanner's retry-open1 remains outside BOTH tuples.
+            let inner=*pending.reference_data();
+            assert_eq!(pending.observed_originals_data(),inner.observed_originals_data());
+            assert_eq!(pending.post_originals_data(),inner.post_originals_data());
+            let selected_c=RehomeRetryReferenceData::new_data(inner,21,221).unwrap();
+            let selected_b=RehomeRetryReferenceData::new_data(inner,345,605).unwrap();
+            for row in [selected_c,selected_b] {
+                let mut encoded=Vec::new();rehome_retry_wire_data(&row,|bytes|encoded.extend_from_slice(bytes));
+                assert!(rehome_retry_test_decode(&encoded).unwrap().matches_data(&row));
+                assert_ne!(baseline,one(row).retry_commitment_data());
+                assert_eq!(one(row).audit_originals_data().unwrap(),2*plan.directories_data()+plan.files_data()+1+row.post_originals_data());
+            }
+            for row in [RehomeRetryReferenceData::new_data(inner,21,220).unwrap(),
+                RehomeRetryReferenceData::new_data(inner,20,221).unwrap()] {
+                assert_ne!(baseline,one(row).retry_commitment_data());
+            }
+            for (actual,quote) in [(19,220),(20,219),(221,220),(24577,24577),(usize::MAX,24576),(20,usize::MAX)] {
+                assert!(RehomeRetryReferenceData::new_data(inner,actual,quote).is_err());
+            }
+            let mut q=pending.reference_data().fields_data();q.quote=24576;
+            let maximum=RehomeRetryReferenceData::same_input_data(PartialFreshRetryReferenceData::from_fields_data(q).unwrap()).unwrap();
+            assert!(one(maximum).audit_originals_data().is_err());
+            let facts=plan.invocations;assert_eq!(facts.len,1);
+            for change in 0..3 {
+                let mut fact=InstallInvocationFactData::intent(&intent).unwrap();
+                match change{0=>fact.invocation[0]^=1,1=>fact.request[0]^=1,2=>fact.intent[0]^=1,_=>unreachable!()}
+                let mut changed=InstallInvocationSetData::empty();changed.insert(fact).unwrap();assert_ne!(facts.commitment(),changed.commitment());
+            }
+            let mut keys=InstallInvocationSetData::empty();
+            for n in 1..=64u8 {keys.insert(InstallInvocationFactData::new([n;16],[n+80;16],[n;32]).unwrap()).unwrap();}
+            assert_eq!(keys.len,64);let same=keys.rows[0].unwrap();assert!(!keys.insert(same).unwrap());
+            assert!(keys.insert(InstallInvocationFactData::new([70;16],[150;16],[70;32]).unwrap()).is_err());
+            let mut drift=same;drift.intent[0]^=1;assert!(keys.insert(drift).is_err());
+            let mut cross=same;cross.invocation=same.request;cross.request=[250;16];assert!(keys.insert(cross).is_err());
+            let hex=|value:&[u8;16]|value.iter().map(|b|format!("{b:02x}")).collect::<String>();
+            let mut pending_table=RemovalArchiveCensus::empty(0).unwrap();
+            for (number,value) in [(3,pending),(4,rehome_retry_test_reference(12,true))] {
+                let mut row=removal_archive_test_row(number);row.rehome=Some(one(value));pending_table.add(row).unwrap();
+            }
+            assert!(pending_table.invocation_union().is_err());
+            // Compact DATA fixture exercises the global union, independently
+            // of the physical reader's conservative64-row allocation quote.
+            let mut retry_ceiling=RemovalArchiveCensus{rows:Vec::with_capacity(1),storage_bytes:0,root:0,
+                install_invocations:InstallInvocationSetData::empty()};let mut row=removal_archive_test_row(3);
+            row.rehome=Some(RehomeReferenceData::wire_data(child.0,child.1,total,total,plan.directories_data(),
+                plan.files_data(),plan.bytes_data(),[9;32]).unwrap().with_retries_data(sixty_four).unwrap());
+            retry_ceiling.add(row).unwrap();assert_eq!(retry_ceiling.invocation_union().err(),Some("rehome-invocation-count")); // P1+retry64
+            let mut table=RemovalArchiveCensus::empty(0).unwrap();let mut row=removal_archive_test_row(3);
+            row.files=std::array::from_fn(|slot|Some(removal_history_test_file(row.identity,slot,b"{}",0o100444)));
+            row.rehome=Some(with);table.add(row).unwrap();table.install_invocations=plan.invocations;
+            table.invocation_union().unwrap();assert!(table.retries_complete_data());
+            let request=hex(retry.request_data());let invocation=hex(retry.invocation_data());
+            assert!(table.fresh(&request,&invocation).is_err());
+            let (original,stored)=table.find_retry_data(&request,&invocation).unwrap().unwrap();
+            table.fresh_retry(&request,&invocation,original,stored).unwrap();
+            assert!(table.fresh_retry(&request,&invocation,(Identity{ino:original.0.ino+1,..original.0},0),stored).is_err());
+            let mut changed=stored.fields_data();changed.content[0]^=1;let changed=PartialFreshRetryReferenceData::from_fields_data(changed).unwrap();
+            assert!(table.fresh_retry(&request,&invocation,original,&changed).is_err());
+            assert!(table.find_retry_data(&"f".repeat(32),&invocation).is_err());
+            assert!(table.fresh(&"e".repeat(32),&"d".repeat(32)).is_ok());
+            assert_eq!(table.install_invocation_union_data([&intent].into_iter(),None).unwrap(),3); // removal+Install+retry
+            assert!(table.install_invocation_union_data(std::iter::empty(),Some(&intent)).is_err());
+            assert_eq!(table.install_invocation_commitment_data(),plan.invocations.commitment());
+            let used=table.rows[0].rehome.as_ref().unwrap().audit_originals_data().unwrap();
+            assert_eq!(table.scan_originals_data().unwrap(),10+2+used);assert_eq!(table.post_originals_data().unwrap(),8+2+used);
+            let sum=table.rows[0].files.iter().flatten().map(|f|f.len).sum::<u64>()+plan.bytes_data()+17;
+            assert_eq!(table.storage_bytes(),sum);assert!(table.owned_bytes().unwrap()<=REMOVAL_ARCHIVE_TABLE);
+            let expected_commitment=table.rows[0].rehome.as_ref().unwrap().retry_commitment_data();
+            let (snapshot,_)=removal_archive_test_snapshot_with_table(false,table);
+            let decoded=parse_removal_genesis_data(snapshot.len() as u64,&"2".repeat(32),|at,out|{
+                let at=at as usize;let n=out.len().min(snapshot.len()-at).min(11);out[..n].copy_from_slice(&snapshot[at..at+n]);Ok(n)}).unwrap();
+            assert_eq!(decoded.prior_archives_data()[0].rehome_data().unwrap().retry_commitment_data(),expected_commitment);
+            assert_eq!(decoded.prior_archives_data()[0].rehome_data().unwrap().retries.len(),1);
+            let mut ceiling=removal_archive_test_table(63);ceiling.install_invocations.insert(InstallInvocationFactData::intent(&intent).unwrap()).unwrap();
+            assert_eq!(ceiling.install_invocation_union_data(std::iter::empty(),None).unwrap(),64);
+            assert!(ceiling.fresh(&"e".repeat(32),&"d".repeat(32)).is_err());
+            ceiling.rows.pop();assert!(ceiling.fresh(&"e".repeat(32),&"d".repeat(32)).is_ok());
+        }
         #[cfg(test)]
         fn removal_archive_test_row(number:u64)->RemovalArchiveReference {
             let identity=Identity {dev:1,ino:100+number,mode:0o040700,uid:0,gid:0,links:2,size:64,
@@ -4425,7 +6604,7 @@ mod installer {
                     out.string(&row.path)?;out.identity(row.identity,row.flags)?;out.u16(row.children.len())?;
                     for (name,inode) in &row.children { out.string(name)?;out.put(&inode.to_be_bytes())?; }
                 }
-                let prior=self.prior_archives()?;out.u16(prior.rows().len())?;
+                let prior=self.prior_archives()?;prior.invocation_union()?;out.u16(prior.rows().len())?;
                 let mut previous=None;let mut prior_bytes=0u64;
                 for row in prior.rows() {
                     check(worker::removal_archive_name_data(row.name()) && previous.is_none_or(|old:&str|old<row.name()),"removal-snapshot-prior-order")?;
@@ -5205,13 +7384,16 @@ mod installer {
             assert_ne!(first,plan.fingerprint().unwrap());
         }
         fn stage_roster(book: &mut Install, root: usize, record: &Recorded, evidence_bytes: &mut u64) -> Result<()> {
-            if record.intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
-            let name = format!(".install-{}", record.intent.invocation_data());
+            stage_roster_intent(book,root,&record.intent,evidence_bytes)
+        }
+        fn stage_roster_intent(book:&mut Install,root:usize,intent:&IntentData,evidence_bytes:&mut u64)->Result<()> {
+            if intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
+            let name = format!(".install-{}", intent.invocation_data());
             let stage = book.open(Some(root), &name, true)?; book.protected(stage, true, Some(0o700))?;
             native::no_xattrs(book.fd(stage)?.as_fd()).map_err(|_| "maintenance-stage-attributes")?;
             check(stat::fstat(book.fd(stage)?).map_err(|_| "maintenance-stage-stat")?.st_flags == 0,
                 "maintenance-stage-flags")?;
-            let phases: &[&str] = if record.intent.action_data() == ActionData::RestoreFixedApp {
+            let phases: &[&str] = if intent.action_data() == ActionData::RestoreFixedApp {
                 &["staging-created", "prepared", "app-publication-confirmed"]
             } else { &["staging-created", "prepared", "runtime-publication-confirmed", "both-publications-confirmed"] };
             exact_roster(book, stage, &phases.iter().map(|phase| format!("{phase}.json")).collect())?;
@@ -5220,11 +7402,144 @@ mod installer {
                 *evidence_bytes = evidence_bytes.checked_add(body.len() as u64).ok_or("maintenance-control-bound")?;
                 let value = mobile_release_desktop::protocol::strict_json(&body).map_err(|_| "maintenance-stage-record")?;
                 check(value.is_object() && value["schemaVersion"] == 1 && value["phase"] == *phase
-                    && value["release"] == record.intent.next_data().binding_data().release
-                    && value["inventorySha256"] == record.intent.next_data().binding_data().inventory_sha256
+                    && value["release"] == intent.next_data().binding_data().release
+                    && value["inventorySha256"] == intent.next_data().binding_data().inventory_sha256
                     && value["originalSettlement"] == "pending-final-closes", "maintenance-stage-record")?;
             }
             book.check_name(stage, true)?; book.forward_close(stage, "maintenance-stage-close")
+        }
+        // An actual closed census, never a generic expected-name exception.
+        // Parent constructor is private; worker creates it only after the fixed
+        // original init/source/inherited-M admission and actual physical scan.
+        pub(super) struct InstallArchiveObservation {
+            binding:worker::ArchivedInstallData,census:Option<RemovalArchiveCensus>,root:usize,
+            root_names:Option<BTreeSet<String>>,version_names:Option<BTreeSet<String>>,success_names:bool,state_sha:Option<[u8;32]>,invocation:Option<[u8;16]>,
+        }
+        impl InstallArchiveObservation {
+            pub(super) fn parent(root:usize,binding:worker::ArchivedInstallData,census:Option<RemovalArchiveCensus>,
+                inventory:&str)->Result<Self> {
+                if let Some(census)=&census {binding.matches(census,inventory)?;}
+                Ok(Self{root,binding,census,root_names:None,version_names:None,success_names:false,state_sha:None,invocation:None})
+            }
+            pub(super) fn worker(book:&mut Install,root:usize,binding:worker::ArchivedInstallData)->Result<Self> {
+                check(book.worker_stderr_is_gate && !book.worker_go_eof && book.gate.verified
+                    && !book.gate.lock_attempted && !book.gate.exclusive_acquired && book.gate.parent==Some(root),
+                    "archived-worker-original-init")?;
+                reserve_install_archive_context(book)?;
+                Ok(Self{root,binding,census:None,root_names:None,version_names:None,success_names:false,state_sha:None,invocation:None})
+            }
+            fn root_names(&mut self,book:&mut Install,root:usize,wanted:&mut BTreeSet<String>,inventory:&str,input:&worker::ReinstallInputRead<'_>)->Result<()> {
+                check(self.root==root && book.gate.parent==Some(root) && book.removal_archive_scan.is_none(),
+                    "archived-observation-root")?;
+                let actual=read_removal_archive_census_with_retries(book,root,wanted,input)?;
+                self.binding.matches(&actual,inventory)?;
+                check(actual.retries_complete_data(),"archived-retries-unsettled")?;
+                for row in actual.rows(){check(wanted.insert(row.name().to_owned()),"archived-root-collision")?;}
+                // Old and new tables overlap only inside the existing reserved
+                // census workspace. This is not authority from the names alone.
+                check(actual.owned_bytes()?<=128*1024,"archived-census-memory")?;
+                self.census=Some(actual);book.clock()
+            }
+            fn storage(&self)->Result<u64>{self.census.as_ref().map(RemovalArchiveCensus::storage_bytes).ok_or("archived-census-pending")}
+            pub(super) fn data(&self)->serde_json::Value {self.binding.data()}
+            pub(super) fn post(&self,book:&mut Install,input:&worker::ReinstallInputRead<'_>)->Result<()> {
+                check(book.gate.parent==Some(self.root),"archived-observation-root")?;
+                let census=self.census.as_ref().ok_or("archived-census-pending")?;
+                post_removal_archive_references_with_retries(book,census,input)
+            }
+            pub(super) fn future_originals(&self,book:&Install,full_scans:usize,posts:usize,extra:usize)->Result<usize> {
+                let census=self.census.as_ref().ok_or("archived-census-pending")?;
+                census.scan_originals_data()?.checked_mul(full_scans)
+                    .and_then(|n|n.checked_add(census.post_originals_data().ok()?.checked_mul(posts)?))
+                    .and_then(|n|n.checked_add(extra)).and_then(|n|n.checked_add(book.originals.len()))
+                    .filter(|n|*n<=24576).ok_or("archived-original-budget")
+            }
+        }
+        pub(super) fn observe_with_archives(book:&mut Install,prepared:PreparedFresh,selected:ReleaseSetData,
+            pending_intent:Option<&str>,archives:InstallArchiveObservation,input:&worker::ArchivedInputOriginal<'_>)->Result<Observed> {
+            selected_compile(&selected)?;
+            check(book.gate.verified && (book.gate.exclusive_acquired || book.worker_stderr_is_gate),
+                "maintenance-original-gate-required")?;
+            observe_admitted_archives(book,prepared,selected,pending_intent,Some(archives),Some(input))
+        }
+        const ARCHIVED_NAMES_LIMIT:usize=512*1024;
+        pub(super) fn reserve_install_archive_context(book:&mut Install)->Result<()> {
+            if book.archived_install_reserved{return book.clock();}
+            let reserve=(ARCHIVED_NAMES_LIMIT+2*worker::INIT_LIMIT+2*transaction::STATE_LIMIT+std::mem::size_of::<InstallArchiveObservation>()) as u64;
+            check(removal_effective_control_bytes(book)?.checked_add(reserve).is_some_and(|n|n<=16*1024*1024),
+                "archived-context-control-budget")?;
+            book.removal_control_reserved=book.removal_control_reserved.checked_add(reserve).ok_or("archived-context-control-budget")?;
+            book.archived_install_reserved=true;book.clock()
+        }
+        fn archived_names_memory(root:&BTreeSet<String>,versions:&BTreeSet<String>)->Result<()> {
+            let count=root.len().checked_add(versions.len()).ok_or("archived-names-memory")?;
+            let bytes=root.iter().chain(versions).try_fold(count.checked_mul(1024).ok_or("archived-names-memory")?,
+                |n,s|n.checked_add(s.capacity()).ok_or("archived-names-memory"))?;
+            check(root.len()<=350 && versions.len()<=64 && bytes<=ARCHIVED_NAMES_LIMIT,"archived-names-memory")
+        }
+        impl InstallArchiveObservation {
+            fn capture_names(&mut self,root:BTreeSet<String>,versions:BTreeSet<String>)->Result<()> {
+                check(self.root_names.is_none() && self.version_names.is_none(),"archived-names-once")?;
+                archived_names_memory(&root,&versions)?;self.root_names=Some(root);self.version_names=Some(versions);Ok(())
+            }
+            // Called only after the actual joined successful writer, exact
+            // current State reproduction, producer pair + capsule readback.
+            // Apply only the closed action's known additions to SOURCE-derived
+            // original expected sets, never adopt observed foreign root names.
+            pub(super) fn successful_names(&mut self,book:&mut Install,action:ActionData,intent:&IntentData,
+                previous:Option<&StateData>,selected:&ReleaseSetData,state:&StateData,input:&worker::ReinstallInputRead<'_>)->Result<()> {
+                check(!self.success_names && state.invocation_data()==intent.invocation_data()
+                    && state.current_data().release_data()==selected.current_data(),"archived-success-names-once")?;
+                let root=self.root_names.as_mut().ok_or("archived-initial-names")?;
+                let versions=self.version_names.as_mut().ok_or("archived-initial-names")?;
+                // Fixed upper bound before additions (including BTree growth),
+                // then real capacities checked again before any finality claim.
+                let used=root.len().checked_add(versions.len()).and_then(|n|n.checked_add(10))
+                    .and_then(|n|n.checked_mul(1280)).ok_or("archived-names-memory")?;
+                check(used<=ARCHIVED_NAMES_LIMIT,"archived-names-memory")?;
+                root.insert(transaction::STATE_NAME.to_owned());root.insert(paths::APP_NAME.to_owned());
+                root.insert(data(transaction::intent_name_data(intent.invocation_data()))?);
+                root.insert(data(transaction::capsule_name_data(intent.invocation_data()))?);
+                if action!=ActionData::SamePackageNoop{root.insert(format!(".install-{}",intent.invocation_data()));}
+                if let Some(old)=previous{root.insert(data(transaction::archived_state_name_data(old.invocation_data()))?);}
+                if action==ActionData::Update{root.insert(data(transaction::retained_app_name_data(intent.invocation_data()))?);}
+                let pair=control_names(selected,selected.current_data().binding_data().release)?;
+                root.insert(pair.0);root.insert(pair.1);versions.insert(selected.current_data().binding_data().release.to_owned());
+                archived_names_memory(root,versions)?;
+                exact_roster(book,self.root,root)?;
+                let version_root=book.open(Some(self.root),"versions",true)?;book.protected(version_root,true,Some(0o755))?;
+                exact_roster(book,version_root,versions)?;
+                let _=audit_generation(book,self.root,version_root,&state.current_data(),false,false)?;
+                book.forward_close(version_root,"archived-final-versions-close")?;
+                let mut evidence=0;stage_roster_intent(book,self.root,intent,&mut evidence)?;
+                self.post(book,input)?;self.state_sha=Some(worker::removal_hex_data(state.digest_data())?);
+                self.invocation=Some(worker::removal_hex_data(intent.invocation_data())?);self.success_names=true;book.clock()
+            }
+            pub(super) fn final_names_post(&self,book:&mut Install,selected:&ReleaseSetData,input:&worker::ReinstallInputRead<'_>)->Result<()> {
+                check(self.success_names,"archived-success-names-required")?;
+                exact_roster(book,self.root,self.root_names.as_ref().ok_or("archived-initial-names")?)?;
+                let versions=book.open(Some(self.root),"versions",true)?;book.protected(versions,true,Some(0o755))?;
+                exact_roster(book,versions,self.version_names.as_ref().ok_or("archived-initial-names")?)?;
+                let (reader,raw)=metadata_original(book,self.root,transaction::STATE_NAME,transaction::STATE_LIMIT)?;
+                check(Some(<[u8;32]>::from(Sha256::digest(&raw)))==self.state_sha,"archived-final-state-changed")?;
+                let state=data(StateData::parse_data(&raw,selected))?;
+                check(Some(worker::removal_hex_data(state.invocation_data())?)==self.invocation
+                    && state.current_data().release_data()==selected.current_data(),"archived-final-state-binding")?;
+                let _=audit_generation(book,self.root,versions,&state.current_data(),false,false)?;
+                held_bytes(book,reader,&raw)?;book.forward_close(reader,"archived-final-state-close")?;
+                book.forward_close(versions,"archived-final-versions-close")?;self.post(book,input)
+            }
+        }
+        impl Observed {
+            pub(super) fn check_archived_invocation(&self,invocation:&str,request:&str)->Result<()> {
+                let Some(archives)=&self.archives else{return Ok(());};
+                let bytes=self.intent_bytes(invocation,request)?;
+                let intent=data(IntentData::parse_data(&bytes,&self.selected))?;
+                let census=archives.census.as_ref().ok_or("archived-census-pending")?;
+                census.install_invocation_union_data(self.history.iter().flat_map(|h|
+                    h.originals.values().chain(std::iter::once(&h.current))).map(|r|&r.intent),Some(&intent))?;
+                Ok(())
+            }
         }
         pub(super) fn observe(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
             pending_intent: Option<&str>) -> Result<Observed> {
@@ -5310,7 +7625,8 @@ mod installer {
             exclusion.post(book,source)?; old.post(book)?;
             begin_removal_archive_census(book,source.root_original(),true)?;
             let RemovalObserved { inner,inventory_original,record_original,record_bytes }=old;
-            let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls }=inner;
+            let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls,archives }=inner;
+            check(archives.is_none(),"removal-current-archive-context")?;
             check(action==ActionData::SamePackageNoop && intent.is_none() && intent_original.is_none(),"removal-current-only")?;
             let history=history.ok_or("removal-current-history")?;
             let controls=controls.ok_or("removal-current-controls")?;
@@ -5363,6 +7679,10 @@ mod installer {
         }
         fn observe_admitted(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
             pending_intent: Option<&str>) -> Result<Observed> {
+            observe_admitted_archives(book,prepared,selected,pending_intent,None,None)
+        }
+        fn observe_admitted_archives(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
+            pending_intent: Option<&str>,mut archives:Option<InstallArchiveObservation>,archive_input:Option<&worker::ArchivedInputOriginal<'_>>) -> Result<Observed> {
             let root = prepared.destination; let versions = prepared.versions;
             let history = match book.named(Some(root), transaction::STATE_NAME) {
                 Err(Errno::ENOENT) => None,
@@ -5424,9 +7744,20 @@ mod installer {
                     invocation != h.current.state.invocation_data() && !h.originals.contains_key(invocation)), "maintenance-invocation-reused")?;
                 root_names.insert(data(transaction::intent_name_data(invocation))?);
             }
-            removal_archive_root_names(book,root,&mut root_names)?;
+            if let Some(archives)=archives.as_mut(){
+                let input=archive_input.ok_or("archived-input-required")?.read(book,&prepared,&selected)?;
+                archives.root_names(book,root,&mut root_names,selected.current_data().binding_data().inventory_sha256,&input)?;}
+            else{removal_archive_root_names(book,root,&mut root_names)?;}
             exact_roster(book, root, &root_names)?; exact_roster(book, versions, &version_names)?;
+            if let Some(archives)=archives.as_mut(){archives.capture_names(root_names,version_names)?;}
+            let archive_index=if archives.is_some(){
+                let quote=worker::reinstall_index_quote_data(&prepared.inventory)?;
+                check(removal_effective_control_bytes(book)?.checked_add(quote.2 as u64).is_some_and(|n|n<=16*1024*1024),
+                    "archived-observer-index-memory")?;Some(quote)
+            }else{None};
             let incoming = prepared.inventory.index()?;
+            if let Some((files,dirs,_))=archive_index{check(incoming.files.len()==files && incoming.directories.len()==dirs,
+                "archived-observer-index-count")?;}
             let copy_app_only = action == ActionData::RestoreFixedApp;
             let mut incoming_cost = GenerationCostData { files:0, bytes:0 };
             if action != ActionData::SamePackageNoop {
@@ -5477,7 +7808,7 @@ mod installer {
                 book.removal_observation_control=Some(control_bound);
                 book.removal_observation_reserved=book.removal_control_reserved;
             }
-            let prior_archive_bytes=removal_archive_storage_bytes(book)?;
+            let prior_archive_bytes=match archives.as_ref(){Some(archives)=>archives.storage()?,None=>removal_archive_storage_bytes(book)?};
             let complete_storage=budget.payload_totals_data().1.checked_add(planned_evidence)
                 .and_then(|n|n.checked_add(costs.len() as u64*transaction::PRODUCER_CONTROL_LIMIT as u64))
                 .and_then(|n|n.checked_add(prior_archive_bytes))
@@ -5486,7 +7817,7 @@ mod installer {
                 check(!capture.complete && !capture.failed && capture.quote.is_none(),"removal-snapshot-quote-once")?;
                 capture.quote=Some((control_bound,complete_storage));
             }
-            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls })
+            Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls,archives })
         }
         impl Observed {
             pub(super) fn controls_post(&self, book: &Install) -> Result<()> {
@@ -5528,6 +7859,7 @@ mod installer {
                 data(IntentData::encode_data(invocation, request_id, self.action, self.previous(), &self.selected))
             }
             pub(super) fn create_intent(&mut self, book: &mut Install, invocation: &str, request_id: &str) -> Result<()> {
+                self.check_archived_invocation(invocation,request_id)?;
                 check(self.intent.is_none() && self.intent_original.is_none(), "maintenance-intent-once")?;
                 for name in [data(transaction::intent_name_data(invocation))?, data(transaction::capsule_name_data(invocation))?,
                     data(transaction::archived_state_name_data(invocation))?, data(transaction::retained_app_name_data(invocation))?,
@@ -5550,6 +7882,7 @@ mod installer {
                 self.intent = Some(data(IntentData::parse_data(&bytes, &self.selected))?); Ok(())
             }
             pub(super) fn read_intent(&mut self, book: &mut Install, invocation: &str, request_id: &str) -> Result<()> {
+                self.check_archived_invocation(invocation,request_id)?;
                 check(self.intent.is_none() && self.intent_original.is_none(), "maintenance-intent-once")?;
                 let (original, bytes) = metadata_original(book, self.prepared.destination,
                     &data(transaction::intent_name_data(invocation))?, transaction::INTENT_LIMIT)?;
@@ -6092,6 +8425,40 @@ mod installer {
             pub(super) fn package_sha256_data(&self) -> &str { &self.package_sha256 }
             pub(super) fn request_id_data(&self) -> Option<&str> { self.requested_id.as_deref() }
         }
+        // Fixed Install-only private handoff of the SAME retained originals.
+        impl Input {
+            pub(super) fn private_path_data(&self,book:&Install)->Result<String> {
+                check(self.purpose==InputPurpose::Install,"archived-input-purpose")?;self.post(book)?;
+                let mut path=String::new();
+                for held in self.held.iter().filter(|h|h.directory) {
+                    let original=book.originals.get(held.original).ok_or("archived-input-chain")?;
+                    if original.parent.is_none(){check(original.name=="/" && path.is_empty(),"archived-input-root")?;}
+                    else{path.push('/');path.push_str(&original.name);}
+                }
+                path.push('/');path.push_str(&book.originals.get(self.package).ok_or("archived-input-package")?.name);
+                source_name(&path)?;check(path.capacity()<=8192,"archived-input-path-memory")?;self.post(book)?;Ok(path)
+            }
+            pub(super) fn private_binding_data(&self,book:&Install)->Result<[u8;32]> {
+                check(self.purpose==InputPurpose::Install && !self.held.is_empty() && self.held.len()<=35,
+                    "archived-input-purpose")?;self.post(book)?;
+                let mut digest=Sha256::new();digest.update(b"MRK-ARCHIVED-INSTALL-INPUT-1\0");
+                digest.update((self.held.len() as u64).to_be_bytes());
+                for held in &self.held {
+                    let original=book.originals.get(held.original).ok_or("archived-input-original")?;
+                    digest.update([u8::from(held.directory),u8::from(held.readonly)]);
+                    digest.update((original.name.len() as u64).to_be_bytes());digest.update(original.name.as_bytes());
+                    let flags=stat::fstat(book.fd(held.original)?).map_err(|_|"archived-input-stat")?.st_flags;
+                    worker::archived_identity_digest(&mut digest,book.identity(held.original)?,flags);
+                }
+                for raw in [&self.package_sha256,&self.descriptor_sha256,&self.signature_sha256] {
+                    let bytes: [u8;32]=worker::removal_hex_data(raw)?;digest.update(bytes);
+                }
+                self.post(book)?;Ok(digest.finalize().into())
+            }
+            pub(super) fn private_path_originals_data(path:&str)->Result<usize> {
+                let (_,parts)=source_name(path)?;parts.len().checked_add(4).filter(|n|*n<=35).ok_or("archived-input-original-bound")
+            }
+        }
         #[cfg(test)]
         pub(super) fn fixed_source_data_checks() {
             let local=MntFlags::MNT_LOCAL;let readonly=MntFlags::MNT_RDONLY;
@@ -6155,7 +8522,7 @@ mod installer {
         const TOTAL: u64 = 120 * SECOND;
         const SETTLEMENT: u64 = 10 * SECOND;
         const ROLE: &str = "--mrk-installer-private-writer-v2";
-        const INIT_LIMIT: usize = 16 * 1024;
+        pub(super) const INIT_LIMIT: usize = 16 * 1024;
         const CONTROL_LIMIT: usize = 2 * 1024;
         const RESULT_LIMIT: usize = 64 * 1024;
         const SELF_LIMIT: u64 = 64 * 1024 * 1024;
@@ -6239,7 +8606,7 @@ mod installer {
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
-                    removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
+                    removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
@@ -6788,7 +9155,7 @@ mod installer {
             }
             Decision::Proceed
         }
-        fn producer_policy_matches_data(policy: &mobile_release_desktop::macos_install_producer::SigningPolicyData,
+        pub(super) fn producer_policy_matches_data(policy: &mobile_release_desktop::macos_install_producer::SigningPolicyData,
             team: &[u8;10], sha1: &[u8;20], sha256: &[u8;32]) -> bool {
             let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
             policy.team_identifier_data().as_bytes() == team
@@ -9442,8 +11809,14 @@ mod installer {
         // never RemovalResumeReady or an archived success. This holder is put
         // in Parent before either old-signature native call can borrow raw4.
         const REINSTALL_RAW:usize=1024*1024;
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        enum ReinstallArchivePurpose { RehomeRemoved, PreserveHistorical }
+        impl ReinstallArchivePurpose {
+            fn old_membership_data(self,member:bool)->bool{self==Self::PreserveHistorical || member}
+            fn may_rehome_data(self)->bool{self==Self::RehomeRemoved}
+        }
         pub(super) struct ReinstallAdmission {
-            root:usize,genesis:Option<RemovalResumeGenesis>,
+            purpose:ReinstallArchivePurpose,root:usize,genesis:Option<RemovalResumeGenesis>,
             remove:native::install_producer::RemovalProducerVerifier,
             installed:native::install_producer::ProducerVerifier,
             descriptor:Option<mobile_release_desktop::macos_install_producer::ProducerData>,
@@ -9503,7 +11876,7 @@ mod installer {
             Decision::Proceed
         }
         impl ReinstallAdmission {
-            fn new(book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput,request:&str,nonce:&str)->Result<Self> {
+            fn new(book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput,request:&str,nonce:&str,purpose:ReinstallArchivePurpose)->Result<Self> {
                 producer.authenticated_post(book,source,true)?;let root=prepared.destination;
                 let incoming_memory=reinstall_input_memory(prepared)?;
                 check(cfg!(feature="macos-installed-installer") && !cfg!(feature="macos-installed-remover")
@@ -9528,12 +11901,12 @@ mod installer {
                 check(book.named(Some(root),paths::REGISTRATION_GATE_NAME).is_ok()
                     && book.named(Some(root),paths::MAINTENANCE_GATE_NAME).is_ok(),"reinstall-existing-gates")?;
                 book.registration_before_maintenance(root)?;book.maintenance_gate(root)?;reinstall_exclusion(book,root)?;
-                Ok(Self{root,genesis:None,remove:native::install_producer::RemovalProducerVerifier::new(),
+                Ok(Self{purpose,root,genesis:None,remove:native::install_producer::RemovalProducerVerifier::new(),
                     installed:native::install_producer::ProducerVerifier::new(),descriptor:None,removal:None,
                     first:None,verified:false,effects:ReinstallEffects::new(),
                     request:request.to_owned(),nonce:nonce.to_owned()})
             }
-            fn discover(&mut self,book:&mut Install,source:&Source,producer:&ProducerAdmission)->Result<()> {
+            fn discover(&mut self,book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput)->Result<()> {
                 check(self.genesis.is_none() && !self.verified,"reinstall-discovery-once")?;
                 reinstall_source_post(book,source,producer,self.root,None)?;
                 let roster=maintenance::removal_root_roster(book,self.root)?;
@@ -9542,7 +11915,8 @@ mod installer {
                 let wanted:BTreeSet<String>=roster.into_iter().filter_map(|(name,_)|
                     if removal_archive_name_data(&name){None}else{Some(name)}).collect();
                 check(wanted.len()<=286,"reinstall-discovery-bound")?;
-                let census=maintenance::read_removal_archive_census(book,self.root,&wanted)?;
+                let input=ReinstallInputRead::parent(book,source,producer,self.root,prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
+                let census=maintenance::read_removal_archive_census_with_retries(book,self.root,&wanted,&input)?;
                 drop(wanted);
                 let tip_index=reinstall_lineage(book,self.root,&census)?;
                 let genesis_index=census.genesis_index_data(tip_index).ok_or("reinstall-genesis")?;
@@ -9614,7 +11988,8 @@ mod installer {
                 check(producer_policy_matches_data(descriptor.signing_policy_data(),signer.team_data(),signer.leaf_sha1_data(),
                     signer.leaf_sha256_data()),"reinstall-old-source-policy")?;
                 let incoming=producer.descriptor.as_ref().ok_or("reinstall-new-producer")?.release_set_data();
-                check(incoming.contains_data(descriptor.release_set_data().current_data()),"reinstall-unrecognized-old-current")?;
+                check(self.purpose.old_membership_data(incoming.contains_data(descriptor.release_set_data().current_data())),
+                    "reinstall-unrecognized-old-current")?;
                 genesis.content_post(book)?;producer.authenticated_post(book,source,true)?;
                 check(self.first.is_none() && self.remove.settled() && self.installed.settled(),"reinstall-native-finality")?;
                 self.descriptor=Some(descriptor);self.removal=Some(removal);self.verified=true;self.post(book,source,producer)
@@ -9727,15 +12102,23 @@ mod installer {
             // One preeffect reference POST + final recensus + final POST. Each
             // may acquire the now-complete child: 2 genesis originals+2D+F.
             let child=dirs.checked_mul(2)?.checked_add(files)?.checked_add(2)?;
-            used.checked_add(dirs.checked_mul(6)?)?.checked_add(tops.checked_mul(7)?)?
+            let before_writer=used.checked_add(dirs.checked_mul(6)?)?.checked_add(tops.checked_mul(7)?)?
                 .checked_add(files.checked_mul(3)?)?.checked_add(16)?
-                .checked_add(old_post.checked_mul(2)?)?.checked_add(old_scan)?
-                .checked_add(child.checked_mul(3)?)?
-                // Same Parent handoff/strict incoming observation reserve, not
-                // a reset of its Original vector or a worker's separate book.
-                .checked_add(fresh_files.checked_mul(2)?)?.checked_add(fresh_dirs.checked_mul(4)?)?.checked_add(256)
+
+                // Two further existing complete-prefix audits can each read
+                // selected-tip retries. Whole old POST safely covers each;
+                // the initial audit already consumed rows BEFORE this quote.
+                .checked_add(old_post.checked_mul(4)?)?.checked_add(old_scan)?
+                .checked_add(child.checked_mul(3)?)?;
+            // The future census contains the complete child even if the
+            // original census had none or a partial one. Add its entire cost;
+            // no subtraction/credit for previously observed child originals.
+            // The SAME actual writer formula follows the full rehome tail,
+            // before the first mkdir/rename and in the same cumulative Book.
+            archived_writer_originals_data(before_writer,fresh_files,fresh_dirs,
+                old_scan.checked_add(child)?,old_post.checked_add(child)?)
         }
-        fn reinstall_index_quote_data(inventory:&Inventory)->Result<(usize,usize,usize)> {
+        pub(super) fn reinstall_index_quote_data(inventory:&Inventory)->Result<(usize,usize,usize)> {
             // Sorted paths make every directory prefix contiguous: count each
             // once without a second index/allocation before the existing one.
             let mut previous="";let mut directories=2usize;let mut bytes=10usize;
@@ -9762,17 +12145,20 @@ mod installer {
             Ok((inventory.files.len(),directories,peak))
         }
         fn reinstall_input_memory(prepared:&MaintenanceRootInput)->Result<usize> {
-            let initial=prepared.inventory.files.capacity().checked_mul(std::mem::size_of::<Entry>())
+            reinstall_inventory_memory(&prepared.inventory,&prepared.inventory_bytes)
+        }
+        fn reinstall_inventory_memory(inventory:&Inventory,raw:&Vec<u8>)->Result<usize> {
+            let initial=inventory.files.capacity().checked_mul(std::mem::size_of::<Entry>())
                 .and_then(|n|n.checked_add(std::mem::size_of::<MaintenanceRootInput>()))
-                .and_then(|n|n.checked_add(prepared.inventory_bytes.capacity()))
-                .and_then(|n|n.checked_add(prepared.inventory.release.capacity()))
-                .and_then(|n|n.checked_add(prepared.inventory.runtime_manifest_sha256.capacity())).ok_or("reinstall-incoming-memory")?;
-            let owned=prepared.inventory.files.iter().try_fold(initial,|n,row|n.checked_add(row.path.capacity())
+                .and_then(|n|n.checked_add(raw.capacity()))
+                .and_then(|n|n.checked_add(inventory.release.capacity()))
+                .and_then(|n|n.checked_add(inventory.runtime_manifest_sha256.capacity())).ok_or("reinstall-incoming-memory")?;
+            let owned=inventory.files.iter().try_fold(initial,|n,row|n.checked_add(row.path.capacity())
                 .and_then(|n|n.checked_add(row.sha256.capacity())).ok_or("reinstall-incoming-memory"))?;
             Ok(owned)
         }
         fn reinstall_quote(book:&mut Install,prepared:&MaintenanceRootInput,genesis:&RemovalResumeGenesis,
-            plan:&maintenance::RehomeMoveSetData<'_>)->Result<()> {
+            plan:&maintenance::RehomeMoveSetData<'_>,input:&ReinstallInputRead<'_>)->Result<()> {
             // Bound the existing index builder before allocating it, including
             // folded-collision copies. Actual source path/count caps unchanged.
             let (file_count,dir_count,index_peak)=reinstall_index_quote_data(&prepared.inventory)?;
@@ -9790,26 +12176,22 @@ mod installer {
             check(index.files.len()==file_count && index.directories.len()==dir_count,"reinstall-index-quote")?;
             // Previous child bytes are ALREADY in the physical census quote.
             // Only the current-root suffix is added; moving it never copies it.
-            let archived=genesis.census.rows()[genesis.tip_index].rehome_data().map_or(0,|r|r.storage_bytes_data());
+            let archived=genesis.census.rows()[genesis.tip_index].rehome_data().map_or(0,|r|r.counts_data().2);
             let old_root=plan.bytes_data().checked_sub(archived).ok_or("reinstall-storage-quote")?;
-            let fresh_controls=(transaction::INTENT_LIMIT+transaction::CAPSULE_LIMIT+transaction::STATE_LIMIT
-                +installation_record::RECORD_LIMIT+65536+512) as u64;
-            check(genesis.census.storage_bytes().checked_add(old_root)
-                .and_then(|n|n.checked_add(index.payload_bytes)).and_then(|n|n.checked_add(prepared.inventory_bytes.len() as u64))
-                .and_then(|n|n.checked_add(fresh_controls+paths::MAINTENANCE_GATE_BYTES.len() as u64
-                    +paths::REGISTRATION_GATE_BYTES.len() as u64)).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT),
-                "reinstall-storage-budget")?;
+            let (producer,signature)=input.incoming_controls(book)?;
+            maintenance::partial_fresh_storage_data(genesis.census.storage_bytes(),old_root,index.payload_bytes,
+                prepared.inventory_bytes.len(),producer.len(),signature.len())?;
             check(plan.owned_bytes_data()?<=256*1024,"reinstall-plan-memory")?;book.clock()
         }
         fn reinstall_full_audit(book:&mut Install,source:&Source,producer:&ProducerAdmission,root:usize,
             genesis:&RemovalResumeGenesis,child:Option<usize>,selected:&ReleaseSetData,state:&transaction::StateData,
-            plan:&maintenance::RehomeMoveSetData<'_>,prefix:usize,fresh:bool)->Result<()> {
+            plan:&maintenance::RehomeMoveSetData<'_>,prefix:usize,fresh:bool,input:&ReinstallInputRead<'_>)->Result<()> {
             reinstall_source_post(book,source,producer,root,Some(genesis))?;
             let incoming=producer.descriptor.as_ref().ok_or("reinstall-new-producer")?.release_set_data();
             check(selected.encode_data().map_err(|_|"reinstall-old-selected")?==genesis.data.selected_bytes_data(),"reinstall-old-selected")?;
             reinstall_generation_absence(book,root,genesis,incoming,state)?;
             if let Some(child)=child {
-                maintenance::audit_rehome_controls(book,child,plan,maintenance::RehomeAuditSideData::ArchivedPrefix(prefix))?;
+                maintenance::audit_rehome_controls_with_retries(book,child,plan,maintenance::RehomeAuditSideData::ArchivedPrefix(prefix),input,&genesis.census)?;
             }else{check(prefix==0,"reinstall-missing-child")?;}
             maintenance::audit_rehome_controls(book,root,plan,maintenance::RehomeAuditSideData::CurrentSuffix(prefix))?;
             if fresh {
@@ -9823,10 +12205,10 @@ mod installer {
         struct ReinstallEffects {
             started:bool,old_controls_observed:bool,child:Option<usize>,progress:Option<maintenance::RehomeProgressData>,
             moved:Option<usize>,created_child:bool,complete:bool,
-            final_census:Option<maintenance::RemovalArchiveCensus>,fresh_versions:bool,
+            final_census:Option<maintenance::RemovalArchiveCensus>,fresh_versions:bool,partial:Option<maintenance::PartialFreshPreservation>,
         }
         impl ReinstallEffects {fn new()->Self{Self{started:false,old_controls_observed:false,child:None,progress:None,moved:None,
-            created_child:false,complete:false,final_census:None,fresh_versions:false}}}
+            created_child:false,complete:false,final_census:None,fresh_versions:false,partial:None}}}
         fn reinstall_classification(book:&Install,source:&Source,producer:&ProducerAdmission,root:usize,
             genesis:&RemovalResumeGenesis,request:&str,nonce:&str)->Result<()> {
             use mobile_release_desktop::macos_remove_record as record;
@@ -9846,14 +12228,14 @@ mod installer {
             check(result==record::ReinstallClassificationData::NewInstallAfterRemovalObservation,"reinstall-removal-incomplete")
         }
         fn reinstall_census_after(book:&mut Install,root:usize,genesis:&RemovalResumeGenesis,
-            effects:&ReinstallEffects,plan:&maintenance::RehomeMoveSetData<'_>)->Result<maintenance::RemovalArchiveCensus> {
+            effects:&ReinstallEffects,plan:&maintenance::RehomeMoveSetData<'_>,input:&ReinstallInputRead<'_>)->Result<maintenance::RemovalArchiveCensus> {
             let child=effects.child.ok_or("reinstall-child")?;
-            let expected=maintenance::audit_rehome_controls(book,child,plan,
-                maintenance::RehomeAuditSideData::ArchivedPrefix(plan.moves_data().len()))?.into_reference_data(plan)?;
+            let expected=maintenance::audit_rehome_controls_with_retries(book,child,plan,
+                maintenance::RehomeAuditSideData::ArchivedPrefix(plan.moves_data().len()),input,&genesis.census)?.into_reference_data(plan)?;
             let mut wanted:BTreeSet<String>=[paths::REGISTRATION_GATE_NAME,paths::MAINTENANCE_GATE_NAME]
                 .into_iter().map(str::to_owned).collect();
             if effects.fresh_versions{wanted.insert("versions".to_owned());}
-            let census=maintenance::read_removal_archive_census(book,root,&wanted)?;
+            let census=maintenance::read_removal_archive_census_with_retries(book,root,&wanted,input)?;
             check(census.rows().len()==genesis.census.rows().len(),"reinstall-census-count")?;
             for (index,(old,new)) in genesis.census.rows().iter().zip(census.rows()).enumerate() {
                 check(old.name()==new.name() && old.flags()==new.flags() && old.app_data()==new.app_data()
@@ -9870,12 +12252,13 @@ mod installer {
                         (None,None)=>true,(Some(a),Some(b))=>a.matches_data(b),_=>false},"reinstall-other-archive-changed")?;
                 }
             }
-            maintenance::post_removal_archive_references(book,&census)?;Ok(census)
+            maintenance::post_removal_archive_references_with_retries(book,&census,input)?;Ok(census)
         }
         fn reinstall_run_plan(book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput,
             genesis:&RemovalResumeGenesis,request:&str,nonce:&str,effects:&mut ReinstallEffects,
             selected:&ReleaseSetData,state:&transaction::StateData,plan:&maintenance::RehomeMoveSetData<'_>)->Result<()> {
             let root=prepared.destination;reinstall_source_post(book,source,producer,root,Some(genesis))?;
+            let input=ReinstallInputRead::parent(book,source,producer,root,prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
             match book.named(Some(genesis.tip_archive),maintenance::REHOME_CHILD) {
                 Ok(_)=>{
                     let child=book.open(Some(genesis.tip_archive),maintenance::REHOME_CHILD,true)?;
@@ -9889,12 +12272,12 @@ mod installer {
             let (sides,fresh)=reinstall_sides(book,root,effects.child,plan)?;let prefix=plan.prefix_data(&sides)?;
             effects.progress=Some(maintenance::RehomeProgressData::from_observation_data(plan.moves_data().len(),&sides)?);
             effects.fresh_versions=fresh;drop(sides);
-            reinstall_full_audit(book,source,producer,root,genesis,effects.child,selected,state,plan,prefix,fresh)?;
+            reinstall_full_audit(book,source,producer,root,genesis,effects.child,selected,state,plan,prefix,fresh,&input)?;
             reinstall_classification(book,source,producer,root,genesis,request,nonce)?;
             // Before first new mkdir/rename, reserve ALL subsequent originals,
             // source+index overlap and fresh-install headroom, not only liveFDs.
-            reinstall_quote(book,prepared,genesis,plan)?;
-            maintenance::post_removal_archive_references(book,&genesis.census)?;
+            reinstall_quote(book,prepared,genesis,plan,&input)?;
+            maintenance::post_removal_archive_references_with_retries(book,&genesis.census,&input)?;
             if effects.child.is_none() {
                 let before=RemovalPublication::parent_before(book,genesis.tip_archive)?;
                 let child=book.directory(genesis.tip_archive,maintenance::REHOME_CHILD,true,0o700)?;
@@ -9944,10 +12327,10 @@ mod installer {
                 })();
                 effects.progress.as_mut().ok_or("reinstall-progress")?.post_data(post)?;
             }
-            reinstall_full_audit(book,source,producer,root,genesis,Some(child),selected,state,plan,plan.moves_data().len(),fresh)?;
+            reinstall_full_audit(book,source,producer,root,genesis,Some(child),selected,state,plan,plan.moves_data().len(),fresh,&input)?;
             // Extra complete-child audit inside census_after is explicitly part
             // of the reserved three child-audit terms, not free8P shorthand.
-            let census=reinstall_census_after(book,root,genesis,effects,plan)?;
+            let census=reinstall_census_after(book,root,genesis,effects,plan,&input)?;
             check(census.owned_bytes()?<=128*1024,"reinstall-final-census-memory")?;
             effects.final_census=Some(census);
             reinstall_classification(book,source,producer,root,genesis,request,nonce)?;
@@ -9958,7 +12341,8 @@ mod installer {
         }
         impl ReinstallAdmission {
             fn run(&mut self,book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput)->Result<()> {
-                self.post(book,source,producer)?;check(!self.effects.started,"reinstall-effects-once")?;
+                self.post(book,source,producer)?;
+                check(self.purpose.may_rehome_data() && !self.effects.started,"reinstall-effects-once")?;
                 self.effects.started=true;
                 let Self{genesis,effects,request,nonce,first,..}=self;
                 let genesis=genesis.as_ref().ok_or("reinstall-genesis")?;
@@ -9978,7 +12362,9 @@ mod installer {
                 self.admission.post(book,self.source,self.producer)?;
                 let effect=&self.admission.effects;
                 check(effect.complete && effect.moved.is_none() && effect.final_census.is_some()
-                    && effect.progress.as_ref().is_some_and(|p|p.first_failure_data().is_none())
+                    && (effect.progress.as_ref().is_some_and(|p|p.first_failure_data().is_none())
+                        || effect.old_controls_observed && effect.partial.as_ref().is_some_and(|p|p.returned_settled_data()))
+                    && effect.final_census.as_ref().is_some_and(|c|c.retries_complete_data())
                     && self.incoming.destination==self.admission.root && self.incoming.input==self.source.input,
                     "reinstall-current-observation-required")?;
                 let child=effect.child.ok_or("reinstall-child")?;removal_resume_stat(book,child,true,Some(0o700))?;
@@ -10013,7 +12399,7 @@ mod installer {
             // Only the archived old skeleton is observed here. Current root
             // may contain a new partial transaction; this path does not label
             // it absent, authorize a move, or hand off GO to any worker.
-            fn observe_old_controls(&mut self,book:&mut Install,source:&Source,producer:&ProducerAdmission)->Result<()> {
+            fn observe_old_controls(&mut self,book:&mut Install,source:&Source,producer:&ProducerAdmission,prepared:&MaintenanceRootInput)->Result<()> {
                 self.post(book,source,producer)?;
                 check(!self.effects.started && !self.effects.old_controls_observed,"reinstall-old-observation-once")?;
                 let genesis=self.genesis.as_ref().ok_or("reinstall-genesis")?;
@@ -10026,12 +12412,14 @@ mod installer {
                     let incoming=producer.descriptor.as_ref().ok_or("reinstall-new-producer")?.release_set_data();
                     check(selected.encode_data().map_err(|_|"reinstall-old-selection")?==genesis.data.selected_bytes_data(),"reinstall-old-selection")?;
                     for generation in std::iter::once(state.current_data()).chain(state.retained_data()) {
-                        check(incoming.contains_data(generation.release_data()),"reinstall-unrecognized-old-generation")?;
+                        check(self.purpose.old_membership_data(incoming.contains_data(generation.release_data())),
+                            "reinstall-unrecognized-old-generation")?;
                     }
-                    let actual=maintenance::audit_rehome_controls(book,child,plan,
-                        maintenance::RehomeAuditSideData::ArchivedPrefix(plan.moves_data().len()))?.into_reference_data(plan)?;
+                    let input=ReinstallInputRead::parent(book,source,producer,self.root,prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
+                    let actual=maintenance::audit_rehome_controls_with_retries(book,child,plan,
+                        maintenance::RehomeAuditSideData::ArchivedPrefix(plan.moves_data().len()),&input,&genesis.census)?.into_reference_data(plan)?;
                     check(reference.matches_data(&actual),"reinstall-old-archived-skeleton")?;
-                    maintenance::post_removal_archive_references(book,&genesis.census)?;
+                    maintenance::post_removal_archive_references_with_retries(book,&genesis.census,&input)?;
                     reinstall_source_post(book,source,producer,self.root,Some(genesis))
                 })?;
                 self.effects.old_controls_observed=true;self.post(book,source,producer)
@@ -10079,6 +12467,340 @@ mod installer {
                 Ok(self.admission.effects.final_census.as_ref().unwrap_or(&genesis.census))
             }
         }
+        // Fixed private comparison DATA. Only actual original-parent admission
+        // and the existing inherited-M/Ready/GO mechanism convey authority.
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        pub(super) struct ArchivedInstallData {
+            genesis:[u8;16],tip:[u8;16],genesis_sha:[u8;32],tip_sha:[u8;32],
+            inventory_sha:[u8;32],census_sha:[u8;32],count:u8,
+        }
+        fn archived_hex_data(bytes:&[u8])->String {bytes.iter().map(|b|format!("{b:02x}")).collect()}
+        pub(super) fn archived_identity_digest(digest:&mut Sha256,id:Identity,flags:u32) {
+            digest.update(id.dev.to_be_bytes());digest.update(id.ino.to_be_bytes());digest.update(id.mode.to_be_bytes());
+            digest.update(id.uid.to_be_bytes());digest.update(id.gid.to_be_bytes());digest.update(id.links.to_be_bytes());
+            digest.update(id.size.to_be_bytes());digest.update(id.mtime.to_be_bytes());digest.update(id.mtime_ns.to_be_bytes());
+            digest.update(id.ctime.to_be_bytes());digest.update(id.ctime_ns.to_be_bytes());digest.update(flags.to_be_bytes());
+        }
+        fn archived_census_digest(census:&maintenance::RemovalArchiveCensus)->Result<[u8;32]> {
+            check(!census.rows().is_empty() && census.rows().len()<=64,"archived-census-count")?;
+            let mut digest=Sha256::new();digest.update(b"MRK-ARCHIVED-INSTALL-CENSUS-1\0");
+            digest.update((census.rows().len() as u64).to_be_bytes());
+            digest.update(census.install_invocation_commitment_data());let mut previous="";
+            for row in census.rows() {
+                check(removal_archive_name_data(row.name()) && row.name()>previous,"archived-census-order")?;
+                previous=row.name();digest.update((row.name().len() as u64).to_be_bytes());digest.update(row.name().as_bytes());
+                archived_identity_digest(&mut digest,row.identity(),row.flags());
+                for file in row.files(){match file {None=>digest.update([0]),Some(file)=>{
+                    digest.update([1,file.shape_tag_data()]);archived_identity_digest(&mut digest,file.identity(),file.flags());
+                    digest.update(file.len().to_be_bytes());digest.update(file.digest());
+                }}}
+                match row.app_data(){None=>digest.update([0]),Some((id,flags))=>{
+                    digest.update([1]);archived_identity_digest(&mut digest,id,flags);
+                }}
+                match row.rehome_data(){None=>digest.update([0]),Some(reference)=>{
+                    digest.update([1]);let(id,flags)=reference.root_data();archived_identity_digest(&mut digest,id,flags);
+                    digest.update((reference.prefix_data() as u64).to_be_bytes());digest.update((reference.total_data() as u64).to_be_bytes());
+                    let(dirs,files,bytes)=reference.counts_data();digest.update((dirs as u64).to_be_bytes());
+                    digest.update((files as u64).to_be_bytes());digest.update(bytes.to_be_bytes());
+                    digest.update(reference.storage_bytes_data().to_be_bytes());digest.update(reference.digest_data());
+                    digest.update(reference.retry_commitment_data());
+                    digest.update([u8::from(reference.complete_data())]);
+                }}
+            }
+            // Deliberately excludes mutable CURRENT installed-root metadata.
+            // Every archived named original and fixed leaf is included above.
+            Ok(digest.finalize().into())
+        }
+        impl ArchivedInstallData {
+            fn from_original(genesis:&RemovalResumeGenesis,census:&maintenance::RemovalArchiveCensus,inventory:&str)->Result<Self> {
+                let row=census.rows().get(genesis.genesis_index).ok_or("archived-genesis")?;
+                let tip=census.rows().get(genesis.tip_index).ok_or("archived-tip")?;
+                let value=Self{genesis:removal_hex_data(&row.name()[8..])?,tip:removal_hex_data(&tip.name()[8..])?,
+                    genesis_sha:*genesis.data.whole_sha256_data(),tip_sha:<[u8;32]>::from(Sha256::digest(&genesis.tip_raw)),
+                    inventory_sha:removal_hex_data(inventory)?,census_sha:archived_census_digest(census)?,
+                    count:u8::try_from(census.rows().len()).map_err(|_|"archived-count")?};
+                value.matches(census,inventory)?;Ok(value)
+            }
+            pub(super) fn matches(&self,census:&maintenance::RemovalArchiveCensus,inventory:&str)->Result<()> {
+                check(self.count>0 && self.count<=64 && usize::from(self.count)==census.rows().len()
+                    && self.inventory_sha==removal_hex_data(inventory)? && self.census_sha==archived_census_digest(census)?,
+                    "archived-census-binding")?;
+                let genesis=format!(".remove-{}",archived_hex_data(&self.genesis));
+                let tip=format!(".remove-{}",archived_hex_data(&self.tip));
+                let g=census.rows().iter().position(|row|row.name()==genesis).ok_or("archived-genesis")?;
+                let t=census.rows().iter().position(|row|row.name()==tip).ok_or("archived-tip")?;
+                check(census.genesis_index_data(t)==Some(g) && census.is_tip_data(t)
+                    && census.rows()[g].files()[0].as_ref().is_some_and(|f|f.shape_tag_data()==2 && *f.digest()==self.genesis_sha)
+                    && census.rows()[t].attempt_data().is_some_and(|a|*a.raw_tip_sha256_data()==self.tip_sha)
+                    && census.rows()[t].rehome_data().is_some_and(|r|r.complete_data()),"archived-current-tip")
+            }
+            pub(super) fn data(&self)->Value {
+                json!({"schemaVersion":1,"genesis":format!(".remove-{}",archived_hex_data(&self.genesis)),
+                    "tip":format!(".remove-{}",archived_hex_data(&self.tip)),
+                    "genesisSha256":archived_hex_data(&self.genesis_sha),"tipSha256":archived_hex_data(&self.tip_sha),
+                    "inventorySha256":archived_hex_data(&self.inventory_sha),"censusSha256":archived_hex_data(&self.census_sha),
+                    "archiveCount":self.count})
+            }
+            fn parse(value:&Value)->Result<Self> {
+                object(value,&["schemaVersion","genesis","tip","genesisSha256","tipSha256","inventorySha256","censusSha256","archiveCount","input"])?;
+                archived_input_shape_data(&value["input"])?;
+                check(value["schemaVersion"]==1,"archived-init-version")?;
+                let text=|name:&str|value[name].as_str().ok_or("archived-init-string");
+                let name=|key:&str|->Result<[u8;16]>{let s=text(key)?;check(removal_archive_name_data(s),"archived-init-name")?;
+                    removal_hex_data(&s[8..])};
+                let count=u8::try_from(value["archiveCount"].as_u64().ok_or("archived-init-count")?).map_err(|_|"archived-init-count")?;
+                check(count>0 && count<=64,"archived-init-count")?;
+                Ok(Self{genesis:name("genesis")?,tip:name("tip")?,genesis_sha:removal_hex_data(text("genesisSha256")?)?,
+                    tip_sha:removal_hex_data(text("tipSha256")?)?,inventory_sha:removal_hex_data(text("inventorySha256")?)?,
+                    census_sha:removal_hex_data(text("censusSha256")?)?,count})
+            }
+        }
+        // One containing-owner quote, shared by actual writer preparation and
+        // pre-preservation admission. Costs are consumed Original records, not
+        // merely simultaneous FDs; checked additions never renew the book.
+        fn archived_writer_originals_data(used:usize,files:usize,dirs:usize,scan:usize,post:usize)->Option<usize> {
+            used.checked_add(scan.checked_mul(2)?)?.checked_add(post.checked_mul(9)?)?
+                .checked_add(files.checked_mul(4)?)?.checked_add(dirs.checked_mul(6)?)?
+                .checked_add(512).filter(|n|*n<=24576)
+        }
+        #[derive(Clone,Copy)]
+        enum ArchivedInstallMode { RehomedFresh, CurrentState }
+        #[derive(Clone,Copy,Debug,PartialEq,Eq)]
+        enum ArchivedInstallPhase { Observed, RClosedUnderM, WorkerPending, WorkerJoined, Refused }
+        impl ArchivedInstallPhase {
+            fn r_returned_data(&mut self,closed:bool,no_fd:bool,under_m:bool)->Result<()> {
+                check(*self==Self::Observed,"archived-r-once")?;
+                *self=if closed && no_fd && under_m{Self::RClosedUnderM}else{Self::Refused};
+                check(*self==Self::RClosedUnderM,"archived-r-close")
+            }
+            fn worker_entered_data(&mut self)->Result<()> {
+                check(*self==Self::RClosedUnderM,"archived-spawn-once")?;*self=Self::WorkerPending;Ok(())
+            }
+            fn worker_joined_data(&mut self)->Result<()> {
+                check(*self==Self::WorkerPending,"archived-join-once")?;*self=Self::WorkerJoined;Ok(())
+            }
+        }
+        struct ArchivedInstallHandoff { phase:ArchivedInstallPhase,root:usize,r:usize,m:usize }
+        impl ArchivedInstallHandoff {
+            fn r_returned(&mut self,book:&Install)->Result<()> {
+                let original=book.originals.get(self.r).ok_or("archived-r-original")?;
+                self.phase.r_returned_data(original.state==State::Closed,original.fd.is_none(),book.registration.closed_under_maintenance)
+            }
+            fn post(&self,book:&Install,source:&Source,producer:&ProducerAdmission,reinstall:&ReinstallAdmission)->Result<()> {
+                check(matches!(self.phase,ArchivedInstallPhase::RClosedUnderM|ArchivedInstallPhase::WorkerPending|ArchivedInstallPhase::WorkerJoined)
+                    && self.root==reinstall.root && book.gate.parent==Some(self.root)
+                    && book.gate.participant==Some(self.m) && book.registration.participant==Some(self.r),"archived-handoff-required")?;
+                producer.authenticated_post(book,source,false)?;book.registration_ready()?;
+                check(reinstall.verified && reinstall.first.is_none() && reinstall.remove.settled() && reinstall.installed.settled()
+                    && reinstall.remove.custody().remove_signature_matched && reinstall.installed.custody().signature_matched,
+                    "archived-source-finality")?;
+                book.protected(self.root,true,Some(0o755))?;book.check_name(self.root,false)?;
+                check(stat::fstat(book.fd(self.root)?).map_err(|_|"archived-root-stat")?.st_flags==0,"archived-root-flags")?;
+                let genesis=reinstall.genesis.as_ref().ok_or("archived-genesis")?;
+                for n in [genesis.archive,genesis.tip_archive]{removal_resume_stat(book,n,true,Some(0o700))?;}
+                for (n,file) in [(genesis.snapshot,genesis.census.rows()[genesis.genesis_index].files()[0].as_ref()),
+                    (genesis.tip_original,genesis.census.rows()[genesis.tip_index].files()[genesis.census.rows()[genesis.tip_index]
+                        .attempt_data().ok_or("archived-tip")?.tip_slot_data()].as_ref())] {
+                    let file=file.ok_or("archived-control")?;removal_resume_stat(book,n,false,Some(0o444))?;
+                    check(book.identity(n)?==file.identity() && file.shape_tag_data()==2,"archived-control-original")?;
+                }
+                maintenance::held_bytes(book,genesis.tip_original,&genesis.tip_raw)?;
+                check(removal_resume_hash(book,genesis.snapshot,maintenance::REMOVAL_SNAPSHOT_LIMIT)?==*genesis.data.whole_sha256_data(),
+                    "archived-genesis-content")?;book.clock()
+            }
+        }
+        fn archived_init_shape_data(init:&Value)->Result<()> {
+            let maintenance=init.get("maintenance").is_some();let archives=init.get("archives").is_some();
+            check(!archives || maintenance,"archived-maintenance-required")?;
+            if archives{object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate",
+                "parentCommandEndpoint","parentResultEndpoint","maintenance","archives"])}
+            else if maintenance{object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate",
+                "parentCommandEndpoint","parentResultEndpoint","maintenance"])}
+            else{object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate",
+                "parentCommandEndpoint","parentResultEndpoint"])}
+        }
+        const ARCHIVED_INPUT_WORK:usize=256*1024;
+        struct ArchivedWorkerInput {
+            input:completed_package::Input,parent:u32,root:usize,binding:[u8;32],selected_sha:[u8;32],selected:ReleaseSetData,
+        }
+        fn archived_input_data(book:&Install,source:&Source,producer:&ProducerAdmission)->Result<Value> {
+            producer.authenticated_post(book,source,true)?;
+            let value=json!({"completedPath":producer.input.private_path_data(book)?,
+                "originalBindingSha256":archived_hex_data(&producer.input.private_binding_data(book)?)});
+            producer.authenticated_post(book,source,false)?;Ok(value)
+        }
+        fn archived_input_shape_data(value:&Value)->Result<(&str,[u8;32])> {
+            object(value,&["completedPath","originalBindingSha256"])?;
+            let path=value["completedPath"].as_str().ok_or("archived-input-path")?;
+            completed_package::Input::private_path_originals_data(path)?;
+            let binding=removal_hex_data(value["originalBindingSha256"].as_str().ok_or("archived-input-binding")?)?;
+            Ok((path,binding))
+        }
+        fn archived_selection_sha(selected:&ReleaseSetData)->Result<[u8;32]> {
+            let bytes=selected.encode_data().map_err(|_|"archived-selected-encoding")?;check(bytes.len()<=16*1024,"archived-selected-bound")?;
+            Ok(Sha256::digest(&bytes).into())
+        }
+        impl ArchivedWorkerInput {
+            fn open(book:&mut Install,source:&Source,root:usize,selected:&ReleaseSetData,value:&Value)->Result<Self> {
+                check(book.worker_stderr_is_gate && !book.worker_go_eof && book.gate.verified && book.gate.parent==Some(root)
+                    && !book.gate.lock_attempted && !book.gate.exclusive_acquired,"archived-worker-original-init")?;
+                book.source_post(source)?;maintenance::selected_compile(selected)?;
+                let(path,binding)=archived_input_shape_data(value)?;
+                let originals=completed_package::Input::private_path_originals_data(path)?;
+                let extra=usize::from(book.removal_peer_pending)*3;
+                check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(extra)
+                    .and_then(|n|n.checked_add(originals)).is_some_and(|n|n<96),"archived-input-live-budget")?;
+                let rows=book.originals.len().checked_add(originals).filter(|n|*n<=24576).ok_or("archived-input-original-budget")?;
+                maintenance::reserve_removal_original_storage(book,rows)?;
+                check(maintenance::removal_effective_control_bytes(book)?.checked_add(ARCHIVED_INPUT_WORK as u64)
+                    .is_some_and(|n|n<=16*1024*1024),"archived-input-control-budget")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(ARCHIVED_INPUT_WORK as u64)
+                    .ok_or("archived-input-control-budget")?;
+                let input=completed_package::Input::open(book,path)?;
+                check(input.private_path_data(book)?==path && input.private_binding_data(book)?==binding
+                    && input.package_sha256_data()==selected.current_data().binding_data().package_sha256,
+                    "archived-input-original-binding")?;
+                let peak=input.retained_bytes_data()?.checked_add(input.descriptor_data().len())
+                    .and_then(|n|n.checked_add(input.signature_data().len())).and_then(|n|n.checked_add(65536+16384))
+                    .filter(|n|*n<=ARCHIVED_INPUT_WORK).ok_or("archived-input-workspace")?;let _=peak;
+                let out=Self{input,parent:u32::try_from(unistd::getppid().as_raw()).map_err(|_|"archived-parent")?,
+                    root,binding,selected_sha:archived_selection_sha(selected)?,selected:selected.clone()};
+                out.post(book,source,selected,false)?;Ok(out)
+            }
+            fn post(&self,book:&Install,source:&Source,selected:&ReleaseSetData,content:bool)->Result<()> {
+                check(book.worker_stderr_is_gate && book.gate.verified && book.gate.parent==Some(self.root)
+                    && !book.gate.lock_attempted && !book.gate.exclusive_acquired && self.parent>1
+                    && unistd::getppid().as_raw()==self.parent as i32 && self.selected_sha==archived_selection_sha(selected)?,
+                    "archived-worker-input-current")?;
+                book.source_post(source)?;book.gate_protected(book.gate.participant.ok_or("archived-worker-m")?)?;
+                if content{self.input.content_post(book)?;}else{self.input.post(book)?;}
+                check(self.input.private_binding_data(book)?==self.binding,"archived-input-original-binding")?;book.clock()
+            }
+        }
+        #[derive(Clone,Copy,PartialEq,Eq)]
+        pub(super) enum PrefixReadRole { ParentSignature, OriginalWorkerCensus }
+        // Borrowed immutable current-input permission only; neither constructor
+        // can prove old archive signatures, current absence or payload effect.
+        #[derive(Clone,Copy)]
+        enum ReinstallInputOrigin<'a> { Parent(&'a ProducerAdmission),OriginalWorker(&'a ArchivedWorkerInput) }
+        pub(super) struct ReinstallInputRead<'a> {
+            source:&'a Source,origin:ReinstallInputOrigin<'a>,root:usize,input:usize,
+            inventory:&'a Inventory,raw:&'a[u8],selected:&'a ReleaseSetData,
+        }
+        impl<'a> ReinstallInputRead<'a> {
+            fn parent(book:&Install,source:&'a Source,producer:&'a ProducerAdmission,root:usize,input:usize,
+                inventory:&'a Inventory,raw:&'a[u8])->Result<Self> {
+                producer.authenticated_post(book,source,true)?;
+                let selected=producer.descriptor.as_ref().ok_or("reinstall-input-producer")?.release_set_data();
+                let out=Self{source,origin:ReinstallInputOrigin::Parent(producer),root,input,inventory,raw,selected};
+                out.post_source(book)?;Ok(out)
+            }
+            fn original_worker(book:&Install,source:&'a Source,backing:&'a ArchivedWorkerInput,root:usize,input:usize,
+                inventory:&'a Inventory,raw:&'a[u8],selected:&'a ReleaseSetData)->Result<Self> {
+                let out=Self{source,origin:ReinstallInputOrigin::OriginalWorker(backing),root,input,inventory,raw,selected};
+                out.post_source(book)?;Ok(out)
+            }
+            pub(super) fn post_source(&self,book:&Install)->Result<()> {
+                check(self.input==self.source.input && book.gate.parent==Some(self.root) && book.gate.verified,
+                    "reinstall-input-current")?;
+                match self.origin {
+                    ReinstallInputOrigin::Parent(producer)=>{
+                        producer.authenticated_post(book,self.source,false)?;
+                        check(book.gate.exclusive_acquired && !book.worker_stderr_is_gate,"reinstall-input-m")?;
+                        if book.registration.closed_under_maintenance {book.registration_ready()?;}else{reinstall_exclusion(book,self.root)?;}
+                    },
+                    ReinstallInputOrigin::OriginalWorker(backing)=>backing.post(book,self.source,self.selected,false)?,
+                }
+                maintenance::selected_compile(self.selected)?;book.check_name(self.input,true)?;
+                check(hash(self.raw)==self.selected.current_data().binding_data().inventory_sha256,
+                    "reinstall-input-inventory")?;book.clock()
+            }
+            pub(super) fn prefix_read_role(&self,book:&Install)->Result<PrefixReadRole>{
+                self.post_source(book)?;Ok(match self.origin{ReinstallInputOrigin::Parent(_)=>PrefixReadRole::ParentSignature,
+                    ReinstallInputOrigin::OriginalWorker(_)=>PrefixReadRole::OriginalWorkerCensus})
+            }
+            pub(super) fn prefix_source_originals(&self,book:&Install)->Result<[usize;3]>{
+                self.post_source(book)?;Ok([self.source.script,self.source.image,self.source.input])
+            }
+            pub(super) fn root_original(&self)->usize{self.root}
+            pub(super) fn new_selection(&self,book:&Install)->Result<&ReleaseSetData>{self.post_source(book)?;Ok(self.selected)}
+            pub(super) fn incoming(&self,book:&Install)->Result<(usize,&Inventory,&[u8])>{self.post_source(book)?;Ok((self.input,self.inventory,self.raw))}
+            pub(super) fn incoming_controls(&self,book:&Install)->Result<(&[u8],&[u8])>{
+                self.post_source(book)?;let input=match self.origin{ReinstallInputOrigin::Parent(p)=>&p.input,
+                    ReinstallInputOrigin::OriginalWorker(p)=>&p.input};Ok((input.descriptor_data(),input.signature_data()))
+            }
+            pub(super) fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)>{
+                self.post_source(book)?;reinstall_index_quote_data(self.inventory)
+            }
+        }
+        // Opaque borrowed origin allows the consuming observer to construct a
+        // view AFTER PreparedFresh has moved into its own stack, never self refs.
+        pub(super) struct ArchivedInputOriginal<'a>{source:&'a Source,origin:ReinstallInputOrigin<'a>}
+        impl ArchivedInputOriginal<'_> {
+            pub(super) fn read<'a>(&'a self,book:&Install,prepared:&'a PreparedFresh,selected:&'a ReleaseSetData)->Result<ReinstallInputRead<'a>> {
+                match self.origin {
+                    ReinstallInputOrigin::Parent(p)=>ReinstallInputRead::parent(book,self.source,p,prepared.destination,prepared.input,&prepared.inventory,&prepared.inventory_bytes),
+                    ReinstallInputOrigin::OriginalWorker(p)=>ReinstallInputRead::original_worker(book,self.source,p,prepared.destination,prepared.input,&prepared.inventory,&prepared.inventory_bytes,selected),
+                }
+            }
+        }
+        // Fixed borrowed continuation of the SAME Parent. The mutable ledger
+        // was obtained from a complete SOURCE/namespace observation and stored
+        // before effects. This type has no DATA/serde/public constructor.
+        pub(super) struct ReinstallPreservationContext<'a> {
+            source:&'a Source,producer:&'a ProducerAdmission,incoming:&'a MaintenanceRootInput,
+            genesis:&'a RemovalResumeGenesis,root:usize,child:usize,
+            old_remove:&'a native::install_producer::RemovalProducerVerifier,
+            old_install:&'a native::install_producer::ProducerVerifier,
+            first:&'a Option<&'static str>,verified:&'a bool,
+            ledger:&'a mut maintenance::PartialFreshPreservation,
+        }
+        impl ReinstallPreservationContext<'_> {
+            pub(super) fn post_source(&self,book:&Install)->Result<()> {
+                check(*self.verified && self.first.is_none() && self.old_remove.settled() && self.old_install.settled()
+                    && self.old_remove.custody().remove_signature_matched && self.old_install.custody().signature_matched
+                    && self.incoming.destination==self.root && self.incoming.input==self.source.input,
+                    "partial-current-source-required")?;
+                reinstall_source_post(book,self.source,self.producer,self.root,Some(self.genesis))?;
+                removal_resume_stat(book,self.child,true,Some(0o700))
+            }
+            pub(super) fn root_original(&self)->usize {self.root}
+            pub(super) fn child_original(&self)->Result<usize> {Ok(self.child)}
+            pub(super) fn incoming<'a>(&'a self,book:&Install)->Result<(usize,&'a Inventory,&'a[u8])> {
+                self.post_source(book)?;book.check_name(self.incoming.input,true)?;
+                Ok((self.incoming.input,&self.incoming.inventory,&self.incoming.inventory_bytes))
+            }
+            pub(super) fn incoming_controls<'a>(&'a self,book:&Install)->Result<(&'a[u8],&'a[u8])> {
+                self.post_source(book)?;Ok((self.producer.input.descriptor_data(),self.producer.input.signature_data()))
+            }
+            pub(super) fn new_selection<'a>(&'a self,book:&Install)->Result<&'a ReleaseSetData> {
+                self.post_source(book)?;self.producer.descriptor.as_ref().map(|d|d.release_set_data()).ok_or("partial-new-producer")
+            }
+            pub(super) fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)> {
+                self.post_source(book)?;reinstall_index_quote_data(&self.incoming.inventory)
+            }
+            pub(super) fn old_genesis<'a>(&'a self,book:&Install)->Result<(usize,&'a maintenance::RemovalGenesisData)> {
+                self.post_source(book)?;Ok((self.genesis.snapshot,&self.genesis.data))
+            }
+            pub(super) fn preservation(&self)->&maintenance::PartialFreshPreservation {self.ledger}
+            pub(super) fn preservation_mut(&mut self)->&mut maintenance::PartialFreshPreservation {self.ledger}
+            pub(super) fn archive_census<'a>(&'a self,book:&Install)->Result<&'a maintenance::RemovalArchiveCensus> {
+                self.post_source(book)?;Ok(&self.genesis.census)
+            }
+            fn own_parent(&self,book:&Install,n:usize)->Result<()> {
+                let allowed=if n==self.root || n==self.child{true}else if self.ledger.retry_original_data()==Some(n){
+                    let original=book.originals.get(n).ok_or("partial-own-parent")?;
+                    original.parent==Some(self.child) && original.name==self.ledger.retry_name_data()?
+                }else{false};
+                check(allowed,"partial-own-parent")
+            }
+            pub(super) fn parent_before(&self,book:&Install,n:usize)->Result<(Identity,u32)> {
+                self.own_parent(book,n)?;RemovalPublication::parent_before(book,n)
+            }
+            pub(super) fn returned_parent(&self,book:&mut Install,n:usize,before:(Identity,u32))->Result<()> {
+                self.own_parent(book,n)?;reinstall_parent_returned(book,n,before)
+            }
+        }
         struct Parent {
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
@@ -10096,6 +12818,7 @@ mod installer {
             removal_payload_execution:Option<RemovalPayloadExecution>,
             removal_resume:Option<RemovalResumeSource>,removal_resume_ready:Option<RemovalResumeReady>,
             reinstall_requested:bool,reinstall:Option<ReinstallAdmission>,reinstall_input:Option<MaintenanceRootInput>,
+            archive_handoff:Option<ArchivedInstallHandoff>,
             command_original: Option<usize>, output_original: Option<usize>,
             command_close: bool, output_close: bool, output_eof: bool, output_admitted: bool,
             wait: Option<ExitStatus>, wait_unknown: bool, termination_attempted: bool,
@@ -10118,7 +12841,7 @@ mod installer {
                     removal_snapshot:None,
                     removal_payload_execution:None,
                     removal_resume:None,removal_resume_ready:None,
-                    reinstall_requested:false,reinstall:None,reinstall_input:None,
+                    reinstall_requested:false,reinstall:None,reinstall_input:None,archive_handoff:None,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
                     wait:None,wait_unknown:false,termination_attempted:false,errors:Vec::new(),
                     command_gate_kernel_retained:false,parent_book_settled:false })
@@ -10169,7 +12892,222 @@ mod installer {
             // argv form nor installer entry dispatches here in this slice.
             // Inactive SOURCE entry: only genuine completed Install creates
             // this separate admission. No CLI/GO or same-Remove Ready reaches it.
+            // Called only after this Parent's existing genuine-new-Install old
+            // controls admission. Invocation is a bounded comparison hint; the
+            // complete actual PartialFresh observer supplies the owned proof.
+            fn preserve_archived_partial(&mut self,invocation:&str)->Result<()> {
+                check(self.archive_handoff.is_none() && self.command.is_none() && self.child.is_none()
+                    && self.reinstall.as_ref().is_some_and(|r|r.effects.partial.is_none()),"partial-parent-once")?;
+                let ledger={
+                    let view=ReinstallOldControlsObserved{admission:self.reinstall.as_ref().ok_or("partial-admission")?,
+                        producer:self.producer.as_ref().ok_or("partial-producer")?,source:self.source.as_ref().ok_or("partial-source")?,
+                        incoming:self.reinstall_input.as_ref().ok_or("partial-input")?};
+                    view.post(&self.book)?;
+                    maintenance::partial_fresh_current_attempt(&mut self.book,&view,invocation)?.into_preservation()?
+                };
+                // The exact owned ledger and its existing Book originals are
+                // now retained before a retry mkdir/open/rename can be entered.
+                self.reinstall.as_mut().ok_or("partial-admission")?.effects.partial=Some(ledger);
+                {
+                    let admission=self.reinstall.as_ref().ok_or("partial-admission")?;
+                    let census=&admission.genesis.as_ref().ok_or("partial-genesis")?.census;
+                    let ledger=admission.effects.partial.as_ref().ok_or("partial-ledger")?;
+                    let scan=census.scan_originals_data()?;let post=census.post_originals_data()?;
+                    // Same-C new retry outer original + actual source audit.
+                    // Future B support must include its full outer admission
+                    // and observation quote here, not merely inner Q.
+                    let new_retry=ledger.planned_retry_post_originals_data()?;
+                    let (files,dirs,_)=reinstall_index_quote_data(&self.reinstall_input.as_ref().ok_or("partial-input")?.inventory)?;
+                    let before_writer=self.book.originals.len().checked_add(ledger.planned_preservation_originals_data()?)
+                        .and_then(|n|n.checked_add(scan)).and_then(|n|n.checked_add(post))
+                        .and_then(|n|n.checked_add(new_retry.checked_mul(2)?)).and_then(|n|n.checked_add(16))
+                        .ok_or("partial-final-original-quote")?;
+                    let future=archived_writer_originals_data(before_writer,files,dirs,
+                        scan.checked_add(new_retry).ok_or("partial-final-original-quote")?,
+                        post.checked_add(new_retry).ok_or("partial-final-original-quote")?)
+                        .ok_or("partial-final-original-quote")?;
+                    maintenance::reserve_removal_original_storage(&mut self.book,future)?;
+                }
+                let admission=self.reinstall.as_mut().ok_or("partial-admission")?;
+                let child=admission.effects.child.ok_or("partial-child")?;
+                let mut context=ReinstallPreservationContext{
+                    source:self.source.as_ref().ok_or("partial-source")?,producer:self.producer.as_ref().ok_or("partial-producer")?,
+                    incoming:self.reinstall_input.as_ref().ok_or("partial-input")?,genesis:admission.genesis.as_ref().ok_or("partial-genesis")?,
+                    root:admission.root,child,old_remove:&admission.remove,old_install:&admission.installed,
+                    first:&admission.first,verified:&admission.verified,
+                    ledger:admission.effects.partial.as_mut().ok_or("partial-ledger")?,
+                };
+                context.post_source(&self.book)?;
+                maintenance::preserve_partial_fresh(&mut self.book,&mut context)?;
+                context.post_source(&self.book)?;
+                drop(context); // Only borrowed context; SAME ledger/FD/raw owners remain.
+                self.finish_preserved_namespace()
+            }
+            fn finish_preserved_namespace(&mut self)->Result<()> {
+                let admission=self.reinstall.as_mut().ok_or("partial-admission")?;
+                check(admission.effects.partial.as_ref().is_some_and(|p|p.returned_settled_data())
+                    && admission.effects.old_controls_observed && !admission.effects.complete,
+                    "partial-actual-return-required")?;
+                let source=self.source.as_ref().ok_or("partial-source")?;
+                let producer=self.producer.as_ref().ok_or("partial-producer")?;
+                let prepared=self.reinstall_input.as_ref().ok_or("partial-input")?;
+                admission.post(&self.book,source,producer)?;
+                let mut wanted:BTreeSet<String>=[paths::REGISTRATION_GATE_NAME,paths::MAINTENANCE_GATE_NAME]
+                    .into_iter().map(str::to_owned).collect();
+                // The original transport moves its SOURCE versions top last.
+                // A merely protected empty replacement is not our returned effect.
+                check(matches!(self.book.named(Some(admission.root),"versions"),Err(Errno::ENOENT)),
+                    "partial-final-versions-absent")?;
+                let input=ReinstallInputRead::parent(&self.book,source,producer,admission.root,
+                    prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
+                let census=maintenance::read_removal_archive_census_with_retries(&mut self.book,admission.root,&wanted,&input)?;
+                check(census.retries_complete_data(),"partial-all-cohorts-complete")?;
+                census.fresh(&admission.request,&self.invocation)?;
+                for row in census.rows(){check(wanted.insert(row.name().to_owned()),"partial-final-root-collision")?;}
+                let actual=maintenance::removal_root_roster(&mut self.book,admission.root)?;
+                check(actual.len()==wanted.len() && actual.iter().all(|(name,ino)|*ino!=0 && wanted.contains(name)),
+                    "partial-final-exact-root")?;
+                let genesis=admission.genesis.as_ref().ok_or("partial-genesis")?;
+                let child=admission.effects.child.ok_or("partial-child")?;
+                removal_resume_stat(&self.book,child,true,Some(0o700))?;
+                let row=census.rows().get(genesis.tip_index).ok_or("partial-final-tip")?;
+                let child_identity=self.book.identity(child)?;
+                check(row.name()==self.book.originals[genesis.tip_archive].name
+                    && row.rehome_data().is_some_and(|r|r.complete_data() && r.root_data()==(child_identity,0)),
+                    "partial-final-old-child")?;
+                maintenance::post_removal_archive_references_with_retries(&mut self.book,&census,&input)?;
+                admission.post(&self.book,source,producer)?;
+                check(census.owned_bytes()?<=128*1024,"partial-final-census-memory")?;
+                // ONLY this actual closed scan/root/custody can publish the
+                // strong clean handoff; placement/read DATA alone never does.
+                admission.effects.fresh_versions=false;
+                admission.effects.final_census=Some(census);
+                admission.effects.complete=true;self.reinstall_observed()?.post(&self.book)
+            }
+            fn continue_preserved_fresh_and_go(&mut self,prior_invocation:&str)->Result<()> {
+                self.preserve_archived_partial(prior_invocation)?;
+                self.prepare_archived_writer(ArchivedInstallMode::RehomedFresh)?;
+                self.spawn_admitted_writer()
+            }
+            fn archived_post(&mut self,physical:bool)->Result<()> {
+                let Some(handoff)=self.archive_handoff.as_ref() else {return Ok(());};
+                handoff.post(&self.book,self.source.as_ref().ok_or("archived-source")?,
+                    self.producer.as_ref().ok_or("archived-producer")?,self.reinstall.as_ref().ok_or("archived-reinstall")?)?;
+                let observed=self.maintenance.as_ref().ok_or("archived-observed")?;
+                let archives=observed.archives.as_ref().ok_or("archived-observed")?;
+                if physical {
+                    let input=ReinstallInputRead::parent(&self.book,self.source.as_ref().ok_or("archived-source")?,
+                        self.producer.as_ref().ok_or("archived-producer")?,observed.prepared.destination,observed.prepared.input,
+                        &observed.prepared.inventory,&observed.prepared.inventory_bytes)?;
+                    archives.post(&mut self.book,&input)?;
+                }
+                self.book.clock()
+            }
+            // Source-only callable continuation; external dispatch remains
+            // withheld until the separately authored PartialFresh/cohort joins.
+            fn admit_archived_install_and_go(&mut self,source_path:&str,completed:&str,mode:ArchivedInstallMode)->Result<()> {
+                self.admit_reinstall_source_inputs_for(source_path,completed,match mode{
+                    ArchivedInstallMode::RehomedFresh=>ReinstallArchivePurpose::RehomeRemoved,
+                    ArchivedInstallMode::CurrentState=>ReinstallArchivePurpose::PreserveHistorical})?;
+                {
+                    let source=self.source.as_ref().ok_or("archived-source")?;
+                    let producer=self.producer.as_ref().ok_or("archived-producer")?;
+                    let admission=self.reinstall.as_mut().ok_or("archived-admission")?;
+                    match mode {
+                        ArchivedInstallMode::RehomedFresh=>admission.run(&mut self.book,source,producer,
+                            self.reinstall_input.as_ref().ok_or("archived-input")?)?,
+                        ArchivedInstallMode::CurrentState=>admission.observe_old_controls(&mut self.book,source,producer,
+                            self.reinstall_input.as_ref().ok_or("archived-input")?)?,
+                    }
+                }
+                self.prepare_archived_writer(mode)?;self.spawn_admitted_writer()
+            }
+            fn prepare_archived_writer(&mut self,mode:ArchivedInstallMode)->Result<()> {
+                check(self.archive_handoff.is_none() && self.maintenance.is_none() && self.command.is_none()
+                    && self.child.is_none() && self.request_export.is_none(),"archived-parent-once")?;
+                match mode {ArchivedInstallMode::RehomedFresh=>self.reinstall_observed()?.post(&self.book)?,
+                    ArchivedInstallMode::CurrentState=>self.reinstall_old_observed()?.post(&self.book)?,}
+                let root=self.reinstall_input.as_ref().ok_or("archived-input")?.destination;
+                let producer=self.producer.as_ref().ok_or("archived-producer")?;
+                let selected=producer.descriptor.as_ref().ok_or("archived-producer")?.release_set_data().clone();
+                maintenance::selected_compile(&selected)?;
+                let admission=self.reinstall.as_ref().ok_or("archived-reinstall")?;
+                let genesis=admission.genesis.as_ref().ok_or("archived-genesis")?;
+                let census=admission.effects.final_census.as_ref().unwrap_or(&genesis.census);
+                census.fresh(&admission.request,&self.invocation)?;
+                let binding=ArchivedInstallData::from_original(genesis,census,selected.current_data().binding_data().inventory_sha256)?;
+                let (files,dirs,index_peak)=reinstall_index_quote_data(&self.reinstall_input.as_ref().ok_or("archived-input")?.inventory)?;
+                let future=archived_writer_originals_data(self.book.originals.len(),files,dirs,
+                    census.scan_originals_data()?,census.post_originals_data()?).ok_or("archived-parent-original-budget")?;
+                maintenance::reserve_removal_original_storage(&mut self.book,future)?;
+                maintenance::reserve_install_archive_context(&mut self.book)?;
+                check(maintenance::removal_effective_control_bytes(&self.book)?.checked_add(index_peak as u64)
+                    .and_then(|n|n.checked_add((2*INIT_LIMIT+128*1024) as u64)).is_some_and(|n|n<=16*1024*1024),
+                    "archived-parent-control-budget")?;
+                // Both branches must prove exact current namespace before any
+                // intent or GO. CurrentState is not fallback after a failed Fresh.
+                let versions=match mode {
+                    ArchivedInstallMode::RehomedFresh=>{
+                        self.reinstall_observed()?.post(&self.book)?;
+                        match self.book.named(Some(root),"versions") {
+                            Ok(_)=>{
+                                let n=self.book.open(Some(root),"versions",true)?;
+                                removal_resume_stat(&self.book,n,true,Some(0o755))?;
+                                check(maintenance::roster_now(&mut self.book,n)?.is_empty(),"archived-fresh-versions")?;n
+                            },
+                            Err(Errno::ENOENT)=>{
+                                let before=RemovalPublication::parent_before(&self.book,root)?;
+                                // Existing Creation/Original ledger records every
+                                // actual mkdir/open even if later sync fails.
+                                let n=self.book.directory(root,"versions",true,0o755)?;
+                                reinstall_parent_returned(&mut self.book,root,before)?;
+                                self.reinstall.as_mut().ok_or("archived-reinstall")?.effects.fresh_versions=true;n
+                            },
+                            Err(_)=>return Err("archived-versions-name"),
+                        }
+                    },
+                    ArchivedInstallMode::CurrentState=>{
+                        check(self.book.named(Some(root),transaction::STATE_NAME).is_ok(),"archived-current-state-required")?;
+                        let n=self.book.open(Some(root),"versions",true)?;removal_resume_stat(&self.book,n,true,Some(0o755))?;n
+                    },
+                };
+                let census=self.reinstall.as_mut().ok_or("archived-reinstall")?.effects.final_census.take();
+                let context=maintenance::InstallArchiveObservation::parent(root,binding,census,
+                    selected.current_data().binding_data().inventory_sha256)?;
+                let incoming=self.reinstall_input.take().ok_or("archived-input")?;
+                let prepared=PreparedFresh{input:incoming.input,inventory:incoming.inventory,inventory_bytes:incoming.inventory_bytes,
+                    destination:incoming.destination,versions};
+                let origin=ArchivedInputOriginal{source:self.source.as_ref().ok_or("archived-source")?,
+                    origin:ReinstallInputOrigin::Parent(self.producer.as_ref().ok_or("archived-producer")?)};
+                let mut observed=maintenance::observe_with_archives(&mut self.book,prepared,selected,None,context,&origin)?;
+                check(match mode {ArchivedInstallMode::RehomedFresh=>observed.action==ActionData::FreshInstall,
+                    ArchivedInstallMode::CurrentState=>observed.action!=ActionData::FreshInstall && observed.history.is_some()},
+                    "archived-current-action")?;
+                let producer=self.producer.as_ref().ok_or("archived-producer")?;
+                observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
+                let input=origin.read(&self.book,&observed.prepared,&observed.selected)?;
+                observed.archives.as_ref().ok_or("archived-census")?.post(&mut self.book,&input)?;
+                let request=self.reinstall.as_ref().ok_or("archived-reinstall")?.request.clone();
+                observed.check_archived_invocation(&self.invocation,&request)?;
+                let r=self.book.registration.participant.ok_or("archived-original-r")?;
+                let m=self.book.gate.participant.ok_or("archived-original-m")?;
+                self.archive_handoff=Some(ArchivedInstallHandoff{phase:ArchivedInstallPhase::Observed,root,r,m});
+                self.maintenance=Some(observed);
+                let action=self.maintenance.as_ref().ok_or("archived-observed")?.action;
+                let closed=self.book.registration_complete_admitted(root,action);
+                let returned=self.archive_handoff.as_mut().ok_or("archived-handoff")?.r_returned(&self.book);
+                // Preserve actual R-close phase before late result veto. Neither
+                // late/refused outcome can proceed to reservation/intent/spawn.
+                closed?;returned?;self.archived_post(true)?;
+                self.request_export=Some(RequestExport::reserve(&mut self.book,root,&request)?);
+                self.request_export.as_ref().ok_or("archived-request")?.persist_reservation(&mut self.book)?;
+                self.maintenance.as_mut().ok_or("archived-observed")?.create_intent(&mut self.book,&self.invocation,&request)?;
+                self.archived_post(true)
+            }
             fn admit_reinstall_source_inputs(&mut self,source_path:&str,completed:&str)->Result<()> {
+                self.admit_reinstall_source_inputs_for(source_path,completed,ReinstallArchivePurpose::RehomeRemoved)
+            }
+            fn admit_reinstall_source_inputs_for(&mut self,source_path:&str,completed:&str,purpose:ReinstallArchivePurpose)->Result<()> {
                 check(!self.entered && self.producer.is_none() && self.reinstall.is_none()
                     && self.removal.is_none() && self.removal_resume.is_none(),"worker-parent-once")?;
                 self.entered=true;self.reinstall_requested=true;
@@ -10189,9 +13127,10 @@ mod installer {
                     else{raw[..16].iter().map(|b|format!("{b:02x}")).collect::<String>()};
                 let nonce=raw[16..].iter().map(|b|format!("{b:02x}")).collect::<String>();
                 self.invocation=nonce.clone();
-                self.reinstall=Some(ReinstallAdmission::new(&mut self.book,source,producer,self.reinstall_input.as_ref().ok_or("reinstall-input")?,&request,&nonce)?);
+                self.reinstall=Some(ReinstallAdmission::new(&mut self.book,source,producer,self.reinstall_input.as_ref().ok_or("reinstall-input")?,&request,&nonce,purpose)?);
                 let admission=self.reinstall.as_mut().ok_or("reinstall-original")?;
-                admission.discover(&mut self.book,source,producer)?;admission.inspect(&self.book,source,producer)?;
+                admission.discover(&mut self.book,source,producer,self.reinstall_input.as_ref().ok_or("reinstall-input")?)?;
+                admission.inspect(&self.book,source,producer)?;
                 admission.post(&self.book,source,producer)
             }
             fn admit_reinstall_controls(&mut self,source_path:&str,completed:&str)->Result<()> {
@@ -10206,7 +13145,8 @@ mod installer {
                 self.admit_reinstall_source_inputs(source_path,completed)?;
                 let source=self.source.as_ref().ok_or("reinstall-new-source")?;
                 let producer=self.producer.as_ref().ok_or("reinstall-new-producer")?;
-                self.reinstall.as_mut().ok_or("reinstall-original")?.observe_old_controls(&mut self.book,source,producer)?;
+                self.reinstall.as_mut().ok_or("reinstall-original")?.observe_old_controls(&mut self.book,source,producer,
+                    self.reinstall_input.as_ref().ok_or("reinstall-input")?)?;
                 self.reinstall_old_observed()?.post(&self.book)
             }
             fn reinstall_old_observed(&self)->Result<ReinstallOldControlsObserved<'_>> {
@@ -10489,9 +13429,15 @@ mod installer {
                     observed.create_intent(&mut self.book,&self.invocation,&request_id)?;
                     self.maintenance = Some(observed);
                 } else { let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?; }
+                self.source=Some(actual);
+                self.spawn_admitted_writer()
+            }
+            fn spawn_admitted_writer(&mut self)->Result<()> {
+                check(self.entered && self.source.is_some() && self.command.is_none() && self.child.is_none(),"worker-spawn-once")?;
                 let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
                 check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
-                self.book.gate_protected(gate)?; self.book.registration_ready()?; self.book.source_post(&actual)?;
+                self.book.gate_protected(gate)?; self.book.registration_ready()?; self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
+                self.archived_post(true)?;
                 let end = self.book.shared_deadline()?.end;
                 // Include temporary ends of two pipes and the standard spawn
                 // error channel as headroom, not extra permitted live book FDs.
@@ -10503,6 +13449,7 @@ mod installer {
                 self.output_original = Some(output_n);
                 // Each source/gate original remains held before this transfer.
                 let duplicate = self.book.fd(gate)?.as_fd().try_clone_to_owned().map_err(|_| "worker-gate-duplicate")?;
+                let actual=self.source.as_ref().ok_or("worker-source-original")?;
                 let mut command = Command::new(&actual.executable);
                 command.arg(ROLE).arg(end.to_string()).arg(&self.invocation)
                     .current_dir(&actual.directory).env_clear()
@@ -10510,10 +13457,10 @@ mod installer {
                     .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::from(duplicate));
                 self.command = Some(ManuallyDrop::new(command));
                 self.command_gate_kernel_retained = true;
-                self.source = Some(actual);
                 self.book.shared_deadline()?.check_work()?;
                 // Original call is made once. On Err there is no adoption/retry
                 // and no assertion that an unobserved child never existed.
+                if let Some(handoff)=self.archive_handoff.as_mut(){handoff.phase.worker_entered_data()?;}
                 let child = self.command.as_mut().ok_or("worker-command-original")?.spawn();
                 match child {
                     Ok(child) => self.child = Some(child),
@@ -10536,7 +13483,9 @@ mod installer {
                     "parent":parent,"child":child,"compile":compile_binding()?,"source":source_data(&self.book,actual)?,
                     "gate":identity_data(self.book.identity(gate)?),
                     "parentCommandEndpoint":command_before,"parentResultEndpoint":result_before});
-                if let Some(observed) = &self.maintenance { init["maintenance"] = observed.binding(&self.book)?; }
+                if let Some(observed) = &self.maintenance { init["maintenance"] = observed.binding(&self.book)?;
+                    if let Some(archives)=&observed.archives{init["archives"]=archives.data();
+                        init["archives"]["input"]=archived_input_data(&self.book,self.source.as_ref().ok_or("archived-source")?,self.producer.as_ref().ok_or("archived-producer")?)?;}}
                 let bytes = serde_json::to_vec(&init).map_err(|_| "worker-frame-json")?;
                 self.init_sha = hash(&bytes);
                 write_frame(self.book.fd(command_n)?.as_fd(), &init, INIT_LIMIT, self.book.shared_deadline()?, true)?;
@@ -10554,6 +13503,7 @@ mod installer {
                     "worker-pipe-post")?;
                 self.original_wait(); check(self.wait.is_none() && !self.wait_unknown, "worker-exited-before-go")?;
                 self.producer_post(true)?; // Same originals/content again, BEFORE the sole GO.
+                self.archived_post(true)?;
                 write_frame(self.book.fd(command_n)?.as_fd(),&control("go",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result),
                     CONTROL_LIMIT,self.book.shared_deadline()?,true)?;
                 // Actual EOF is part of the child's pre-mutation barrier.
@@ -10658,6 +13608,14 @@ mod installer {
                 completed_path: Option<&str>) -> Result<JoinedWriter> {
                 check(!self.entered, "worker-parent-once")?;
                 if let Err(error) = self.admit_and_go_inputs(source,selected,completed_path) { self.note(error); }
+                self.join_original_writer()
+            }
+            fn run_archived_completed(&mut self,source:&str,completed:&str,mode:ArchivedInstallMode)->Result<JoinedWriter> {
+                check(!self.entered,"worker-parent-once")?;
+                if let Err(error)=self.admit_archived_install_and_go(source,completed,mode){self.note(error);}
+                self.join_original_writer()
+            }
+            fn join_original_writer(&mut self)->Result<JoinedWriter> {
                 if self.child.is_none() { return Err(self.errors.first().copied().unwrap_or("worker-original-child")); }
                 let bytes = match self.collect() {
                     Ok(bytes) => bytes, Err(error) => { self.note(error); return Err(error); }
@@ -10688,6 +13646,8 @@ mod installer {
                     && self.output_eof && self.output_close && self.command_close && !self.wait_unknown && self.errors.is_empty(),
                     "maintenance-original-join-required")?;
                 self.book.shared_deadline()?.check_work()?;
+                if let Some(handoff)=self.archive_handoff.as_mut(){handoff.phase.worker_joined_data()?;}
+                self.archived_post(true)?;
                 self.producer_post(false)?; self.book.registration_ready()?;
                 check(joined.observed_at < self.book.shared_deadline()?.original_endpoint(),"maintenance-original-join-deadline")?;
                 let observed = self.maintenance.as_mut().ok_or("maintenance-observation-missing")?;
@@ -10723,6 +13683,15 @@ mod installer {
                         within_original_deadline:joined.outcome.timely,payload_write_count:joined.outcome.writes,payload_write_bytes:joined.outcome.bytes },
                     &observed.selected).map_err(|_| "maintenance-capsule-binding")?;
                 maintenance::persist_capsule(&mut self.book,observed,&self.invocation,&capsule)?;
+                if writer_known && joined.outcome.exit==0 {
+                    if let Some(archives)=observed.archives.as_mut(){
+                        let input=ReinstallInputRead::parent(&self.book,self.source.as_ref().ok_or("archived-source")?,
+                            self.producer.as_ref().ok_or("archived-producer")?,observed.prepared.destination,observed.prepared.input,
+                            &observed.prepared.inventory,&observed.prepared.inventory_bytes)?;
+                        archives.successful_names(&mut self.book,observed.action,observed.intent.as_ref().ok_or("archived-intent")?,
+                            observed.history.as_ref().map(|h|&h.current.state),&observed.selected,state.as_ref().ok_or("archived-state")?,&input)?;
+                    }
+                }
                 self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
                 Ok(json!({"schemaVersion":2,"kind":"maintenance-parent-pending-finalization","invocation":self.invocation,
                     "requestId":request.request_id,"resultName":request.name,
@@ -10737,6 +13706,13 @@ mod installer {
             }
             fn record_maintenance_export(&mut self, joined: &JoinedWriter) -> Result<Value> {
                 let record = self.record_maintenance_capsule(joined)?;
+                self.archived_post(true)?;
+                if joined.outcome.exit==0 {if let Some(observed)=&self.maintenance{if let Some(archives)=&observed.archives{
+                    let input=ReinstallInputRead::parent(&self.book,self.source.as_ref().ok_or("archived-source")?,
+                        self.producer.as_ref().ok_or("archived-producer")?,observed.prepared.destination,observed.prepared.input,
+                        &observed.prepared.inventory,&observed.prepared.inventory_bytes)?;
+                    archives.final_names_post(&mut self.book,&observed.selected,&input)?;
+                }}}
                 self.request_export.as_mut().ok_or("maintenance-request-missing")?.publish(&mut self.book,&record)?;
                 self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
                 self.producer_post(false)?;
@@ -10826,12 +13802,11 @@ mod installer {
             let directory = executable.parent().and_then(Path::to_str).ok_or("worker-script-parent")?;
             Ok(format!("{directory}/input"))
         }
-        enum PreparedWorker { Fresh(PreparedFresh), Maintenance(maintenance::Observed) }
+        enum PreparedWorker { Fresh(PreparedFresh), Maintenance(maintenance::Observed), ArchivedMaintenance(maintenance::Observed,Source,ArchivedWorkerInput) }
         fn prepare_worker(book: &mut Install, init: &Value, gate_fd: BorrowedFd<'_>, invocation: &str, end: u64) -> Result<PreparedWorker> {
             let maintenance_value = init.get("maintenance");
-            if maintenance_value.is_some() {
-                object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate", "parentCommandEndpoint","parentResultEndpoint","maintenance"])?;
-            } else { object(init,&["schemaVersion","kind","invocation","endNanos","parent","child","compile","source","gate","parentCommandEndpoint","parentResultEndpoint"])?; }
+            let archive_value=init.get("archives");
+            archived_init_shape_data(init)?;
             check(init["schemaVersion"] == 2 && init["kind"] == "private-writer-init" && init["invocation"] == invocation
                 && init["endNanos"].as_u64() == Some(end)
                 && init["parent"].as_u64() == Some(unistd::getppid().as_raw() as u64)
@@ -10843,12 +13818,27 @@ mod installer {
             pipe_shape(&init["parentCommandEndpoint"])?; pipe_shape(&init["parentResultEndpoint"])?;
             let source_path = worker_input_path()?;
             let (input,inventory,inventory_bytes) = book.input(&source_path)?;
+            let archived_index=if archive_value.is_some(){
+                maintenance::reserve_install_archive_context(book)?;
+                let quote=reinstall_index_quote_data(&inventory)?;
+                let records=quote.0.checked_mul(3).and_then(|n|n.checked_add(quote.1.checked_mul(3)?))
+                    .and_then(|n|n.checked_add(256)).and_then(|n|n.checked_add(book.originals.len()))
+                    .filter(|n|*n<=24576).ok_or("archived-worker-original-budget")?;
+                maintenance::reserve_removal_original_storage(book,records)?;
+                let retained=reinstall_inventory_memory(&inventory,&inventory_bytes)?;
+                check(maintenance::removal_effective_control_bytes(book)?.checked_add(retained as u64)
+                    .and_then(|n|n.checked_add(quote.2 as u64)).is_some_and(|n|n<=16*1024*1024),"archived-worker-index-memory")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(retained as u64).ok_or("archived-worker-index-memory")?;
+                Some(quote)
+            }else{None};
             let index = inventory.index()?;
             check(index.payload_bytes.checked_add(inventory_bytes.len() as u64)
                 .and_then(|n| n.checked_add(installation_record::RECORD_LIMIT as u64))
                 .and_then(|n| n.checked_add((paths::MAINTENANCE_GATE_BYTES.len() + paths::REGISTRATION_GATE_BYTES.len()) as u64))
                 .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT)
                 && index.files.len().checked_add(4).is_some_and(|n| n <= installation_record::FILE_LIMIT), "inventory-bound")?;
+            if let Some((files,dirs,_))=archived_index{check(index.files.len()==files && index.directories.len()==dirs,"archived-worker-index-count")?;}
+            drop(index); // Known temporary index only; no FD/original/authority.
             let source = book.worker_source(&source_path,input)?;
             check(init["source"] == source_data(book,&source)?, "worker-source-binding")?;
             let support = book.support_root()?;
@@ -10878,11 +13868,17 @@ mod installer {
             let prepared = PreparedFresh { input,inventory,inventory_bytes,destination,versions };
             if let Some(value) = maintenance_value {
                 let selected = maintenance::Observed::selected_from_binding(value)?;
-                let mut observed = maintenance::observe(book,prepared,selected,Some(invocation))?;
+                let worker_input=match archive_value{Some(value)=>Some(ArchivedWorkerInput::open(book,&source,destination,&selected,&value["input"])?),None=>None};
+                let mut observed=if let Some(archive_value)=archive_value {
+                    let data=ArchivedInstallData::parse(archive_value)?;
+                    let context=maintenance::InstallArchiveObservation::worker(book,destination,data)?;
+                    let origin=ArchivedInputOriginal{source:&source,origin:ReinstallInputOrigin::OriginalWorker(worker_input.as_ref().ok_or("archived-worker-input")?)};
+                    maintenance::observe_with_archives(book,prepared,selected,Some(invocation),context,&origin)?
+                }else{maintenance::observe(book,prepared,selected,Some(invocation))?};
                 let request_id = value["requestId"].as_str().ok_or("maintenance-request-shape")?;
                 observed.read_intent(book,invocation,request_id)?;
                 check(observed.binding(book)? == *value,"maintenance-init-binding")?;
-                Ok(PreparedWorker::Maintenance(observed))
+                if archive_value.is_some(){Ok(PreparedWorker::ArchivedMaintenance(observed,source,worker_input.ok_or("archived-worker-input")?))}else{Ok(PreparedWorker::Maintenance(observed))}
             } else { Ok(PreparedWorker::Fresh(prepared)) }
         }
         fn dispatch_private(args: &[String]) -> i32 {
@@ -10901,6 +13897,7 @@ mod installer {
             let mut book = Install::with_worker_deadline(clock,true);
             let stdin = std::io::stdin(); let stdout = std::io::stdout(); let stderr = std::io::stderr();
             let mut init_sha = String::new();
+            let mut archived_input_backing:Option<(Source,ArchivedWorkerInput)>=None;
             let attempt = (|| {
                 let command_endpoint = pipe_data(stdin.as_fd(),false,book.shared_deadline()?)?;
                 let result_endpoint = pipe_data(stdout.as_fd(),true,book.shared_deadline()?)?;
@@ -10908,6 +13905,9 @@ mod installer {
                 let (init,bytes) = read_frame(stdin.as_fd(),INIT_LIMIT,book.shared_deadline()?)?;
                 init_sha = hash(&bytes);
                 let prepared = prepare_worker(&mut book,&init,stderr.as_fd(),&args[3],end)?;
+                if let PreparedWorker::ArchivedMaintenance(observed,source,backing)=&prepared {
+                    backing.post(&book,source,&observed.selected,true)?;
+                }
                 let parent = u32::try_from(unistd::getppid().as_raw()).map_err(|_| "worker-parent")?;
                 let child = std::process::id();
                 write_frame(stdout.as_fd(),&control("ready",&args[3],&init_sha,end,parent,child,&command_endpoint,&result_endpoint),
@@ -10921,14 +13921,28 @@ mod installer {
                 book.worker_go_eof = true; // Actual complete GO and EOF, not parsed permission DATA alone.
                 let destination = match &prepared {
                     PreparedWorker::Fresh(prepared) => prepared.destination,
-                    PreparedWorker::Maintenance(observed) => observed.prepared.destination,
+                    PreparedWorker::Maintenance(observed) | PreparedWorker::ArchivedMaintenance(observed,_,_) => observed.prepared.destination,
                 };
                 book.registration_after_go(destination)?;
+                if let PreparedWorker::ArchivedMaintenance(observed,source,backing)=&prepared {
+                    backing.post(&book,source,&observed.selected,true)?;
+                    let input=ReinstallInputRead::original_worker(&book,source,backing,observed.prepared.destination,observed.prepared.input,
+                        &observed.prepared.inventory,&observed.prepared.inventory_bytes,&observed.selected)?;
+                    observed.archives.as_ref().ok_or("archived-worker-observation")?.post(&mut book,&input)?;
+                }
                 match prepared {
                     PreparedWorker::Fresh(prepared) => book.install_prepared(prepared,&args[3]),
                     PreparedWorker::Maintenance(observed) => maintenance::execute(&mut book,observed,&args[3]),
+                    PreparedWorker::ArchivedMaintenance(observed,source,backing) => {
+                        archived_input_backing=Some((source,backing));
+                        maintenance::execute(&mut book,observed,&args[3])
+                    },
                 }
             })();
+            let attempt=attempt.and_then(|()|{
+                if let Some((source,backing))=&archived_input_backing{backing.post(&book,source,&backing.selected,true)?;}
+                Ok(())
+            });
             let result = book.finish(attempt);
             let outcome = PreExit::from_original(&book,&result);
             // No claim to have closed fd1/fd2 or joined ourselves. The parent's
@@ -11103,10 +14117,23 @@ mod installer {
                 let (f,d,bytes)=reinstall_index_quote_data(&inventory).unwrap();assert_eq!((f,d),(3,5));assert!(bytes>8192);
                 inventory.files.swap(0,1);assert!(reinstall_index_quote_data(&inventory).is_err());
                 let quote=reinstall_record_quote_data(10,2,3,2,8,10,4,5).unwrap();
-                assert_eq!(quote,10+6*2+7*2+3*3+16+2*8+10+3*(2*2+3+2)+2*4+4*5+256);
-                assert!(reinstall_record_quote_data(usize::MAX,2,3,2,8,10,4,5).is_none());
-                assert!(reinstall_record_quote_data(10,usize::MAX,3,2,8,10,4,5).is_none());
-                assert!(reinstall_record_quote_data(10,2,3,usize::MAX,8,10,4,5).is_none());
+                let full_child=2*2+3+2;
+                let rehome_tail=10+6*2+7*2+3*3+16+4*8+10+3*full_child;
+                assert_eq!(quote,rehome_tail+2*(10+full_child)+9*(8+full_child)+4*4+6*5+512);
+                assert_eq!(Some(quote),archived_writer_originals_data(rehome_tail,4,5,10+full_child,8+full_child));
+                let cost=reinstall_record_quote_data(0,2,3,2,8,10,4,5).unwrap();
+                assert_eq!(reinstall_record_quote_data(24576-cost,2,3,2,8,10,4,5),Some(24576));
+                assert!(reinstall_record_quote_data(24577-cost,2,3,2,8,10,4,5).is_none());
+                for index in 0..8 {
+                    let mut fields=[10,2,3,2,8,10,4,5];fields[index]=usize::MAX;
+                    assert!(reinstall_record_quote_data(fields[0],fields[1],fields[2],fields[3],
+                        fields[4],fields[5],fields[6],fields[7]).is_none());
+                }
+                // An absent/partial old child cannot remove the full future
+                // child cost. Existing old work adds on top, never replaces it.
+                let absent_child=reinstall_record_quote_data(0,2,3,2,0,0,4,5).unwrap();
+                assert_eq!(absent_child,6*2+7*2+3*3+16+3*full_child+2*full_child+9*full_child+4*4+6*5+512);
+                assert_eq!(reinstall_record_quote_data(0,2,3,2,1,1,4,5),Some(absent_child+4+1+2+9));
                 // Existing rehome pure group separately exercises the actual
                 // return-latched state reducer and exact old/new boundaries.
             }
@@ -11224,6 +14251,48 @@ mod installer {
 
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                // Closed private DATA only. Native/parent/original gate proofs
+                // cannot be created by these parser or phase checks.
+                let archived=ArchivedInstallData{genesis:[1;16],tip:[2;16],genesis_sha:[3;32],tip_sha:[4;32],
+                    inventory_sha:[5;32],census_sha:[6;32],count:64};
+                let mut encoded=archived.data();encoded["input"]=json!({"completedPath":"/Volumes/Mobile Release Kit/Install.pkg","originalBindingSha256":"ab".repeat(32)});assert!(ArchivedInstallData::parse(&encoded).unwrap()==archived);
+                for key in ["schemaVersion","genesis","tip","genesisSha256","tipSha256","inventorySha256","censusSha256","archiveCount","input"] {
+                    let mut missing=encoded.clone();missing.as_object_mut().unwrap().remove(key);
+                    assert!(ArchivedInstallData::parse(&missing).is_err());
+                }
+                for (key,bad) in [("schemaVersion",json!(2)),("genesis",json!(".remove-00000000000000000000000000000000")),
+                    ("tip",json!(".remove-ABCDEF01234567890123456789012345")),("genesisSha256",json!("aa")),
+                    ("tipSha256",json!("FF".repeat(32))),("inventorySha256",Value::Null),("censusSha256",json!([])),
+                    ("archiveCount",json!(0)),("archiveCount",json!(65)),("archiveCount",json!(-1)),("archiveCount",json!("1"))] {
+                    let mut changed=encoded.clone();changed[key]=bad;assert!(ArchivedInstallData::parse(&changed).is_err());
+                }
+                for input in [json!({}),json!({"completedPath":"/Install.pkg","originalBindingSha256":"ab".repeat(32)}),
+                    json!({"completedPath":"/Volumes/Mobile Release Kit/Remove.pkg","originalBindingSha256":"ab".repeat(32)}),
+                    json!({"completedPath":"/Volumes/Mobile Release Kit/Install.pkg","originalBindingSha256":"AB".repeat(32)}),
+                    json!({"completedPath":"/Volumes/Mobile Release Kit/Install.pkg","originalBindingSha256":"ab".repeat(32),"fallback":true})] {
+                    let mut bad=encoded.clone();bad["input"]=input;assert!(ArchivedInstallData::parse(&bad).is_err());
+                }
+                let mut extra=encoded.clone();extra["authority"]=json!(true);assert!(ArchivedInstallData::parse(&extra).is_err());
+                let mut init=json!({"schemaVersion":2,"kind":"private-writer-init","invocation":"1".repeat(32),"endNanos":1,
+                    "parent":2,"child":3,"compile":{},"source":{},"gate":{},"parentCommandEndpoint":{},"parentResultEndpoint":{}});
+                assert!(archived_init_shape_data(&init).is_ok()); // Existing legacy shape only, not authority.
+                init["archives"]=encoded.clone();assert!(archived_init_shape_data(&init).is_err());
+                init["maintenance"]=json!({});assert!(archived_init_shape_data(&init).is_ok()); // Maintenance Fresh is allowed.
+                init["extra"]=json!(false);assert!(archived_init_shape_data(&init).is_err());init.as_object_mut().unwrap().remove("extra");
+                init.as_object_mut().unwrap().remove("archives");assert!(archived_init_shape_data(&init).is_ok());
+                assert!(ReinstallArchivePurpose::RehomeRemoved.old_membership_data(true));
+                assert!(!ReinstallArchivePurpose::RehomeRemoved.old_membership_data(false));
+                assert!(ReinstallArchivePurpose::RehomeRemoved.may_rehome_data());
+                assert!(ReinstallArchivePurpose::PreserveHistorical.old_membership_data(false));
+                assert!(ReinstallArchivePurpose::PreserveHistorical.old_membership_data(true));
+                assert!(!ReinstallArchivePurpose::PreserveHistorical.may_rehome_data());
+                let writer_cost=archived_writer_originals_data(0,3,4,5,6).unwrap();
+                assert_eq!(writer_cost,2*5+9*6+4*3+6*4+512);
+                assert_eq!(archived_writer_originals_data(24576-writer_cost,3,4,5,6),Some(24576));
+                assert!(archived_writer_originals_data(24577-writer_cost,3,4,5,6).is_none());
+                for overflow in 0..5 {let mut fields=[0usize,3,4,5,6];fields[overflow]=usize::MAX;
+                    assert!(archived_writer_originals_data(fields[0],fields[1],fields[2],fields[3],fields[4]).is_none());}
+
                 removal_resume_data_checks();
                 reinstall_live_data_checks();
                 removal_payload_data_checks();
@@ -11532,6 +14601,22 @@ mod installer {
             }
             #[test]
             fn original_join_requires_eof_closes_matching_return_and_timely_sources() {
+                let mut phase=ArchivedInstallPhase::Observed;
+                assert!(phase.worker_entered_data().is_err());assert!(phase.worker_joined_data().is_err());
+                for facts in [[false,true,true],[true,false,true],[true,true,false]] {
+                    let mut refused=ArchivedInstallPhase::Observed;
+                    assert!(refused.r_returned_data(facts[0],facts[1],facts[2]).is_err());
+                    assert_eq!(refused,ArchivedInstallPhase::Refused);
+                    assert!(refused.r_returned_data(true,true,true).is_err());assert!(refused.worker_entered_data().is_err());
+                }
+                phase.r_returned_data(true,true,true).unwrap();assert_eq!(phase,ArchivedInstallPhase::RClosedUnderM);
+                // The returned-close observation survives a later caller veto;
+                // it is NOT by itself permission to spawn or claim child exit.
+                assert!(phase.r_returned_data(true,true,true).is_err());assert!(phase.worker_joined_data().is_err());
+                phase.worker_entered_data().unwrap();assert_eq!(phase,ArchivedInstallPhase::WorkerPending);
+                assert!(phase.worker_entered_data().is_err());phase.worker_joined_data().unwrap();
+                assert_eq!(phase,ArchivedInstallPhase::WorkerJoined);assert!(phase.worker_joined_data().is_err());
+
                 // Execute the same Parent reducers without inventing a native
                 // verifier/peer/retirement capability or a filesystem effect.
                 use removal_peer_native::{RemovalPeerCustody as PeerCustody,RemovalPeerRole as PeerRole,
