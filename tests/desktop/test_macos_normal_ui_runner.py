@@ -197,7 +197,84 @@ RELEASE_EVIDENCE_SOURCE_INVERSE = ((84244,
   'b7e0e6930ae4301d528d0525a63344f16ca195b00691e3adb743621dc4bb100c',
   '    @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {\n'))
 
+# Exact current engineering wait/Status amendments only; preserve every prior
+# owner/hash assertion by undoing these four uniquely identified regions first.
+ENGINEERING_WAIT_STATUS_REGIONS = (('            throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)\n',
+  '            if engineeringRequireDiagnosticActive {\n'
+  '                try require(false, "missing or ambiguous expected control in " + journeyStage, line: '
+  'line)\n'
+  '            }\n'
+  '            throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)\n'),
+ ('            throw Refusal.condition("terminal UI refusal in " + journeyStage)\n',
+  '            if engineeringRequireDiagnosticActive {\n'
+  '                try require(false, "terminal UI refusal in " + journeyStage, line: line)\n'
+  '            }\n'
+  '            throw Refusal.condition("terminal UI refusal in " + journeyStage)\n'),
+ ('                                       failures: [String] = []) throws -> XCUIElement {\n',
+  '                                       failures: [String] = [], line: UInt = #line) throws -> XCUIElement '
+  '{\n'),
+ ('        try require(window.sheets.count == 0, "reference navigation opened an unexpected native '
+  'operation")\n'
+  '\n'
+  '        let first = try quitSheet(app, window)\n',
+  '        try require(window.sheets.count == 0, "reference navigation opened an unexpected native '
+  'operation")\n'
+  '\n'
+  '        // Fresh native document only: a heading or event relay alone is not\n'
+  '        // Status invocation admission. An invoke failure remains visible until\n'
+  '        // a successful explicit checkStatus; equal-revision display is not a\n'
+  '        // separately correlated receipt for this button click.\n'
+  '        try click(renderer.buttons.matching(identifier: "Artifacts"), "engineering Artifacts navigation '
+  'unavailable")\n'
+  '        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Inspect '
+  'selected artifact bytes")), in: renderer)\n'
+  '        let artifactStatusQuery = renderer.buttons.matching(identifier: "Check original artifact '
+  'status")\n'
+  '        let artifactStatus = try waitElement(artifactStatusQuery, in: renderer, enabled: true,\n'
+  '                                             failures: ["No new artifact outcome confirmed"])\n'
+  '        try reveal(artifactStatus, in: renderer)\n'
+  '        try require(artifactStatus.isEnabled && artifactStatus.isHittable,\n'
+  '                    "engineering artifact Status read unavailable")\n'
+  '        artifactStatus.click() // Actual production bridge command; no fixture result.\n'
+  '        _ = try waitElement(artifactStatusQuery, in: renderer, enabled: true,\n'
+  '                            failures: ["No new artifact outcome confirmed"])\n'
+  '        let artifactAvailability = renderer.staticTexts.matching(NSPredicate(format: "title IN %@", [\n'
+  '            "This native document supports reviewing selected artifact bytes. Actual originals and '
+  'runtime are rechecked before inspection.",\n'
+  '            "The required bundled runtime is not qualified for this document. Missing optional '
+  'verification tools are a separate unavailable check."\n'
+  '        ]))\n'
+  '        _ = try waitElement(artifactAvailability, in: renderer,\n'
+  '                            failures: ["No new artifact outcome confirmed"])\n'
+  '        try require(renderer.staticTexts.matching(identifier: "No new artifact outcome confirmed").count '
+  '== 0,\n'
+  '                    "engineering artifact Status invocation did not settle successfully")\n'
+  '        let chooseArtifact = try unique(renderer.buttons.matching(identifier: "Choose AAB"),\n'
+  '                                        "engineering artifact input control differs")\n'
+  '        let reviewArtifact = try unique(renderer.buttons.matching(identifier: "Review artifact '
+  'inspection"),\n'
+  '                                        "engineering artifact review control differs")\n'
+  '        try require(!chooseArtifact.isEnabled && !reviewArtifact.isEnabled,\n'
+  '                    "engineering Status observation must not admit a project or inspection")\n'
+  '        try engineeringNoFallback(renderer)\n'
+  '        try require(window.sheets.count == 0, "engineering Status read opened an unexpected native '
+  'operation")\n'
+  '        // This proves only a validated native Status in this fresh application,\n'
+  '        // not artifact inspection, every ACL entry, or signed/runtime readiness.\n'
+  '\n'
+  '        let first = try quitSheet(app, window)\n'))
+
+def without_engineering_wait_status_source(source):
+    if not any(current in source for _, current in ENGINEERING_WAIT_STATUS_REGIONS):
+        return source
+    for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
+        if source.count(current) != 1:
+            raise AssertionError("engineering wait/Status exact source region differs")
+        source = source.replace(current, previous, 1)
+    return source
+
 def without_release_evidence_source(source):
+    source = without_engineering_wait_status_source(source)
     if 'static let releaseEvidenceDocuments:' not in source:
         if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
         return source
@@ -1747,6 +1824,15 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertNotIn("GateObservation(", engineering)
 
     def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
+        # Current raw diagnostic sites are validated before historical inverses.
+        raw_wait = SWIFT.read_text()
+        for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
+            self.assertEqual(raw_wait.count(current), 1)
+        for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
+            for bad in (raw_wait.replace(current, previous, 1),
+                        raw_wait.replace(current, current + current, 1)):
+                with self.assertRaises(AssertionError):
+                    without_engineering_wait_status_source(bad)
         self.assertEqual(MODULE.LOADER_SHA,
                          hashlib.sha256((ROOT / "desktop/tools/macos_aqua_qualification.py").read_bytes()).hexdigest())
         source = without_positive_android_source(SWIFT.read_text())

@@ -3639,7 +3639,7 @@ final class NormalAppUITests: XCTestCase {
     }
     @MainActor private func waitElement(_ query: XCUIElementQuery, in root: XCUIElement,
                                        enabled: Bool = false, timeout: TimeInterval = 5,
-                                       failures: [String] = []) throws -> XCUIElement {
+                                       failures: [String] = [], line: UInt = #line) throws -> XCUIElement {
         let first = query.element(boundBy: 0)
         let failed = root.staticTexts.matching(NSPredicate(format: "label IN %@", failures))
         let targets: NSDictionary = ["ready": first, "failed": failed.element(boundBy: 0)]
@@ -3649,10 +3649,16 @@ final class NormalAppUITests: XCTestCase {
         let result = XCTWaiter.wait(for: [expected], timeout: try remaining(timeout))
         if failed.count > 0 {
             diagnostic(root)
+            if engineeringRequireDiagnosticActive {
+                try require(false, "terminal UI refusal in " + journeyStage, line: line)
+            }
             throw Refusal.condition("terminal UI refusal in " + journeyStage)
         }
         if result != .completed || query.count != 1 {
             diagnostic(root)
+            if engineeringRequireDiagnosticActive {
+                try require(false, "missing or ambiguous expected control in " + journeyStage, line: line)
+            }
             throw Refusal.condition("missing or ambiguous expected control in " + journeyStage)
         }
         try require(first.exists && (!enabled || first.isEnabled), "expected UI condition disappeared")
