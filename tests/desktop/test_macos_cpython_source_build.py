@@ -8583,6 +8583,52 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                             seal.SealBuild.recheck_tools(receiver, full=True)
                     self.assertTrue(BUILD.DATA.known)
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # The actual protected_tool leaf gate emits only the reused
+            # bounded scalar/role envelope. Inert lstat facts force each
+            # predicate in its ORIGINAL order; no tool read/run is admitted.
+            for condition in ("kind", "owner", "executable", "mode", "bad-scalar"):
+                with self.subTest(tool_admission=condition), scratch() as root:
+                    path = root / "private-tool-name-not-for-evidence"
+                    path.write_bytes(b"inert-never-executed")
+                    path.chmod(0o700)
+                    actual = path.lstat()
+                    foreign_uid = os.getuid() + 1 or 1
+                    fields = dict(st_mode=actual.st_mode, st_uid=actual.st_uid,
+                                  st_gid=actual.st_gid, st_nlink=actual.st_nlink)
+                    if condition == "kind":
+                        fields.update(st_mode=BUILD.stat.S_IFDIR | 0o622, st_uid=foreign_uid)
+                    elif condition in {"owner", "bad-scalar"}:
+                        fields.update(st_uid=-1 if condition == "bad-scalar" else foreign_uid,
+                                      st_mode=BUILD.stat.S_IFREG | 0o622)
+                    elif condition == "executable":
+                        fields.update(st_mode=BUILD.stat.S_IFREG | 0o622)
+                    else:
+                        fields.update(st_mode=BUILD.stat.S_IFREG | 0o722)
+                    records = []
+                    receiver = SimpleNamespace(check=lambda: None, tools={}, tool_parents={},
+                        evidence_json=lambda name, value: records.append((name, value)))
+                    original_lstat = Path.lstat
+                    def selected_lstat(selected, *args, **kwargs):
+                        return SimpleNamespace(**fields) if selected == path else original_lstat(selected, *args, **kwargs)
+                    with patch.object(Path, "lstat", selected_lstat), \
+                         patch.object(BUILD, "read", side_effect=AssertionError("unadmitted tool read")) as read:
+                        reason = "tool-diagnostic-scalar" if condition == "bad-scalar" else "unprotected-selected-tool"
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^" + reason + "$"):
+                            seal.SealBuild.protected_tool(receiver, path, role="python", system=False)
+                        read.assert_not_called()
+                    self.assertEqual(receiver.tools, {})
+                    if condition == "bad-scalar":
+                        self.assertEqual(records, [])
+                    else:
+                        expected = {"schemaVersion": 1, "role": "python", "condition": condition,
+                            "AppleSystem": False, "executableRequired": True, "uid": fields["st_uid"],
+                            "gid": fields["st_gid"], "mode": fields["st_mode"], "nlink": fields["st_nlink"],
+                            "hostUid": os.getuid()}
+                        self.assertEqual(records, [("tool-admission-failure.json", expected)])
+                        encoded = BUILD.canonical(expected)
+                        self.assertLessEqual(len(encoded), 512)
+                        self.assertNotIn(str(root).encode(), encoded)
+                        self.assertNotIn(path.name.encode(), encoded)
             for invalid in (None, "", "relative/python", "/a/../python", "/" + "a" * 4096,
                             "/" + "a/" * 128 + "python", "/python\0bad"):
                 with self.subTest(invalid_python_entry=repr(invalid)):
