@@ -4472,11 +4472,13 @@ class InstallerContextTests(unittest.TestCase):
         self.assertLess(observer_method.index('self.artifacts[CONTEXT_PRESENTATION_ARTIFACT]'),
                         observer_method.index('self.complete_installer_context(package_entries, packages)'))
         self.assertNotIn('context_product_argument_observed(', observer_method)
-        self.assertIn('CONTEXT_PRODUCT_SELECTED = True', publish)
-        self.assertIn('--observe-context-receipts', workflow)
+        # Context remains callable, but this source selects only the linked DATA batch.
+        self.assertIn('CONTEXT_PRODUCT_SELECTED = False', publish)
+        self.assertIn('REMOVAL_PARENT_SELECTED = True', publish)
+        self.assertIn('--qualify-removal-parent-data', workflow)
         self.assertEqual(publish.count('fixture.context_publication_tick('), 4)
         self.assertGreater(publish.rindex('fixture.context_publication_tick('), publish.index('os.close(fd)'))
-        self.assertIn('"$PRODUCT_ARGUMENT_OBSERVED" == true', workflow)
+        self.assertIn('"$PRODUCT_ARGUMENT_OBSERVED" == false', workflow)
         self.assertIn('"$ACCEPTED" == false', workflow)
         self.assertEqual(fixture.CONTEXT_SECONDS, 120)
         self.assertEqual(fixture.CONTEXT_PACKAGE_LIMIT, 8 * 1024 * 1024)

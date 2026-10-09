@@ -270,6 +270,57 @@ pub fn classify_data(prior: &RemovalRecordData, current: FreshObservationData<'_
         _ => C::Incomplete,
     }
 }
+/// Closed linked-history comparison only, never source/EX or deletion authority.
+/// `chain` is the complete unique tip-to-genesis chain. The native caller must
+/// authenticate its actual raw originals and complete namespace independently,
+/// and quote all retained records/reference storage before reading them.
+/// A future writer still links chain[0], never the ancestor used for comparison.
+/// Read-only classification permits64; new_attempt_data still forbids making65.
+/// No allocation, parsing, IO, historical failure rewrite or capability escapes.
+pub fn classify_linked_data(chain: &[&RemovalRecordData], expected: RemovalBindingData<'_>,
+    current: FreshObservationData<'_>) -> Result<ClassificationData> {
+    use {AppSlotsData as A, ClassificationData as C, PayloadPresenceData as P, PrefixData as S};
+    require(!chain.is_empty() && chain.len() <= INVOCATION_LIMIT, RecordDataError::Limit)?;
+    require(expected.valid(), RecordDataError::Binding)?;
+    // Validate the ENTIRE chain before returning even a direct tip result. A
+    // successful tip cannot conceal an unrelated, broken or truncated tail.
+    for (index, record) in chain.iter().enumerate() {
+        let binding = record.binding_data();
+        require(binding.target == expected.target && binding.source_commit == expected.source_commit
+            && binding.removal_descriptor_sha256 == expected.removal_descriptor_sha256
+            && binding.installed_producer_sha256 == expected.installed_producer_sha256
+            && binding.installed_inventory_sha256 == expected.installed_inventory_sha256
+            && binding.installation_state_sha256 == expected.installation_state_sha256
+            && binding.payload_roster_sha256 == expected.payload_roster_sha256, RecordDataError::Binding)?;
+        require(chain[..index].iter().all(|earlier|
+            earlier.request_id_data() != record.request_id_data()
+                && earlier.root_nonce_data() != record.root_nonce_data()), RecordDataError::ReusedIdentity)?;
+    }
+    for pair in chain.windows(2) {
+        require(pair[0].previous_attempt_data() == Some((pair[1].request_id_data(),
+            pair[1].root_nonce_data(), pair[1].digest_data())), RecordDataError::Binding)?;
+    }
+    require(chain[chain.len()-1].previous_attempt_data().is_none(), RecordDataError::Shape)?;
+    if !hex(current.request_id,32) || !hex(current.root_nonce,32)
+        || current.prior_record_sha256 != chain[0].digest_data()
+        || chain.iter().any(|record| current.request_id == record.request_id_data()
+            || current.root_nonce == record.root_nonce_data()) { return Ok(C::Mismatch); }
+    let direct = classify_data(chain[0], current);
+    if direct != C::Incomplete
+        || !matches!(chain[0].prefix_data(), S::AdmissionRecorded | S::AppWithdrawn)
+        || !matches!((current.app_slots,current.payload),
+            (A::NewOnly,P::PartialInRosterMatching) | (A::Neither,P::AllAbsent)) { return Ok(direct); }
+    for prior in &chain[1..] {
+        if matches!(prior.prefix_data(), S::AdmissionRecorded | S::AppWithdrawn) { continue; }
+        // This digest view is internal and only follows fully checked raw links.
+        // All fresh observations/checks/IDs stay identical. The FIRST meaningful
+        // phase is terminal even if it rejects; never search for older success.
+        let observation = FreshObservationData { prior_record_sha256: prior.digest_data(), ..current };
+        return Ok(classify_data(prior, observation));
+    }
+    Ok(C::Incomplete)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReinstallClassificationData { Unobserved, Indeterminate, Mismatch, RemovalIncomplete, NewInstallAfterRemovalObservation }
 /// This descriptive result is never RestoreFixedApp or earlier-removal success.
@@ -608,5 +659,108 @@ mod tests {
         assert_eq!(classify_data(&prior,current),C::Mismatch);
         current=original; current.app_slots=A::Unknown; assert_eq!(classify_data(&prior,current),C::Indeterminate);
         current=original; current.payload=P::Unknown; assert_eq!(classify_data(&prior,current),C::Indeterminate);
+        // Real new-attempt encodings reset to Admission. A crash after that
+        // write (or AppWithdrawn) must preserve the exact linked predecessor,
+        // not invent an old close/result or rebind the genesis commitment.
+        fn linked_child(prior: &RemovalRecordData, index: usize, prefix: PrefixData) -> RemovalRecordData {
+            let mut record = prior.new_attempt_data(&format!("{:032x}",index+256),
+                &format!("{:032x}",index+512),index,expected()).unwrap();
+            for next in [PrefixData::AppWithdrawn,PrefixData::PayloadRosterRemoval,PrefixData::PayloadAbsentObserved] {
+                if record.prefix_data() == prefix { break; }
+                record = record.next_prefix_data(next,expected()).unwrap();
+            }
+            record
+        }
+        for (prefix,slots,payload,want) in [
+            (S::PayloadRosterRemoval,A::NewOnly,P::PartialInRosterMatching,C::RemainingPayloadObserved),
+            (S::PayloadRosterRemoval,A::Neither,P::AllAbsent,C::PayloadAbsenceObservedAfterInterruptedRemoval),
+            (S::PayloadAbsentObserved,A::Neither,P::AllAbsent,C::PayloadAbsenceReobserved)] {
+            let old = at(prefix).first_failure_latched_data(FailureKindData::CloseUnknown,expected()).unwrap();
+            let admission = linked_child(&old,1,S::AdmissionRecorded);
+            let withdrawn = linked_child(&admission,2,S::AppWithdrawn)
+                .first_failure_latched_data(FailureKindData::Persistence,expected()).unwrap();
+            let tip = linked_child(&withdrawn,3,S::AdmissionRecorded);
+            let chain = [&tip,&withdrawn,&admission,&old];
+            let original: Vec<_> = chain.iter().map(|r| (r.bytes_data().to_vec(),r.first_failure_data())).collect();
+            let current = fresh(&tip,slots,payload);
+            assert_eq!(classify_data(&tip,current),C::Incomplete);
+            assert_eq!(classify_linked_data(&chain,expected(),current).unwrap(),want);
+            assert_eq!(classify_linked_data(&chain[1..],expected(),fresh(&withdrawn,slots,payload)).unwrap(),want);
+            assert_eq!(tip.previous_attempt_data().unwrap().2,withdrawn.digest_data());
+            for (record,(bytes,failure)) in chain.iter().zip(&original) {
+                assert_eq!(record.bytes_data(),bytes);assert_eq!(record.first_failure_data(),*failure);
+            }
+            for index in 0..5 {
+                for (check,want) in [(CheckData::Unknown,C::Indeterminate),
+                    (CheckData::Unobserved,C::Unobserved),(CheckData::Differs,C::Mismatch)] {
+                    let mut changed=current;
+                    match index {0=>changed.source_purpose=check,1=>changed.exclusive_original=check,
+                        2=>changed.protected_controls=check,3=>changed.remaining_roster=check,_=>changed.complete_namespace=check}
+                    assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),want);
+                }
+            }
+            let mut changed=current;changed.app_slots=A::Both;
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Mismatch);
+            changed=current;changed.payload=P::Unknown;
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Indeterminate);
+            changed=current;changed.prior_record_sha256=old.digest_data();
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Mismatch);
+            changed=current;changed.request_id=old.request_id_data();
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Mismatch);
+            changed=current;changed.root_nonce=withdrawn.root_nonce_data();
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Mismatch);
+            changed=current;changed.request_id="0";
+            assert_eq!(classify_linked_data(&chain,expected(),changed).unwrap(),C::Mismatch);
+            let mut wrong=expected();wrong.target=MaintenanceTargetData::Intel;
+            assert_eq!(classify_linked_data(&chain,wrong,current),Err(RecordDataError::Binding));
+            wrong=expected();wrong.payload_roster_sha256=old.digest_data();
+            assert_eq!(classify_linked_data(&chain,wrong,current),Err(RecordDataError::Binding));
+            assert_eq!(classify_linked_data(&chain[..3],expected(),current),Err(RecordDataError::Shape));
+            assert_eq!(classify_linked_data(&[&tip,&admission,&withdrawn,&old],expected(),current),Err(RecordDataError::Binding));
+            assert_eq!(classify_linked_data(&[&tip,&withdrawn,&tip,&old],expected(),current),Err(RecordDataError::ReusedIdentity));
+            // Same parsed fields, different exact original bytes: raw link fails.
+            let mut whitespace=old.bytes_data().to_vec();whitespace.push(b' ');
+            let changed_old=RemovalRecordData::parse_shape_data(&whitespace).unwrap();
+            assert_eq!(classify_linked_data(&[&tip,&withdrawn,&admission,&changed_old],expected(),current),Err(RecordDataError::Binding));
+            let mut foreign:Value=serde_json::from_slice(old.bytes_data()).unwrap();
+            foreign["installedInventorySha256"]=json!("9".repeat(64));
+            let foreign=RemovalRecordData::parse_shape_data(&serde_json::to_vec(&foreign).unwrap()).unwrap();
+            assert_eq!(classify_linked_data(&[&tip,&withdrawn,&admission,&foreign],expected(),current),Err(RecordDataError::Binding));
+            let unrelated=linked_child(&old,4,S::AdmissionRecorded);
+            assert_eq!(classify_linked_data(&[&tip,&withdrawn,&admission,&old,&unrelated],expected(),current),Err(RecordDataError::Binding));
+            assert_eq!(classify_linked_data(&[],expected(),current),Err(RecordDataError::Limit));
+        }
+        // Do not skip a first meaningful terminal refusal to find an older
+        // deletion phase that would otherwise accept this partial namespace.
+        let old=at(S::PayloadRosterRemoval);
+        let terminal=linked_child(&old,1,S::PayloadAbsentObserved);
+        let tip=linked_child(&terminal,2,S::AdmissionRecorded);
+        let observation=fresh(&tip,A::NewOnly,P::PartialInRosterMatching);
+        assert_eq!(classify_linked_data(&[&tip,&terminal,&old],expected(),observation).unwrap(),C::Mismatch);
+        let first=begin();let entry=linked_child(&first,1,S::AppWithdrawn);
+        let observation=fresh(&entry,A::Neither,P::AllAbsent);
+        assert_eq!(classify_linked_data(&[&entry,&first],expected(),observation).unwrap(),C::Incomplete);
+        assert_eq!(classify_linked_data(&[&first],expected(),fresh(&first,A::NewOnly,P::PartialInRosterMatching)).unwrap(),C::Incomplete);
+        // Classification64 is read-only, not permission to create a65th attempt.
+        let mut records=vec![at(S::PayloadRosterRemoval)];
+        for index in 1..INVOCATION_LIMIT {
+            records.push(linked_child(records.last().unwrap(),index,
+                if index%2==0 {S::AppWithdrawn}else{S::AdmissionRecorded}));
+        }
+        let refs:Vec<_>=records.iter().rev().collect();let tip=refs[0];
+        let observation=fresh(tip,A::NewOnly,P::PartialInRosterMatching);
+        assert_eq!(classify_linked_data(&refs,expected(),observation).unwrap(),C::RemainingPayloadObserved);
+        assert_eq!(tip.new_attempt_data(NEW_REQUEST,NEW_NONCE,INVOCATION_LIMIT,expected()).unwrap_err(),RecordDataError::Limit);
+        let mut too_many=refs.clone();too_many.push(tip);
+        assert_eq!(classify_linked_data(&too_many,expected(),observation),Err(RecordDataError::Limit));
+        // Direct classification remains exact, but a direct success never hides
+        // an invalid entire chain. No modification of the ordinary global table.
+        for (prefix,slots,payload,want) in cases {
+            let prior=at(prefix).first_failure_latched_data(FailureKindData::OriginalUnknown,expected()).unwrap();
+            assert_eq!(classify_linked_data(&[&prior],expected(),fresh(&prior,slots,payload)).unwrap(),want);
+        }
+        let unrelated=linked_child(&old,1,S::AdmissionRecorded);
+        assert_eq!(classify_linked_data(&[&old,&unrelated],expected(),fresh(&old,A::NewOnly,P::PartialInRosterMatching)),
+            Err(RecordDataError::Binding));
     }
 }

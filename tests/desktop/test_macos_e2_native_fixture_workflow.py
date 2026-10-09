@@ -13,14 +13,14 @@ STEP_NAMES = (
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
     "Prepare only the locked fixture graphs through the original command owner",
-    "Observe the fixed product Installer argument through the original Context owner",
+    "Compile linked admission and classify linked crash cuts through the original owner",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
     "Require closed scoped qualification without full E2 acceptance",
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Same120s Context: direct component and fixed one-component product/$1 observation.\n          # No Cargo suite, signing, SM, Keychain, payload installation or maintenance authority.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-context-receipts\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Same990s owner: two original graphs, linked-admission Parent2 and linked-crash Record1.\n          # Compiled DATA only; no Installer, live removal, signing, SM, Keychain or app launch.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -177,9 +177,9 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
         self.assertEqual(active(native).count(" --observe-service-layout"), 0)
         self.assertEqual(active(native).count(" --observe-service-cocoa-startup"), 0)
-        self.assertEqual(active(native).count(" --qualify-removal-parent-data"), 0)
+        self.assertEqual(active(native).count(" --qualify-removal-parent-data"), 1)
         self.assertEqual(active(native).count(" --qualify-removal-recovery-data"), 0)
-        self.assertEqual(active(native).count(" --observe-context-receipts"), 1)
+        self.assertEqual(active(native).count(" --observe-context-receipts"), 0)
         self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
         self.assertEqual(active(prepare).count("owner.run_owned("), 1)
         for required in (
@@ -566,8 +566,9 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         ))
         self.assertEqual(len(ns["INTEGRATION_SOURCES"]), 30)
         self.assertEqual(ns["PARENT_ROLES"], ("removal-parent-rust-tests", "removal-record-rust-tests"))
-        self.assertEqual(ns["RECORD_RUST_TESTS"], ("macos_install_record::tests::full_inventory_and_stable_directory_identity",))
+        self.assertEqual(ns["RECORD_RUST_TESTS"], ("macos_remove_record::tests::fresh_removal_and_reinstall_table_never_upgrades_old_failure",))
         self.assertIn("desktop/src-tauri/src/macos_install_record.rs", ns["PARENT_SOURCES"])
+        self.assertIn("desktop/src-tauri/src/macos_remove_record.rs", ns["PARENT_SOURCES"])
         self.assertEqual(ns["PARENT_RUST_TESTS"], (
             "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
             "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources"))
@@ -1186,8 +1187,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('registration_qualified = registration is not None', route)
         self.assertIn('REMOVAL_DATA_SELECTED = False', publish)
         self.assertIn('REMOVAL_INTEGRATION_SELECTED = False', publish)
-        self.assertIn('REMOVAL_PARENT_SELECTED = False', publish)
-        self.assertIn('CONTEXT_PRODUCT_SELECTED = True', publish)
+        self.assertIn('REMOVAL_PARENT_SELECTED = True', publish)
+        self.assertIn('CONTEXT_PRODUCT_SELECTED = False', publish)
         self.assertIn('REMOVAL_CHANGES_SELECTED = False', publish)
         self.assertIn('REMOVAL_RECOVERY_SELECTED = False', publish)
         self.assertIn('if outcome == "success" and not CONTEXT_PRODUCT_SELECTED and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:', route)
@@ -1649,7 +1650,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "NATIVE_OUTCOME: ${{ steps.native.outcome }}",
             "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
             'set -euo pipefail',
-            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$CONTEXT_COMPLETED" == true && "$PRODUCT_ARGUMENT_OBSERVED" == true && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$CONTEXT_COMPLETED" == false && "$PRODUCT_ARGUMENT_OBSERVED" == false && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == true && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
         ):
             with self.subTest(finality=required):
                 self.assertIn(required, active(final))

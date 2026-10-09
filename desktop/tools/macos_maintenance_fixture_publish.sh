@@ -70,8 +70,8 @@ if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
 REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
-REMOVAL_PARENT_SELECTED = False  # Historical Parent2/Record1 DATA remains independently validated.
-CONTEXT_PRODUCT_SELECTED = True  # Fixed source-bound product/$1 observation only; no maintenance authority.
+REMOVAL_PARENT_SELECTED = True  # Exact linked-admission Parent2 and linked-crash Record1 DATA only.
+CONTEXT_PRODUCT_SELECTED = False  # Prior product/$1 observation remains independently qualified.
 REMOVAL_CHANGES_SELECTED = False  # Historical changed11 scope remains independently validated.
 REMOVAL_RECOVERY_SELECTED = False  # NativeRecovery4 unchanged; no overlapping rerun.
 OWNER_DIAGNOSTIC_ROLES = (

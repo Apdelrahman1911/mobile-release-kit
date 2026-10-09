@@ -170,14 +170,14 @@ INTEGRATION_SOURCES = (
     'desktop/native/macos-installed-native/src/install_producer.m',
     'desktop/native/macos-installed-native/src/install_producer.h',
 )
-# Two fixed originals: changed Parent2 plus the selected-B Record1 DATA group. Old17 remains closed.
+# Two fixed originals: linked-admission Parent2 plus linked-crash Record1 DATA; no live removal.
 PARENT_ARGUMENT = "--qualify-removal-parent-data"
 PARENT_ROLES = ("removal-parent-rust-tests", "removal-record-rust-tests")
 PARENT_RUST_TESTS = (
     "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
     "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
 )
-RECORD_RUST_TESTS = ("macos_install_record::tests::full_inventory_and_stable_directory_identity",)
+RECORD_RUST_TESTS = ("macos_remove_record::tests::fresh_removal_and_reinstall_table_never_upgrades_old_failure",)
 # Four fixed changed DATA originals only; previous route contracts are untouched.
 CHANGES_ARGUMENT = "--qualify-removal-changes-data"
 CHANGES_ROLES = ('removal-changes-parent-rust-tests', 'removal-changes-app-rust-tests', 'removal-changes-native-rust-tests', 'removal-changes-emitter-rust-tests')

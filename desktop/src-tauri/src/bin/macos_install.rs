@@ -3225,6 +3225,12 @@ mod installer {
             let kind=if private {RemovalRosterKind::Archive}else{RemovalRosterKind::InstalledRoot};
             check(limit==kind.limit(),"removal-prior-roster-bound")?;removal_fixed_roster(book,directory,kind)
         }
+        pub(super) fn removal_linked_archive_roster(book:&mut Install,archive:usize)->Result<Vec<(String,u64)>> {
+            let original=book.originals.get(archive).ok_or("removal-linked-archive-original")?;
+            check(book.gate.parent.is_some() && original.parent==book.gate.parent
+                && worker::removal_archive_name_data(&original.name),"removal-linked-archive-location")?;
+            removal_fixed_roster(book,archive,RemovalRosterKind::Archive)
+        }
         pub(super) fn removal_root_roster(book:&mut Install,root:usize)->Result<Vec<(String,u64)>> {
             book.clock()?;check(book.gate.parent==Some(root),"removal-prior-root-original")?;
             reserve_removal_snapshot_work(book)?;removal_fixed_roster(book,root,RemovalRosterKind::InstalledRoot)
@@ -8430,6 +8436,21 @@ mod installer {
                 book.removal_control_reserved=book.removal_control_reserved.checked_add(self.plan.owned_bytes(0)? as u64)
                     .filter(|n|*n<=16*1024*1024).ok_or("removal-resume-control-bound")?;Ok(())
             }
+            pub(super) fn chain_quote(&self,book:&Install,count:usize,post:usize)->Result<(usize,u64,u64)> {
+                let (linked,_storage)=self.linked_attempt_quote(book,post)?;
+                let control=self.control.max(removal_effective_control_bytes(book)?);
+                let (end,work)=worker::removal_resume_chain_quote_data(linked,count,post,control)
+                    .ok_or("removal-chain-budget")?;Ok((end,work,control))
+            }
+            pub(super) fn linked_attempt_quote(&self,book:&Install,post:usize)->Result<(usize,u64)> {
+                self.continuation_budget(book)?;
+                let f=self.forecast;
+                check(u64::try_from(post).ok()==Some(f.post),"removal-linked-history-quote")?;
+                let continuation=removal_resume_continuation_quote_data(book.originals.len(),f.files,f.directories,f.controls,f.post)
+                    .and_then(|n|usize::try_from(n).ok()).ok_or("removal-linked-originals")?;
+                worker::removal_linked_quote_data(continuation,post,self.storage,
+                    self.control.max(removal_effective_control_bytes(book)?)).ok_or("removal-linked-budget")
+            }
             pub(super) fn continuation_budget(&self,book:&Install)->Result<()> {
                 self.plan.memory(0)?;
                 check(book.removal_control_reserved<=16*1024*1024,"removal-resume-control-bound")?;
@@ -11631,6 +11652,94 @@ mod installer {
                     && self.persisted && self.closed && self.directory_persisted && self.readback
             }
         }
+        impl RemovalSnapshotFile {
+            fn create(&mut self,book:&mut Install,directory:usize,slot:usize)->Result<()> {
+                let name=removal_payload_file_name(slot)?;
+                check(slot<6 && self.writer.is_none(),"removal-snapshot-file-once")?;
+                book.absent(directory,name)?;
+                let before=RemovalPublication::parent_before(book,directory)?;
+                let n=book.create_file(directory,name,Role::ReceiptWriter)?;
+                self.writer=Some(n); // Actual handle before later veto.
+                let id=book.identity(n)?;
+                check(id.mode==0o100600 && id.uid==0 && id.gid==0 && id.links==1 && id.size==0,
+                    "removal-snapshot-private-writer")?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-writer-stat")?;
+                check(actual.st_flags==0,"removal-snapshot-writer-flags")?;
+                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-snapshot-writer-attributes")?;
+                RemovalPublication::returned_parent_change(book,directory,before,true)
+            }
+            fn write(&mut self,book:&mut Install,slot:usize,mut bytes:&[u8])->Result<()> {
+                let file=self;let n=file.writer.ok_or("removal-snapshot-writer")?;
+                let bound=if slot==0 {maintenance::REMOVAL_SNAPSHOT_LIMIT}else{mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64};
+                check(file.written.checked_add(bytes.len() as u64).is_some_and(|n|n<=bound),"removal-snapshot-write-bound")?;
+                while !bytes.is_empty() {
+                    book.clock()?;
+                    let count=unistd::write(book.fd(n)?,bytes).map_err(|_|"removal-snapshot-write")?;
+                    check(count>0 && count<=bytes.len(),"removal-snapshot-write-bound")?;
+                    file.written+=count as u64;file.digest.update(&bytes[..count]);bytes=&bytes[count..];
+                    // Retain the actual returned bytes before a late clock cut.
+                    book.clock()?;
+                }
+                Ok(())
+            }
+            fn close_file(&mut self,book:&mut Install,directory:usize,slot:usize)->Result<()> {
+                let file=self;let n=file.writer.ok_or("removal-snapshot-writer")?;
+                let before=book.identity(n)?;let original=&book.originals[n];
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-written-stat")?;
+                let named=book.named(original.parent,&original.name).map_err(|_|"removal-snapshot-written-name")?;
+                check(before.same_object(Identity::of(&actual)) && actual.st_mode==0o100600 && actual.st_nlink==1
+                    && actual.st_size==file.written as i64 && actual.st_flags==0 && named.st_flags==0
+                    && Identity::of(&actual)==Identity::of(&named),"removal-snapshot-written-original")?;
+                book.clock()?;
+                stat::fchmod(book.fd(n)?,Mode::from_bits_truncate(0o444)).map_err(|_|"removal-snapshot-seal")?;
+                file.sealed=true;book.clock()?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-sealed-stat")?;
+                let original=&book.originals[n];
+                let named=book.named(original.parent,&original.name).map_err(|_|"removal-snapshot-sealed-name")?;
+                check(before.same_object(Identity::of(&actual)) && actual.st_mode==0o100444 && actual.st_nlink==1
+                    && actual.st_size==file.written as i64 && actual.st_flags==0 && named.st_flags==0
+                    && Identity::of(&actual)==Identity::of(&named),"removal-snapshot-sealed-original")?;
+                book.originals[n].identity=Some(Identity::of(&actual));
+                book.protected(n,false,Some(0o444))?;
+                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-snapshot-file-attributes")?;
+                book.clock()?;let persisted=native::sync(book.fd(n)?.as_fd(),true);
+                file.persisted=persisted.is_ok();persisted.map_err(|_|"removal-snapshot-file-persist")?;book.clock()?;
+                file.closed=book.close(n);check(file.closed,"removal-snapshot-writer-close")?;book.clock()?;
+                let name=removal_payload_file_name(slot)?;
+                let reader=book.open(Some(directory),name,false)?;file.reader=Some(reader);
+                check(book.identity(reader)?==Identity::of(&actual),"removal-snapshot-readback-original")?;
+                book.protected(reader,false,Some(0o444))?;
+                native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_|"removal-snapshot-file-attributes")?;
+                let digest=format!("{:x}",file.digest.clone().finalize());
+                check(book.read(reader,file.written,false)?.0==digest,"removal-snapshot-readback")?;
+                check(stat::fstat(book.fd(reader)?).map_err(|_|"removal-snapshot-readback-stat")?.st_flags==0,
+                    "removal-snapshot-readback-flags")?;
+                file.readback=true;book.clock()?;
+                let persisted=native::sync(book.fd(directory)?.as_fd(),false);
+                file.directory_persisted=persisted.is_ok();persisted.map_err(|_|"removal-snapshot-directory-persist")?;
+                book.clock()
+            }
+            fn file_post(&self,book:&Install)->Result<()> {
+                let file=self;check(file.settled_data(),"removal-snapshot-original-finality")?;
+                let n=file.reader.ok_or("removal-snapshot-reader")?;
+                book.check_name(n,true)?;
+                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-final-stat")?;
+                check(actual.st_flags==0 && actual.st_mode==0o100444 && actual.st_nlink==1
+                    && actual.st_size==file.written as i64,"removal-snapshot-final-original")?;
+                let mut at=0u64;let mut hash=Sha256::new();let mut block=[0;65536];
+                loop {
+                    book.clock()?;
+                    let count=nix::sys::uio::pread(book.fd(n)?,&mut block,at as i64).map_err(|_|"removal-snapshot-final-read")?;
+                    if count==0 { break; }
+                    at=at.checked_add(count as u64).filter(|n|*n<=file.written).ok_or("removal-snapshot-final-size")?;
+                    hash.update(&block[..count]);
+                }
+                check(at==file.written && hash.finalize()==file.digest.clone().finalize(),"removal-snapshot-final-hash")?;
+                book.check_name(n,true)?;
+                check(stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-final-stat")?.st_flags==0,"removal-snapshot-final-flags")?;
+                book.clock()
+            }
+        }
         struct RemovalSnapshot {
             capture:maintenance::RemovalSnapshotCapture,archive:Option<usize>,name:String,
             files:[RemovalSnapshotFile;6],attempted:bool,record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
@@ -11716,71 +11825,15 @@ mod installer {
             }
             fn create(&mut self,book:&mut Install,slot:usize)->Result<()> {
                 let directory=self.archive.ok_or("removal-snapshot-archive")?;
-                let name=removal_payload_file_name(slot)?;
-                check(slot<6 && self.files[slot].writer.is_none(),"removal-snapshot-file-once")?;
-                book.absent(directory,name)?;
-                let before=RemovalPublication::parent_before(book,directory)?;
-                let n=book.create_file(directory,name,Role::ReceiptWriter)?;
-                self.files[slot].writer=Some(n); // Actual handle before later veto.
-                let id=book.identity(n)?;
-                check(id.mode==0o100600 && id.uid==0 && id.gid==0 && id.links==1 && id.size==0,
-                    "removal-snapshot-private-writer")?;
-                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-writer-stat")?;
-                check(actual.st_flags==0,"removal-snapshot-writer-flags")?;
-                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-snapshot-writer-attributes")?;
-                RemovalPublication::returned_parent_change(book,directory,before,true)
+                removal_payload_file_name(slot)?;
+                self.files[slot].create(book,directory,slot)
             }
-            fn write(&mut self,book:&mut Install,slot:usize,mut bytes:&[u8])->Result<()> {
-                let file=&mut self.files[slot];let n=file.writer.ok_or("removal-snapshot-writer")?;
-                let bound=if slot==0 {maintenance::REMOVAL_SNAPSHOT_LIMIT}else{mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64};
-                check(file.written.checked_add(bytes.len() as u64).is_some_and(|n|n<=bound),"removal-snapshot-write-bound")?;
-                while !bytes.is_empty() {
-                    book.clock()?;
-                    let count=unistd::write(book.fd(n)?,bytes).map_err(|_|"removal-snapshot-write")?;
-                    check(count>0 && count<=bytes.len(),"removal-snapshot-write-bound")?;
-                    file.written+=count as u64;file.digest.update(&bytes[..count]);bytes=&bytes[count..];
-                    // Retain the actual returned bytes before a late clock cut.
-                    book.clock()?;
-                }
-                Ok(())
+            fn write(&mut self,book:&mut Install,slot:usize,bytes:&[u8])->Result<()> {
+                self.files[slot].write(book,slot,bytes)
             }
             fn close_file(&mut self,book:&mut Install,slot:usize)->Result<()> {
                 let directory=self.archive.ok_or("removal-snapshot-archive")?;
-                let file=&mut self.files[slot];let n=file.writer.ok_or("removal-snapshot-writer")?;
-                let before=book.identity(n)?;let original=&book.originals[n];
-                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-written-stat")?;
-                let named=book.named(original.parent,&original.name).map_err(|_|"removal-snapshot-written-name")?;
-                check(before.same_object(Identity::of(&actual)) && actual.st_mode==0o100600 && actual.st_nlink==1
-                    && actual.st_size==file.written as i64 && actual.st_flags==0 && named.st_flags==0
-                    && Identity::of(&actual)==Identity::of(&named),"removal-snapshot-written-original")?;
-                book.clock()?;
-                stat::fchmod(book.fd(n)?,Mode::from_bits_truncate(0o444)).map_err(|_|"removal-snapshot-seal")?;
-                file.sealed=true;book.clock()?;
-                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-sealed-stat")?;
-                let original=&book.originals[n];
-                let named=book.named(original.parent,&original.name).map_err(|_|"removal-snapshot-sealed-name")?;
-                check(before.same_object(Identity::of(&actual)) && actual.st_mode==0o100444 && actual.st_nlink==1
-                    && actual.st_size==file.written as i64 && actual.st_flags==0 && named.st_flags==0
-                    && Identity::of(&actual)==Identity::of(&named),"removal-snapshot-sealed-original")?;
-                book.originals[n].identity=Some(Identity::of(&actual));
-                book.protected(n,false,Some(0o444))?;
-                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-snapshot-file-attributes")?;
-                book.clock()?;let persisted=native::sync(book.fd(n)?.as_fd(),true);
-                file.persisted=persisted.is_ok();persisted.map_err(|_|"removal-snapshot-file-persist")?;book.clock()?;
-                file.closed=book.close(n);check(file.closed,"removal-snapshot-writer-close")?;book.clock()?;
-                let name=removal_payload_file_name(slot)?;
-                let reader=book.open(Some(directory),name,false)?;file.reader=Some(reader);
-                check(book.identity(reader)?==Identity::of(&actual),"removal-snapshot-readback-original")?;
-                book.protected(reader,false,Some(0o444))?;
-                native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_|"removal-snapshot-file-attributes")?;
-                let digest=format!("{:x}",file.digest.clone().finalize());
-                check(book.read(reader,file.written,false)?.0==digest,"removal-snapshot-readback")?;
-                check(stat::fstat(book.fd(reader)?).map_err(|_|"removal-snapshot-readback-stat")?.st_flags==0,
-                    "removal-snapshot-readback-flags")?;
-                file.readback=true;book.clock()?;
-                let persisted=native::sync(book.fd(directory)?.as_fd(),false);
-                file.directory_persisted=persisted.is_ok();persisted.map_err(|_|"removal-snapshot-directory-persist")?;
-                book.clock()
+                self.files[slot].close_file(book,directory,slot)
             }
             fn census_post(&self,book:&mut Install)->Result<()> {
                 let archive=self.archive.ok_or("removal-snapshot-archive")?;
@@ -11911,24 +11964,7 @@ mod installer {
 
         impl RemovalSnapshot {
             fn file_post(&self,book:&Install,slot:usize)->Result<()> {
-                let file=&self.files[slot];check(file.settled_data(),"removal-snapshot-original-finality")?;
-                let n=file.reader.ok_or("removal-snapshot-reader")?;
-                book.check_name(n,true)?;
-                let actual=stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-final-stat")?;
-                check(actual.st_flags==0 && actual.st_mode==0o100444 && actual.st_nlink==1
-                    && actual.st_size==file.written as i64,"removal-snapshot-final-original")?;
-                let mut at=0u64;let mut hash=Sha256::new();let mut block=[0;65536];
-                loop {
-                    book.clock()?;
-                    let count=nix::sys::uio::pread(book.fd(n)?,&mut block,at as i64).map_err(|_|"removal-snapshot-final-read")?;
-                    if count==0 { break; }
-                    at=at.checked_add(count as u64).filter(|n|*n<=file.written).ok_or("removal-snapshot-final-size")?;
-                    hash.update(&block[..count]);
-                }
-                check(at==file.written && hash.finalize()==file.digest.clone().finalize(),"removal-snapshot-final-hash")?;
-                book.check_name(n,true)?;
-                check(stat::fstat(book.fd(n)?).map_err(|_|"removal-snapshot-final-stat")?.st_flags==0,"removal-snapshot-final-flags")?;
-                book.clock()
+                self.files[slot].file_post(book)
             }
         }
 
@@ -12927,6 +12963,133 @@ mod installer {
                     "removal-resume-exclusive-originals")?;book.clock()
             }
         }
+        // Same-source read-only linked crash classification. No effect or old
+        // native success is reconstructed from a predecessor record.
+        pub(super) fn removal_resume_chain_quote_data(linked:usize,count:usize,post:usize,control:u64)
+            ->Option<(usize,u64)> {
+            if !(1..=64).contains(&count){return None;}
+            let end=linked.checked_add(count.checked_mul(2)?)?.checked_add(post)?;
+            let unit=(2*mobile_release_desktop::macos_remove_record::RECORD_LIMIT)
+                .checked_add(std::mem::size_of::<mobile_release_desktop::macos_remove_record::RemovalRecordData>())?
+                .checked_add(std::mem::size_of::<&mobile_release_desktop::macos_remove_record::RemovalRecordData>())?;
+            let work=count.checked_mul(unit)?.checked_add(256*1024)?;
+            let work=u64::try_from(work).ok()?;
+            if end>24576 || control.checked_add(work)?.checked_add(REMOVAL_LINKED_WORK)?>16*1024*1024{return None;}
+            Some((end,work))
+        }
+        fn removal_resume_chain_indices(census:&maintenance::RemovalArchiveCensus,tip:usize,genesis:usize)
+            ->Result<([usize;64],usize)> {
+            check(!census.rows().is_empty() && census.rows().len()<64 && census.is_tip_data(tip)
+                && census.genesis_index_data(tip)==Some(genesis),"removal-chain-tip")?;
+            let expected=census.rows().get(genesis).and_then(|r|r.attempt_data()).ok_or("removal-chain-genesis")?.binding_data();
+            let mut indices=[0usize;64];let mut count=0;let mut current=tip;
+            loop {
+                check(count<64 && !indices[..count].contains(&current)
+                    && census.genesis_index_data(current)==Some(genesis),"removal-chain-cycle-or-bound")?;
+                let row=census.rows().get(current).ok_or("removal-chain-row")?;
+                let attempt=row.attempt_data().ok_or("removal-chain-record")?;
+                check(attempt.binding_data()==expected,"removal-chain-binding")?;
+                indices[count]=current;count+=1;
+                let Some(previous)=attempt.previous_attempt_data() else {
+                    check(current==genesis,"removal-chain-tail")?;break;
+                };
+                let mut next=None;
+                for (index,row) in census.rows().iter().enumerate() {
+                    if row.attempt_data().is_some_and(|a|a.request_id_data()==previous.0 && a.root_nonce_data()==previous.1
+                        && a.raw_tip_sha256_data()==previous.2) {
+                        check(next.is_none(),"removal-chain-ambiguous")?;next=Some(index);
+                    }
+                }
+                current=next.ok_or("removal-chain-missing")?;
+            }
+            Ok((indices,count))
+        }
+        fn removal_resume_chain_record_matches(record:&mobile_release_desktop::macos_remove_record::RemovalRecordData,
+            attempt:&maintenance::RemovalAttemptData)->Result<()> {
+            check(removal_hex_data::<16>(record.request_id_data())?==*attempt.request_id_data()
+                && removal_hex_data::<16>(record.root_nonce_data())?==*attempt.root_nonce_data()
+                && removal_hex_data::<32>(record.digest_data())?==*attempt.raw_tip_sha256_data()
+                && attempt.binding_data().matches_data(record.binding_data())
+                && record.prefix_data()==attempt.prefix_data() && record.first_failure_data()==attempt.first_failure_data(),
+                "removal-chain-record-changed")?;
+            let previous=record.previous_attempt_data().map(|(request,nonce,tip)|->Result<_>{
+                Ok((removal_hex_data::<16>(request)?,removal_hex_data::<16>(nonce)?,removal_hex_data::<32>(tip)?))}).transpose()?;
+            check(previous.as_ref().map(|(r,n,t)|(r,n,t))==attempt.previous_attempt_data(),"removal-chain-link-changed")
+        }
+        fn removal_resume_classify_chain(book:&mut Install,source:&RemovalResumeSource,exclusion:&RemovalResumeExclusion,
+            observed:&maintenance::RemovalResumeObservation,request:&str,nonce:&str)
+            ->Result<mobile_release_desktop::macos_remove_record::ClassificationData> {
+            use mobile_release_desktop::{macos_remove_record::{self as record,RemovalRecordData,RECORD_LIMIT},
+                macos_install_maintenance::CheckData as K};
+            exclusion.post(book,source)?;observed.continuation_budget(book)?;
+            check(source.native_settled() && !source.pending_native_data(),"removal-chain-native-finality")?;
+            let genesis=source.originals.genesis.as_ref().ok_or("removal-chain-genesis")?;
+            let census=&genesis.census;census.fresh(request,nonce)?;
+            let (indices,count)=removal_resume_chain_indices(census,genesis.tip_index,genesis.genesis_index)?;
+            let post=census.post_originals_data()?;
+            let (end,work,control)=observed.chain_quote(book,count,post)?;
+            let live=book.originals.iter().filter(|row|row.fd.is_some()).count();
+            check(live.checked_add(book.removal_live_reserved)
+                .and_then(|n|n.checked_add(if book.worker_deadline.is_some(){EXTRA_LIVE}else{0}))
+                .and_then(|n|n.checked_add(2)).is_some_and(|n|n<=96),"removal-chain-live")?;
+            let prior_reserved=book.removal_control_reserved;
+            book.removal_control_reserved=prior_reserved.checked_add(work)
+                .filter(|n|*n<=16*1024*1024).ok_or("removal-chain-memory")?;
+            maintenance::reserve_removal_original_storage(book,end)?;
+            let added=book.removal_control_reserved.checked_sub(prior_reserved).ok_or("removal-chain-memory")?;
+            check(control.checked_add(added).and_then(|n|n.checked_add(REMOVAL_LINKED_WORK))
+                .is_some_and(|n|n<=16*1024*1024),"removal-chain-memory")?;
+            let mut records:Vec<RemovalRecordData>=Vec::new();records.try_reserve_exact(count).map_err(|_|"removal-chain-allocation")?;
+            let mut refs:Vec<&RemovalRecordData>=Vec::new();refs.try_reserve_exact(count).map_err(|_|"removal-chain-allocation")?;
+            check(records.capacity()<=count && refs.capacity()<=count,"removal-chain-capacity")?;
+            let start=book.originals.len();let mut owned=0usize;let mut read_bytes=0u64;
+            let binding=genesis.data.binding_data()?;
+            for index in &indices[..count] {
+                exclusion.post(book,source)?;
+                let row=&census.rows()[*index];let attempt=row.attempt_data().ok_or("removal-chain-record")?;
+                check(removal_archive_name_data(row.name()) && (1..6).contains(&attempt.tip_slot_data()),"removal-chain-location")?;
+                let file=row.files()[attempt.tip_slot_data()].as_ref().ok_or("removal-chain-file")?;
+                check(file.shape_tag_data()==2 && file.len()>0 && file.len()<=RECORD_LIMIT as u64
+                    && file.digest()==attempt.raw_tip_sha256_data(),"removal-chain-file-binding")?;
+                let archive=book.open(Some(source.root_original()),row.name(),true)?;
+                removal_resume_stat(book,archive,true,Some(0o700))?;
+                check(book.identity(archive)?==row.identity() && row.flags()==0,"removal-chain-archive-original")?;
+                let reader=book.open(Some(archive),removal_payload_file_name(attempt.tip_slot_data())?,false)?;
+                removal_resume_stat(book,reader,false,Some(0o444))?;
+                check(book.identity(reader)?==file.identity() && file.flags()==0,"removal-chain-file-original")?;
+                let (digest,raw)=book.read(reader,file.len(),true)?;
+                check(raw.len() as u64==file.len() && raw.capacity()<=2*RECORD_LIMIT
+                    && removal_hex_data::<32>(&digest)?==*file.digest(),"removal-chain-raw-binding")?;
+                read_bytes=read_bytes.checked_add(raw.len() as u64).filter(|n|*n<=(count*RECORD_LIMIT) as u64)
+                    .ok_or("removal-chain-read-bound")?;
+                let parsed=binding.with_binding(|binding|RemovalRecordData::parse_data(&raw,binding).map_err(|_|"removal-chain-parse"))?;
+                removal_resume_chain_record_matches(&parsed,attempt)?;
+                let bytes=parsed.owned_bytes_data().filter(|n|*n<=2*RECORD_LIMIT).ok_or("removal-chain-memory")?;
+                owned=owned.checked_add(bytes).filter(|n|*n<=count*2*RECORD_LIMIT).ok_or("removal-chain-memory")?;
+                check(records.len()<records.capacity(),"removal-chain-capacity")?;records.push(parsed);drop(raw);
+                removal_resume_stat(book,reader,false,Some(0o444))?;
+                removal_resume_stat(book,archive,true,Some(0o700))?;
+                book.forward_close(reader,"removal-chain-file-close")?;book.forward_close(archive,"removal-chain-archive-close")?;
+                exclusion.post(book,source)?;
+            }
+            source.final_original_post(book)?;
+            check(book.originals.len().checked_sub(start).is_some_and(|n|n<=2*count+post),"removal-chain-original-count")?;
+            exclusion.post(book,source)?;observed.linked_attempt_quote(book,post)?;
+            check(records.len()==count,"removal-chain-count")?;
+            for record in &records {check(refs.len()<refs.capacity(),"removal-chain-capacity")?;refs.push(record);}
+            let result=binding.with_binding(|binding| {
+                check(records[0].bytes_data()==genesis.tip_raw.as_slice(),"removal-chain-original-tip")?;
+                let current=record::FreshObservationData {request_id:request,root_nonce:nonce,prior_record_sha256:records[0].digest_data(),
+                    source_purpose:K::Matches,exclusive_original:K::Matches,protected_controls:K::Matches,
+                    remaining_roster:K::Matches,complete_namespace:K::Matches,
+                    app_slots:observed.plan.app_slots_data(),payload:observed.plan.payload_presence_data()};
+                record::classify_linked_data(&refs,binding,current).map_err(|_|"removal-chain-classification")
+            })?;
+            // No record/census hash becomes a live proof. Only this actual
+            // source/EX/namespace caller may consume the comparison result.
+            drop(refs);drop(records);exclusion.post(book,source)?;Ok(result)
+        }
+
         struct RemovalResumeReady {
             source:RemovalResumeSource,exclusion:RemovalResumeExclusion,observed:maintenance::RemovalResumeObservation,
             request:String,nonce:String,classification:mobile_release_desktop::macos_remove_record::ClassificationData,
@@ -12942,34 +13105,164 @@ mod installer {
                 self.post(book)?;Ok((self.source.genesis_data(book)?,self.source.genesis_original(book)?))
             }
             fn create(source:RemovalResumeSource,exclusion:RemovalResumeExclusion,observed:maintenance::RemovalResumeObservation,
-                book:&Install,request:&str,nonce:&str)->Result<Self> {
-                use mobile_release_desktop::{macos_remove_record::{self as record,ClassificationData as C},
-                    macos_install_maintenance::CheckData as K};
+                book:&mut Install,request:&str,nonce:&str)->Result<Self> {
+                use mobile_release_desktop::macos_remove_record::ClassificationData as C;
                 removal_hex_data::<16>(request)?;removal_hex_data::<16>(nonce)?;
                 exclusion.post(book,&source)?;observed.continuation_budget(book)?;
                 let genesis=source.originals.genesis.as_ref().ok_or("removal-resume-genesis-missing")?;
                 // Fresh attempts cannot fill a sixty-fifth slot or recycle IDs
                 // hidden in an observed partial writer. Existing failures stay.
                 check(genesis.census.rows().len()<64,"removal-resume-attempt-bound")?;genesis.census.fresh(request,nonce)?;
-                let binding=genesis.data.binding_data()?;
-                let classification=binding.with_binding(|binding| {
-                    let prior=record::RemovalRecordData::parse_data(&genesis.tip_raw,binding).map_err(|_|"removal-resume-tip-record")?;
-                    check(prior.owned_bytes_data().is_some_and(|n|n<=2*record::RECORD_LIMIT),"removal-resume-record-memory")?;
-                    // These Matches are reached ONLY from actual typed SOURCE,
-                    // full immutable-control/subset observations and same EX;
-                    // no parser/old admission constructed these originals.
-                    let current=record::FreshObservationData {request_id:request,root_nonce:nonce,prior_record_sha256:prior.digest_data(),
-                        source_purpose:K::Matches,exclusive_original:K::Matches,protected_controls:K::Matches,
-                        remaining_roster:K::Matches,complete_namespace:K::Matches,
-                        app_slots:observed.plan.app_slots_data(),payload:observed.plan.payload_presence_data()};
-                    Ok(record::classify_data(&prior,current))
-                })?;
+                let classification=removal_resume_classify_chain(book,&source,&exclusion,&observed,request,nonce)?;
                 check(matches!(classification,C::WithdrawalObservedAfterAdmission|C::RemainingPayloadObserved
                     |C::PayloadAbsenceObservedAfterInterruptedRemoval|C::PayloadAbsenceReobserved),"removal-resume-prefix-namespace")?;
                 let value=Self{source,exclusion,observed,request:request.into(),nonce:nonce.into(),classification};
                 value.post(book)?;Ok(value)
             }
         }
+        // Inactive linked writer: only a fresh actual absent-app Ready may
+        // reach it. Admission is not deletion permission or old finality.
+        const REMOVAL_LINKED_WORK: u64 = 512 * 1024;
+        pub(super) fn removal_linked_quote_data(continuation:usize,post:usize,storage:u64,control:u64)
+            ->Option<(usize,u64)> {
+            let end=continuation.checked_add(8)?.checked_add(post.checked_mul(2)?)?;
+            let bytes=storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)?;
+            if end>24576 || bytes>installation_record::PAYLOAD_LIMIT
+                || control.checked_add(REMOVAL_LINKED_WORK)?>16*1024*1024 {return None;}
+            Some((end,bytes))
+        }
+        fn removal_linked_record_data(raw:&[u8],expected:&[u8;32],request:&str,nonce:&str,count:usize,
+            binding:mobile_release_desktop::macos_remove_record::RemovalBindingData<'_>)
+            ->Result<mobile_release_desktop::macos_remove_record::RemovalRecordData> {
+            use mobile_release_desktop::macos_remove_record::{RemovalRecordData,RECORD_LIMIT};
+            check(raw.len()<=RECORD_LIMIT && <[u8;32]>::from(Sha256::digest(raw))==*expected,"removal-linked-tip")?;
+            let old=RemovalRecordData::parse_data(raw,binding).map_err(|_|"removal-linked-tip")?;
+            check(old.owned_bytes_data().is_some_and(|n|n<=2*RECORD_LIMIT),"removal-linked-memory")?;
+            let new=old.new_attempt_data(request,nonce,count,binding).map_err(|_|"removal-linked-record")?;
+            check(new.owned_bytes_data().is_some_and(|n|n<=2*RECORD_LIMIT),"removal-linked-memory")?;Ok(new)
+        }
+        fn removal_linked_root_delta_data(before:&[(String,u64)],after:&[(String,u64)],name:&str,inode:u64)->bool {
+            removal_archive_name_data(name) && inode!=0 && before.len()<350 && after.len()==before.len()+1
+                && !before.iter().any(|(old,_)|old==name)
+                && after.iter().filter(|(old,id)|old==name && *id==inode).count()==1
+                && before.iter().all(|row|after.iter().filter(|actual|*actual==row).count()==1)
+                && before.windows(2).all(|p|p[0].0<p[1].0) && after.windows(2).all(|p|p[0].0<p[1].0)
+        }
+        struct RemovalLinkedAttempt {
+            archive:Option<usize>,name:String,files:[RemovalSnapshotFile;6],attempted:bool,
+            pending:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            record:Option<mobile_release_desktop::macos_remove_record::RemovalRecordData>,
+            first:Option<&'static str>,start:usize,allowed:usize,end:usize,storage_quote:u64,
+        }
+        // Only returned by the settled writer, never by the record parser.
+        struct RemovalLinkedAdmission {archive:usize,record:usize,genesis:usize,record_sha256:String}
+        impl RemovalLinkedAttempt {
+            fn new()->Self {Self{archive:None,name:String::new(),files:std::array::from_fn(|_|RemovalSnapshotFile::new()),
+                attempted:false,pending:None,record:None,first:None,start:0,allowed:0,end:0,storage_quote:0}}
+            fn memory(&self,root_before:&[(String,u64)],root_capacity:usize,other:usize)->Result<()> {
+                let mut bytes=std::mem::size_of::<Self>().checked_add(self.name.capacity())
+                    .and_then(|n|n.checked_add(root_capacity.checked_mul(std::mem::size_of::<(String,u64)>())?))
+                    .and_then(|n|n.checked_add(other)).ok_or("removal-linked-memory")?;
+                for (name,_) in root_before {bytes=bytes.checked_add(name.capacity()).ok_or("removal-linked-memory")?;}
+                for record in [&self.pending,&self.record].into_iter().flatten() {
+                    bytes=bytes.checked_add(record.owned_bytes_data().ok_or("removal-linked-memory")?).ok_or("removal-linked-memory")?;
+                }
+                // One other maximum root reader, its fixed block, codec/returned
+                // record overlap and the one original Creation/name allocation.
+                bytes=bytes.checked_add(350*(std::mem::size_of::<(String,u64)>()+255)+65536
+                    +8192+7*(std::mem::size_of::<(String,u64)>()+255)
+                    +8*mobile_release_desktop::macos_remove_record::RECORD_LIMIT+4096).ok_or("removal-linked-memory")?;
+                check(bytes<=REMOVAL_LINKED_WORK as usize,"removal-linked-memory")
+            }
+            fn sealed_record_data(&self)->Option<&mobile_release_desktop::macos_remove_record::RemovalRecordData> {
+                let record=self.pending.as_ref().or(self.record.as_ref())?;let file=&self.files[1];
+                removal_payload_sealed_record_data(record.bytes_data().len(),file.written,file.sealed,
+                    format!("{:x}",file.digest.clone().finalize())==record.digest_data()).then_some(record)
+            }
+            fn complete_data(&self)->bool {
+                self.attempted && self.first.is_none() && self.files[1].settled_data() && self.sealed_record_data().is_some()
+            }
+            fn prepare_inner(&mut self,book:&mut Install,ready:&RemovalResumeReady)->Result<RemovalLinkedAdmission> {
+                use mobile_release_desktop::macos_remove_record::RemovalRecordData;
+                check(!self.attempted && self.first.is_none(),"removal-linked-once")?;self.attempted=true;
+                ready.post(book)?;
+                let source=&ready.source;let root=source.root_original();
+                let genesis=source.originals.genesis.as_ref().ok_or("removal-linked-genesis")?;
+                let census=&genesis.census;
+                check(!census.rows().is_empty() && census.rows().len()<64 && census.is_tip_data(genesis.tip_index)
+                    && census.genesis_index_data(genesis.tip_index)==Some(genesis.genesis_index)
+                    && source.native_settled() && !source.pending_native_data() && book.creations.is_empty(),"removal-linked-original")?;
+                census.fresh(&ready.request,&ready.nonce)?;
+                let post=census.post_originals_data()?;
+                let (end,storage)=ready.observed.linked_attempt_quote(book,post)?;
+                self.end=end;self.storage_quote=storage;
+                let live=book.originals.iter().filter(|n|n.fd.is_some()).count();
+                check(live.checked_add(book.removal_live_reserved)
+                    .and_then(|n|n.checked_add(if book.worker_deadline.is_some(){EXTRA_LIVE}else{0}))
+                    .and_then(|n|n.checked_add(8)).is_some_and(|n|n<=96),"removal-linked-live")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(REMOVAL_LINKED_WORK)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-linked-memory")?;
+                maintenance::reserve_removal_original_storage(book,end)?;
+                // Reserve the entire cumulative quote before any writer effects.
+                let old_capacity=book.originals.capacity();let future=end.checked_sub(book.originals.len()).ok_or("removal-linked-originals")?;
+                book.originals.try_reserve_exact(future).map_err(|_|"removal-linked-allocation")?;
+                check(book.originals.capacity()<=old_capacity.max(end),"removal-linked-capacity")?;
+                book.creations.try_reserve_exact(1).map_err(|_|"removal-linked-allocation")?;
+                check(book.creations.capacity()<=1,"removal-linked-capacity")?;
+                self.start=book.originals.len();self.allowed=8usize.checked_add(post.checked_mul(2).ok_or("removal-linked-originals")?)
+                    .ok_or("removal-linked-originals")?;
+                self.name=format!(".remove-{}",ready.nonce);check(removal_archive_name_data(&self.name),"removal-linked-name")?;
+                self.memory(&[],0,0)?;
+                let binding=genesis.data.binding_data()?;
+                self.pending=Some(binding.with_binding(|binding| removal_linked_record_data(&genesis.tip_raw,
+                    genesis.census.rows()[genesis.tip_index].attempt_data().ok_or("removal-linked-tip")?.raw_tip_sha256_data(),
+                    &ready.request,&ready.nonce,census.rows().len(),binding))?);
+                self.memory(&[],0,0)?;
+                source.final_original_post(book)?;
+                let before=maintenance::removal_root_roster(book,root)?;
+                self.memory(&before,before.capacity(),0)?;
+                check(before.len()<350 && !before.iter().any(|(name,_)|name==&self.name),"removal-linked-name-occupied")?;
+                ready.post(book)?;let parent_before=RemovalPublication::parent_before(book,root)?;
+                let effect=book.creations.len();
+                let archive=book.directory(root,&self.name,true,0o700)?;self.archive=Some(archive);
+                let identity=book.identity(archive)?;
+                check(book.creations.get(effect).is_some_and(|c|c.parent==root && c.name==self.name
+                    && c.state=="created" && c.identity==Some(identity)),"removal-linked-directory-effect")?;
+                check(stat::fstat(book.fd(archive)?).map_err(|_|"removal-linked-stat")?.st_flags==0,"removal-linked-flags")?;
+                RemovalPublication::returned_parent_change(book,root,parent_before,true)?;
+                ready.post(book)?;
+                let raw=self.pending.as_ref().ok_or("removal-linked-record")?.bytes_data().to_vec();
+                self.memory(&before,before.capacity(),raw.capacity())?;
+                self.files[1].create(book,archive,1)?;self.files[1].write(book,1,&raw)?;
+                self.files[1].close_file(book,archive,1)?;
+                let reader=self.files[1].reader.ok_or("removal-linked-readback")?;
+                maintenance::held_bytes(book,reader,&raw)?;
+                binding.with_binding(|binding| {
+                    let parsed=RemovalRecordData::parse_data(&raw,binding).map_err(|_|"removal-linked-readback")?;
+                    check(parsed.digest_data()==self.pending.as_ref().ok_or("removal-linked-record")?.digest_data(),"removal-linked-readback")
+                })?;
+                let roster=maintenance::removal_linked_archive_roster(book,archive)?;
+                check(roster.len()==1 && roster[0].0=="admission.json"
+                    && roster[0].1==book.identity(reader)?.ino,"removal-linked-archive-roster")?;
+                drop(roster);
+                let after=maintenance::removal_root_roster(book,root)?;
+                check(removal_linked_root_delta_data(&before,&after,&self.name,identity.ino),"removal-linked-root-roster")?;
+                drop(after);drop(before);drop(raw);
+                source.final_original_post(book)?;self.files[1].file_post(book)?;
+                ready.post(book)?;
+                check(book.originals.len().checked_sub(self.start).is_some_and(|n|n<=self.allowed)
+                    && self.complete_data(),"removal-linked-finality")?;
+                self.record=self.pending.take();
+                Ok(RemovalLinkedAdmission{archive,record:reader,genesis:genesis.snapshot,
+                    record_sha256:self.record.as_ref().ok_or("removal-linked-record")?.digest_data().to_owned()})
+            }
+            fn prepare(&mut self,book:&mut Install,ready:&RemovalResumeReady)->Result<RemovalLinkedAdmission> {
+                let result=self.prepare_inner(book,ready);
+                if let Err(error)=&result{self.first.get_or_insert(*error);}
+                result
+            }
+        }
+
         // Fixed <=64 prior-reference relation, not a timestamp or a reusable
         // source grant. Edges are admitted only after exact raw/current row
         // comparison by the sole snapshot decoder below.
@@ -14293,6 +14586,7 @@ mod installer {
             removal_snapshot: Option<RemovalSnapshot>,
             removal_payload_execution:Option<RemovalPayloadExecution>,
             removal_resume:Option<RemovalResumeSource>,removal_resume_ready:Option<RemovalResumeReady>,
+            removal_linked_attempt:Option<RemovalLinkedAttempt>,
             reinstall_requested:bool,reinstall:Option<ReinstallAdmission>,reinstall_input:Option<MaintenanceRootInput>,
             archive_handoff:Option<ArchivedInstallHandoff>,
             prefix_source:Option<maintenance::CompleteGenerationPrefixSource>,prefix_retained:bool,
@@ -14318,6 +14612,7 @@ mod installer {
                     removal_snapshot:None,
                     removal_payload_execution:None,
                     removal_resume:None,removal_resume_ready:None,
+                    removal_linked_attempt:None,
                     reinstall_requested:false,reinstall:None,reinstall_input:None,archive_handoff:None,
                     prefix_source:Some(maintenance::CompleteGenerationPrefixSource::new()),prefix_retained:false,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
@@ -14700,8 +14995,19 @@ mod installer {
                 check(source.native_settled() && !source.pending_native_data(),"removal-resume-native-finality")?;
                 observed.charge_retained(&mut self.book)?;
                 let source=self.removal_resume.take().ok_or("removal-resume-source-missing")?;
-                self.removal_resume_ready=Some(RemovalResumeReady::create(source,exclusion,observed,&self.book,request,nonce)?);
+                self.removal_resume_ready=Some(RemovalResumeReady::create(source,exclusion,observed,&mut self.book,request,nonce)?);
                 self.removal_resume_ready.as_ref().ok_or("removal-resume-ready-missing")?.post(&self.book)
+            }
+            // No entry dispatch calls this yet. Keep the same ledger installed
+            // before its first allocation/effect and on every known/unknown error.
+            fn begin_removal_resume_attempt(&mut self)->Result<RemovalLinkedAdmission> {
+                check(self.removal_linked_attempt.is_none() && self.errors.is_empty(),"removal-linked-once")?;
+                self.removal_resume_ready.as_ref().ok_or("removal-resume-ready-missing")?.post(&self.book)?;
+                self.removal_linked_attempt=Some(RemovalLinkedAttempt::new());
+                let result=self.removal_linked_attempt.as_mut().ok_or("removal-linked-missing")?
+                    .prepare(&mut self.book,self.removal_resume_ready.as_ref().ok_or("removal-resume-ready-missing")?);
+                if let Err(error)=&result {self.note(*error);}
+                result
             }
             fn retain_unresolved_removal_resume(&mut self) {
                 if !self.removal_resume.as_ref().is_some_and(RemovalResumeSource::pending_native_data)
@@ -15782,6 +16088,68 @@ mod installer {
 
             #[test]
             fn private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality() {
+                // Real caller preflight includes the entire linked writer and
+                // payload continuation, then chain reads +actual old POST.
+                let post=8usize;let count=3usize;
+                let (end,work)=removal_resume_chain_quote_data(100,count,post,0).unwrap();
+                assert_eq!(end,100+2*count+post);
+                let unit=2*mobile_release_desktop::macos_remove_record::RECORD_LIMIT
+                    +std::mem::size_of::<mobile_release_desktop::macos_remove_record::RemovalRecordData>()
+                    +std::mem::size_of::<&mobile_release_desktop::macos_remove_record::RemovalRecordData>();
+                assert_eq!(work,(count*unit+256*1024) as u64);
+                let pool=16*1024*1024-work-REMOVAL_LINKED_WORK;
+                assert_eq!(removal_resume_chain_quote_data(24576-2*count-post,count,post,pool),Some((24576,work)));
+                assert!(removal_resume_chain_quote_data(24577-2*count-post,count,post,pool).is_none());
+                assert!(removal_resume_chain_quote_data(100,count,post,pool+1).is_none());
+                assert!(removal_resume_chain_quote_data(100,0,post,0).is_none());
+                assert!(removal_resume_chain_quote_data(100,65,post,0).is_none());
+                assert!(removal_resume_chain_quote_data(usize::MAX,count,post,0).is_none());
+                assert!(removal_resume_chain_quote_data(100,count,usize::MAX,0).is_none());
+                assert!(removal_resume_chain_quote_data(100,count,post,u64::MAX).is_none());
+                let linked=removal_linked_quote_data(400,post,0,0).unwrap().0;
+                assert_eq!(removal_resume_chain_quote_data(linked,count,post,0).unwrap().0,400+8+2*post+2*count+post);
+                // Linked admission uses the original raw tip/genesis, not a new
+                // snapshot commitment. Pure DATA does not authorize this writer.
+                use mobile_release_desktop::macos_remove_record::{RemovalRecordData,RemovalBindingData,PrefixData};
+                let hash="a".repeat(64);let source="b".repeat(40);
+                let binding=RemovalBindingData {target:removal_resume_target(),source_commit:&source,
+                    removal_descriptor_sha256:&hash,installed_producer_sha256:&hash,installed_inventory_sha256:&hash,
+                    installation_state_sha256:&hash,payload_roster_sha256:&hash};
+                let old=RemovalRecordData::admission_data(&"1".repeat(32),&"2".repeat(32),binding).unwrap();
+                let digest: [u8;32]=Sha256::digest(old.bytes_data()).into();
+                let new=removal_linked_record_data(old.bytes_data(),&digest,&"3".repeat(32),&"4".repeat(32),63,binding).unwrap();
+                assert_eq!(new.previous_attempt_data(),Some((old.request_id_data(),old.root_nonce_data(),old.digest_data())));
+                assert_eq!(new.binding_data().payload_roster_sha256,old.binding_data().payload_roster_sha256);
+                assert_eq!(new.prefix_data(),PrefixData::AdmissionRecorded);
+                for count in [0,64,usize::MAX] {assert!(removal_linked_record_data(old.bytes_data(),&digest,
+                    &"3".repeat(32),&"4".repeat(32),count,binding).is_err());}
+                let mut wrong=digest;wrong[0]^=1;
+                assert!(removal_linked_record_data(old.bytes_data(),&wrong,&"3".repeat(32),&"4".repeat(32),1,binding).is_err());
+                assert!(removal_linked_record_data(old.bytes_data(),&digest,&"0".repeat(32),&"4".repeat(32),1,binding).is_err());
+                let different="c".repeat(64);
+                assert!(removal_linked_record_data(old.bytes_data(),&digest,&"3".repeat(32),&"4".repeat(32),1,
+                    RemovalBindingData{payload_roster_sha256:&different,..binding}).is_err());
+                let post=8;let extra=8+2*post;
+                let storage=installation_record::PAYLOAD_LIMIT-5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
+                let control=16*1024*1024-REMOVAL_LINKED_WORK;
+                assert_eq!(removal_linked_quote_data(24576-extra,post,storage,control),Some((24576,installation_record::PAYLOAD_LIMIT)));
+                assert!(removal_linked_quote_data(24577-extra,post,storage,control).is_none());
+                assert!(removal_linked_quote_data(24576-extra,post,storage+1,control).is_none());
+                assert!(removal_linked_quote_data(24576-extra,post,storage,control+1).is_none());
+                assert!(removal_linked_quote_data(usize::MAX,post,storage,control).is_none());
+                assert!(removal_linked_quote_data(0,usize::MAX,0,0).is_none());
+                assert!(removal_linked_quote_data(0,0,u64::MAX,0).is_none());
+                assert!(removal_linked_quote_data(0,0,0,u64::MAX).is_none());
+                let name=format!(".remove-{}","4".repeat(32));
+                let before=vec![("M".into(),10),("R".into(),11)];
+                let after=vec![(name.clone(),12),("M".into(),10),("R".into(),11)];
+                assert!(removal_linked_root_delta_data(&before,&after,&name,12));
+                assert!(!removal_linked_root_delta_data(&after,&after,&name,12));
+                assert!(!removal_linked_root_delta_data(&before,&after,&name,13));
+                let mut wrong=after.clone();wrong[1].1=13;
+                assert!(!removal_linked_root_delta_data(&before,&wrong,&name,12));
+                wrong=after.clone();wrong.push(("foreign".into(),14));
+                assert!(!removal_linked_root_delta_data(&before,&wrong,&name,12));
                 maintenance::completed_entry_data_checks();
                 assert_eq!(completed_entry_retry_post_data(200),Some(201));
                 assert_eq!(completed_entry_retry_post_data(usize::MAX),None);
@@ -16156,6 +16524,35 @@ mod installer {
             }
             #[test]
             fn original_join_requires_eof_closes_matching_return_and_timely_sources() {
+                // Actual file/linked ledger predicates at every late cut. No
+                // file operation, close, prior success or destructive grant here.
+                use mobile_release_desktop::macos_remove_record::{RemovalRecordData,RemovalBindingData};
+                let hash="a".repeat(64);let source="b".repeat(40);
+                let binding=RemovalBindingData {target:removal_resume_target(),source_commit:&source,
+                    removal_descriptor_sha256:&hash,installed_producer_sha256:&hash,installed_inventory_sha256:&hash,
+                    installation_state_sha256:&hash,payload_roster_sha256:&hash};
+                for cut in 0..8 {
+                    let mut attempt=RemovalLinkedAttempt::new();
+                    assert!(!attempt.complete_data());assert!(attempt.sealed_record_data().is_none());
+                    attempt.attempted=true;
+                    attempt.pending=Some(RemovalRecordData::admission_data(&"1".repeat(32),&"2".repeat(32),binding).unwrap());
+                    let raw=attempt.pending.as_ref().unwrap().bytes_data();let size=raw.len();
+                    let file=&mut attempt.files[1];file.writer=Some(1);
+                    file.written=if cut==0{size as u64-1}else{size as u64};file.digest.update(&raw[..file.written as usize]);
+                    file.sealed=cut>=2;file.persisted=cut>=3;file.closed=cut>=4;
+                    if cut>=5 {file.reader=Some(2);file.readback=true;}
+                    file.directory_persisted=cut>=6;
+                    assert_eq!(attempt.sealed_record_data().is_some(),cut>=2);
+                    assert_eq!(attempt.complete_data(),cut>=6);
+                    // A failed final old-original POST/clock cannot grant the
+                    // settled admission even when file persistence is known.
+                    attempt.first.get_or_insert("actual-first-cut");
+                    attempt.first.get_or_insert("later-post");
+                    assert_eq!(attempt.first,Some("actual-first-cut"));
+                    assert!(!attempt.complete_data());
+                    assert_eq!(attempt.sealed_record_data().is_some(),cut>=2);
+                    assert!(attempt.record.is_none()); // no promotion on error
+                }
                 for (pending,retained,expected) in [(false,false,PrefixRetentionData::Continue),
                     (true,false,PrefixRetentionData::Retain),(false,true,PrefixRetentionData::Retain),(true,true,PrefixRetentionData::Retain)]{
                     assert_eq!(prefix_retention_data(pending,retained),expected);
