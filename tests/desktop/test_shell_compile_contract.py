@@ -193,6 +193,65 @@ def source_slots_paths(events, captures):
     return SlotsPath, writer, read
 
 
+# Literal B selection independent from the production tuple; all source bodies
+# below are inert DATA, not genuine package/signature/native inputs.
+INTEL_REMOVAL_CASES = [
+    "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
+    "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
+    "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
+]
+
+
+def intel_removal_environment():
+    value = source_slots_environment()
+    value.update(GITHUB_REF="refs/heads/verify/desktop-macos-intel-removal-abrupt",
+                 GITHUB_WORKFLOW_REF="fictional/project/.github/workflows/desktop-macos-intel-source-slots.yml@refs/heads/verify/desktop-macos-intel-removal-abrupt",
+                 MRK_PUSH_EVENT_AFTER=value["GITHUB_SHA"])
+    return value
+
+
+def intel_removal_bodies():
+    return {
+        "desktop/macos-installed-inputs/build-release-intel.json": b'{"schemaVersion":1,"packageVersion":"0.1.1","release":"macos26-x86_64-desktop-01"}',
+        "desktop/src-tauri/Cargo.toml": b'[package]\nversion = "0.1.1"\n',
+        "desktop/src-tauri/tauri.conf.json": b'{"version":"0.1.1"}',
+    }
+
+
+def intel_removal_build():
+    return {"release": "macos26-x86_64-desktop-01", "sources": [
+        {"path": name, "size": len(body), "sha256": helper.hashlib.sha256(body).hexdigest()}
+        for name, body in intel_removal_bodies().items()]}
+
+
+def intel_removal_context():
+    value = source_slots_context()
+    value.update(helper.compile_workflow_binding(intel_removal_environment(), helper.SOURCE_SLOTS_SCOPE))
+    value.update(sourceSlots={"target": "x86_64-apple-darwin", "features": ["macos-installed-removal-abrupt-fixture"],
+                              "testTarget": "bin", "binary": "mrk-macos-remove", "tests": list(INTEL_REMOVAL_CASES)},
+                 sourceSlotsBuild=intel_removal_build())
+    return value
+
+
+def intel_removal_result():
+    return {"tests": list(INTEL_REMOVAL_CASES), "running": 3, "passed": 3, "failed": 0,
+            "ignored": 0, "measured": 0, "filtered": 7}
+
+
+def intel_removal_stdout():
+    return ("\nrunning 3 tests\n" + "".join("test " + name + " ... ok\n" for name in INTEL_REMOVAL_CASES)
+            + "\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s\n\n").encode()
+
+
+def intel_removal_receipt(phase):
+    value, bound = source_slots_receipt(phase), intel_removal_context()
+    value.update(scope="desktop-macos-intel-removal-abrupt-data-v1", workflowRef=bound["workflowRef"],
+                 sourceSlots=deepcopy(bound["sourceSlots"]), sourceSlotsBuild=deepcopy(bound["sourceSlotsBuild"]))
+    if phase == "compile":
+        value["testResult"] = intel_removal_result()
+    return value
+
+
 class ShellCompileContractTests(unittest.TestCase):
     def test_compile_scope_refuses_every_native_phase_before_context_or_tools(self):
         with patch.object(helper, "load_context", side_effect=AssertionError("context must not be opened")), \
@@ -269,6 +328,31 @@ class ShellCompileContractTests(unittest.TestCase):
         changed["sourceSlots"]["features"] = ["registration-helper"]
         with self.assertRaises(helper.CheckFailure):
             helper.phase_source_slots("compile", changed)
+
+        # B is a closed second compiler/DATA selection, not a new native entry.
+        b = intel_removal_context()
+        self.assertEqual(helper.source_slots_selection(True), b["sourceSlots"])
+        self.assertTrue(helper.source_slots_is_removal(b))
+        self.assertFalse(helper.source_slots_is_removal(source_slots_context()))
+        self.assertEqual(helper.compiler_binding(b), MAC_RUST_EXPECTED["x86_64-apple-darwin"])
+        for value in (None, 0, 1, "removal-abrupt", [], {}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_selection(value)
+        with patch.object(helper, "tools", side_effect=AssertionError("no tool")), \
+                patch.object(helper, "source_unchanged", side_effect=AssertionError("no source IO")):
+            for key, value in (("features", ["macos-installed-removal-abrupt-fixture", "development-runtime"]),
+                               ("binary", "mobile-release-kit-desktop"), ("tests", INTEL_REMOVAL_CASES[:2]),
+                               ("target", "aarch64-apple-darwin"), ("testTarget", "lib")):
+                bad = deepcopy(b); bad["sourceSlots"][key] = value
+                with self.subTest(b_selector=key), self.assertRaises(helper.CheckFailure):
+                    helper.phase_source_slots("compile", bad)
+            for value in (helper.MAC_COMPILE_SCOPE, "native", "fixture"):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.phase_source_slots(value, b)
+            for bad in ({**b, "workflowRef": source_slots_context()["workflowRef"]},
+                        {**source_slots_context(), "sourceSlots": b["sourceSlots"]}):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.phase_source_slots("compile", bad)
 
     def test_compile_binding_requires_actual_fixed_workflow_ref_source_and_attempt(self):
         original = environment()
@@ -450,7 +534,16 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.compile_workflow_binding({**engineering, key: bad, "MRK_EXPECTED_SHA": "1" * 40}, helper.ENGINEERING_COMPILE_SCOPE)
         # Actual new workflow source is also nominated, not a synthetic manifest.
         engineering_workflow = (HELPER.parents[2] / helper.ENGINEERING_COMPILE_WORKFLOW).read_text(encoding="utf-8")
-        self.assertIn("branches: [verify/desktop-macos-engineering-ui]", engineering_workflow)
+        self.assertEqual([line.strip() for line in engineering_workflow.splitlines() if line.lstrip().startswith("branches:")],
+                         ["branches: [verify/desktop-macos-engineering-ui, verify/desktop-macos-xctest-compile]"])
+        self.assertIn("  engineering-main:\n    if: github.ref == 'refs/heads/verify/desktop-macos-engineering-ui'\n", engineering_workflow)
+        self.assertIn('[[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-engineering-ui ]] || exit 1', engineering_workflow)
+        # A shared workflow trigger does not grant the ordinary engineering job
+        # to the compile-only ref; its actual helper binding is still exact.
+        compile_only = {**engineering, "GITHUB_REF": "refs/heads/verify/desktop-macos-xctest-compile",
+                        "GITHUB_WORKFLOW_REF": "fictional/project/.github/workflows/desktop-macos-engineering-ui.yml@refs/heads/verify/desktop-macos-xctest-compile"}
+        with self.assertRaises(helper.CheckFailure):
+            helper.compile_workflow_binding(compile_only, helper.ENGINEERING_COMPILE_SCOPE)
         self.assertIn("environment: macos-engineering", engineering_workflow)
         self.assertIn("runs-on: macos-26", engineering_workflow)
         self.assertIn("MRK_DESKTOP_HOSTED_CHECKS: macos-engineering-ui-compile-v1", engineering_workflow)
@@ -487,7 +580,9 @@ class ShellCompileContractTests(unittest.TestCase):
                          "MRK_EXPECTED_SHA": "1" * 40}, helper.SOURCE_SLOTS_SCOPE), binding)
         workflow = (HELPER.parents[2] / helper.SOURCE_SLOTS_WORKFLOW).read_text(encoding="utf-8")
         self.assertEqual(workflow.count("runs-on: macos-26-intel"), 1)
-        self.assertIn("branches: [verify/desktop-macos-intel-source-slots]", workflow)
+        self.assertIn("branches: [verify/desktop-macos-intel-source-slots, verify/desktop-macos-intel-removal-abrupt]", workflow)
+        self.assertIn('[[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]', workflow)
+        self.assertIn("MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}", workflow)
         self.assertEqual(workflow.count("type: string"), 1)
         self.assertIn('[[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]', workflow)
         self.assertIn('[[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]', workflow)
@@ -549,6 +644,81 @@ class ShellCompileContractTests(unittest.TestCase):
                 loaded = {**deepcopy(bound), key: bad}
                 with self.assertRaises(helper.CheckFailure):
                     helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+
+        # The B push does not rely on workflow_dispatch/default-branch delivery.
+        fixed_b = intel_removal_environment()
+        b = intel_removal_context()
+        selected = helper.compile_workflow_binding(fixed_b, helper.SOURCE_SLOTS_SCOPE)
+        self.assertEqual(selected["workflowRef"], b["workflowRef"])
+        for key, value in (("GITHUB_EVENT_NAME", "workflow_dispatch"), ("GITHUB_EVENT_NAME", "pull_request"),
+                           ("MRK_PUSH_EVENT_AFTER", "2" * 40), ("MRK_PUSH_EVENT_AFTER", ""),
+                           ("GITHUB_SHA", "0" * 40), ("GITHUB_REF", "refs/heads/main"),
+                           ("GITHUB_WORKFLOW_REF", source_slots_context()["workflowRef"])):
+            with self.subTest(b_binding=key), self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**fixed_b, key: value, "MRK_EXPECTED_SHA": "1" * 40}, helper.SOURCE_SLOTS_SCOPE)
+        # Old DATA1 still accepts its actual exact-SHA dispatch and needs no after.
+        legacy = source_slots_environment()
+        self.assertEqual(helper.compile_workflow_binding({**legacy, "GITHUB_EVENT_NAME": "workflow_dispatch",
+                         "MRK_EXPECTED_SHA": "1" * 40}, helper.SOURCE_SLOTS_SCOPE),
+                         helper.compile_workflow_binding(legacy, helper.SOURCE_SLOTS_SCOPE))
+        build = intel_removal_build()
+        self.assertIs(helper.validate_source_slots_build(build), build)
+        for key, value in (("release", "macos26-arm64-desktop-01"), ("release", "macos26-x86_64-" + "x" * 50),
+                           ("sources", []), ("sources", list(reversed(build["sources"]))), ("extra", True)):
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_source_slots_build({**build, key: value})
+        for key, value in (("size", True), ("size", 4097), ("sha256", "0" * 64), ("path", "foreign")):
+            bad = deepcopy(build); bad["sources"][0][key] = value
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_source_slots_build(bad)
+        # Real fixed reader/decoder with inert byte ports; no SOURCE fixture IO.
+        bodies, read_sizes, closes = intel_removal_bodies(), [], []
+        class SourceBytes(io.BytesIO):
+            def read(self, limit):
+                read_sizes.append(limit)
+                return super().read(limit)
+            def close(self):
+                closes.append(True)
+                super().close()
+        class BuildPath(PurePosixPath):
+            def open(self, mode):
+                self_outer.assertEqual(mode, "rb")
+                key = self.relative_to("/inert/source").as_posix()
+                return SourceBytes(bodies[key])
+        self_outer = self
+        with patch.object(helper, "ordinary"):
+            self.assertEqual(helper.source_slots_build_inputs(BuildPath("/inert/source")), build)
+            self.assertEqual(read_sizes, [4097, 1024 * 1024 + 1, 1024 * 1024 + 1])
+            self.assertEqual(len(closes), 3)
+            initial = intel_removal_bodies()
+            for key, value in (("desktop/macos-installed-inputs/build-release-intel.json", b"x" * 4097),
+                               ("desktop/macos-installed-inputs/build-release-intel.json", b""),
+                               ("desktop/src-tauri/Cargo.toml", b'[package]\nversion = "0.1.2"\n'),
+                               ("desktop/src-tauri/tauri.conf.json", b'{"version":"0.1.2"}')):
+                bodies = {**initial, key: value}
+                with self.subTest(build_source=key), self.assertRaises(helper.CheckFailure):
+                    helper.source_slots_build_inputs(BuildPath("/inert/source"))
+        events = []
+        MemoryPath, _ = memory_paths(events)
+        loaded = deepcopy(b)
+        with patch.dict(helper.os.environ, {**fixed_b, "MRK_DESKTOP_CI_ROOT": b["root"]}, clear=True), \
+                patch.object(helper, "Path", MemoryPath), patch.object(helper, "ordinary"), \
+                patch.object(helper, "hash_file", return_value=b["workflowSha256"]), \
+                patch.object(helper, "read_bounded_json", side_effect=lambda *args: deepcopy(loaded)), \
+                patch.object(helper, "source_slots_source_guard"), \
+                patch.object(helper, "source_slots_build_inputs", return_value=deepcopy(build)) as input_read:
+            self.assertEqual(helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE), b)
+            self.assertEqual(str(input_read.call_args.args[0]), b["source"])
+            for key, value in (("release", "macos26-x86_64-foreign"), ("sources", list(reversed(build["sources"])))):
+                loaded = deepcopy(b); loaded["sourceSlotsBuild"][key] = value
+                with self.assertRaises(helper.CheckFailure):
+                    helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            loaded = deepcopy(b); loaded["sourceSlotsBuild"]["sources"][0]["sha256"] = "a" * 64
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            loaded = deepcopy(b); loaded["sourceSlots"] = source_slots_context()["sourceSlots"]
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -968,6 +1138,139 @@ class ShellCompileContractTests(unittest.TestCase):
                 helper.source_slots_test_result(broken)
 
 
+        b = intel_removal_context()
+        for phase in ("acquire", "compile"):
+            expected = intel_removal_receipt(phase)
+            self.assertEqual(helper.validate_compile_receipt(expected, b, phase), expected)
+            published = []
+            with patch.object(helper, "write_json", side_effect=lambda path, value: published.append((str(path), deepcopy(value)))):
+                helper.phase_receipt(b, phase, [row["check"] for row in expected["checks"]], node=None,
+                                     source_slots_result=intel_removal_result() if phase == "compile" else None)
+            self.assertEqual(published, [(b["root"] + "/" + phase + "-checks.json", expected)])
+            for wrong, ctx in ((source_slots_receipt(phase), b), (expected, source_slots_context())):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt(wrong, ctx, phase)
+            for key, value in (("sourceSlotsBuild", None), ("sourceSlots", source_slots_context()["sourceSlots"]),
+                               ("scope", "desktop-macos-intel-source-slots-data-v1"), ("sourceTree", "f" * 40)):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt({**expected, key: value}, b, phase)
+        valid = intel_removal_stdout()
+        self.assertEqual(helper.source_slots_removal_test_result(valid), intel_removal_result())
+        swapped = valid.replace(INTEL_REMOVAL_CASES[0].encode(), b"swap").replace(
+            INTEL_REMOVAL_CASES[1].encode(), INTEL_REMOVAL_CASES[0].encode()).replace(b"swap", INTEL_REMOVAL_CASES[1].encode())
+        for bad in (b"", b"\xff", valid.decode(), b"x" * (1024 * 1024 + 1), source_slots_stdout(),
+                    valid.replace(b"running 3", b"running 0"), valid.replace(b"3 passed", b"2 passed"),
+                    valid.replace(b"0 ignored", b"1 ignored"), valid.replace(b"0 failed", b"1 failed"),
+                    valid.replace(b"... ok", b"... ignored", 1), valid[:-3], valid + b"extra\n", valid + valid,
+                    valid.replace(INTEL_REMOVAL_CASES[0].encode(), INTEL_REMOVAL_CASES[1].encode()),
+                    valid.replace(("test " + INTEL_REMOVAL_CASES[0] + " ... ok\n").encode(), b""),
+                    valid.replace(b"7 filtered", b"65536 filtered"), swapped):
+            with self.subTest(b_output=str(bad)[:60]), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_removal_test_result(bad)
+        for key, value in (("passed", True), ("failed", 1), ("running", 2), ("filtered", False),
+                           ("tests", list(reversed(INTEL_REMOVAL_CASES))), ("tests", tuple(INTEL_REMOVAL_CASES))):
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_source_slots_removal_result({**intel_removal_result(), key: value})
+
+        # Exercise the actual selected B phase and owner branches, not a model.
+        order = ["rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"]
+        for fault in (None, "compile-returned", "compile-unknown", "test-returned", "wrong-result", "read", "close",
+                      "source-post", "projection-post", "late-test", "reverse", "late-receipt"):
+            events, captures, calls, published, clock, posts = [], {}, [], [], [100.0], []
+            SlotsPath, writer, read = source_slots_paths(events, captures)
+            class FailingClosePath(SlotsPath):
+                def open(self, *args, **kwargs):
+                    stream = super().open(*args, **kwargs)
+                    if fault != "close" or self.name != "source-slots-compile.stderr":
+                        return stream
+                    class Guard:
+                        def __enter__(self):
+                            return stream.__enter__()
+                        def __exit__(self, *args):
+                            stream.__exit__(*args)
+                            raise OSError("consumed close unknown")
+                    return Guard()
+            def source_post(*args, **kwargs):
+                posts.append("source")
+                if fault == "source-post" and posts.count("source") == 2:
+                    raise helper.CheckFailure("actual source POST")
+            def build_post(path):
+                self.assertEqual(str(path), b["source"])
+                posts.append("build")
+                if fault == "projection-post" and posts.count("build") == 2:
+                    return {**intel_removal_build(), "release": "macos26-x86_64-changed"}
+                return intel_removal_build()
+            def invoke(argv, **kw):
+                calls.append((list(map(str, argv)), {**kw, "env": dict(kw["env"])}))
+                check = kw["check"]
+                if check == "rust-version-target":
+                    return "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+                if check == "mac-cargo-version":
+                    return "cargo 1.98.0 (abcdef123 2026-09-01)"
+                if check == "headless-test-compile-only" and fault in ("compile-returned", "compile-unknown"):
+                    error = helper.CheckFailure("actual compile failure")
+                    if fault == "compile-returned":
+                        error._returned_command = (check, 101)
+                    raise error
+                if check == "mac-source-slots-data-test":
+                    kw["output"].write((source_slots_stdout() if fault == "wrong-result" else valid).decode())
+                    if fault == "test-returned":
+                        error = helper.CheckFailure("actual test failure"); error._returned_command = (check, 101); raise error
+                    if fault == "late-test": clock[0] = 970.0
+                    if fault == "reverse": clock[0] = 99.0
+                return ""
+            def capture_read(path, original, **kwargs):
+                if fault == "read":
+                    raise helper.CheckFailure("actual output readback")
+                return read(path, original)
+            def publish(path, value):
+                published.append((str(path), deepcopy(value)))
+                if fault == "late-receipt" and path.name == "compile-checks.json": clock[0] = 970.0
+            with self.subTest(b_phase=fault), patch.object(helper, "Path", FailingClosePath), \
+                    patch.object(helper, "ordinary"), patch.object(helper, "source_unchanged", side_effect=source_post), \
+                    patch.object(helper, "source_slots_source_guard"), patch.object(helper, "source_slots_build_inputs", side_effect=build_post), \
+                    patch.object(helper, "run", side_effect=invoke), patch.object(helper, "source_slots_writer", side_effect=writer), \
+                    patch.object(helper, "source_slots_read", side_effect=capture_read), patch.object(helper, "write_json", side_effect=publish), \
+                    patch.object(helper, "source_slots_compiler_diagnostic", return_value={"state": "unavailable", "reason": "cargo-json-unavailable", "returnCode": 101, "errors": [], "sources": []}), \
+                    patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "inert-not-forwarded"}, clear=True):
+                if fault is None:
+                    helper.phase_source_slots("compile", b)
+                else:
+                    with self.assertRaises((helper.CheckFailure, OSError)):
+                        helper.phase_source_slots("compile", b)
+            checks = [kw["check"] for _, kw in calls]
+            self.assertEqual(checks, order[:-1] if fault in ("compile-returned", "compile-unknown", "read", "close") else order)
+            for argv, kw in calls:
+                if "output" not in kw: continue
+                common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--features", "macos-installed-removal-abrupt-fixture",
+                          "--target", "x86_64-apple-darwin", "--manifest-path", b["source"] + "/desktop/src-tauri/Cargo.toml",
+                          "--target-dir", b["root"] + "/target", "--bin", "mrk-macos-remove"]
+                tail = (["--message-format=json,json-diagnostic-short", "--no-run"] if kw["check"] == "headless-test-compile-only"
+                        else ["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *INTEL_REMOVAL_CASES])
+                self.assertEqual(argv, ["/Users/runner/.rustup/toolchains/stable-x86_64-apple-darwin/bin/cargo", "test", *common, *tail])
+                self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
+                self.assertEqual(kw["env"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], b["sourceSha"])
+                self.assertEqual(kw["env"]["MRK_IMAGE_RELEASE_ID"], b["sourceSlotsBuild"]["release"])
+                self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", kw["env"])
+                self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
+            passed = [value for path, value in published if path.endswith("/compile-checks.json")]
+            failures = [value for path, value in published if path.endswith("/source-slots-failure.json")]
+            self.assertEqual(passed, [intel_removal_receipt("compile")] if fault in (None, "late-receipt") else [])
+            self.assertEqual(len(failures), int(fault is not None))
+            for failure in failures:
+                self.assertEqual(failure["scope"], "desktop-macos-intel-removal-abrupt-data-v1")
+                self.assertEqual(failure["sourceSlots"], b["sourceSlots"])
+                self.assertEqual(failure["sourceSlotsBuild"], b["sourceSlotsBuild"])
+                self.assertEqual(failure["status"], "failed-or-unknown")
+                self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
+                if fault in ("compile-returned", "test-returned"):
+                    self.assertEqual(failure["originalCommandReturnCode"], 101)
+                if fault == "compile-unknown": self.assertIsNone(failure["originalCommandReturnCode"])
+            if fault is None:
+                self.assertEqual(posts, ["source", "build", "build", "source"])
+                self.assertEqual(len([event for event in events if event[0] == "closed"]), 4)
+
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):
         names = set(helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES + helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES)
         helper.validate_compile_inventory(names, set())
@@ -1242,6 +1545,42 @@ class ShellCompileContractTests(unittest.TestCase):
             self.assertTrue({"other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration",
                              "signing", "installed-runtime"}.issubset(public["notQualified"]))
             helper.phase_source_slots("acquire", prepared)
+        legacy_calls, legacy_written = list(calls), list(written)
+        calls.clear(); written.clear(); events.clear(); captures.clear()
+        b = intel_removal_context()
+        with patch.dict(helper.os.environ, intel_removal_environment(), clear=True), \
+                patch.object(helper, "Path", SlotsPath), patch.object(helper, "run", side_effect=invoke_slots), \
+                patch.object(helper, "ordinary"), patch.object(helper, "hash_file", return_value="2" * 64), \
+                patch.object(helper, "no_cargo_configuration"), \
+                patch.object(helper, "source_slots_build_inputs", return_value=intel_removal_build()) as build_input, \
+                patch.object(helper, "write_json", side_effect=lambda path, value: written.append((str(path), deepcopy(value)))), \
+                patch.object(helper.shutil, "which", side_effect=only_git), \
+                patch.object(helper.tempfile, "mkdtemp", return_value=b["root"]), \
+                patch.object(helper.zipfile, "ZipFile", ZipStream), patch.object(helper.time, "monotonic", return_value=100.0), \
+                patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read):
+            with io.StringIO() as ignored, contextlib.redirect_stdout(ignored):
+                helper.prepare("macos", helper.SOURCE_SLOTS_SCOPE)
+            prepared_b = next(value for path, value in written if path.endswith("/context.json"))
+            public_b = next(value for path, value in written if path.endswith("/public-bindings.json"))
+            self.assertEqual(prepared_b["sourceSlots"], b["sourceSlots"])
+            self.assertEqual(public_b["sourceSlotsBuild"], intel_removal_build())
+            self.assertEqual(public_b["scope"], "desktop-macos-intel-removal-abrupt-data-v1")
+            self.assertIsNone(public_b["node"])
+            helper.phase_source_slots("acquire", prepared_b)
+            self.assertEqual(build_input.call_count, 4)  # prepare input+POST, acquire PRE+POST
+        acquired_b = [(argv, kw) for argv, kw in calls if kw["check"] == "mac-source-slots-locked-metadata"]
+        self.assertEqual(len(acquired_b), 1)
+        b_argv, b_kw = acquired_b[0]
+        self.assertEqual(b_argv, ["/Users/runner/.rustup/toolchains/stable-x86_64-apple-darwin/bin/cargo", "metadata",
+                                 "--locked", "--format-version", "1", "--no-default-features", "--features", "macos-installed-removal-abrupt-fixture",
+                                 "--filter-platform", "x86_64-apple-darwin", "--manifest-path", b["source"] + "/desktop/src-tauri/Cargo.toml"])
+        self.assertNotIn("--offline", b_argv)
+        self.assertEqual(b_kw["env"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], b["sourceSha"])
+        self.assertEqual(b_kw["env"]["MRK_IMAGE_RELEASE_ID"], intel_removal_build()["release"])
+        self.assertEqual(b_kw["timeout"], 600)
+        self.assertTrue(b_kw["output"].closed and b_kw["diagnostics"].closed)
+        self.assertEqual(next(value for path, value in written if path.endswith("/acquire-checks.json")), intel_removal_receipt("acquire"))
+        calls[:], written[:] = legacy_calls, legacy_written
         metadata = [(argv, kw) for argv, kw in calls if kw["check"] == "mac-source-slots-locked-metadata"]
         self.assertEqual(len(metadata), 1)
         argv, kw = metadata[0]
@@ -1320,6 +1659,41 @@ class ShellCompileContractTests(unittest.TestCase):
                     helper.phase_source_slots("clean", bound)
                 no_deletion()
 
+
+        # Same real cleanup code, B positive receipts only. Cross-selection or
+        # changed build inputs cannot authorize even the first inert deletion.
+        bound = intel_removal_context()
+        def reset_b_tree():
+            reset_slots_tree()
+            for phase_name in ("acquire", "compile"):
+                files[bound["root"] + "/" + phase_name + "-checks.json"] = json.dumps(intel_removal_receipt(phase_name)).encode()
+        with patch.object(helper, "Path", CleanPath), patch.object(helper, "ordinary", side_effect=original_file), \
+                patch.object(helper.shutil, "rmtree", side_effect=remove_tree), patch.object(helper, "source_unchanged"), \
+                patch.object(helper, "source_slots_source_guard"), \
+                patch.object(helper, "source_slots_build_inputs", return_value=intel_removal_build()) as build_input:
+            reset_b_tree()
+            with io.StringIO() as ignored, contextlib.redirect_stdout(ignored):
+                helper.phase_source_slots("clean", bound)
+            self.assertFalse(directories)
+            self.assertEqual(set(files), {bound["root"] + "/" + name for name in helper.COMPILE_PUBLIC_FILES})
+            self.assertEqual(build_input.call_count, 1)
+            for fault in ("legacy-acquire", "legacy-compile", "failure", "foreign", "projection", "frontend", "ignored"):
+                reset_b_tree()
+                if fault.startswith("legacy-"):
+                    phase_name = fault.removeprefix("legacy-")
+                    files[bound["root"] + "/" + phase_name + "-checks.json"] = json.dumps(source_slots_receipt(phase_name)).encode()
+                elif fault in ("failure", "foreign"):
+                    files[bound["root"] + ("/source-slots-failure.json" if fault == "failure" else "/foreign")] = b"{}"
+                elif fault == "projection":
+                    build_input.return_value = {**intel_removal_build(), "release": "macos26-x86_64-changed"}
+                elif fault == "frontend": directories.add(bound["source"] + "/desktop/dist")
+                else:
+                    frame = intel_removal_receipt("compile"); frame["testResult"]["ignored"] = 1
+                    files[bound["root"] + "/compile-checks.json"] = json.dumps(frame).encode()
+                with self.subTest(b_cleanup=fault), self.assertRaises(helper.CheckFailure):
+                    helper.phase_source_slots("clean", bound)
+                no_deletion()
+                build_input.return_value = intel_removal_build()
 
     def test_compile_receipt_bytes_reject_duplicate_nonfinite_extra_or_oversized_frames(self):
         value = receipt("compile")

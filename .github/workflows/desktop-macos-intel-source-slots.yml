@@ -1,8 +1,8 @@
-name: Mac Intel SourceSlots allocation DATA
+name: Mac Intel fixed compiler and DATA
 
 on:
   push:
-    branches: [verify/desktop-macos-intel-source-slots]
+    branches: [verify/desktop-macos-intel-source-slots, verify/desktop-macos-intel-removal-abrupt]
     paths:
       - desktop/**
       - src/mobile_release/**
@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   source-slots:
-    name: One Intel SourceSlots allocation test (not supplier qualification)
+    name: Fixed Intel DATA selection (not installed or supplier qualification)
     runs-on: macos-26-intel
     timeout-minutes: 40
     env:
@@ -32,6 +32,7 @@ jobs:
       MRK_MACOS_TARGET: x86_64-apple-darwin
       MRK_DESKTOP_HOSTED_CHECKS: macos-intel-source-slots-v1
       MRK_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
     steps:
       - name: Require exact disposable verification source
         timeout-minutes: 1
@@ -41,11 +42,13 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == X64 ]]
-          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots || "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-removal-abrupt ]]
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" != 0000000000000000000000000000000000000000 ]]
           [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-intel-source-slots.yml@$GITHUB_REF" ]]
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-removal-abrupt ]]; then
+            [[ "$GITHUB_EVENT_NAME" == push && "$MRK_PUSH_EVENT_AFTER" == "$GITHUB_SHA" ]]
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
           else
             [[ "$GITHUB_EVENT_NAME" == push ]]
@@ -82,7 +85,7 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
-      - name: Compile once and run the one exact inert allocation test
+      - name: Compile once and run only the fixed selected inert DATA
         id: allocation
         timeout-minutes: 16
         shell: bash
