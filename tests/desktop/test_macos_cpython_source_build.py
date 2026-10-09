@@ -8530,6 +8530,83 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # SOURCE/host facts below are inert DATA to enter only the actual
+            # early main guards. No builder bootstrap, file IO or native runs.
+            with patch.object(seal.os, "environ", {
+                "MRK_SEAL_TARGET": "aarch64-apple-darwin",
+                "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1",
+                "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
+                "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64",
+                "GITHUB_REPOSITORY": seal.REPOSITORY, "GITHUB_EVENT_NAME": "push",
+                "GITHUB_REF": seal.REFERENCE, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                "GITHUB_JOB": "seal-build",
+                "GITHUB_WORKFLOW_REF": seal.REPOSITORY + "/" + seal.WORKFLOW + "@" + seal.REFERENCE,
+                "GITHUB_WORKSPACE": str(seal.CHECKOUT), "RUNNER_TEMP": str(seal.WORK_PARENT),
+                "DEVELOPER_DIR": str(seal.DEVELOPER), "MRK_SEAL_PYTHON": "/fixture/python",
+            }), patch.object(seal.sys, "argv", ["fixed-entry"]), \
+                 patch.object(seal.sys, "platform", "darwin"), \
+                 patch.object(seal.sys, "version_info", (3, 14, 7)), \
+                 patch.object(seal.sys, "flags", SimpleNamespace(isolated=True, no_site=True)), \
+                 patch.object(seal.sys, "dont_write_bytecode", True), \
+                 patch.object(seal.sys, "executable", "/fixture/python"), \
+                 patch.object(seal.os, "uname", return_value=SimpleNamespace(machine="arm64")), \
+                 patch.object(seal.platform, "mac_ver", return_value=("26.6.2", (), "arm64")), \
+                 patch.object(seal.os, "getuid", return_value=65534), \
+                 patch.object(seal.os, "geteuid", return_value=65534), \
+                 patch.object(seal.os, "getgid", return_value=65534), \
+                 patch.object(seal.os, "getegid", return_value=65534), \
+                 patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")) as bootstrap:
+                cases = (("MRK_SEAL_TARGET", "bad", "target", "fixed-seal-target"),
+                         ("GITHUB_SHA", "0" * 40, "run", "fixed-seal-run"),
+                         ("GITHUB_JOB", "bad", "context", "fixed-seal-workflow-context"),
+                         ("MRK_SEAL_PYTHON", "/other", "python-entry", "actual-setup-python-entry"))
+                for key, value, stage, reason in cases:
+                    with self.subTest(diagnostic=stage), patch.dict(seal.os.environ, {key: value}):
+                        with self.assertRaises(ValueError) as caught:
+                            seal.main()
+                        bootstrap.assert_not_called()
+                        self.assertIn("stage=" + stage + " reason=" + reason + " category=refused", seal.failure_diagnostic(caught.exception))
+                with patch.object(seal.sys, "platform", "linux"):
+                    with self.assertRaises(ValueError) as caught:
+                        seal.main()
+                    bootstrap.assert_not_called()
+                    self.assertIn("stage=host reason=fixed-seal-native-host", seal.failure_diagnostic(caught.exception))
+                with self.assertRaises(ValueError) as caught:
+                    seal.main()
+                bootstrap.assert_called_once_with()
+                self.assertIn("stage=bootstrap reason=builder-source-hash", seal.failure_diagnostic(caught.exception))
+            # Formatting never stringifies an exception, prints a path/message,
+            # adopts a fake build owner or upgrades unknown DATA finality.
+            class HostileError(Exception):
+                def __str__(self):
+                    raise AssertionError("must not stringify")
+            with patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                for error, category in ((HostileError("private-data"), "other"),
+                                        (OSError("/private/path"), "io"),
+                                        (ImportError("private-module"), "import"),
+                                        (KeyboardInterrupt(), "interrupted"),
+                                        (ValueError("private-data"), "refused"),
+                                        (BUILD.BuildRefused("builder-source-hash"), "refused")):
+                    line = seal.failure_diagnostic(error)
+                    self.assertLessEqual(len(line.encode("ascii")), 512)
+                    self.assertIn("category=" + category, line)
+                    self.assertIn("phase=unavailable calls=unavailable data=known nonAtomic=true", line)
+                    self.assertNotIn("private", line)
+                BUILD.DATA.unknown()
+                with patch.object(seal, "_DIAGNOSTIC_STAGE", "/private/path"), \
+                     patch.object(seal, "_DIAGNOSTIC_BUILD", SimpleNamespace(phase="sdk-path", entered=1, returned=1)):
+                    self.assertEqual(seal.failure_diagnostic(HostileError()),
+                        "MRK_SEAL_DIAGNOSTIC_V1 stage=unknown reason=unclassified category=other phase=unavailable calls=unavailable data=unknown nonAtomic=true")
+                # Unentered exact-class DATA receiver tests only diagnostic
+                # field bounding, not a native lifetime or cleanup claim.
+                receiver = object.__new__(seal.SealBuild)
+                receiver.phase, receiver.entered, receiver.returned = "helper-native-test", 22, 21
+                with patch.object(seal, "_DIAGNOSTIC_BUILD", receiver):
+                    self.assertIn("phase=helper-native-test calls=22/21 data=unknown", seal.failure_diagnostic(HostileError()))
+                    receiver.phase, receiver.returned = "private-value", 23
+                    self.assertIn("phase=unknown calls=unavailable data=unknown", seal.failure_diagnostic(HostileError()))
+                    receiver.entered, receiver.returned = True, False
+                    self.assertIn("calls=unavailable data=unknown", seal.failure_diagnostic(HostileError()))
         finally:
             self.assertIs(sys.modules.pop(name), seal)
 

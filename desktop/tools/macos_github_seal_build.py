@@ -77,6 +77,64 @@ ROLE_LIMITS = (
 B = None
 
 
+# Failure-only observations; never an admission, cleanup or publication grant.
+_DIAGNOSTIC_STAGE = "entry"
+_DIAGNOSTIC_BUILD = None
+_DIAGNOSTIC_STAGES = frozenset((
+    "entry", "target", "host", "run", "context", "python-entry", "bootstrap",
+    "detached", "limits", "source-snapshot", "macho-load", "probe-load",
+    "qualification-load", "owner-load", "cancellation-load", "build-init", "build-execute",
+))
+_DIAGNOSTIC_REASONS = frozenset((
+    "fixed-seal-target", "fixed-seal-native-host", "fixed-seal-run",
+    "fixed-seal-workflow-context", "actual-setup-python-entry", "builder-source-kind",
+    "builder-source-original", "builder-source-short", "builder-source-post",
+    "builder-source-hash", "builder-already-loaded", "fixed-detached-source",
+    "descriptor-capacity", "resource-capacity", "resource-limit-post",
+    "deadline-shape", "common-deadline-exhausted", "bounded-original-roster",
+    "source-directory", "source-directories", "source-leaf", "source-count",
+    "existing-owner-source-pin", "helper-source-pin", "canonical-source-pin",
+    "ordinary-input-kind", "ordinary-input-links", "ordinary-input-size",
+    "input-open-correspondence", "input-short-read", "input-post-correspondence",
+    "input-byte-binding", "source-module-already-imported", "source-module-route",
+    "existing-parser-unbound", "owner-already-imported", "owner-source-pin",
+    "owner-source-route", "seal-original-cancellation-owner",
+))
+
+
+def failure_diagnostic(error):
+    """One closed, non-atomic failed-entry line; no exception string conversion."""
+    stage = _DIAGNOSTIC_STAGE if type(_DIAGNOSTIC_STAGE) is str and _DIAGNOSTIC_STAGE in _DIAGNOSTIC_STAGES else "unknown"
+    refusal = type(error) is ValueError or (B is not None and type(error) is B.BuildRefused)
+    reason = "unclassified"
+    if refusal and type(error.args) is tuple and len(error.args) == 1:
+        candidate = error.args[0]
+        if type(candidate) is str and candidate in _DIAGNOSTIC_REASONS:
+            reason = candidate
+    category = ("refused" if refusal else "io" if isinstance(error, OSError) else
+                "import" if isinstance(error, ImportError) else
+                "interrupted" if isinstance(error, (KeyboardInterrupt, SystemExit)) else "other")
+    phase, calls, data = "unavailable", "unavailable", "unavailable"
+    if B is not None and type(B.DATA) is B.DataFinality:
+        data = "known" if B.DATA.known else "unknown"
+    build = _DIAGNOSTIC_BUILD
+    if type(build) is SealBuild:
+        observed = build.phase
+        allowed = {"admission", "canonical-source-extraction", "source-and-native-final-post"}
+        allowed.update(role for role, _, _ in ROLE_LIMITS)
+        phase = observed if type(observed) is str and observed in allowed else "unknown"
+        entered, returned = build.entered, build.returned
+        if type(entered) is int and type(returned) is int and 0 <= returned <= entered <= 22:
+            calls = f"{entered}/{returned}"
+    line = (f"MRK_SEAL_DIAGNOSTIC_V1 stage={stage} reason={reason} category={category} "
+            f"phase={phase} calls={calls} data={data} nonAtomic=true")
+    # Fixed literal alphabets and two decimal counters fit comfortably. No
+    # truncation of arbitrary input or fallback to its representation is used.
+    if len(line.encode("ascii")) > 512:
+        return "MRK_SEAL_DIAGNOSTIC_V1 stage=unknown reason=unclassified category=other phase=unknown calls=unavailable data=unavailable nonAtomic=true"
+    return line
+
+
 def need(value, reason):
     if not value:
         raise ValueError(reason)
@@ -1005,48 +1063,67 @@ class SealBuild:
 
 
 def main():
+    global _DIAGNOSTIC_STAGE, _DIAGNOSTIC_BUILD
     started = time.monotonic()
+    _DIAGNOSTIC_STAGE = "target"
     target = os.environ.get("MRK_SEAL_TARGET", "")
     need(len(sys.argv) == 1 and target in TARGETS, "fixed-seal-target")
     machine, runner_arch, _, _, _ = TARGETS[target]
+    _DIAGNOSTIC_STAGE = "host"
     need(sys.platform == "darwin" and os.uname().machine == machine and platform.mac_ver()[0].startswith("26.")
          and sys.version_info[:3] == (3, 14, 7) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid(), "fixed-seal-native-host")
+    _DIAGNOSTIC_STAGE = "run"
     source, run, attempt = (os.environ.get(key, "") for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
     need(re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-seal-run")
+    _DIAGNOSTIC_STAGE = "context"
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
         "RUNNER_ARCH": runner_arch, "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
         "GITHUB_REF": REFERENCE, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "seal-build",
         "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + REFERENCE,
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT), "DEVELOPER_DIR": str(DEVELOPER)}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-seal-workflow-context")
+    _DIAGNOSTIC_STAGE = "python-entry"
     need(os.environ.get("MRK_SEAL_PYTHON") == sys.executable, "actual-setup-python-entry")
+    _DIAGNOSTIC_STAGE = "bootstrap"
     bootstrap_builder()
+    _DIAGNOSTIC_STAGE = "detached"
     B.need(B.read(CHECKOUT / ".git/HEAD", 41) == source.encode("ascii") + b"\n", "fixed-detached-source")
+    _DIAGNOSTIC_STAGE = "limits"
     resource_limits = limits()
     os.umask(0o077)
     check = lambda: B.remaining(started + WORK_SECONDS, time.monotonic(), WORK_SECONDS)
+    _DIAGNOSTIC_STAGE = "source-snapshot"
     before = source_snapshot(check)
     tools = CHECKOUT / "desktop/tools"
+    _DIAGNOSTIC_STAGE = "macho-load"
     orchestration = B.load_module("_mrk_seal_existing_macho", tools / "macos_cpython_orchestrator.py")
     B.need(orchestration._BUILD is None, "existing-parser-unbound")
     orchestration._BUILD = B  # SAME actual DATA ledger; no CPython context call.
+    _DIAGNOSTIC_STAGE = "probe-load"
     probe = B.load_module("_mrk_seal_existing_probe", tools / "macos_cpython_source_probe.py")
+    _DIAGNOSTIC_STAGE = "qualification-load"
     qualification = B.load_module("_mrk_seal_existing_qualification", tools / "macos_aqua_qualification.py")
+    _DIAGNOSTIC_STAGE = "owner-load"
     owner = qualification.load_owner(CHECKOUT)
+    _DIAGNOSTIC_STAGE = "cancellation-load"
     from mobile_release import cancellation
+    _DIAGNOSTIC_STAGE = "build-init"
     build = SealBuild(target=target, source=source, run=run, attempt=attempt, owner=owner,
         control=cancellation, orchestration=orchestration, probe=probe, started=started)
     build.resource_limits, build.source_binding = resource_limits, before
+    _DIAGNOSTIC_BUILD = build
+    _DIAGNOSTIC_STAGE = "build-execute"
     build.execute()
 
 
 if __name__ == "__main__":
     try:
         main()
-    except BaseException:
+    except BaseException as error:
         # No exception payload, environment, path or secret material is printed.
+        print(failure_diagnostic(error), file=sys.stderr)
         print("Canonical seal build refused; only finalized public evidence is eligible for retention.", file=sys.stderr)
         raise SystemExit(1) from None
     print("Canonical seal native tests returned; packaging and the framed parent integration remain separate.")
