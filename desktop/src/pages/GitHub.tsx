@@ -45,7 +45,7 @@ function draftBranch(session: ProjectSession | null, path: string): string {
 function Proposal({ result, credentialHelp, onHelp }: { result: GitHubSetupProposed; credentialHelp: CredentialHelp[] | null; onHelp: (help: HelpContent) => void }) {
   return <section className="github-proposal" aria-label="Read-only GitHub setup proposal">
     <div className="card">
-      <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Any separate native operation is reported in Local workflow files."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
+      <SectionHeading title="Passive proposal — nothing applied by this preview" description="Complete caller text from the shared core. This preview saves no files and observes no GitHub, Git or Store state. Local caller installation is reported in Local workflow files; remote settings use their separate card."><Badge tone="info">GitHub not contacted</Badge></SectionHeading>
       <dl className="github-facts">
         <div><dt>Toolkit repository</dt><dd><code>{result.tooling.repository}</code></dd></div>
         <div><dt>Toolkit commit · format-only</dt><dd><code>{result.tooling.sha}</code></dd></div>
@@ -117,7 +117,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
   const shaHelp = state.help?.inputs.find((entry) => entry.id === 'toolingSha');
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   return <>
-    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation; remote GitHub setup remains unavailable." />
+    <PageHeading eyebrow="GITHUB" title="Review the setup. Keep authority separate." description="Preview four caller files and a core-sourced checklist. Local installation needs its own fresh native review and confirmation. On a qualified Mac runtime, repository Actions and workflow token policy have a separate remote review and confirmation; environment and secret provisioning remain unavailable." />
     {connectionView}
     <div className="notice notice-info"><Icon name="shield" /><div><strong>Passive setup preview · remote authority unavailable</strong><p>This preview does not contact GitHub. Remote repository state, toolkit ref existence, template compatibility and release readiness remain unknown from a preview. A passive proposal never authorizes local writes or a release. Separate local operation outcomes are shown below.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
@@ -171,7 +171,7 @@ export function GitHub({ info, session, state, controller, loading, onReload, on
     {state.result?.state === 'proposed' && <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} />}
     {nativeReview}
     <section className="card"><SectionHeading title="Local setup is not remote authorization" description="Previewing or applying local caller files does not configure remote environments or secrets, or authorize workflow dispatch. Separate connection and workflow cards enforce their own native availability and user-consent requirements." /><div className="github-disabled-actions">
-      <DisabledAction label="Apply remote GitHub setup" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Authenticated repository setup and remote apply are not implemented. A local file plan has no remote authority.')} />
+      <DisabledAction label="Configure remote environments and protections" icon="lock" reason={futureReason(info?.capabilities, 'github.setup', 'Remote environments and protections are not implemented. The separate repository-settings card supports only Actions enablement and default workflow token permissions, with its own native preview and confirmation. A local file plan has no remote authority.')} />
       <DisabledAction label="Provision GitHub secrets" icon="key" reason={futureReason(info?.capabilities, 'github.setup', 'Environment and secret provisioning are not implemented. No credential values are accepted.')} />
       <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
     </div></section>

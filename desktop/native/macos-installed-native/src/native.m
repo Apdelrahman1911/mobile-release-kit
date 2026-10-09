@@ -291,7 +291,7 @@ int mrk_observation_original_window(uintptr_t original, uint32_t *flags) {
 // Closed ABI result: Other=0, Accept=1, Decline=2. This same pure mapping is
 // exercised by narrow native-crate test definitions; no panel is fabricated.
 static BOOL mrk_panel_project_field(int kind) { return kind >= 4 && kind <= 7; }
-static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 12) || mrk_panel_project_field(kind); }
+static BOOL mrk_panel_open_kind(int kind) { return kind == 1 || kind == 3 || kind == 8 || kind == 9 || (kind >= 10 && kind <= 16) || mrk_panel_project_field(kind); }
 int mrk_panel_response(int kind, int64_t code, int programmatic) {
     if (programmatic) return 0;
     if (mrk_panel_open_kind(kind)) {
@@ -508,6 +508,10 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
                 : kind == 10 ? @"Choose an installed Java 17 JDK folder"
                 : kind == 11 ? @"Choose the Android SDK folder"
                 : kind == 12 ? @"Choose an extracted Gradle distribution folder"
+                : kind == 13 ? @"Choose an Android App Bundle to inspect"
+                : kind == 14 ? @"Choose an iOS IPA to inspect"
+                : kind == 15 ? @"Choose its Xcode archive or archive ZIP"
+                : kind == 16 ? @"Choose its dSYM directory or ZIP"
                 : kind == 9 ? @"Choose up to 10 public PNG or JPEG listing images"
                 : kind == 3 ? @"Choose a signing or iOS build-input file"
                 : kind == 4 ? @"Choose an existing version source inside the project" : kind == 5 ? @"Choose an existing Xcode project directory"
@@ -515,10 +519,10 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
             [panel setTitle:title];
             // The message displays the purpose inside the sheet; its window title may not.
             [panel setMessage:title];
-            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9];
-            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12)];
+            [panel setCanChooseFiles:kind == 3 || kind == 4 || kind == 9 || (kind >= 13 && kind <= 16)];
+            [panel setCanChooseDirectories:kind == 1 || kind == 8 || (kind >= 5 && kind <= 7) || (kind >= 10 && kind <= 12) || kind == 15 || kind == 16];
             [panel setAllowsMultipleSelection:kind == 9]; [panel setCanCreateDirectories:NO];
-            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10];
+            [panel setResolvesAliases:NO]; [panel setTreatsFilePackagesAsDirectories:(kind >= 5 && kind <= 7) || kind == 10 || kind == 15 || kind == 16];
         } else {
             s->alert = [[NSAlert alloc] init];
             [s->alert setMessageText:@"Quit and discard unsaved drafts?"];

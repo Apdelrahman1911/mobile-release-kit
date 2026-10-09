@@ -18,6 +18,9 @@ impl AndroidBuildOwner {
     pub(crate) fn new(runtime: RuntimeConfig, toolchain: Option<crate::android_toolchain::AndroidToolchainProfile>) -> Self {
         Self { saved: SavedCommandOwner::android_build(runtime, toolchain) }
     }
+    pub(crate) fn artifact_tool_loan(&self, document: &std::sync::Arc<()>) -> Result<Option<std::sync::Arc<crate::saved_command_owner::ArtifactToolLoan>>, BridgeError> {
+        self.saved.artifact_tool_loan(document)
+    }
     pub(crate) fn registration_control(&self) -> std::sync::Arc<crate::saved_command_owner::AndroidRegistrationControl> {
         self.saved.android_registration_control()
     }

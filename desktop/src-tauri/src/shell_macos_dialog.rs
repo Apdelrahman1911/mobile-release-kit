@@ -632,6 +632,13 @@ fn panel_kind(choice: DialogChoice, initial_folder: Option<&std::path::Path>) ->
             crate::android_tool_sources::Role::Sdk => PanelKind::AndroidSdk,
             crate::android_tool_sources::Role::Gradle => PanelKind::AndroidGradle,
         }),
+        (DialogChoice::ArtifactInput{format,role},None)=>Ok(match(format,role){
+            (crate::artifact_inspection_protocol::Format::Aab,crate::artifact_inspection_protocol::Role::Artifact)=>PanelKind::ArtifactAab,
+            (crate::artifact_inspection_protocol::Format::Ipa,crate::artifact_inspection_protocol::Role::Artifact)=>PanelKind::ArtifactIpa,
+            (crate::artifact_inspection_protocol::Format::Ipa,crate::artifact_inspection_protocol::Role::Archive)=>PanelKind::ArtifactArchive,
+            (crate::artifact_inspection_protocol::Format::Ipa,crate::artifact_inspection_protocol::Role::Dsyms)=>PanelKind::ArtifactDsyms,
+            _=>return Err(Reason::InvalidRequest),
+        }),
         (DialogChoice::Project, None) => Ok(PanelKind::Project),
         (DialogChoice::EvidenceFolder, None) => Ok(PanelKind::EvidenceFolder),
         (DialogChoice::PublicImages, None) => Ok(PanelKind::PublicImages),
@@ -800,6 +807,14 @@ mod tests {
     use super::*;
     #[test]
     fn android_source_roles_use_the_original_folder_panel_without_renderer_initial_paths() {
+        use crate::artifact_inspection_protocol::{Format as F,Role as A};
+        for (format,role,kind) in [(F::Aab,A::Artifact,PanelKind::ArtifactAab),(F::Ipa,A::Artifact,PanelKind::ArtifactIpa),
+            (F::Ipa,A::Archive,PanelKind::ArtifactArchive),(F::Ipa,A::Dsyms,PanelKind::ArtifactDsyms)] {
+            assert!(matches!(panel_kind(DialogChoice::ArtifactInput{format,role},None),Ok(actual) if actual==kind));
+            assert!(panel_kind(DialogChoice::ArtifactInput{format,role},Some(std::path::Path::new("/inert"))).is_err());
+        }
+        assert!(panel_kind(DialogChoice::ArtifactInput{format:F::Aab,role:A::Archive},None).is_err());
+
         use crate::android_tool_sources::Role;
         for (role, kind) in [(Role::Jdk, PanelKind::AndroidJdk), (Role::Sdk, PanelKind::AndroidSdk), (Role::Gradle, PanelKind::AndroidGradle)] {
             assert!(matches!(panel_kind(DialogChoice::AndroidToolSource(role), None), Ok(actual) if actual == kind));

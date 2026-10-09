@@ -774,3 +774,28 @@ mod frozen_row_data_tests {
         assert!(rows.iter().all(|row|row.selection.is_none()&&row.recovery.is_none()&&row.versions.is_none()));
     }
 }
+
+/// Read-only loan of the same published catalog original. It is not a build
+/// capability, a new catalog worker, or a renderer-deserializable root identity.
+pub(crate) struct ArtifactToolLoan {original:Arc<Inner>,selected:Arc<Selection>}
+impl ArtifactToolLoan {
+    pub(crate) fn current(&self)->bool {
+        let Ok(r)=self.original.registry.try_lock() else{return false;};
+        !self.original.poisoned.load(Ordering::SeqCst)&&!r.disabled&&!r.exhausted&&!r.stopping&&!r.document_lost
+            &&!r.android_catalog.unknown()&&!r.android_catalog.busy()&&!r.android_registration.unknown()
+            &&!r.android_registration.busy()&&!self.original.android_registration_control.is_unknown()
+            &&r.android_catalog.selection().is_some_and(|v|Arc::ptr_eq(v,&self.selected))&&self.selected.matches_owner(&self.original)
+    }
+    pub(crate) fn selected_data(&self)->Option<&android_wire::MacToolchainSelection>{self.current().then_some(self.selected.data())}
+}
+impl SavedCommandOwner {
+    pub(crate) fn artifact_tool_loan(&self,document:&Arc<()>)->Result<Option<Arc<ArtifactToolLoan>>,BridgeError>{
+        if self.inner.domain!=SavedCommandDomain::AndroidBuild||!self.inner.android_original_document_matches(Some(document)){return Err(BridgeError::cleanup_unknown());}
+        let r=self.inner.lock();
+        if r.disabled||r.exhausted||r.stopping||r.document_lost||r.android_catalog.unknown()||r.android_catalog.busy()
+            ||r.android_registration.unknown()||r.android_registration.busy()||self.inner.android_registration_control.is_unknown()
+            ||self.inner.poisoned.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
+        match r.android_catalog.selection(){None=>Ok(None),Some(selected) if selected.matches_owner(&self.inner)=>
+            Ok(Some(Arc::new(ArtifactToolLoan{original:self.inner.clone(),selected:selected.clone()}))),Some(_)=>Err(BridgeError::cleanup_unknown())}
+    }
+}

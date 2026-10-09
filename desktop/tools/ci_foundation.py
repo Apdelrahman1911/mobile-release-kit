@@ -269,147 +269,174 @@ CONVENTIONAL_PREPARE_INPUTS: dict | None = {
 # the reviewed current preparer. Never replace this closed roster with
 # a discovered checkout inventory or H's historical core-source-files.json.
 CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
-    {"path":"/work/inputs/core-source/desktop/android_build_bootstrap.py","size":1051,"sha256":"2cc8b02d24458f3e3e0b90a661765d8e2f97c884030bbeed2a37f587379975a7"},
-    {"path":"/work/inputs/core-source/desktop/config_edit_bootstrap.py","size":1163,"sha256":"927e52dc4e2bb77ce07b4fccdf29807f4fc51f750e53bc1e139719f419cef86f"},
-    {"path":"/work/inputs/core-source/desktop/engine_bootstrap.py","size":1187,"sha256":"fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c"},
-    {"path":"/work/inputs/core-source/desktop/environment_bootstrap.py","size":1077,"sha256":"e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965"},
-    {"path":"/work/inputs/core-source/desktop/github-ca.pem","size":240216,"sha256":"9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f"},
-    {"path":"/work/inputs/core-source/desktop/github_connection_bootstrap.py","size":1227,"sha256":"f484aa139d5e33dd1d27ccee790d2a4e1c90046064956de3699c6b2b89a7df79"},
-    {"path":"/work/inputs/core-source/desktop/github_preflight_bootstrap.py","size":812,"sha256":"04731ad5972dc7390f708e664484bfc14e9f18e905aab18a29cf01a508d81509"},
-    {"path":"/work/inputs/core-source/desktop/github_release_bootstrap.py","size":895,"sha256":"0f4a9c8910e527546fa1b16ed34890d267295c6b56ecd10aac73f599cb707bdc"},
-    {"path":"/work/inputs/core-source/desktop/ios_archive_bootstrap.py","size":738,"sha256":"1c750ecd088f2bf33985a1bdf62a3a9fd0df19fd9563f4f443e605b272661c19"},
-    {"path":"/work/inputs/core-source/desktop/offline_preflight_bootstrap.py","size":1081,"sha256":"0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750"},
-    {"path":"/work/inputs/core-source/desktop/project_recovery_bootstrap.py","size":750,"sha256":"596edfd308abe327a9a255c82d8ea181e3b607e55db40406cb39a1675bd9edbf"},
-    {"path":"/work/inputs/core-source/desktop/tools/prepare_runtime.py","size":13227,"sha256":"dd554d59850d6b059a2c05de92dcdddc9373b154c53d9536e84d13497137f88d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/__init__.py","size":144,"sha256":"557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/__main__.py","size":115,"sha256":"50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_command_process.py","size":172299,"sha256":"30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py","size":3936,"sha256":"67cc1c9e37c80ab91c5abce21c92a9319f8273374f6b57d51ff488521e524826"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py","size":509,"sha256":"acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py","size":66714,"sha256":"68c31de6508628d5994e82459f6c3f149dca1fe2359fbf04e8945327c01a01c5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py","size":44597,"sha256":"d41bd28c4b752d5aeff1d4bc8ac086c350a05fbed87591ab72e88e145bdbcad7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py","size":7238,"sha256":"f0526059bb7b76e90b075b50f6144e0e4b2e8aa7d431a8a40d51090b4e898527"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_android_signing_material.py","size":10009,"sha256":"81e484a291ff1aed07c822499057b7932ae11cbd6243d6cd87cbdf8b6e1cdfc8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py","size":7712,"sha256":"a300db0df65418ac110399225312c117b0e1f1a43608f3259ea6044ab33341e7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py","size":17411,"sha256":"392d6e0e183c3127361ec1b7faeda9b14fc73173934899c109788eda017275e2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py","size":11994,"sha256":"96751f97c443d7a3e31305f5d83183c27f4a2883e0a88df83bc5125bebe3303e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_engine.py","size":9464,"sha256":"083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py","size":5794,"sha256":"b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py","size":6574,"sha256":"0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py","size":19517,"sha256":"1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py","size":14149,"sha256":"a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py","size":11006,"sha256":"93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py","size":5216,"sha256":"64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_engine.py","size":492,"sha256":"ab1e76f3ae0b4a83f4b17340df3f803909d9fbb84063aa743a49a63a26319080"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_protocol.py","size":22594,"sha256":"10775bf62ea12f6c449c51c90ffd8d06166d78aceb8c4dea67749b0732bf6721"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_selection.py","size":4160,"sha256":"8a5d9051f3772bdc070ff25a090ab234ca36b59b4c3ffc6f7cfe56e1efae1b49"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_recovery_protocol.py","size":6972,"sha256":"8f3c6801776e8b8cf48385234860b7a448af87dfb51eac4c6c2b757b13601c39"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_signed_operation.py","size":36496,"sha256":"9f423b72ab217506d682607609b9d75537532ccef99d69beba67f3624c12f184"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_ios_signing_material.py","size":9566,"sha256":"4742c1c9b8d7acc984b4fb2dfcb84d9a8a76b9121f241a3f18ee8d7a51d46929"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py","size":16253,"sha256":"391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py","size":938,"sha256":"7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py","size":1199,"sha256":"ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py","size":13301,"sha256":"094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_control.py","size":1430,"sha256":"97b8b5cc938fcaf2b432a3dc8bc82a05989113525b0739be538807abeb869790"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_engine.py","size":494,"sha256":"430d9938a7b93094d5f078af5aa83d19dbc289ec4f8a3a66ba3a26169273a231"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_protocol.py","size":11539,"sha256":"e0d7227470502cce0f59bd9d978b76f2e39b561afb4646899680c01fffd3fae8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py","size":12928,"sha256":"0be0f717b20ee040658beca3de5478a5b7ee9a0f9408ca486cfad305609f1a3c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py","size":16555,"sha256":"295d229b4dd9928b7c944613f400ce04b3f3daf8ba1dd99a244c18202399121b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_action_family.py","size":634,"sha256":"999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_connection_transport.py","size":44396,"sha256":"83f920465937d6d2443606413469229e47022370ad4813f0266afe3ca393e5a1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py","size":17327,"sha256":"c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py","size":19072,"sha256":"f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_native_process.py","size":62175,"sha256":"70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_profile_callers.py","size":8197,"sha256":"4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_profile_process.py","size":131940,"sha256":"be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_contract.py","size":9500,"sha256":"8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py","size":17638,"sha256":"bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872"},
-    {"path":"/work/inputs/core-source/src/mobile_release/_store_lane_files.py","size":35156,"sha256":"880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android.py","size":38142,"sha256":"68a704b27702372b73ea92861e774d2bb9e59f0d01df822f2624fbe5ed83fe25"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_operation.py","size":26622,"sha256":"e10f2e3738c40452da539078c3b266149f6b7bfa27be91b4edaa944d1b5cb317"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_signing.py","size":9158,"sha256":"48505b448f0685b4ed49802a2ff2317564e1715cf19dde9863a85c4d0b1f786e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_build_tools.py","size":56931,"sha256":"79a6c092c7d30f752c5d326bbac9e4db0e02b836e905904d4c98f947770472be"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_manifest.py","size":9267,"sha256":"7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_upload_validation.py","size":6295,"sha256":"5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_zip.py","size":15103,"sha256":"34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/android_zip_integrity.py","size":15169,"sha256":"80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/__init__.py","size":9264,"sha256":"df0553cbacb757af487715c1f235469be8d72e5044820a28cb454bc7b2abc879"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py","size":16989,"sha256":"d86e658d861d37c8e4f43095a5de71cd9607b0eb1260ebc1de76e64ff02b3366"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_catalog.py","size":15772,"sha256":"72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py","size":19158,"sha256":"834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_credential_guide.py","size":7905,"sha256":"bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_environment.py","size":14236,"sha256":"4115d50e6ff1b2acb991b259a7f06443f234a07d4820167bc444aed916f5b0d4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_connection.py","size":16515,"sha256":"a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_github_setup.py","size":12630,"sha256":"87fa322b2fcd02e399eff4b49eb15ebc84864f1fdcd25b3f958944ea21f9f825"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_json.py","size":2851,"sha256":"84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_lifecycle_evidence.py","size":8942,"sha256":"f094cdd8af9418c44e69f4c7578349251511d5857af2b22ff74cf3e8ee918618"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_metadata_text.py","size":10878,"sha256":"759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_preview.py","size":10213,"sha256":"ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_release_version.py","size":8391,"sha256":"54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot.py","size":33629,"sha256":"54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py","size":19049,"sha256":"c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py","size":26733,"sha256":"a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/contracts.py","size":29210,"sha256":"28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json","size":39128,"sha256":"7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/field-help.json","size":28837,"sha256":"890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json","size":9225,"sha256":"75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json","size":20358,"sha256":"6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json","size":10495,"sha256":"08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/project.schema.json","size":12407,"sha256":"2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json","size":5157,"sha256":"d4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09"},
-    {"path":"/work/inputs/core-source/src/mobile_release/build_inputs.py","size":158556,"sha256":"72c1d593425b46cd16615984528fd28097ccee8bffbfc76928b86f2b1099c8fb"},
-    {"path":"/work/inputs/core-source/src/mobile_release/cancellation.py","size":31041,"sha256":"5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35"},
-    {"path":"/work/inputs/core-source/src/mobile_release/checked_files.py","size":22382,"sha256":"803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3"},
-    {"path":"/work/inputs/core-source/src/mobile_release/cli.py","size":64644,"sha256":"9f1967be7552446ad2f4e5fd6b6f88666573eeb1e6077320deb13d1570e16de2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config.py","size":39869,"sha256":"1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config_edit.py","size":24493,"sha256":"23ddff685ee6179f0a5b9c35d7b5706683f965c27438fd7b16539754d7779b83"},
-    {"path":"/work/inputs/core-source/src/mobile_release/config_payloads.py","size":4803,"sha256":"b7b9ca12f5c09595430b07bfcf8aed2b1b93f60230888721d1ab78199bc910c2"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credential_policy.py","size":4714,"sha256":"384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credential_requirements.py","size":9503,"sha256":"2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/credentials.py","size":106984,"sha256":"1d7efc1307772005282602cd6211ee660cab134a134b7379f25eff6c8df863f5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem","size":4539,"sha256":"c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_android_build.py","size":16867,"sha256":"86caa7a953fbd3a68e4627a0074669d29b85186a74d580964103726932fb93f5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_ios_archive.py","size":22552,"sha256":"c8e8c564dd22826c31028557a35741e6fbf002c25de0e6cc22f3d77e9177658b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_preflight.py","size":8915,"sha256":"2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581"},
-    {"path":"/work/inputs/core-source/src/mobile_release/desktop_project_recovery.py","size":7245,"sha256":"f86353181b260e45d8c748e0dda0653fe7317b571b95c117682d3476067a9611"},
-    {"path":"/work/inputs/core-source/src/mobile_release/discovery.py","size":27885,"sha256":"6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd"},
-    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics.py","size":12025,"sha256":"db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py","size":24700,"sha256":"a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0"},
-    {"path":"/work/inputs/core-source/src/mobile_release/errors.py","size":749,"sha256":"26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853"},
-    {"path":"/work/inputs/core-source/src/mobile_release/evidence_layout.py","size":2011,"sha256":"e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_preflight.py","size":23244,"sha256":"9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_release.py","size":35859,"sha256":"8e798185e43632d64a3f45d7f45934d617751dfd4221d8478eaec074af06d61f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/github_workflow_edit.py","size":21086,"sha256":"cd059224ec5174ece0f0ddb5d74464a9df4497ac991bc3f86fa160f932d0dcaf"},
-    {"path":"/work/inputs/core-source/src/mobile_release/init_transaction.py","size":88826,"sha256":"b19ee28073fd59a6903414ee7429a64e0b9dcf17864d0428009be646e93dda9c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/init_workspace_custody.py","size":33409,"sha256":"3a1ff617db9ecf54209e2b99daa5547b414b146a46bf8c655d0e5cdbb8b5296c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/inspection.py","size":930,"sha256":"663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios.py","size":63226,"sha256":"d399eae3aa5ed516a43b91611150b36cdb10e94ab3c4f3226130e37cccf3cfa7"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_archive_operation.py","size":68026,"sha256":"ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_artifacts.py","size":81185,"sha256":"7b4065bb9a69f2dc404dab40512dffe9e1f4fe957eb41cb865197f1e8c3f85a4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_der.py","size":5132,"sha256":"9ad85b4f36c65d5dc1895fae45ffc3959f0e190e7b183615aa6c0714d8b38ab5"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_entitlements.py","size":23224,"sha256":"3278efadeecbcc09187cc859c03e1e011a8bf2d8f22355f92c03ade140c4951f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_plist_binary.py","size":8499,"sha256":"1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_auth.py","size":7972,"sha256":"143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profile_trust.py","size":9102,"sha256":"e813efc8e4218048bae71f04de942493e93e5880f095e5ae68f051d6cf176edf"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_profiles.py","size":36397,"sha256":"ee19ada826cdd49da7ad8a4ad2b7a2f6bc82eedf9334507980c6c4b87853bb1f"},
-    {"path":"/work/inputs/core-source/src/mobile_release/ios_upload_validation.py","size":7171,"sha256":"2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589"},
-    {"path":"/work/inputs/core-source/src/mobile_release/local_signing.py","size":99969,"sha256":"2163e0233b616ac23921612755ea975826b1ea5a2d55f7384c0a4e3bee3c6c4d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/macho.py","size":23720,"sha256":"b313682fbc54a73d7eddd1afb6620493c12e3031857c43ed725c5d6103e3719b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata.py","size":27910,"sha256":"1aadff63995e2e705c21d5b5e30d8b4ba9f7c69035f32de39afada6d05c8dc2b"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text.py","size":8246,"sha256":"207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70"},
-    {"path":"/work/inputs/core-source/src/mobile_release/metadata_text_edit.py","size":16301,"sha256":"e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815"},
-    {"path":"/work/inputs/core-source/src/mobile_release/owned_process.py","size":9037,"sha256":"0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8"},
-    {"path":"/work/inputs/core-source/src/mobile_release/preflight.py","size":60891,"sha256":"d49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173"},
-    {"path":"/work/inputs/core-source/src/mobile_release/provenance.py","size":203226,"sha256":"30567c328615b0fd2825e51c08dbfdf82e8c83868ab1d4a8c8017af9330c5442"},
-    {"path":"/work/inputs/core-source/src/mobile_release/release_confirmation.py","size":456,"sha256":"7bac256337f269289b867da659ce19ac3fd403527d2ddf118ba473e7a6215aa4"},
-    {"path":"/work/inputs/core-source/src/mobile_release/release_version_edit.py","size":15399,"sha256":"2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167"},
-    {"path":"/work/inputs/core-source/src/mobile_release/reporting.py","size":7628,"sha256":"4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900"},
-    {"path":"/work/inputs/core-source/src/mobile_release/stores.py","size":51029,"sha256":"1346d53d11e60d2f70101905c00e8cda98bcfb838e3ad53359a34cac1b1ab58a"},
-    {"path":"/work/inputs/core-source/src/mobile_release/toolchain_policy.py","size":517,"sha256":"1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61"},
-    {"path":"/work/inputs/core-source/src/mobile_release/tooling.py","size":7495,"sha256":"3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d"},
-    {"path":"/work/inputs/core-source/src/mobile_release/version_text.py","size":10275,"sha256":"408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1"},
-    {"path":"/work/inputs/core-source/src/mobile_release/workflow.py","size":128551,"sha256":"095d2c7dbca450c6dbbb79c9cdd4332073a134aa3150cc51ce2d3b5bb378dd52"},
-    {"path":"/work/inputs/core-source/src/mobile_release/workflow_payloads.py","size":3228,"sha256":"5dbc513b408c0e5735ed67c00db1e3e92499461f307abd53307d493f0895201b"},
+    {'path': '/work/inputs/core-source/desktop/android_build_bootstrap.py', 'size': 1522, 'sha256': 'c40cc18014cb2287a947a29ae206d06484616472886afa04f5afa90f70969f9b'},
+    {'path': '/work/inputs/core-source/desktop/artifact_inspection_bootstrap.py', 'size': 742, 'sha256': 'ebfd55d7b0fe85daa0b65a5eaeae92487f75050f391298d8025260a784907bfc'},
+    {'path': '/work/inputs/core-source/desktop/config_edit_bootstrap.py', 'size': 1355, 'sha256': '0d0123feedf4b992571f02ccd7ad79f2b46dbfa9b23304c8f245c8fe7b291d7f'},
+    {'path': '/work/inputs/core-source/desktop/engine_bootstrap.py', 'size': 1187, 'sha256': 'fe90aa7f12192d7b94067a7774a7151b4f235a339b94881897e9120b0fe25c7c'},
+    {'path': '/work/inputs/core-source/desktop/environment_bootstrap.py', 'size': 1077, 'sha256': 'e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965'},
+    {'path': '/work/inputs/core-source/desktop/github-ca.pem', 'size': 240216, 'sha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'},
+    {'path': '/work/inputs/core-source/desktop/github_connection_bootstrap.py', 'size': 1249, 'sha256': '442137c076170a8f5df291503961e0e67e2edad9ae3c44905075f61204dc4668'},
+    {'path': '/work/inputs/core-source/desktop/github_preflight_bootstrap.py', 'size': 831, 'sha256': '5c28892a457c6a8ea946c43774dd53c1f61a179b3136e63a52cf6eb1d32447db'},
+    {'path': '/work/inputs/core-source/desktop/github_release_bootstrap.py', 'size': 911, 'sha256': '96868532859a696a72868ec8fe2c327b3f81769f6c57ea8d4de92147d038c07d'},
+    {'path': '/work/inputs/core-source/desktop/github_setup_bootstrap.py', 'size': 806, 'sha256': '0ab443416343692b6c5cf7ad123f68f319cbd64a3bd762c6430f6dccf39fa4a4'},
+    {'path': '/work/inputs/core-source/desktop/ios_archive_bootstrap.py', 'size': 738, 'sha256': '1c750ecd088f2bf33985a1bdf62a3a9fd0df19fd9563f4f443e605b272661c19'},
+    {'path': '/work/inputs/core-source/desktop/offline_preflight_bootstrap.py', 'size': 1081, 'sha256': '0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750'},
+    {'path': '/work/inputs/core-source/desktop/project_recovery_bootstrap.py', 'size': 750, 'sha256': '596edfd308abe327a9a255c82d8ea181e3b607e55db40406cb39a1675bd9edbf'},
+    {'path': '/work/inputs/core-source/desktop/tools/prepare_runtime.py', 'size': 13593, 'sha256': '37f2bf9d8644ab0e1826ea591b6b73ea618aa6dc8a04573053e41fca11371294'},
+    {'path': '/work/inputs/core-source/src/mobile_release/__init__.py', 'size': 144, 'sha256': '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/__main__.py', 'size': 115, 'sha256': '50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_command_process.py', 'size': 172299, 'sha256': '30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_control.py', 'size': 3936, 'sha256': '67cc1c9e37c80ab91c5abce21c92a9319f8273374f6b57d51ff488521e524826'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_engine.py', 'size': 509, 'sha256': 'acb8af725b5b77cdaaacbeabe193351498b5b9e1f828e6c7405dca67e0951c4a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_files.py', 'size': 66714, 'sha256': '68c31de6508628d5994e82459f6c3f149dca1fe2359fbf04e8945327c01a01c5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_protocol.py', 'size': 44871, 'sha256': '00e248aa279348194094fc40a0051fcac295eb72f2291915aff3f0e35516eb37'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_build_selection.py', 'size': 7238, 'sha256': 'f0526059bb7b76e90b075b50f6144e0e4b2e8aa7d431a8a40d51090b4e898527'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_android_signing_material.py', 'size': 10009, 'sha256': '81e484a291ff1aed07c822499057b7932ae11cbd6243d6cd87cbdf8b6e1cdfc8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_control.py', 'size': 1359, 'sha256': 'a51b94045a1835113db9d5652402fa97ea2fe75497b313c257fc66e903bd0990'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_engine.py', 'size': 496, 'sha256': '6a5c8941c81541494e94bd7dd7b9b523904dda14d5e3226394c0409325e06b15'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_protocol.py', 'size': 20279, 'sha256': 'a74de05d896f927032dda3d9297ab225b21f75ea6fcb53c5c9668ecf5b20da56'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_artifact_inspection_selection.py', 'size': 22811, 'sha256': 'c77ea1550a1dbfd4e7fbf16d13b24caf9997599aa2c1c2b4b3fa61c40a0cddf0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_control.py', 'size': 8523, 'sha256': '1afda791e6f5c321656a866b76afb67159f129af1cc90cd71b5dff35cdb67a10'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_engine.py', 'size': 31122, 'sha256': 'c0879f50acdeae6fd112af91ef089e09fd98a8f85b55b009727495ebb652e227'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_edit_protocol.py', 'size': 16051, 'sha256': 'a9a3200466861c222c2af5269b915f711f5b8e0f54200e6451e9001a18ab9658'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_engine.py', 'size': 9464, 'sha256': '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_control.py', 'size': 5794, 'sha256': 'b4d8fbe47b575faa8de2fc06854bb6863cd3e68fdb60473c8f5488ce70142771'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py', 'size': 6574, 'sha256': '0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py', 'size': 19517, 'sha256': '1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py', 'size': 14149, 'sha256': 'a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py', 'size': 11006, 'sha256': '93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 3696, 'sha256': '0b07dbfeec2d418eb2b969ea6d39e81caa782d8737df123f98f998d2b722407d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_images_protocol.py', 'size': 9003, 'sha256': 'd4b8aa46d95ec7447c8e6a879f021ef8b82fa936020133c62508a75d18e99e63'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_initialization_protocol.py', 'size': 15547, 'sha256': 'e72c015f5d1fece9fd8bcd4ef2b910a457491e89a8b0eeaab866260e7d4b85d0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py', 'size': 5216, 'sha256': '64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_engine.py', 'size': 492, 'sha256': 'ab1e76f3ae0b4a83f4b17340df3f803909d9fbb84063aa743a49a63a26319080'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_protocol.py', 'size': 22814, 'sha256': '38f84a0b11ccaa9b3e192fb782a06909eb0cf003e6d78376a7022fe57078922c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_selection.py', 'size': 4160, 'sha256': '8a5d9051f3772bdc070ff25a090ab234ca36b59b4c3ffc6f7cfe56e1efae1b49'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_recovery_protocol.py', 'size': 6972, 'sha256': '8f3c6801776e8b8cf48385234860b7a448af87dfb51eac4c6c2b757b13601c39'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_signed_operation.py', 'size': 36496, 'sha256': '9f423b72ab217506d682607609b9d75537532ccef99d69beba67f3624c12f184'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_signing_material.py', 'size': 9566, 'sha256': '4742c1c9b8d7acc984b4fb2dfcb84d9a8a76b9121f241a3f18ee8d7a51d46929'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_budget.py', 'size': 16253, 'sha256': '391ef71136be104523e09b4c2da0967d04271fbbedf7ea04663649eeb82e02d4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_control.py', 'size': 938, 'sha256': '7d867dfba27acd98333f3bb8477f1693e4ad93738a0273be4a4fa44108c438d9'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_engine.py', 'size': 1199, 'sha256': 'ebd6e6e40b024724cb4659f51d200ec255f67fb2b97bd20ab41df8956038f444'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_preflight_protocol.py', 'size': 13301, 'sha256': '094b9259bf99b790d237b0e99c81401eb3839da5360985910b4a86182f542537'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_control.py', 'size': 1430, 'sha256': '97b8b5cc938fcaf2b432a3dc8bc82a05989113525b0739be538807abeb869790'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_engine.py', 'size': 494, 'sha256': '430d9938a7b93094d5f078af5aa83d19dbc289ec4f8a3a66ba3a26169273a231'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_protocol.py', 'size': 11539, 'sha256': 'e0d7227470502cce0f59bd9d978b76f2e39b561afb4646899680c01fffd3fae8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py', 'size': 13949, 'sha256': 'e21d3e6ad0d99bf0750e8b08e6c884aa2cb50e3155c7d0fa894d66fe529fa49d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py', 'size': 17536, 'sha256': '2671a28e5bc05c509a576283c3c6f0d2c5bd655cbe1652c14aaabd95bc111411'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_action_family.py', 'size': 634, 'sha256': '999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 48358, 'sha256': 'ca3d312c5786a47862e862c9a739702d251866c595255f8f66e73430eab2a5f2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py', 'size': 17327, 'sha256': 'c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py', 'size': 19514, 'sha256': 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_native_process.py', 'size': 62175, 'sha256': '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_profile_callers.py', 'size': 8197, 'sha256': '4c1374b6a738f027a3cdbbd4a778346a5ec5df889da9781f8d26b3f7ac688c75'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_profile_process.py', 'size': 131940, 'sha256': 'be6442d5d2f5e777ed48e61a0151c50c4e9878c7c40fec8573af524511780613'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_contract.py', 'size': 9500, 'sha256': '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_evidence.py', 'size': 17638, 'sha256': 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_store_lane_files.py', 'size': 35156, 'sha256': '880eb0cfa37c0c70eb089c6adbe333450af139f1d85c901e861c756057c7aac5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android.py', 'size': 43903, 'sha256': 'bfccda7ce6b0e989a56ee63a2a907ef29f9aa1ae2831221d094509d08cf9bd2f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_operation.py', 'size': 26622, 'sha256': 'e10f2e3738c40452da539078c3b266149f6b7bfa27be91b4edaa944d1b5cb317'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_signing.py', 'size': 9158, 'sha256': '48505b448f0685b4ed49802a2ff2317564e1715cf19dde9863a85c4d0b1f786e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools.py', 'size': 59387, 'sha256': '41b9e27a43ff240412007b3c0381d455cfee9266566ff44735a3131955d0e440'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools_macos.py', 'size': 24465, 'sha256': '08adbf065bf69b574c15dcf85221ca2cc3634b7bb4a562cd11b7cb5c963f98f1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_manifest.py', 'size': 9267, 'sha256': '7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_upload_validation.py', 'size': 6295, 'sha256': '5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_zip.py', 'size': 15103, 'sha256': '34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_zip_integrity.py', 'size': 15169, 'sha256': '80bae3a6142f044643f7a1077b671f3ad105123fe1db55ac674d1b4eb0b1467f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/__init__.py', 'size': 9264, 'sha256': 'df0553cbacb757af487715c1f235469be8d72e5044820a28cb454bc7b2abc879'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_candidate_evidence.py', 'size': 17026, 'sha256': '7dbaaf5f63b8f29b50a1841340b8dcc78ec0e4519311416b37d3a75305180452'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_catalog.py', 'size': 15772, 'sha256': '72059524e4968b4769b5da7bcfb0dbeda121112ddbd04ffe0a20f2daeecf91b3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_credential_assessment.py', 'size': 19158, 'sha256': '834e6a88a64cf491504e03e8e7026b70c693b37196c489bf3d6ebabdcb9bac92'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_credential_guide.py', 'size': 7905, 'sha256': 'bd713a2150eb6b03ea2896ea98db27647146fd536f7a2d412a7f8ada7e98a3fb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_environment.py', 'size': 14333, 'sha256': '81b5d37f0f2aae536e8a96edc8fe517516fd47c1540a00862c974b481944092b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_github_connection.py', 'size': 16515, 'sha256': 'a68974f2bf477cd5d3d4349398a3c7616ac3f47b8fd704a0fa356e3784d29a7b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_github_setup.py', 'size': 13267, 'sha256': 'a8ec2cb35195188ffc66124cabce38ebedbee23726731b43a4333dbd70e240bb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_json.py', 'size': 2851, 'sha256': '84c90334c94b12877cc3dbcd9324bd80d78a2de9f54d64e30c771af06f719815'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_lifecycle_evidence.py', 'size': 8942, 'sha256': 'f094cdd8af9418c44e69f4c7578349251511d5857af2b22ff74cf3e8ee918618'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_metadata_text.py', 'size': 10878, 'sha256': '759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_preview.py', 'size': 10213, 'sha256': 'ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_release_version.py', 'size': 8391, 'sha256': '54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot.py', 'size': 33629, 'sha256': '54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py', 'size': 19049, 'sha256': 'c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py', 'size': 26733, 'sha256': 'a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/contracts.py', 'size': 29210, 'sha256': '28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/credential-guide-v1.json', 'size': 39128, 'sha256': '7f9828720684a1b6d071df2a34d415feb8ff4552c89d8d6d42b19970d838d478'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/field-help.json', 'size': 28837, 'sha256': '890d9d1c22a4984bb60b0b503cf1106fe5b5f03ddf50614b5d00350ee510bb16'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/github-connection-v1.json', 'size': 9225, 'sha256': '75a635de5747c8e0773ec1ee996fff594f38e2a7f28d90099db86f56b4319714'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/github-setup-v1.json', 'size': 20358, 'sha256': '6fa1f3b7dd1907f56af44ccf050458626d702ec0a06e5578a7416986c46ad29a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-image-help-v1.json', 'size': 5492, 'sha256': 'cae88cfa09df0ad46a841b0ba61e036a2e94bcb1bd17e801eaa84042d7fe313e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-images-v1.json', 'size': 8572, 'sha256': '2a5b5790573fd4abe3493762b60592c2bd65bccfcc31855a96d11641892e550a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/metadata-text-help-v1.json', 'size': 10495, 'sha256': '08c4efac78ee2aabc75f6ece7f93010f34193bcb8c8304a742b9e0c7e940ccfb'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/project.schema.json', 'size': 12407, 'sha256': '2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json', 'size': 5157, 'sha256': 'd4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09'},
+    {'path': '/work/inputs/core-source/src/mobile_release/artifact_inspection.py', 'size': 9104, 'sha256': 'c350c6fa35c034afab172b6b659acb0915d4534e5ac5eb5cd01bc2b485057e47'},
+    {'path': '/work/inputs/core-source/src/mobile_release/build_inputs.py', 'size': 162278, 'sha256': '514a5b899fbdb9e8043965baa6316d2e46efbc6e5afff4424f919d5f48943ea4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/cancellation.py', 'size': 31723, 'sha256': 'e71c7063e2652e3ce539c95c0b667ab13275f7ce01559b460585e99e1550f916'},
+    {'path': '/work/inputs/core-source/src/mobile_release/checked_files.py', 'size': 22382, 'sha256': '803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/cli.py', 'size': 63460, 'sha256': '7962b6916a632521378a6d76f163ad4796890cdb262e0bdc37a8ce3e66fbd246'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config.py', 'size': 39869, 'sha256': '1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config_edit.py', 'size': 25534, 'sha256': '40da2f9bb7813a296e18cb8b86ba2c4e84c703d06dcfbb218eae706f781a4ba6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/config_payloads.py', 'size': 4805, 'sha256': 'e4b260181b325f40d896db86234399ea9fa573ff8bcd07a9c6c494294cf7cd76'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credential_policy.py', 'size': 4714, 'sha256': '384375dc92348ba2f25159241ae1c9e9711b5ff7c7d72c2fa230146846590805'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credential_requirements.py', 'size': 9503, 'sha256': '2ee398a6b17a067977d4081b111ac72ef49d6876d8cddfa75bbaca60545e301f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/credentials.py', 'size': 106984, 'sha256': '1d7efc1307772005282602cd6211ee660cab134a134b7379f25eff6c8df863f5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/darwin_memory.py', 'size': 6079, 'sha256': '31489d681c8bd14cd50fe8f4ac6bf1707ae55681cae99fecc899569e8d6b99b6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem', 'size': 4539, 'sha256': 'c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_android_build.py', 'size': 16867, 'sha256': '86caa7a953fbd3a68e4627a0074669d29b85186a74d580964103726932fb93f5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_artifact_inspection.py', 'size': 81442, 'sha256': 'e3ed183182d5220acb12e5fca6b53f55a4d103b3312c2b0c036b0101dc4bc9e5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_ios_archive.py', 'size': 22552, 'sha256': 'c8e8c564dd22826c31028557a35741e6fbf002c25de0e6cc22f3d77e9177658b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_preflight.py', 'size': 8915, 'sha256': '2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_project_recovery.py', 'size': 7245, 'sha256': 'f86353181b260e45d8c748e0dda0653fe7317b571b95c117682d3476067a9611'},
+    {'path': '/work/inputs/core-source/src/mobile_release/discovery.py', 'size': 27885, 'sha256': '6802bd28bccf0c807ca67299c0cb94d2eab0158b44383aed167a42465b2608bd'},
+    {'path': '/work/inputs/core-source/src/mobile_release/environment_diagnostics.py', 'size': 12025, 'sha256': 'db34c792e7097df8d9e0e52980486df450b1e6f9064027202987d99847ec67a1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py', 'size': 24700, 'sha256': 'a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/errors.py', 'size': 749, 'sha256': '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'},
+    {'path': '/work/inputs/core-source/src/mobile_release/evidence_layout.py', 'size': 2011, 'sha256': 'e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_preflight.py', 'size': 23244, 'sha256': '9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_release.py', 'size': 37400, 'sha256': '5862c2989f2818e8d6c9faef277fbd5b8608bdfd5e1b63e22dc9057bb51b8cfa'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 18970, 'sha256': '9cb789151c6994ff269a6f2e20e2657bf5b0ddcd55ab206683e1fae8cbe54d08'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_edit.py', 'size': 22213, 'sha256': '138d38e2379ae7c2d04142862232dd9adf4e2b7165b708c3a80500c02be411d4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_recovery.py', 'size': 42208, 'sha256': '946dd7427df669228d2674202fa3063d5e539e6dc844636349c9d35633a032ab'},
+    {'path': '/work/inputs/core-source/src/mobile_release/init_transaction.py', 'size': 124739, 'sha256': 'e31438ba7b62d147a5d2df5567b5fc796ad7c917fcf32155c41d4df731a80ce0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/init_workspace_custody.py', 'size': 51273, 'sha256': '16db28d284ee5287291ab000cf00500b12b69f43b31b6fe5f0a10da6e3bbc221'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_payloads.py', 'size': 2597, 'sha256': '88047e18b83895264a00cb3f094aa7089d362d14ebcce5fe24717e60b64b2192'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_recovery.py', 'size': 9282, 'sha256': 'f602f708cb92bf449decdadc45d79f427f6f4895ef7b5ebb5159224576262c6e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/initialization_targets.py', 'size': 14895, 'sha256': 'e38cf3eccc4ad87aded173631ede727f6cb1377c306529c111c68bf40304c2c6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/inspection.py', 'size': 930, 'sha256': '663d6d82261815cf044ecc96f19eb7252b54d224edbecd4641679b2a32fc920a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios.py', 'size': 84215, 'sha256': '5e42a8b3a48312d77cd215a8fc6566adf6881787048630535d10a4313493f0da'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_archive_operation.py', 'size': 68026, 'sha256': 'ca724e7943c9862608f4f23db3ffa4202a3904703600c9c338acb8667ee0a49a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_artifacts.py', 'size': 89122, 'sha256': '8247e6fbd81f50bc64742ccc7d3dce7fa2e73e69cf38249b685ac856cb2ff7ec'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_der.py', 'size': 5591, 'sha256': 'cc523fc1239aa4cdfbe38b1a83b12a4ee3a0e6645eeac48c30a27c520f8d5844'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_entitlements.py', 'size': 24766, 'sha256': '62537c12b86f84632ce1c005ab481cff722878ee96f75f202e94e8e329d3919d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_plist_binary.py', 'size': 8499, 'sha256': '1601d3e15467a95348bde537ec6da633c2b4b46e0f7803eb619622b3cab69b2b'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profile_auth.py', 'size': 7972, 'sha256': '143897fba6fcd6e8a6d3d8063425a3274643eca934da334ada795865c840014c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profile_trust.py', 'size': 13730, 'sha256': 'daec8dbe6be114f4c4cf936f228f9152531e5ac86e1619f36389f647d2ceffa7'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_profiles.py', 'size': 38828, 'sha256': '28983f9ecfb445fa8412a065b610ab48f6ec701249aaaaa1c8333aeaf9a5c081'},
+    {'path': '/work/inputs/core-source/src/mobile_release/ios_upload_validation.py', 'size': 7171, 'sha256': '2b914576fd795123bd6088711f19d1072801415736f266ebaf39c5d6d4446589'},
+    {'path': '/work/inputs/core-source/src/mobile_release/local_signing.py', 'size': 100391, 'sha256': '5fe3dc261a12802cfa54df171c461ec03a3e60119b0ab5c5e943c70715f16d9e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/macho.py', 'size': 24772, 'sha256': '40841a2a613def730afc157133507887db5acf97f2beb8e8cccf5c161b915fef'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata.py', 'size': 26246, 'sha256': 'c4ac064ee8dbb4197fb810045fd10151fc728ec3e990704ce4dbad9245fc1f97'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_image_header.py', 'size': 4953, 'sha256': '0c45ea5966272c370c344245418dcda6e54026fa86af40ba635d88442de468dd'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images.py', 'size': 34681, 'sha256': 'c22916e49ccb102938f752ba774b875f7f58c7726ad700328c3eb2950f1cd58d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_custody.py', 'size': 17479, 'sha256': '1bf1d046640421012ac06249d55360eb862a50dc28b6a64234a6703d37c2763f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_edit.py', 'size': 14063, 'sha256': 'fe8c1d3842665df68e32373c817dfe7612cbcfb482226d7d3f38420afe9e6fad'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_images_recovery.py', 'size': 47833, 'sha256': '5ee2ec281b08633cfce5f1730f1fa5fc82f09887c86cc4fbc4df882422666db3'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_text.py', 'size': 8246, 'sha256': '207cde915a41c7ae026d2640d97464220bd7284c2de20ff3f366fb9fb0f4cb70'},
+    {'path': '/work/inputs/core-source/src/mobile_release/metadata_text_edit.py', 'size': 16301, 'sha256': 'e6f76867b3605f72816f66e37a413d9ab1bc001790b8a0d8eff252d485280815'},
+    {'path': '/work/inputs/core-source/src/mobile_release/owned_process.py', 'size': 9037, 'sha256': '0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/preflight.py', 'size': 60891, 'sha256': 'd49e71ec66f149bab82ef4dcabf22db96fed61864a5540d48ae309183e25c173'},
+    {'path': '/work/inputs/core-source/src/mobile_release/project_initialization.py', 'size': 13149, 'sha256': '14a3be9ce60d7e722ec1f2b7e6df6a5e22fedd4812a08cff12da525eaaa949b0'},
+    {'path': '/work/inputs/core-source/src/mobile_release/provenance.py', 'size': 203226, 'sha256': '30567c328615b0fd2825e51c08dbfdf82e8c83868ab1d4a8c8017af9330c5442'},
+    {'path': '/work/inputs/core-source/src/mobile_release/release_confirmation.py', 'size': 456, 'sha256': '7bac256337f269289b867da659ce19ac3fd403527d2ddf118ba473e7a6215aa4'},
+    {'path': '/work/inputs/core-source/src/mobile_release/release_version_edit.py', 'size': 15399, 'sha256': '2ba0d9f3cf99ebe77a06a1690d6f93755ce48af55ca20da9989fed5cd2eed167'},
+    {'path': '/work/inputs/core-source/src/mobile_release/reporting.py', 'size': 7628, 'sha256': '4bbed825e6f1098dd4a89d864002641a2c7ec13f183ac0e85d5de3cc38aab900'},
+    {'path': '/work/inputs/core-source/src/mobile_release/saved_text_recovery.py', 'size': 53291, 'sha256': 'd7b81a1baf7f6546325facc45611ce5b6dfb402f335d3688ee9f49cc908768d5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/stores.py', 'size': 51029, 'sha256': '1346d53d11e60d2f70101905c00e8cda98bcfb838e3ad53359a34cac1b1ab58a'},
+    {'path': '/work/inputs/core-source/src/mobile_release/toolchain_policy.py', 'size': 517, 'sha256': '1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61'},
+    {'path': '/work/inputs/core-source/src/mobile_release/tooling.py', 'size': 7495, 'sha256': '3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/version_text.py', 'size': 10275, 'sha256': '408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/workflow.py', 'size': 128551, 'sha256': '095d2c7dbca450c6dbbb79c9cdd4332073a134aa3150cc51ce2d3b5bb378dd52'},
+    {'path': '/work/inputs/core-source/src/mobile_release/workflow_payloads.py', 'size': 4997, 'sha256': 'c485569cc573cf2ec99971370eee18bc0d54be7c1eac4edc344d89160fc06ea9'},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
     "manifestSha256": "acebf377f172ef49b79eab4a0edbf72c2222a869cacb24b21d234551da6152ba",
@@ -782,6 +809,21 @@ SOURCE_SLOTS_INITIALIZATION_TESTS = (
     'project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded',
     'project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents',
     'project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply',
+)
+SOURCE_SLOTS_ARTIFACT_SELECTION = "artifact-setup10"
+SOURCE_SLOTS_ARTIFACT_EVIDENCE = "desktop-macos-artifact-setup-data-v1"
+# Fixed lexical DATA tuple; never a native picker or inspection receipt.
+SOURCE_SLOTS_ARTIFACT_TESTS = (
+    'artifact_inspection_protocol::tests::actual_profile_counts_and_negative_checks_never_replace_original_finality',
+    'artifact_inspection_protocol::tests::exact_result_frames_and_status_headroom_do_not_truncate_or_accept_unbounded_strings',
+    'artifact_inspection_protocol::tests::originals_have_lossless_full_tuples_without_claiming_payload_or_native_custody',
+    'artifact_inspection_protocol::tests::selected_ids_are_closed_distinct_and_never_paths_or_other_domain_consent',
+    'installed_runtime::installed_github_action_original_slots_are_inert_and_uncertainty_is_absorbing',
+    'runtime::macos_github_actions_profile_data_contract',
+    'saved_command_owner::artifact_inputs::tests::missing_original_table_cannot_be_loaned_or_consumed_and_metadata_census_is_checked',
+    'saved_command_owner::tests::artifact_original_closure_distinguishes_unentered_from_claimed_and_unreturned_workers',
+    'saved_command_owner::tests::artifact_two_frames_without_selected_originals_never_publish_and_first_stop_never_renews',
+    'supervisor::macos_github_actions_original_data_contract',
 )
 SOURCE_SLOTS_BUILD_INPUTS = (
     ("desktop/macos-installed-inputs/build-release-intel.json", 4096),
@@ -2954,10 +2996,12 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
             "Compiler workflow event or exact dispatch source differs")
     initialization = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_initialization(environment)
+    artifact = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_artifact(environment)
     return {"workflowPath": profile["workflow"], "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt,
-            **({"sourceSlotsSelection": SOURCE_SLOTS_INITIALIZATION_SELECTION} if initialization else {})}
+            **({"sourceSlotsSelection": SOURCE_SLOTS_INITIALIZATION_SELECTION} if initialization else
+               {"sourceSlotsSelection": SOURCE_SLOTS_ARTIFACT_SELECTION} if artifact else {})}
 
 
 def workflow_native_binding(environment: dict[str, str]) -> dict[str, str]:
@@ -3080,10 +3124,14 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         elif source_slots_is_initialization(context):
             expected.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
                             sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif source_slots_is_artifact(context):
+            expected.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
         if phase == "compile":
             expected["testResult"] = (validate_source_slots_removal_result(value.get("testResult")) if removal
                                       else validate_source_slots_initialization_result(value.get("testResult"))
-                                      if source_slots_is_initialization(context) else validate_source_slots_result(value.get("testResult")))
+                                      if source_slots_is_initialization(context) else validate_source_slots_artifact_result(value.get("testResult"))
+                                      if source_slots_is_artifact(context) else validate_source_slots_result(value.get("testResult")))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -7186,7 +7234,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
         value["testResult"] = (validate_source_slots_removal_result(source_slots_result) if source_slots_is_removal(context)
                                else validate_source_slots_initialization_result(source_slots_result)
-                               if source_slots_is_initialization(context) else validate_source_slots_result(source_slots_result))
+                               if source_slots_is_initialization(context) else validate_source_slots_artifact_result(source_slots_result)
+                               if source_slots_is_artifact(context) else validate_source_slots_result(source_slots_result))
     if main_compiled is not None:
         require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
                 and compiled is None, "Unexpected engineering main artifact")
@@ -7215,6 +7264,9 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
             elif source_slots_is_initialization(context):
                 value.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
                              sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+            elif source_slots_is_artifact(context):
+                value.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7654,7 +7706,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     context.update(binding)
     if scope == SOURCE_SLOTS_SCOPE:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "SourceSlots source tree differs")
-        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context))
+        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context), artifact=source_slots_is_artifact(context))
         if slots_removal:
             context["sourceSlotsBuild"] = slots_build
     if engineering_work is not None:
@@ -7730,6 +7782,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         elif source_slots_is_initialization(context):
             public.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
                           sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif source_slots_is_artifact(context):
+            public.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
         public["notQualified"].extend(("other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration", "signing", "installed-runtime"))
     if scope == MAC_COMPILE_SCOPE:
         compiler = compiler_binding(context)
@@ -7820,6 +7875,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             removal = source_slots_is_removal(context)
             require(removal == (os.environ.get("GITHUB_REF") == SOURCE_SLOTS_REMOVAL_REF)
                     and source_slots_is_initialization(context) == source_slots_requested_initialization(os.environ)
+                    and source_slots_is_artifact(context) == source_slots_requested_artifact(os.environ)
                     and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
                     and type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -8548,14 +8604,14 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 
 def source_slots_requested_initialization(environment: dict) -> bool:
     selection = environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1")
-    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION),
+    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION),
             "Unknown fixed Intel DATA dispatch selection")
-    if selection == SOURCE_SLOTS_INITIALIZATION_SELECTION:
+    if selection in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION):
         require(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                 and environment.get("GITHUB_REF") == SOURCE_SLOTS_REF
                 and environment.get("MRK_EXPECTED_SHA") == environment.get("GITHUB_SHA"),
-                "Initialization DATA requires exact fixed-ref dispatch")
-        return True
+                "Named DATA requires exact fixed-ref dispatch")
+        return selection == SOURCE_SLOTS_INITIALIZATION_SELECTION
     return False
 
 
@@ -8563,14 +8619,28 @@ def source_slots_is_initialization(context: dict) -> bool:
     if "sourceSlotsSelection" not in context:
         return False
     require(type(context["sourceSlotsSelection"]) is str
-            and context["sourceSlotsSelection"] == SOURCE_SLOTS_INITIALIZATION_SELECTION,
-            "Initialization DATA context selection differs")
-    return True
+            and context["sourceSlotsSelection"] in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION),
+            "Named DATA context selection differs")
+    return context["sourceSlotsSelection"] == SOURCE_SLOTS_INITIALIZATION_SELECTION
 
 
-def source_slots_selection(removal: bool = False, *, initialization: bool = False) -> dict:
-    require(type(removal) is bool and type(initialization) is bool and not (removal and initialization),
+def source_slots_requested_artifact(environment: dict) -> bool:
+    source_slots_requested_initialization(environment)  # SAME closed dispatch validation.
+    return environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1") == SOURCE_SLOTS_ARTIFACT_SELECTION
+
+
+def source_slots_is_artifact(context: dict) -> bool:
+    source_slots_is_initialization(context)  # SAME closed context tag validation.
+    return context.get("sourceSlotsSelection") == SOURCE_SLOTS_ARTIFACT_SELECTION
+
+
+def source_slots_selection(removal: bool = False, *, initialization: bool = False, artifact: bool = False) -> dict:
+    require(type(removal) is bool and type(initialization) is bool and type(artifact) is bool
+            and sum((removal, initialization, artifact)) <= 1,
             "Unknown Intel DATA selector")
+    if artifact:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_ARTIFACT_TESTS)}
     if initialization:
         return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
                 "testTarget": "lib", "tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS)}
@@ -8623,7 +8693,7 @@ def source_slots_build_inputs(source: Path) -> dict:
 def source_slots_is_removal(context: dict) -> bool:
     removal = source_slots_removal_workflow(context.get("workflowRef"))
     initialization = source_slots_is_initialization(context)
-    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization)),
+    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization, artifact=source_slots_is_artifact(context))),
             "SourceSlots context selector differs from its workflow")
     if removal:
         validate_source_slots_build(context.get("sourceSlotsBuild"))
@@ -8687,6 +8757,32 @@ def source_slots_initialization_test_result(raw: bytes) -> dict:
                          + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
     require(match is not None, "Initialization DATA stdout is missing, extra, ignored or failed")
     return validate_source_slots_initialization_result({"tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS), "running": 4, "passed": 4,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_artifact_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Artifact DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_ARTIFACT_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 10), ("passed", 10), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Artifact DATA did not pass exactly its ten selected tests")
+    return value
+
+
+def source_slots_artifact_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Artifact DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Artifact DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_ARTIFACT_TESTS)
+    match = re.fullmatch(r"\n?running 10 tests\n" + rows
+                         + r"\ntest result: ok\. 10 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Artifact DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_artifact_result({"tests": list(SOURCE_SLOTS_ARTIFACT_TESTS), "running": 10, "passed": 10,
                                                  "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
 
 
@@ -9060,6 +9156,7 @@ def phase_source_slots(name: str, context: dict) -> None:
     require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and context.get("platform") == "macos", "Wrong SourceSlots context")
     removal = source_slots_is_removal(context)
     initialization = source_slots_is_initialization(context)
+    artifact = source_slots_is_artifact(context)
     require(name in ("acquire", "compile", "clean"), "Wrong SourceSlots phase")
     root, source = Path(context["root"]), Path(context["source"])
     if name == "clean":
@@ -9112,7 +9209,8 @@ def phase_source_slots(name: str, context: dict) -> None:
             # Reuse one Cargo-fingerprinted compile; only the literal exact case
             # follows it. No ignored filter, arbitrary selector or other graph.
             test_args = (["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
-                          *(SOURCE_SLOTS_REMOVAL_TESTS if removal else SOURCE_SLOTS_INITIALIZATION_TESTS)] if removal or initialization
+                          *(SOURCE_SLOTS_REMOVAL_TESTS if removal else SOURCE_SLOTS_INITIALIZATION_TESTS if initialization
+                            else SOURCE_SLOTS_ARTIFACT_TESTS)] if removal or initialization or artifact
                          else [SOURCE_SLOTS_TEST, "--", "--exact", "--test-threads=1"])
             # JSON short changes only rendered, not the full compiler-message payload.
             # B needs no artifact JSON: preserve all diagnostics in bounded short text.
@@ -9177,7 +9275,7 @@ def phase_source_slots(name: str, context: dict) -> None:
                 raise
             if check == "mac-source-slots-data-test":
                 result = (source_slots_removal_test_result(raw) if removal else source_slots_initialization_test_result(raw)
-                          if initialization else source_slots_test_result(raw))
+                          if initialization else source_slots_artifact_test_result(raw) if artifact else source_slots_test_result(raw))
         last_check = "source-post"
         source_slots_source_guard(source, root)
         source_slots_inputs_unchanged(context)
@@ -9199,6 +9297,9 @@ def phase_source_slots(name: str, context: dict) -> None:
         elif initialization:
             failure.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE, sourceSlots=context["sourceSlots"],
                            sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
+        elif artifact:
+            failure.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
         if name == "compile" and last_check == "headless-test-compile-only":
             if compiler_diagnostic is None:
                 compiler_diagnostic = source_slots_diagnostic_unavailable(None, "original-unavailable")

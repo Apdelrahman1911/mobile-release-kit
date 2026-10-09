@@ -1,8 +1,10 @@
+import type { ArtifactInspectionApi } from './artifactInspectionTypes.ts';
 import type { ProjectInitializationApi } from './projectInitializationTypes.ts';
 import type { InstallationDescription, InstallationRevealResult, InstallationStatus, InstallationPreparationStatus } from './installation.ts';
 import type { AssetSessionApi } from './assetSessionTypes.ts';
 import type { GitHubWorkflowEditApi } from './githubWorkflowEditTypes.ts';
 import type { GitHubConnectionApi, GitHubConnectionHelp } from './githubConnectionTypes.ts';
+import type { GitHubRemoteSetupApi } from './GitHubRemoteSetupTypes.ts';
 import type { GitHubPreflightApi } from './githubPreflightTypes.ts';
 import type { GitHubReleaseApi } from './githubReleaseTypes.ts';
 import type { MetadataTextApi, MetadataTextGuide } from './metadataText.ts';
@@ -407,7 +409,7 @@ export interface PrepareConfigEditRequest {
   baselineGeneration: number;
 }
 
-export interface DesktopApi extends ProjectInitializationApi, AssetSessionApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
+export interface DesktopApi extends ArtifactInspectionApi, ProjectInitializationApi, AssetSessionApi, GitHubRemoteSetupApi, GitHubWorkflowEditApi, GitHubConnectionApi, GitHubPreflightApi, GitHubReleaseApi, MetadataTextApi, ReleaseVersionEditApi, EnvironmentDiagnosticsApi, ReleaseVersionApi, CandidateEvidenceApi, LifecycleEvidenceApi, OfflinePreflightApi, AndroidBuildApi, IOSArchiveApi, ProjectRecoveryApi {
   mode: BridgeMode;
   appInfo(): Promise<AppInfo>;
   revealInstallation(): Promise<InstallationRevealResult>;

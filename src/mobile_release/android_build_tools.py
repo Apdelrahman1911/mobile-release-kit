@@ -528,22 +528,37 @@ class _Entries:
                 self.tools._unknown(error)
 
 
+def _inspection_operation(operation) -> bool:
+    """Closed second origin; no subtype, caller flag or fabricated build role."""
+    from .android_build_operation import AndroidBuildOperation
+    if type(operation) is AndroidBuildOperation:
+        return False
+    from .desktop_artifact_inspection import ArtifactInspectionOperation
+    _need(type(operation) is ArtifactInspectionOperation, "toolchain-unavailable")
+    return True
+
+
 class AndroidValidationTools:
     """Original operation child. Constructors and argv/environment builders grant no custody."""
 
     def __init__(self, operation, native_binding: object) -> None:
-        from .android_build_operation import AndroidBuildOperation
-        _need(type(operation) is AndroidBuildOperation, "toolchain-unavailable")
+        inspection = _inspection_operation(operation)
         operation.owner()
+        original_source = (operation.guard._artifact_inspection_source if inspection
+                           else operation.guard._android_build_source)
         _need(operation.tools is None and operation.inputs is not None and operation.files is not None
-              and not operation.close_claimed and operation.guard._android_build_source is operation.source
+              and not operation.close_claimed and original_source is operation.source
               and operation.source.active and operation.source.request_returned
               and not operation.source.close_claimed, "toolchain-unavailable")
         self.binding = _binding(native_binding)
-        _need(self.binding == _binding(operation.request.native["toolchain"]))
+        supplied = operation.request.native["tools"]["android"] if inspection else operation.request.native["toolchain"]
+        _need(self.binding == _binding(supplied))
+        if inspection:
+            _need(self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"),
+                  "toolchain-unavailable")
         self.operation, self.guard, self.source = operation, operation.guard, operation.source
         self.request, self.inputs, self.files = operation.request, operation.inputs, operation.files
-        self.release, self.task = operation.inputs.release, operation.inputs.task
+        self.release, self.task = operation.inputs.release, None if inspection else operation.inputs.task
         self.pid, self.thread = os.getpid(), threading.current_thread()
         self.ancestry: _Ancestry | None = None
         self.slots: list[_FD] = []
@@ -566,19 +581,24 @@ class AndroidValidationTools:
             self._mac = MacAdmission(self)
 
     def _owner(self, *, active: bool = True) -> None:
-        from .android_build_operation import AndroidBuildOperation
         operation = self.operation
-        _need(type(operation) is AndroidBuildOperation and type(self) is AndroidValidationTools
+        inspection = _inspection_operation(operation)
+        _need(type(self) is AndroidValidationTools
               and self.pid == os.getpid() and self.thread is threading.current_thread()
               and self.thread is threading.main_thread() and operation.tools is self
               and operation.request is self.request and operation.inputs is self.inputs and operation.files is self.files
               and operation.guard is self.guard and operation.source is self.source
               and self.source.operation is operation and self.source.guard is self.guard, "toolchain-unavailable")
         operation.owner()
-        _need(self.binding == _binding(self.request.native["toolchain"]) and self.inputs.release is self.release
-              and self.inputs.task == self.task)
+        supplied = self.request.native["tools"]["android"] if inspection else self.request.native["toolchain"]
+        _need(self.binding == _binding(supplied) and self.inputs.release is self.release
+              and (self.task is None if inspection else self.inputs.task == self.task))
+        if inspection:
+            _need(self.binding.profile in ("android-registered-macos-arm64-v1", "android-registered-macos-x86_64-v1"),
+                  "toolchain-unavailable")
         if active:
-            _need(self.guard._android_build_source is self.source and self.source.active
+            original_source = self.guard._artifact_inspection_source if inspection else self.guard._android_build_source
+            _need(original_source is self.source and self.source.active
                   and self.source.request_returned and not self.source.close_claimed, "toolchain-unavailable")
 
     def _point(self) -> None:
@@ -859,6 +879,7 @@ class AndroidValidationTools:
 
     def check_project_inputs(self, data: object) -> None:
         self._owner()
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
         _need(self._acquired and not self._project_claimed and not self._close_claimed
               and (self.inputs.check_signer is False or self._signature_ready), "toolchain-unavailable")
         self._project_claimed = True  # A failed supply cannot be replaced/retried.
@@ -878,8 +899,8 @@ class AndroidValidationTools:
         hashed every inventoried file; final closure rechecks those originals.
         """
         self._owner()
-        _need(self._acquired and self.inputs.check_signer is True and not self._close_claimed
-              and not self._signature_claimed and not self._project_claimed
+        _need(self._acquired and (_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and not self._close_claimed and not self._signature_claimed and not self._project_claimed
               and self._project_data is None, "toolchain-unavailable")
         self._signature_claimed = True
         try:
@@ -894,17 +915,27 @@ class AndroidValidationTools:
 
     def _work(self, work_path: Path) -> Path:
         self._owner()
-        _need(self._acquired and self._project_data is not None and not self._close_claimed
-              and (self.inputs.check_signer is False or self._signature_ready), "toolchain-unavailable")
+        inspection = _inspection_operation(self.operation)
+        _need(self._acquired and not self._close_claimed
+              and (self._signature_ready if inspection else
+                   self._project_data is not None and (self.inputs.check_signer is False or self._signature_ready)),
+              "toolchain-unavailable")
         self.operation.checkpoint()
-        from ._desktop_android_build_files import AndroidBuildFiles
-        _need(type(self.files) is AndroidBuildFiles and self.files.operation is self.operation)
+        if inspection:
+            from ._desktop_artifact_inspection_selection import ArtifactInspectionFiles
+            _need(type(self.files) is ArtifactInspectionFiles and self.files.operation is self.operation)
+            self.files.point()
+        else:
+            from ._desktop_android_build_files import AndroidBuildFiles
+            _need(type(self.files) is AndroidBuildFiles and self.files.operation is self.operation)
         expected = self.files.work_path  # Original namespace/read record check, not path authority.
         _need(type(work_path) is type(expected) and work_path == expected)
         self.check()
         return expected
 
     def gradle_command(self, task: str, work_path: Path) -> tuple[str, ...]:
+        self._owner()
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
         work = self._work(work_path)
         _need(type(task) is str and task == self.task)
         jvm = shlex.join(_jvm_arguments(work))
@@ -937,12 +968,18 @@ class AndroidValidationTools:
 
     def _inspection_input(self, snapshot_path: Path) -> tuple[Path, Path]:
         self._owner()
-        _need(self._project_data is not None and not self._close_claimed, "toolchain-unavailable")
-        from ._desktop_android_build_files import OriginalAndroidArtifact
+        inspection = _inspection_operation(self.operation)
+        _need((inspection or self._project_data is not None) and not self._close_claimed, "toolchain-unavailable")
         artifact = self.operation._artifact
-        _need(type(artifact) is OriginalAndroidArtifact and artifact.files is self.files
-              and self.files.artifact is artifact and self.files._original_artifact is artifact
-              and artifact._native is True and artifact._reader is None)
+        if inspection:
+            from ._desktop_artifact_inspection_selection import ArtifactInspectionArtifact
+            _need(type(artifact) is ArtifactInspectionArtifact and artifact.files is self.files
+                  and self.files.artifact is artifact and artifact._native is True and artifact._reader is None)
+        else:
+            from ._desktop_android_build_files import OriginalAndroidArtifact
+            _need(type(artifact) is OriginalAndroidArtifact and artifact.files is self.files
+                  and self.files.artifact is artifact and self.files._original_artifact is artifact
+                  and artifact._native is True and artifact._reader is None)
         artifact.check()
         expected = artifact.path
         _need(type(snapshot_path) is type(expected) and snapshot_path == expected)
@@ -958,6 +995,7 @@ class AndroidValidationTools:
 
     def _signing_inputs(self):
         self._owner()
+        _need(not _inspection_operation(self.operation), "toolchain-unavailable")
         from .android_build_signing import SignedAndroidOperation
         signing = self.operation.signing
         _need(type(signing) is SignedAndroidOperation and signing.operation is self.operation
@@ -987,8 +1025,8 @@ class AndroidValidationTools:
 
     def jarsigner_command(self, snapshot_path: Path) -> tuple[str, ...]:
         self._owner()
-        _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
-              "toolchain-unavailable")
+        _need((_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and self._signature_claimed and self._signature_ready, "toolchain-unavailable")
         work, expected = self._inspection_input(snapshot_path)
         _need(self.profile is not None)
         return (f"{self.binding.root}/{self.profile.java_home}/bin/jarsigner",
@@ -997,8 +1035,8 @@ class AndroidValidationTools:
 
     def keytool_command(self, snapshot_path: Path) -> tuple[str, ...]:
         self._owner()
-        _need(self.inputs.check_signer is True and self._signature_claimed and self._signature_ready,
-              "toolchain-unavailable")
+        _need((_inspection_operation(self.operation) or self.inputs.check_signer is True)
+              and self._signature_claimed and self._signature_ready, "toolchain-unavailable")
         work, expected = self._inspection_input(snapshot_path)
         _need(self.profile is not None)
         return (f"{self.binding.root}/{self.profile.java_home}/bin/keytool",

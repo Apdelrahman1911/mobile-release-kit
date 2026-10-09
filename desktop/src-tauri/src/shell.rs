@@ -553,6 +553,54 @@ async fn cancel_ios_archive(webview: Webview, request: tauri::ipc::Request<'_>, 
     result
 }
 #[tauri::command]
+async fn artifact_inspection_pick(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    let args = crate::artifact_inspection_protocol::pick(&value)?;
+    state.document.artifact_inspection_pick(app, args)
+}
+#[tauri::command]
+async fn artifact_inspection_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    let args = crate::artifact_inspection_protocol::prepare(&value)?;
+    state.document.artifact_inspection_prepare(args)
+}
+#[tauri::command]
+async fn artifact_inspection_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    let args = crate::artifact_inspection_protocol::start(&value)?;
+    state.document.artifact_inspection_start(args)
+}
+#[tauri::command]
+async fn artifact_inspection_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    let args = crate::artifact_inspection_protocol::cancel(&value)?;
+    state.document.artifact_inspection_cancel(args)
+}
+#[tauri::command]
+async fn artifact_inspection_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    crate::artifact_inspection_protocol::status_request(&value)?;
+    state.document.artifact_inspection_status()
+}
+#[tauri::command]
+async fn artifact_inspection_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::artifact_inspection_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview).map_err(|_| crate::artifact_inspection_protocol::invalid())?;
+    let value = artifact_inspection_request_body(request.body())?;
+    let args = crate::artifact_inspection_protocol::discard(&value)?;
+    state.document.artifact_inspection_discard(args)
+}
+#[tauri::command]
 async fn artifact_evidence_choose(webview: Webview, app: tauri::AppHandle, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::candidate_evidence_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?; let body = request_body(&request)?; crate::candidate_evidence_protocol::empty_request(body)?;
@@ -701,6 +749,12 @@ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, B
     match request.body() {
         tauri::ipc::InvokeBody::Json(value) => Ok(value),
         tauri::ipc::InvokeBody::Raw(_) => Err(BridgeError::invalid()),
+    }
+}
+fn artifact_inspection_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
+    match body {
+        tauri::ipc::InvokeBody::Raw(bytes) => crate::artifact_inspection_protocol::raw_request(bytes),
+        tauri::ipc::InvokeBody::Json(_) => Err(crate::artifact_inspection_protocol::invalid()),
     }
 }
 fn preflight_request_body(body: &tauri::ipc::InvokeBody) -> Result<Value, BridgeError> {
@@ -1359,6 +1413,41 @@ async fn github_preflight_cancel(webview: Webview, request: tauri::ipc::Request<
 
 
 #[tauri::command]
+async fn github_remote_setup_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::InvalidInput)); }
+    state.document.github_remote_setup_command("github_remote_setup_status", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_remote_setup_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::InvalidInput)); }
+    state.document.github_remote_setup_command("github_remote_setup_prepare", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_remote_setup_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::InvalidInput)); }
+    state.document.github_remote_setup_command("github_remote_setup_apply", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_remote_setup_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::InvalidInput)); }
+    state.document.github_remote_setup_command("github_remote_setup_discard", request_body(&request)?)
+}
+
+#[tauri::command]
+async fn github_remote_setup_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    fixture_command!(state, Forbidden, observed, crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Unqualified));
+    if webview.label() != MAIN_WINDOW { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::InvalidInput)); }
+    state.document.github_remote_setup_command("github_remote_setup_cancel", request_body(&request)?)
+}
+
+#[tauri::command]
 async fn github_release_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::github_release_protocol::Status, BridgeError> {
     fixture_command!(state, Forbidden, observed, crate::github_release_session::refused(crate::github_release_protocol::Reason::Unqualified));
     if webview.label() != MAIN_WINDOW { return Err(crate::github_release_session::refused(crate::github_release_protocol::Reason::InvalidInput)); }
@@ -1691,6 +1780,10 @@ struct IOSArchiveRelayGuard { document: DocumentBinding, closed: bool }
 impl Drop for IOSArchiveRelayGuard {
     fn drop(&mut self) { if !self.closed { self.document.ios_archive_relay_lost(); } }
 }
+struct ArtifactInspectionRelayGuard { document: DocumentBinding, closed: bool }
+impl Drop for ArtifactInspectionRelayGuard {
+    fn drop(&mut self) { if !self.closed { self.document.artifact_inspection_relay_lost(); } }
+}
 #[deny(unused_variables, unused_assignments)]
 fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>) -> (tauri::async_runtime::JoinHandle<()>, oneshot::Sender<()>) {
     let mut revisions = edits.subscribe();
@@ -1702,6 +1795,8 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
     let project_recovery_guard = ProjectRecoveryRelayGuard { document: document.clone(), closed: false };
     let mut android_build = document.android_build_subscribe();
     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+    let mut artifact_inspection = document.artifact_inspection_subscribe();
+    let artifact_inspection_guard = ArtifactInspectionRelayGuard { document: document.clone(), closed: false };
     let mut ios_archive = document.ios_archive_subscribe();
     let ios_archive_guard = IOSArchiveRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
@@ -1711,6 +1806,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut preflight_guard = preflight_guard;
         let mut android_build_guard = android_build_guard;
         let mut project_recovery_guard = project_recovery_guard;
+        let mut artifact_inspection_guard = artifact_inspection_guard;
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
         let mut initialization_revision = None;
@@ -1721,6 +1817,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut diagnostics_revision = None;
         let mut github_preflight_revision = None;
         let mut github_release_revision = None;
+        let mut github_setup_revision = None;
         let mut preflight_revision = None;
         let mut preflight_relay_failed = false;
         let mut project_recovery_revision = None;
@@ -1731,12 +1828,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut android_registration_revision = None;
         let mut android_service_revision = None;
         let mut android_build_relay_failed = false;
+        let mut artifact_inspection_revision = None;
+        let mut artifact_inspection_relay_failed = false;
         let mut ios_archive_revision = None;
         let mut ios_archive_relay_failed = false;
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
         let mut removal_notice_open=removal_notice.is_some();
         loop {
-            if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; }
+            if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; }
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
             document.finish_macos_maintenance(app.clone());
             // status() releases its native locks before any renderer callback.
@@ -1817,6 +1916,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             if github_release_revision != Some(status.revision) {
                 github_release_revision = Some(status.revision);
                 let _ = app.emit_to(MAIN_WINDOW, crate::github_release_protocol::EVENT, &status);
+            }
+            let status = document.github_remote_setup_status();
+            if github_setup_revision != Some(status.revision) {
+                github_setup_revision = Some(status.revision);
+                let _ = app.emit_to(MAIN_WINDOW, crate::github_setup_protocol::EVENT, &status);
             }
             if let Ok(status) = document.environment_diagnostics_status() {
                 if diagnostics_revision != Some(status.status_revision) {
@@ -1927,6 +2031,19 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                     Err(_) => { ios_archive_relay_failed = true; document.ios_archive_relay_lost(); },
                 }
             }
+            if !artifact_inspection_relay_failed {
+                match document.artifact_inspection_status() {
+                    Ok(status) => {
+                        if artifact_inspection_revision != Some(status.status_revision) {
+                            artifact_inspection_revision = Some(status.status_revision);
+                            if app.emit_to(MAIN_WINDOW, crate::artifact_inspection_protocol::EVENT, &status).is_err() {
+                                artifact_inspection_relay_failed = true; document.artifact_inspection_relay_lost();
+                            }
+                        }
+                    },
+                    Err(_) => { artifact_inspection_relay_failed = true; document.artifact_inspection_relay_lost(); },
+                }
+            }
             // One bounded native inbox in this SAME relay. The 16-byte value
             // is only an insecure hint: no path/clock/consent reaches Prepare.
             // Absent/non-installed/retired observers add no polling loop.
@@ -1939,13 +2056,14 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             };
             tokio::select! {
                 biased;
-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; return; } },
+                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; return; } },
                 result = revisions.changed() => { if result.is_err() { return; } },
                 result = assets.changed() => { if result.is_err() { return; } },
                 result = diagnostics.changed() => { if result.is_err() { return; } },
                 result = preflight.changed() => { if result.is_err() { return; } },
                 result = android_build.changed() => { if result.is_err() { return; } },
                 result = project_recovery.changed() => { if result.is_err() { return; } },
+                result = artifact_inspection.changed() => { if result.is_err() { return; } },
                 result = ios_archive.changed() => { if result.is_err() { return; } },
                 hint = removal_hint => {
                     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image"))]
@@ -2069,11 +2187,11 @@ fn request_shutdown(app: &tauri::AppHandle) {
         }
         app.state::<ShellState>().document.compatibility_quit_result(true);
         // No short circuit can skip another original owner's shutdown.
-        let (passive, edit, diagnostics, preflight, android_build, project_recovery, ios_archive) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown(), bridge.project_recovery.shutdown(), bridge.ios_archive.shutdown());
-        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok() && project_recovery.is_ok() && ios_archive.is_ok()
-            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() {
+        let (passive, edit, diagnostics, preflight, android_build, project_recovery, ios_archive, artifact_inspection) = tokio::join!(bridge.supervisor.shutdown(), bridge.edits.shutdown(), bridge.diagnostics.shutdown(), bridge.preflight.shutdown(), bridge.android_build.shutdown(), bridge.project_recovery.shutdown(), bridge.ios_archive.shutdown(), bridge.artifact_inspection.shutdown());
+        if passive.is_ok() && edit.is_ok() && diagnostics.is_ok() && preflight.is_ok() && android_build.is_ok() && project_recovery.is_ok() && ios_archive.is_ok() && artifact_inspection.is_ok()
+            && bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && bridge.artifact_inspection.can_exit() {
             if !settle_relay(&app).await { return; }
-            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit()) { return; }
+            if !(bridge.supervisor.can_exit() && bridge.edits.can_exit() && bridge.diagnostics.can_exit() && bridge.preflight.can_exit() && bridge.android_build.can_exit() && bridge.project_recovery.can_exit() && bridge.ios_archive.can_exit() && bridge.artifact_inspection.can_exit()) { return; }
             app.state::<ShellState>().exit_ready.store(true, Ordering::SeqCst);
             app.exit(0);
         } else {
@@ -2089,6 +2207,8 @@ fn request_shutdown(app: &tauri::AppHandle) {
 pub(crate) enum DialogChoice { File(crate::credential_format::FileKind), PublicImages, Project, ProjectPath(asset_commands::ProjectPathField), EvidenceFolder, Quit,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     AndroidToolSource(crate::android_tool_sources::Role),
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    ArtifactInput { format: crate::artifact_inspection_protocol::Format, role: crate::artifact_inspection_protocol::Role },
 }
 
 #[cfg(target_os = "linux")]
@@ -3436,6 +3556,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             android_tool_service_status, check_android_tool_service, request_android_tool_service_registration, open_android_tool_service_approval_settings, cancel_android_tool_service,
             prepare_project_recovery, start_project_recovery, project_recovery_status, cancel_project_recovery,
             prepare_ios_archive, start_ios_archive, ios_archive_status, cancel_ios_archive,
+            artifact_inspection_pick, artifact_inspection_prepare, artifact_inspection_start, artifact_inspection_cancel, artifact_inspection_status, artifact_inspection_discard,
             validate_config, suggest_config, preview_config,
             propose_github_setup,
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
@@ -3455,6 +3576,7 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
             github_release_reconcile, github_release_pending, github_release_cancel,
+            github_remote_setup_status, github_remote_setup_prepare, github_remote_setup_apply, github_remote_setup_discard, github_remote_setup_cancel,
             vault_status, vault_open, vault_prepare_initialize, vault_unlock, asset_context, asset_choose, credential_prepare,
             vault_prepare_delete, vault_commit, vault_bind, vault_discard, vault_lock,
             ];

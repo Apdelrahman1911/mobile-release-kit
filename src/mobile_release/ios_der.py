@@ -33,8 +33,17 @@ def decode_der_dictionary(data: bytes, *, profile: bool = False,
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     _require(type(data) is bytes and 0 < len(data) <= MAX_DER_BYTES)
+    max_nodes, max_depth = MAX_DER_NODES, MAX_DER_DEPTH
+    if type(deadline).__name__ == "_ArtifactInspectionDeadline":
+        # Name is import routing only, never an original-operation grant.
+        from .desktop_artifact_inspection import operation_for
+        operation = operation_for(deadline)
+        _require(operation is not None)
+        operation.before_decode(len(data))
+        _require(len(data) <= 256 * 1024)
+        max_nodes, max_depth = 4096, 32
     _require(data[0] in ({0x31} if profile else {0x31, 0x70}))
-    remaining = MAX_DER_NODES
+    remaining = max_nodes
 
     def header(offset: int, end: int) -> tuple[int, int, int]:
         nonlocal remaining
@@ -54,7 +63,7 @@ def decode_der_dictionary(data: bytes, *, profile: bool = False,
         return tag, offset, offset + length
 
     def value(offset: int, end: int, depth: int) -> tuple[Any, int]:
-        _require(depth <= MAX_DER_DEPTH)
+        _require(depth <= max_depth)
         tag, start, stop = header(offset, end)
         if tag in {0x31, 0xB0}:
             result = {}

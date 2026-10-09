@@ -34,10 +34,10 @@ const PYTHON_RESOURCE: &str = "python/bin/python3";
 
 // Canonical fixed inventory shared by packaging and installed-data validation.
 // Presence is not runtime, TLS, XML, or native-custody qualification.
-pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 13] = [
-    "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 15] = [
+    "android_build_bootstrap.py", "artifact_inspection_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
     "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "ios_archive_bootstrap.py",
+    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_setup_bootstrap.py", "ios_archive_bootstrap.py",
     "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
 ];
 
@@ -161,6 +161,8 @@ pub(crate) struct GitHubWorkflowInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct ProjectInitializationInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct ArtifactInspectionInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct IOSArchiveInstalledProfile { _private: () }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) struct AndroidBuildInstalledProfile { _private: () }
@@ -170,6 +172,14 @@ impl AndroidBuildInstalledProfile {
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("android_build_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl ArtifactInspectionInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("artifact_inspection_bootstrap.py"), core: cwd.join("core.zip"), cwd })
     }
 }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -238,6 +248,20 @@ impl GitHubReadOnlyInstalledProfile {
         if !macos_bindings() { return Err(unavailable()); }
         let cwd = crate::installed_runtime::runtime_root();
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_connection_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+    }
+}
+
+// Separate nonsecret setup selection: installed source only, never consent
+// or publisher authority. Original supervised GO and Document checks are separate.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubSetupInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubSetupInstalledProfile {
+    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
+        if !macos_bindings() { return Err(unavailable()); }
+        let cwd = crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("github_setup_bootstrap.py"),
+            core: cwd.join("core.zip"), cwd })
     }
 }
 
@@ -318,15 +342,18 @@ pub(crate) fn macos_github_actions_profile_contract() {
     let release = macos_bindings() && crate::github_release_protocol::publisher_bound();
     assert!(!GITHUB_TLS_PROFILE_QUALIFIED && !GITHUB_PREFLIGHT_NATIVE_QUALIFIED && !GITHUB_RELEASE_NATIVE_QUALIFIED);
     let types = [TypeId::of::<PassiveInstalledProfile>(), TypeId::of::<GitHubReadOnlyInstalledProfile>(),
-        TypeId::of::<GitHubPreflightInstalledProfile>(), TypeId::of::<GitHubReleaseInstalledProfile>()];
+        TypeId::of::<GitHubPreflightInstalledProfile>(), TypeId::of::<GitHubReleaseInstalledProfile>(),
+        TypeId::of::<GitHubSetupInstalledProfile>()];
     for (index, original) in types.iter().enumerate() { assert!(!types[index + 1..].contains(original)); }
     assert_eq!(runtime.github_preflight_profile_available(), preflight);
     assert_eq!(runtime.github_release_profile_available(), release);
+    assert_eq!(runtime.github_setup_profile_available(), macos_bindings());
     assert_eq!(runtime.github_preflight_installed_profile().is_ok(), preflight);
     assert_eq!(runtime.github_release_installed_profile().is_ok(), release);
     let selected = [
         (GitHubPreflightInstalledProfile { _private: () }.selection(), preflight, "github_preflight_bootstrap.py"),
         (GitHubReleaseInstalledProfile { _private: () }.selection(), release, "github_release_bootstrap.py"),
+        (GitHubSetupInstalledProfile { _private: () }.selection(), macos_bindings(), "github_setup_bootstrap.py"),
     ];
     let root = crate::installed_runtime::runtime_root();
     for (selection, expected, bootstrap) in selected {
@@ -344,10 +371,13 @@ pub(crate) fn macos_github_actions_profile_contract() {
     let (_sender, stop) = tokio::sync::watch::channel(true);
     let mut preflight_slots = crate::installed_runtime::GitHubPreflightRuntimeSlots::new();
     let mut release_slots = crate::installed_runtime::GitHubReleaseRuntimeSlots::new();
+    let mut setup_slots = crate::installed_runtime::GitHubSetupRuntimeSlots::new();
     assert!(runtime.resolve_github_preflight_installed(&mut preflight_slots, now, &stop).is_err());
     assert!(runtime.resolve_github_release_installed(&mut release_slots, now, &stop).is_err());
+    assert!(runtime.resolve_github_setup_installed(&mut setup_slots, now, &stop).is_err());
     assert!(preflight_slots.never_started() && preflight_slots.no_child_effect() && preflight_slots.capability().is_err());
     assert!(release_slots.never_started() && release_slots.no_child_effect() && release_slots.capability().is_err());
+    assert!(setup_slots.never_started() && setup_slots.no_child_effect() && setup_slots.capability().is_err());
 }
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[test]
@@ -1602,6 +1632,18 @@ impl RuntimeConfig {
         // Original inspection worker only. Paths are DATA, never native custody.
         originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
     }
+    pub(crate) fn github_setup_profile_available(&self) -> bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_setup_installed(&self, originals: &mut crate::installed_runtime::GitHubSetupRuntimeSlots,
+        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
+        if !self.github_setup_profile_available() { return Err(unavailable()); }
+        originals.inspect_once(GitHubSetupInstalledProfile { _private: () }, end, stop)
+    }
     pub(crate) fn github_preflight_profile_available(&self) -> bool {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
         { self.github_preflight_installed_profile().is_ok() }
@@ -1845,6 +1887,18 @@ impl RuntimeConfig {
     pub(crate) fn resolve_offline_preflight_installed(&self, originals: &mut crate::installed_runtime::OfflinePreflightRuntimeSlots,
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         originals.inspect_once(self.offline_preflight_installed_profile()?, end, stop)
+    }
+    pub(crate) fn artifact_inspection_installed_profile_available(&self)->bool {
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        { macos_bindings() }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        { false }
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_artifact_inspection_installed(&self, originals:&mut crate::installed_runtime::ArtifactInspectionRuntimeSlots,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if !self.artifact_inspection_installed_profile_available(){return Err(unavailable());}
+        originals.inspect_once(ArtifactInspectionInstalledProfile{_private:()},end,stop)
     }
     pub(crate) fn project_recovery_installed_profile_available(&self) -> bool {
         #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -2516,9 +2570,9 @@ mod tests {
     #[test]
     fn payload_names_are_portable_and_unambiguous() {
         assert_eq!(REQUIRED_RUNTIME_RESOURCES, [
-            "android_build_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
+            "android_build_bootstrap.py", "artifact_inspection_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
             "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "ios_archive_bootstrap.py",
+            "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_setup_bootstrap.py", "ios_archive_bootstrap.py",
             "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
         ]);
         for name in REQUIRED_RUNTIME_RESOURCES { assert!(safe_payload_path(name)); }

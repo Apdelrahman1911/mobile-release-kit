@@ -42,17 +42,38 @@ def _require(condition: bool, message: str) -> None:
         raise ValidationError(message)
 
 
+def _artifact_operation(deadline: InspectionDeadline):
+    # The name only avoids loading the new engine for unchanged callers. The
+    # real lookup still requires the exact class and same live original owner.
+    if type(deadline).__name__ != "_ArtifactInspectionDeadline":
+        return None
+    from .desktop_artifact_inspection import operation_for
+    operation = operation_for(deadline)
+    _require(operation is not None, "iOS artifact inspection deadline is not an original")
+    return operation
+
+
 def typed_value(value: Any, *, deadline: InspectionDeadline | None = None) -> Any:
     """Canonical hashable value without Python's bool/int equality ambiguity."""
     deadline = deadline if deadline is not None else InspectionDeadline()
-    remaining, active = MAX_VALUE_NODES, set()
+    operation = _artifact_operation(deadline)
+    max_nodes, max_depth = MAX_VALUE_NODES, MAX_VALUE_DEPTH
+    if operation is not None:
+        # A repeated canonicalization retains another graph; it is not free
+        # merely because the original bytes were already decoded.
+        operation.before_decode(0)
+        max_nodes, max_depth = 4096, 32
+    remaining, active = max_nodes, set()
 
     def convert(item: Any, depth: int) -> Any:
         nonlocal remaining
         deadline.check()
         remaining -= 1
-        _require(depth <= MAX_VALUE_DEPTH and remaining >= 0, "iOS plist complexity exceeds its bound")
+        _require(depth <= max_depth and remaining >= 0, "iOS plist complexity exceeds its bound")
         if isinstance(item, dict) or type(item) is list:
+            if operation is not None:
+                # Refuse before sorted()/tuple allocation, not after traversal.
+                _require(len(item) <= remaining, "iOS plist complexity exceeds its bound")
             identity = id(item)
             _require(identity not in active, "iOS plist contains a cyclic value")
             active.add(identity)
@@ -148,7 +169,9 @@ def _xml_text(text: str, *, deadline: InspectionDeadline) -> str:
     return "".join(parts)
 
 
-def _load_xml_dictionary(data: bytes, *, dictionary_type: type[dict], deadline: InspectionDeadline) -> dict[str, Any]:
+def _load_xml_dictionary(data: bytes, *, dictionary_type: type[dict], deadline: InspectionDeadline,
+                         max_nodes: int = MAX_VALUE_NODES,
+                         max_depth: int = MAX_VALUE_DEPTH) -> dict[str, Any]:
     """Decode one complete supported plist; never ignore unrecognized structure."""
     import base64
     from xml.parsers import expat
@@ -168,7 +191,7 @@ def _load_xml_dictionary(data: bytes, *, dictionary_type: type[dict], deadline: 
         nonlocal nodes
         deadline.check()
         nodes += 1
-        _require(nodes <= MAX_VALUE_NODES and len(frames) <= MAX_VALUE_DEPTH + 1,
+        _require(nodes <= max_nodes and len(frames) <= max_depth + 1,
                  "iOS XML plist complexity exceeds its bound")
         if not frames:
             _require(root is None and tag == "plist" and attributes in ({}, {"version": "1.0"}),
@@ -310,11 +333,18 @@ def load_plist_dictionary(data: bytes, *, deadline: InspectionDeadline | None = 
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
     _require(type(data) is bytes and 0 < len(data) <= MAX_PLIST_BYTES, "iOS plist size exceeds its bound or is empty")
+    operation = _artifact_operation(deadline)
+    max_nodes, max_depth = MAX_VALUE_NODES, MAX_VALUE_DEPTH
+    if operation is not None:
+        operation.before_decode(len(data))
+        _require(len(data) <= 256 * 1024, "iOS plist size exceeds its inspection bound")
+        max_nodes, max_depth = 4096, 32
     try:
         if data.startswith(b"bplist00"):
-            validate_binary_dictionary(data, deadline=deadline, max_nodes=MAX_VALUE_NODES, max_depth=MAX_VALUE_DEPTH)
+            validate_binary_dictionary(data, deadline=deadline, max_nodes=max_nodes, max_depth=max_depth)
         result = (plistlib.loads(data, dict_type=UniqueDictionary) if data.startswith(b"bplist00") else
-                  _load_xml_dictionary(data, dictionary_type=UniqueDictionary, deadline=deadline))
+                  _load_xml_dictionary(data, dictionary_type=UniqueDictionary, deadline=deadline,
+                                       max_nodes=max_nodes, max_depth=max_depth))
         _require(isinstance(result, dict), "iOS plist root must be a dictionary")
         typed_value(result, deadline=deadline)
         return result

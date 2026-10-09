@@ -30,15 +30,15 @@ SELF = "desktop/tools/macos_intel_os_providers.py"
 FIXTURE = "desktop/tools/macos_e2_native_fixture.py"
 QUALIFICATION = "desktop/tools/macos_aqua_qualification.py"
 SOURCE_PINS = {
-    'desktop/tools/macos_aqua_qualification.py': (455054, '8273006e10b2414108d887453f2b5cd8796c23b022d9edd839b58294d39f9246'),
+    'desktop/tools/macos_aqua_qualification.py': (455054, 'be6271fb2345f2e35d7e671cc74e30e311fa47a49edfb3da345de040f7dfecfd'),
     'src/mobile_release/owned_process.py': (9037, '0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8'),
     'src/mobile_release/_command_process.py': (172299, '30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69'),
     'src/mobile_release/_native_process.py': (62175, '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'),
-    'src/mobile_release/cancellation.py': (31041, '5f469444f42b5ad6a69ecce8161a7d83e67303c92a221a31f88c079f4ff29d35'),
+    'src/mobile_release/cancellation.py': (31723, 'e71c7063e2652e3ce539c95c0b667ab13275f7ce01559b460585e99e1550f916'),
     'desktop/tools/macos_e2_native_fixture.py': (390498, 'e4ac0883d7a077d59cc065e3467b4052a47476838f7d0a98cc0e17caaee892a8'),
     'src/mobile_release/__init__.py': (144, '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'),
     'src/mobile_release/errors.py': (749, '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'),
-    'src/mobile_release/_lifetime_evidence.py': (19072, 'f79d21c9846d7527b9c08f474ef47bc57515f592a090b7c61ba9046a82232da3'),
+    'src/mobile_release/_lifetime_evidence.py': (19514, 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'),
     'src/mobile_release/_store_lane_contract.py': (9500, '8726cf9bdb053b3d7f30eb9c8307c18239dc518476b2f895ef1610efa65e040e'),
     'src/mobile_release/_store_lane_evidence.py': (17638, 'bcea0084032ffbd43c15f5682f456965aff812e5007d3211a5afe605fc4d5872'),
 }

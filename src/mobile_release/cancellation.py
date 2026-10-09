@@ -352,6 +352,20 @@ class DefaultCancellation:
         from ._desktop_saved_command_control import SavedCommandDomain
         return source if source.domain is SavedCommandDomain.IOSArchive else None
 
+    @property
+    def _artifact_inspection_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.ArtifactInspection else None
+
+    def _install_artifact_inspection_source(self, source: Any) -> None:
+        from ._desktop_artifact_inspection_control import ArtifactInspectionInput
+        if type(source) is not ArtifactInspectionInput:
+            raise self.restore_error("invalid artifact inspection cancellation source ownership")
+        self._install_saved_command_source(source)
+
     def _install_saved_command_source(self, source: Any) -> None:
         from ._desktop_saved_command_control import source_domain
         self._check_owner()

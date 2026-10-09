@@ -872,6 +872,40 @@ final class NormalAppUITests: XCTestCase {
         try engineeringNoFallback(renderer)
         try require(window.sheets.count == 0, "reference navigation opened an unexpected native operation")
 
+        // Fresh native document only: a heading or event relay alone is not
+        // Status invocation admission. An invoke failure remains visible until
+        // a successful explicit checkStatus; equal-revision display is not a
+        // separately correlated receipt for this button click.
+        try click(renderer.buttons.matching(identifier: "Artifacts"), "engineering Artifacts navigation unavailable")
+        _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Inspect selected artifact bytes")), in: renderer)
+        let artifactStatusQuery = renderer.buttons.matching(identifier: "Check original artifact status")
+        let artifactStatus = try waitElement(artifactStatusQuery, in: renderer, enabled: true,
+                                             failures: ["No new artifact outcome confirmed"])
+        try reveal(artifactStatus, in: renderer)
+        try require(artifactStatus.isEnabled && artifactStatus.isHittable,
+                    "engineering artifact Status read unavailable")
+        artifactStatus.click() // Actual production bridge command; no fixture result.
+        _ = try waitElement(artifactStatusQuery, in: renderer, enabled: true,
+                            failures: ["No new artifact outcome confirmed"])
+        let artifactAvailability = renderer.staticTexts.matching(NSPredicate(format: "title IN %@", [
+            "This native document supports reviewing selected artifact bytes. Actual originals and runtime are rechecked before inspection.",
+            "The required bundled runtime is not qualified for this document. Missing optional verification tools are a separate unavailable check."
+        ]))
+        _ = try waitElement(artifactAvailability, in: renderer,
+                            failures: ["No new artifact outcome confirmed"])
+        try require(renderer.staticTexts.matching(identifier: "No new artifact outcome confirmed").count == 0,
+                    "engineering artifact Status invocation did not settle successfully")
+        let chooseArtifact = try unique(renderer.buttons.matching(identifier: "Choose AAB"),
+                                        "engineering artifact input control differs")
+        let reviewArtifact = try unique(renderer.buttons.matching(identifier: "Review artifact inspection"),
+                                        "engineering artifact review control differs")
+        try require(!chooseArtifact.isEnabled && !reviewArtifact.isEnabled,
+                    "engineering Status observation must not admit a project or inspection")
+        try engineeringNoFallback(renderer)
+        try require(window.sheets.count == 0, "engineering Status read opened an unexpected native operation")
+        // This proves only a validated native Status in this fresh application,
+        // not artifact inspection, every ACL entry, or signed/runtime readiness.
+
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "engineering normal Quit Cancel unavailable")
         try waitGone(first)

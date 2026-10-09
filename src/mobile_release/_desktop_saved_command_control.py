@@ -28,6 +28,7 @@ class SavedCommandDomain(Enum):
     AndroidBuild = "android-build"
     ProjectRecovery = "project-recovery"
     IOSArchive = "ios-archive"
+    ArtifactInspection = "artifact-inspection"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -44,6 +45,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.IOSArchive:
         from . import _desktop_ios_archive_protocol
         return _desktop_ios_archive_protocol
+    if domain is SavedCommandDomain.ArtifactInspection:
+        from . import _desktop_artifact_inspection_protocol
+        return _desktop_artifact_inspection_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -61,6 +65,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_ios_archive_control import IOSArchiveInput
     if type(source) is IOSArchiveInput and source.domain is SavedCommandDomain.IOSArchive:
         return SavedCommandDomain.IOSArchive
+    from ._desktop_artifact_inspection_control import ArtifactInspectionInput
+    if type(source) is ArtifactInspectionInput and source.domain is SavedCommandDomain.ArtifactInspection:
+        return SavedCommandDomain.ArtifactInspection
     raise ValueError("Invalid original saved-command input")
 
 
@@ -127,7 +134,7 @@ class _SavedCommandInput:
         if self.domain is SavedCommandDomain.OfflinePreflight:
             if self.budget is not None:
                 self.budget.checkpoint()
-        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive):
+        elif self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive, SavedCommandDomain.ArtifactInspection):
             self.require_operation().checkpoint()
         else:
             self._require(False)
@@ -149,6 +156,11 @@ class _SavedCommandInput:
             if capture:
                 output_limit = budget.capture(output_limit)
             return timeout, output_limit
+        if self.domain is SavedCommandDomain.ArtifactInspection:
+            # The exact operation admits only its fixed inspector role before
+            # this existing run_owned callback. No caller role/argv is authority.
+            self._require(type(capture) is bool and type(output_limit) is int and output_limit > 0)
+            return self.require_operation().command_limits(timeout, capture, output_limit)
         self._require(self.domain in (SavedCommandDomain.AndroidBuild, SavedCommandDomain.IOSArchive)
                       and type(capture) is bool and type(output_limit) is int and output_limit > 0)
         operation = self.require_operation()
@@ -202,7 +214,8 @@ class _SavedCommandInput:
                 message = {SavedCommandDomain.OfflinePreflight: "Original preflight input changed",
                            SavedCommandDomain.AndroidBuild: "Original Android build input changed",
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
-                           SavedCommandDomain.IOSArchive: "Original saved build input changed"}[self.domain]
+                           SavedCommandDomain.IOSArchive: "Original saved build input changed",
+                           SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             if material_phase and (not self.material_receiving or self.buffer):
                 # The original bounded private reader drains this buffer before

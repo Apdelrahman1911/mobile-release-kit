@@ -11,16 +11,16 @@ use super::*;
 #[cfg(all(test,target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 pub(crate) use known::catalogue_census_data;
 
-pub(super) fn admitted(state: &DocumentState, control: usize) -> Result<(), Reason> {
+pub(super) fn admitted(document:&DocumentBinding,state: &DocumentState, control: usize) -> Result<(), Reason> {
     // The one native/JSON/index/control partition is fixed, inside the unchanged
     // 64MiB session quota. A smaller caller value cannot create payload credit.
     if control != 16 * 1024 * 1024 { return Err(Reason::Capacity); }
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
-    { known::admitted(state, control) }
+    { known::admitted(state, control,Some(&document.inner.bridge.artifact_inspection)) }
     #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
-    { let _ = state; Err(Reason::Capacity) }
+    { let _ = (document,state); Err(Reason::Capacity) }
 }
 
 #[cfg(all(test, debug_assertions, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -65,14 +65,14 @@ impl MacosMaintenanceCensus<'_>{
 pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
     if !state.maintenance.data_only() || !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
-    let bytes=known::android_service_setup_bytes(state,pickers)?;
+    let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection))?;
     Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
 }
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
 pub(super) fn macos_removal_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     peer:&macos_removal::Handle,pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
     if !state.maintenance.removal_matches(peer)||!android_fixture_histories_empty(document){return Err(Reason::Capacity);}
-    let bytes=known::macos_removal_bytes(state,peer,pickers)?;
+    let bytes=known::macos_removal_bytes(state,peer,pickers,Some(&document.inner.bridge.artifact_inspection))?;
     Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
 }
 fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
@@ -91,7 +91,7 @@ pub(super) fn android_service_setup_census<'a>(document:&'a DocumentBinding,stat
     if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     {
-        let bytes=known::android_service_setup_bytes(state,pickers)?;
+        let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection))?;
         Ok(AndroidServiceSetupCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
     }
     #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
@@ -110,7 +110,7 @@ pub(super) fn android_registration_census<'a>(document: &'a DocumentBinding, sta
     if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
     {
-        let bytes = known::android_registration_bytes(state, pickers)?;
+        let bytes = known::android_registration_bytes(state, pickers,Some(&document.inner.bridge.artifact_inspection))?;
         Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
     }
     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
@@ -360,6 +360,17 @@ mod known {
             self.slot_data_rows(value)?;
             self.owner(&value.owner)
         }
+        fn artifact_inputs(&mut self,source:&crate::saved_command_owner::SavedCommandOwner)->Count<()>{
+            let snapshot=source.artifact_census().map_err(|_|Reason::Capacity)?;
+            self.add(capacity(snapshot.data_bytes())?)?;
+            for (original,proof) in snapshot.members(){
+                self.owner(original)?;
+                if self.seen.insert(proof)?{self.arc::<asset_source::ArtifactProbe>()?;self.add(proof.path.capacity())?;self.add(proof.label.capacity())?;self.add(capacity(proof.identity.retained_bytes())?)?;}
+            }Ok(())
+        }
+        fn artifact_binding(&mut self,value:&Arc<ArtifactBinding>)->Count<()>{
+            if self.seen.insert(value)?{self.arc::<ArtifactBinding>()?;self.add(value.project_id.capacity())?;self.add(value.root.path.capacity())?;}Ok(())
+        }
         fn slot_data_rows(&mut self,value:&Slot)->Count<()>{
             // The old Slot still exists at this admission point; it has NOT yet
             // moved into the next owner's retirement. Its inline cells are in
@@ -390,6 +401,7 @@ mod known {
             if let Some(binding) = &value.evidence { self.evidence_binding(binding)?; }
             if let Some(binding) = &value.project_path { self.project_path(binding)?; }
             if let Some(binding) = &value.android_source { self.android_source(binding)?; }
+            if let Some(binding) = &value.artifact { self.artifact_binding(binding)?; }
             if let Some(binding) = &value.images { self.image_binding(binding)?; }
             if let Some(batch) = &value.image_batch { self.heap::<asset_source::CapturedPublicImageBatch>(batch.retained_bytes())?; }
             if let Some(label) = &value.vault.label { self.add(label.capacity())?; }
@@ -548,35 +560,36 @@ mod known {
         CatalogueCensusData{bytes:census.bytes,rows,pickers,_state:state,_saved:saved_aliases}
     }
 
-    pub(super) fn android_registration_bytes(state: &DocumentState, pickers: &[Arc<OriginalWork>; 3]) -> Count<usize> {
-        let mut census = Census::new();
+    pub(super) fn android_registration_bytes(state: &DocumentState, pickers: &[Arc<OriginalWork>; 3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>) -> Count<usize> {
+        let mut census = Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}
         census.document(state)?;
         // SAME Seen table: original picker state shared with Document.slot or
         // another retained root counts once; equal distinct Arcs count again.
         for picker in pickers { census.owner(picker)?; }
         Ok(census.bytes)
     }
-    pub(super) fn android_service_setup_bytes(state:&DocumentState,pickers:&[Option<Arc<OriginalWork>>;3])->Count<usize>{
-        let mut census=Census::new();census.document(state)?;
+    pub(super) fn android_service_setup_bytes(state:&DocumentState,pickers:&[Option<Arc<OriginalWork>>;3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>)->Count<usize>{
+        let mut census=Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}census.document(state)?;
         for picker in pickers.iter().flatten(){census.owner(picker)?;}
         Ok(census.bytes)
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
     pub(super) fn macos_removal_bytes(state:&DocumentState,peer:&macos_removal::Handle,
-        pickers:&[Option<Arc<OriginalWork>>;3])->Count<usize>{
+        pickers:&[Option<Arc<OriginalWork>>;3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>)->Count<usize>{
         // The only live-owner exception is this SAME retained peer, never an
         // arbitrary "ignore busy" switch. Its full prior reservation includes
         // the request/current/peer originals and both task instances; Unknown
         // cannot become zero-byte credit. Saved adds its own quote afterward.
         if !state.maintenance.removal_matches(peer)
             ||!peer.sources_match(pickers,peer.source_generation()){return Err(Reason::Capacity);}
-        let mut census=Census::new();census.document_state_gate(state)?;
+        let mut census=Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}census.document_state_gate(state)?;
         census.document_rows(state)?;census.add(capacity(peer.reservation())?)?;
         for picker in pickers.iter().flatten(){census.owner(picker)?;}
         Ok(census.bytes)
     }
-    pub(super) fn admitted(state: &DocumentState, control: usize) -> Count<()> {
-        let mut census = Census::new();
+    pub(super) fn admitted(state: &DocumentState, control: usize,artifact:Option<&crate::saved_command_owner::SavedCommandOwner>) -> Count<()> {
+        if control!=16*1024*1024{return Err(Reason::Capacity);}
+        let mut census = Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}
         census.document(state)?;
         fits(census.bytes, control)
     }
@@ -616,9 +629,9 @@ mod known {
             assert!(fits(SESSION_BYTES - 16 * 1024 * 1024 + 1, 16 * 1024 * 1024).is_err());
             assert!(fits(usize::MAX, 1).is_err());
             let state = state();
-            assert!(super::super::admitted(&state, 16 * 1024 * 1024).is_ok());
-            assert!(super::super::admitted(&state, 0).is_err());
-            assert!(super::super::admitted(&state, usize::MAX).is_err());
+            assert!(super::admitted(&state, 16 * 1024 * 1024,None).is_ok());
+            assert!(super::admitted(&state, 0,None).is_err());
+            assert!(super::admitted(&state, usize::MAX,None).is_err());
             assert_eq!((state.next_operation, state.next_context), (7, 3));
             assert!(state.slot.is_none());
             #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
@@ -719,7 +732,7 @@ mod known {
         #[test]
         fn sticky_unknown_is_not_an_admission_or_repair() {
             let mut state = state(); state.unknown = true;
-            assert!(super::super::admitted(&state, 16 * 1024 * 1024).is_err());
+            assert!(super::admitted(&state, 16 * 1024 * 1024,None).is_err());
             assert!(state.unknown); assert_eq!(state.next_operation, 7);
             assert!(state.slot.is_none());
         }

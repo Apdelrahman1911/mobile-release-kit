@@ -1,3 +1,6 @@
+import { ArtifactInspectionController, artifactInspectionOwnerReason } from './artifactInspection.ts';
+import { artifactInspectionError } from './artifactInspectionProtocol.ts';
+import { ArtifactInspection } from './components/ArtifactInspection.tsx';
 import { ProjectInitializationController } from './projectInitializationController.ts';
 import { initializationOwnerReason, initializationRetainsDraft } from './projectInitialization.ts';
 import { ProjectInitialization } from './components/ProjectInitialization.tsx';
@@ -29,6 +32,8 @@ import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { ProjectRecovery } from './components/ProjectRecovery.tsx';
 import { IOSArchiveController, iosArchiveOwnerReason } from './iosArchive.ts';
 import { iosArchiveError } from './iosArchiveProtocol.ts';
+import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from './GitHubRemoteSetupController.ts';
+import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { GitHubPreflightController, githubPreflightOwnerReason } from './githubPreflightController.ts';
 import { GitHubReleaseController, githubReleaseOwnerReason } from './githubReleaseController.ts';
@@ -113,6 +118,7 @@ export function App() {
   const versionEditControllerRef = useRef<ReleaseVersionEditController | null>(null);
   const releaseInputControllerRef = useRef<ReleaseInputGuidanceController | null>(null);
   const diagnosticsControllerRef = useRef<EnvironmentDiagnosticsController | null>(null);
+  const artifactInspectionControllerRef = useRef<ArtifactInspectionController | null>(null);
   const offlinePreflightControllerRef = useRef<OfflinePreflightController | null>(null);
   const androidBuildControllerRef = useRef<AndroidBuildController | null>(null);
   const projectRecoveryControllerRef = useRef<ProjectRecoveryController | null>(null);
@@ -122,6 +128,7 @@ export function App() {
   const passivePending = useRef(0);
   const [, setPassivePending] = useState(0);
   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
+  const githubRemoteSetupControllerRef = useRef<GitHubRemoteSetupController | null>(null);
   const githubPreflightControllerRef = useRef<GitHubPreflightController | null>(null);
   const githubReleaseControllerRef = useRef<GitHubReleaseController | null>(null);
   const connectionHelpGeneration = useRef<object>({});
@@ -139,18 +146,20 @@ export function App() {
     const next = retireProjectPath(pathPickerRef.current);
     if (next !== pathPickerRef.current) publishPathPicker(next);
   }, [publishPathPicker]);
+  const artifactBusy = useCallback(() => artifactInspectionControllerRef.current ? artifactInspectionOwnerReason(artifactInspectionControllerRef.current.getSnapshot()) : null, []);
   const preflightBusy = useCallback(() => offlinePreflightControllerRef.current ? offlinePreflightOwnerReason(offlinePreflightControllerRef.current.getSnapshot()) : null, []);
   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
   const iosBusy = useCallback(() => iosArchiveControllerRef.current ? iosArchiveOwnerReason(iosArchiveControllerRef.current.getSnapshot()) : null, []);
   const recoveryBusy = useCallback(() => projectRecoveryControllerRef.current ? projectRecoveryOwnerReason(projectRecoveryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false) => preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false) => artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+    (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [preflightBusy, androidBusy, recoveryBusy, iosBusy]);
+    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -172,6 +181,8 @@ export function App() {
     // Intent/event retirement must precede even an unchanged reducer result:
     // failed refresh and unchanged/older saves need not advance generations.
     retirePathPicker();
+    githubRemoteSetupControllerRef.current?.beforeWorkspaceAction();
+    artifactInspectionControllerRef.current?.beforeWorkspaceAction(action);
     offlinePreflightControllerRef.current?.beforeWorkspaceAction(action);
     androidBuildControllerRef.current?.beforeWorkspaceAction(action);
     projectRecoveryControllerRef.current?.beforeWorkspaceAction(action);
@@ -202,6 +213,7 @@ export function App() {
     versionEditControllerRef.current?.syncProject();
     releaseInputControllerRef.current?.syncProject();
     diagnosticsControllerRef.current?.syncProject();
+    artifactInspectionControllerRef.current?.syncProject();
     offlinePreflightControllerRef.current?.syncProject();
     androidBuildControllerRef.current?.syncProject();
     projectRecoveryControllerRef.current?.syncProject();
@@ -278,6 +290,14 @@ export function App() {
   const [githubConnection] = useState(() => new GitHubConnectionController(savedCommandBusy));
   connectionControllerRef.current = githubConnection;
   const connectionState = useSyncExternalStore(githubConnection.subscribe, githubConnection.getSnapshot, githubConnection.getSnapshot);
+  const [githubRemoteSetup] = useState(() => new GitHubRemoteSetupController(githubConnection.getSnapshot, () => {
+    const projectId = workspaceRef.current.selectedId ?? '';
+    return savedCommandBusy(false, false, false, false, false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
+      (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
+  }));
+  githubRemoteSetupControllerRef.current = githubRemoteSetup;
+  const githubRemoteSetupState = useSyncExternalStore(githubRemoteSetup.subscribe, githubRemoteSetup.getSnapshot, githubRemoteSetup.getSnapshot);
   const [githubPreflight] = useState(() => new GitHubPreflightController(githubConnection.getSnapshot, () => {
     const projectId = workspaceRef.current.selectedId ?? '';
     return savedCommandBusy(false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
@@ -312,7 +332,7 @@ export function App() {
     onApplyIntent:projectId=>{
       dispatch({type:'initialization-intent',projectId});
       retirePathPicker(); releaseVersionControllerRef.current?.saveIntent(); releaseInputControllerRef.current?.saveIntent();
-      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent();offlinePreflightControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent();projectRecoveryControllerRef.current?.versionIntent();iosArchiveControllerRef.current?.versionIntent();
     },
     onConfirmed:completion=>dispatch({type:'initialization-final',projectId:completion.binding.projectId,completion}),
   }));
@@ -329,7 +349,7 @@ export function App() {
       // Recovery changes persisted saved-file facts, never the retained draft.
       // Invalidate existing passive/build consent; no replacement Read is made.
       releaseVersion.saveIntent(); releaseInputs.saveIntent();
-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
     },
   }));
   metadataControllerRef.current = metadataText;
@@ -361,7 +381,7 @@ export function App() {
       // Retire before the submitted intent/outcome can notify subscribers, even
       // for unchanged, failed or out-of-context saves. Never fabricate a Read.
       releaseVersion.saveIntent(); releaseInputs.saveIntent();
-      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
+      androidBuildControllerRef.current?.versionIntent(); offlinePreflightControllerRef.current?.versionIntent(); artifactInspectionControllerRef.current?.versionIntent(); projectRecoveryControllerRef.current?.versionIntent(); iosArchiveControllerRef.current?.versionIntent();
     },
   }));
   versionEditControllerRef.current = versionEdit;
@@ -391,6 +411,8 @@ export function App() {
     if (evidence.integrityFailed || evidence.uncertain || evidence.pending || evidence.cancelling ||
         evidence.status && ['choosing', 'observing', 'stopping', 'unknown'].includes(evidence.status.phase))
       return 'An original evidence operation is active or unverified. Evidence selection is not source-project authority.';
+    const remoteSetupReason = githubRemoteSetupOwnerReason(githubRemoteSetup.getSnapshot());
+    if (remoteSetupReason) return remoteSetupReason;
     const connection = githubConnection.getSnapshot();
     if (connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || (connection.status ?? connection.retained)?.session)
       return 'Finish or disconnect the original GitHub session before starting saved project code.';
@@ -401,12 +423,21 @@ export function App() {
       return 'An original passive project query is still pending. Wait for it to settle before reviewing saved checks.';
     return null;
   };
+  const [artifactInspection] = useState(() => new ArtifactInspectionController({
+    selectedProject: () => {
+      const current=workspaceRef.current;
+      return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
+    },
+    otherOperationReason: () => preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+  }));
+  artifactInspectionControllerRef.current=artifactInspection;
+  const artifactInspectionState=useSyncExternalStore(artifactInspection.subscribe,artifactInspection.getSnapshot,artifactInspection.getSnapshot);
   const [offlinePreflight] = useState(() => new OfflinePreflightController({
     selectedProject: () => {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
-    otherOperationReason: () => androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => artifactBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   offlinePreflightControllerRef.current = offlinePreflight;
   const offlinePreflightState = useSyncExternalStore(offlinePreflight.subscribe, offlinePreflight.getSnapshot, offlinePreflight.getSnapshot);
@@ -417,7 +448,7 @@ export function App() {
     },
     releaseVersion: releaseVersion.getSnapshot,
     assetSession: assetSession.getSnapshot,
-    otherOperationReason: () => preflightBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => artifactBusy() ?? preflightBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   androidBuildControllerRef.current = androidBuild;
   const androidBuildState = useSyncExternalStore(androidBuild.subscribe, androidBuild.getSnapshot, androidBuild.getSnapshot);
@@ -426,7 +457,7 @@ export function App() {
       const current = workspaceRef.current;
       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
     },
-    otherOperationReason: () => preflightBusy() ?? androidBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
   }));
   projectRecoveryControllerRef.current = projectRecovery;
   const projectRecoveryState = useSyncExternalStore(projectRecovery.subscribe, projectRecovery.getSnapshot, projectRecovery.getSnapshot);
@@ -437,7 +468,7 @@ export function App() {
     },
     releaseVersion: releaseVersion.getSnapshot,
     assetSession: assetSession.getSnapshot,
-    otherOperationReason: () => preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? savedCommandPrerequisiteReason(),
+    otherOperationReason: () => artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? savedCommandPrerequisiteReason(),
   }));
   iosArchiveControllerRef.current = iosArchive;
   const iosArchiveState = useSyncExternalStore(iosArchive.subscribe, iosArchive.getSnapshot, iosArchive.getSnapshot);
@@ -470,11 +501,12 @@ export function App() {
     pathService.current = { api: null, info: null };
     // Reconnection cannot discard a pending or unverified original picker.
     if (projectPathOwnerReason(pathPickerRef.current)) return;
+    artifactInspection.beginConnection();
     offlinePreflight.beginConnection();
     androidBuild.beginConnection();
     projectRecovery.beginConnection(); iosArchive.beginConnection();
     if (savedCommandBusy()) { setBootError(versionOwnerReason(versionEdit.getSnapshot(), workspaceRef.current.selectedId ?? '') ?
-      versionEditError({ code: 'VersionEditBusy' }) : metadataImagesOwnerReason(metadataImages.getSnapshot()) ? metadataImagesError({ code: 'metadata_images_busy' }) : recoveryBusy() ? projectRecoveryError({ code: 'project_recovery_busy' }) : androidBusy() ? androidBuildError({ code: 'android_build_busy' }) : iosBusy() ? iosArchiveError({ code: 'ios_archive_busy' }) : offlinePreflightError({ code: 'offline_preflight_busy' })); return; }
+      versionEditError({ code: 'VersionEditBusy' }) : artifactBusy() ? artifactInspectionError({code:'artifact_inspection_busy'}) : metadataImagesOwnerReason(metadataImages.getSnapshot()) ? metadataImagesError({ code: 'metadata_images_busy' }) : recoveryBusy() ? projectRecoveryError({ code: 'project_recovery_busy' }) : androidBusy() ? androidBuildError({ code: 'android_build_busy' }) : iosBusy() ? iosArchiveError({ code: 'ios_archive_busy' }) : offlinePreflightError({ code: 'offline_preflight_busy' })); return; }
     bootstrapPending.current = true;
     const generation = ++bootGeneration.current;
     const helpGeneration = {};
@@ -483,6 +515,7 @@ export function App() {
     githubConnection.setContext(null);
     connectionHandoffRef.current = null; connectionPortRef.current = null;
     void githubConnection.attach(null);
+    void githubRemoteSetup.connect(null);
     void githubPreflight.connect(null);
     void githubRelease.connect(null);
     githubSetup.beginConnection();
@@ -503,6 +536,7 @@ export function App() {
       setApi(connection);
       // This fixed native Status has its own qualification gate. Passive
       // appInfo/catalogue success never enables tool execution.
+      void artifactInspection.connect(connection);
       void offlinePreflight.connect(connection);
       void androidBuild.connect(connection);
       void projectRecovery.connect(connection);
@@ -518,6 +552,7 @@ export function App() {
       // Fixed read-only Status may expose an unavailable native gate. Working
       // passive appInfo is neither credential admission nor TLS qualification.
       void githubConnection.attach(port);
+      void githubRemoteSetup.connect(connection);
       void githubPreflight.connect(connection);
       void githubRelease.connect(connection);
       const appInfo = await connection.appInfo();
@@ -555,18 +590,19 @@ export function App() {
       if (generation === bootGeneration.current) {
         pathService.current = { api: null, info: null };
         connectionHandoffRef.current = null; connectionPortRef.current = null;
-        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubPreflight.connect(null); void githubRelease.connect(null);
+        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null);
         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, githubPreflight, githubRelease, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
+  }, [githubSetup, githubConnection, githubRemoteSetup, githubPreflight, githubRelease, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
 
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
   useEffect(() => releaseVersion.subscribe(() => androidBuild.syncReleaseVersion()), [releaseVersion, androidBuild]);
+  useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
   useEffect(() => releaseVersion.subscribe(() => iosArchive.syncReleaseVersion()), [releaseVersion, iosArchive]);
   // Exact assignment/context changes retire signed consent before a new render;
@@ -594,12 +630,14 @@ export function App() {
   useEffect(() => () => releaseVersion.dispose(), [releaseVersion]);
   useEffect(() => () => releaseInputs.dispose(), [releaseInputs]);
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
+  useEffect(() => () => artifactInspection.dispose(), [artifactInspection]);
   useEffect(() => () => offlinePreflight.dispose(), [offlinePreflight]);
   useEffect(() => () => androidBuild.dispose(), [androidBuild]);
   useEffect(() => () => projectRecovery.dispose(), [projectRecovery]);
   useEffect(() => () => iosArchive.dispose(), [iosArchive]);
   useEffect(() => () => releaseEvidence.dispose(), [releaseEvidence]);
   useEffect(() => () => githubConnection.dispose(), [githubConnection]);
+  useEffect(() => () => githubRemoteSetup.dispose(), [githubRemoteSetup]);
   useEffect(() => () => githubPreflight.dispose(), [githubPreflight]);
   useEffect(() => () => githubRelease.dispose(), [githubRelease]);
   useEffect(() => { if(api)void initialization.connect(api); },[api,initialization]);
@@ -637,7 +675,7 @@ export function App() {
     return () => window.removeEventListener('beforeunload', warn);
   }, []);
 
-  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
+  const navigate = (next: Page) => { initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); androidBuild.setVisible(next === 'releases'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); setPage(next); main.current?.focus({ preventScroll: true }); };
   const refreshReason = savedCommandBusy() ?? methodReason(info, 'project.snapshot', mode);
   const validateReason = savedCommandBusy() ?? methodReason(info, 'config.validate', mode);
   const reviewReason = savedCommandBusy() ?? methodReason(info, 'config.preview', mode);
@@ -659,6 +697,7 @@ export function App() {
     versionEdit.snapshotIntent(projectId);
     metadataText.snapshotIntent(projectId);
     retirePathPicker();
+    artifactInspection.snapshotIntent(projectId);
     offlinePreflight.snapshotIntent(projectId);
     androidBuild.snapshotIntent(projectId);
     projectRecovery.snapshotIntent(projectId);
@@ -681,6 +720,7 @@ export function App() {
     metadataImages.selectionIntent();
     versionEdit.selectionIntent();
     retirePathPicker();
+    artifactInspection.selectionIntent();
     offlinePreflight.selectionIntent();
     androidBuild.selectionIntent();
     projectRecovery.selectionIntent();
@@ -693,6 +733,7 @@ export function App() {
     releaseVersion.setSelectionPending(true);
     releaseInputs.setSelectionPending(true);
     diagnostics.setSelectionPending(true);
+    artifactInspection.setSelectionPending(true);
     offlinePreflight.setSelectionPending(true);
     androidBuild.setSelectionPending(true);
     projectRecovery.setSelectionPending(true);
@@ -708,7 +749,7 @@ export function App() {
       dispatch({ type: 'select', project });
       if (!alreadyLoaded) await loadSnapshot(project.id);
     } catch (error) { setChooseError(apiError(error)); }
-    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); offlinePreflight.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
+    finally { connectionPicking.current = false; setChoosing(false); syncConnectionContext(); releaseVersion.setSelectionPending(false); releaseInputs.setSelectionPending(false); metadataText.setSelectionPending(false); metadataImages.setSelectionPending(false); versionEdit.setSelectionPending(false); diagnostics.setSelectionPending(false); artifactInspection.setSelectionPending(false); offlinePreflight.setSelectionPending(false); androidBuild.setSelectionPending(false); projectRecovery.setSelectionPending(false); iosArchive.setSelectionPending(false); }
   };
 
   const changeApplicationRepository = (value: string) => {
@@ -853,7 +894,7 @@ export function App() {
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Core-managed builds are disabled</span><Badge tone={preview || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project initialization owner retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />Core-managed builds are disabled</span><Badge tone={preview || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project initialization owner retained' : recoveryBusy() ? 'Project recovery owner retained' : androidBusy() ? 'Android build owner retained' : iosBusy() ? 'iOS archive owner retained' : artifactBusy() ? 'Artifact inspection owner retained' : preflightBusy() ? 'Saved offline-check owner retained' : diagnosticsState.status?.active ? 'Build-tool diagnostics active' : saveState.status?.active ? 'Native save session active' : workflowState.status?.active ? 'Local workflow session active' : metadataImagesOwnerReason(metadataImagesState) ? 'Image operation retained' : metadataState.edit.status?.active ? 'Public-text session active' : versionEditState.edit.status?.active ? 'Saved-version session active' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Loading desktop capabilities and the core field catalogue…</span></div>}
@@ -863,6 +904,8 @@ export function App() {
         {(pathPicker.pending || pathPicker.unverified || pathPicker.message) && <div className={`notice ${pathPicker.unverified ? 'notice-warning' : 'notice-info'}`} role={pathPicker.unverified ? 'alert' : 'status'}>
           <Icon name="info" /><span>{projectPathOwnerReason(pathPicker) ?? pathPicker.message}{pathPicker.pending ? ' If the original picker is still open, its Cancel button leaves the draft unchanged.' : ''}</span></div>}
         {info?.runtime.state !== 'available' && info && !preview && <div className="notice notice-warning"><Icon name="info" /><div><strong>{info.runtime.state === 'disabled' ? 'The engine is disabled' : 'Bundled engine unavailable'}</strong><p>{info.runtime.reason ?? 'A trusted packaged runtime has not been supplied. The app will not select an ambient Python or a mock engine.'} Folder selection does not establish a project observation.</p></div></div>}
+        {page !== 'artifacts' && <ArtifactInspection state={artifactInspectionState} controller={artifactInspection} compact
+          projectName={session?.project.name??null} onHelp={setHelp} onShow={()=>navigate('artifacts')}/>}
         {page !== 'releases' && <OfflinePreflight state={offlinePreflightState} controller={offlinePreflight} compact
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
           onShow={() => navigate('releases')} />}
@@ -876,6 +919,7 @@ export function App() {
           projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
           onShow={() => navigate(iosArchiveState.status?.operation?.context.operation === 'ios-local-recovery' ? 'recovery' : 'releases')} onHelp={setHelp} />}
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
+        {page !== 'github' && <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
@@ -893,7 +937,7 @@ export function App() {
         {page === 'dashboard' && <Dashboard session={session} info={info} preview={preview} configSaveState={saveState} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
           initializationPanel={<ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState}/>}
           versionEditor={<ReleaseVersionEditor state={versionEditState} controller={versionEdit} session={session} onSettings={() => navigate('settings')} onHelp={setHelp} onShowProject={showVersionProject} />}
-          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { androidBuild.versionIntent(); iosArchive.versionIntent(); void releaseVersion.read(); }}
+          releaseVersionState={releaseVersionState} releaseVersionReason={releaseVersion.startReason()} onReadVersion={() => { artifactInspection.versionIntent(); androidBuild.versionIntent(); iosArchive.versionIntent(); void releaseVersion.read(); }}
           onChoose={() => void chooseProject()} onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} onNavigate={navigate} onHelp={setHelp} />}
         {page === 'settings' && <><PageHeading eyebrow="PROJECT SETTINGS" title="A little clarity before the next release." description="Edit a practical, schema-driven draft. The bundled core provides every field, requirement, and validation rule." />{editor()}</>}
         {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
@@ -906,6 +950,7 @@ export function App() {
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
             handoff={connectionHandoffRef.current} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
+            <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} onHelp={setHelp} />
             <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} /></>} />}
         {page === 'releases' && <Releases info={info} protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
@@ -920,7 +965,7 @@ export function App() {
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => void releaseVersion.read()} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />} />}
-        {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />
+        {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
         {page === 'recovery' && <><Recovery onOpenReleases={() => navigate('releases')} evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}

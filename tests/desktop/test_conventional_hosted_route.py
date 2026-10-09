@@ -57,7 +57,7 @@ CONTEXT = {"source": "/inert-source", "root": "/inert-root", "sourceSha": "b" * 
 BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
               "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py")
 CURRENT_BOOTSTRAPS = (*BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-                      "ios_archive_bootstrap.py", "github_release_bootstrap.py")
+                      "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py")
 HISTORICAL_CORE_NAMES = sorted([*("desktop/" + name for name in (*BOOTSTRAPS, "github-ca.pem")),
                      "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"])
 CORE_NAMES = sorted([*("desktop/" + name for name in (*CURRENT_BOOTSTRAPS, "github-ca.pem")),
@@ -261,8 +261,8 @@ class DataContracts(unittest.TestCase):
 
     def test_current_roster_is_closed_not_historical_or_discovered_authority(self):
         admitted = data.records(helper.CONVENTIONAL_CURRENT_SOURCE_FILES, absolute=True)
-        self.assertEqual(len(admitted), 141)
-        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 129)
+        self.assertEqual(len(admitted), 168)
+        self.assertEqual(sum(name.startswith("/work/inputs/core-source/src/mobile_release/") for name in admitted), 154)
         # These two changed current rows are not H or full-preparation authority.
         for leaf in ("owned_process.py", "_command_process.py"):
             relative = "src/mobile_release/" + leaf

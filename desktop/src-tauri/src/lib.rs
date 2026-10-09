@@ -74,6 +74,7 @@ mod lifecycle_evidence_protocol;
 mod environment_diagnostics_protocol;
 mod environment_diagnostics_owner;
 mod offline_preflight_protocol;
+mod artifact_inspection_protocol;
 mod offline_preflight_owner;
 mod android_build_protocol;
 mod android_build_owner;
@@ -199,6 +200,8 @@ mod github_preflight_protocol;
 mod github_preflight_session;
 mod github_release_protocol;
 mod github_release_session;
+mod github_setup_protocol;
+mod github_setup_session;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]
 pub mod shell;

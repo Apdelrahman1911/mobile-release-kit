@@ -517,6 +517,49 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         self.assertEqual(result.observation, {"status": 401, "body": None, "failure": "none"})
         self.assertNotIn(_SENTINEL, _json(result.control).decode())
 
+        # Actual empty204 transport adapter, not a synthesized successful JSON.
+        profile = transport._ExchangeProfile.SETUP
+        roles = (transport._ResponseRole.SETUP_ACTIONS_WRITE, transport._ResponseRole.SETUP_WORKFLOW_WRITE)
+        def setup_raw(status=204, headers=(), body=b""):
+            return (f"HTTP/1.1 {status} fixed\r\n".encode() +
+                    b"".join((k + ": " + v + "\r\n").encode() for k, v in headers) + b"\r\n" + body)
+        def parse_setup(raw, role, used=0):
+            selected = transport._Budget(100.0, monotonic=lambda: 100.0, wall=lambda: 1000,
+                                         _profile=profile)
+            selected.body_bytes = used
+            source = io.BytesIO(raw)
+            response = transport._ResponseBody(source, selected, _role=role)
+            return transport._response_result(response, selected), selected, source
+        for role in roles:
+            for headers in ((), (("Content-Length", "0"),)):
+                row, selected, source = parse_setup(setup_raw(headers=headers), role)
+                self.assertEqual(row.observation, {"status": 204, "body": None, "failure": "none"})
+                self.assertEqual(row.control, transport._control())
+                self.assertEqual((selected.body_bytes, source.read()), (0, b""))
+                exact, _, _ = parse_setup(setup_raw(headers=headers), role, transport.MAX_BODY_TOTAL)
+                self.assertEqual(exact.control["reason"], "none")
+            for headers, body in (((), b"x"), ((("Content-Length", "0"),), b"x"),
+                                  ((("Content-Length", "1"),), b"x"),
+                                  ((("Transfer-Encoding", "chunked"),), b"0\r\n\r\n"),
+                                  ((("Content-Length", "0"), ("Transfer-Encoding", "chunked")), b""),
+                                  ((("GitHub-Authentication-Token-Expiration", "never"),), b"")):
+                row, _, _ = parse_setup(setup_raw(headers=headers, body=body), role)
+                self.assertEqual(row.control["reason"], "response-invalid")
+            row, selected, _ = parse_setup(setup_raw(body=b"x"), role, transport.MAX_BODY_TOTAL)
+            self.assertEqual((row.control["reason"], selected.body_bytes), ("response-limit", transport.MAX_BODY_TOTAL + 1))
+            row, _, _ = parse_setup(setup_raw(headers=(("X-RateLimit-Remaining", "0"),)), role)
+            self.assertEqual(row.control, transport._control("response-invalid", 60))
+            row, _, source = parse_setup(setup_raw(409, body=_SENTINEL.encode()), role)
+            self.assertEqual(row.control["reason"], "none" if role is roles[1] else "response-invalid")
+            self.assertEqual(source.read(), _SENTINEL.encode())  # Never consume upstream error detail.
+        for ordinary in (transport._ExchangeProfile.STANDARD, transport._ExchangeProfile.RELEASE_PREPARE):
+            selected = transport._Budget(100.0, monotonic=lambda: 100.0, _profile=ordinary)
+            response = transport._ResponseBody(io.BytesIO(setup_raw()), selected)
+            self.assertEqual(transport._response_result(response, selected).control["reason"], "response-invalid")
+            for role in roles:
+                with self.assertRaises(ValueError):
+                    transport._ResponseBody(io.BytesIO(setup_raw()), selected, _role=role)
+
     def test_initial_metadata_is_bounded_during_reads_and_never_loops_informationals(self):
         for status in (100, 101, 199):
             prefix = f"HTTP/1.1 {status} Inert\r\n".encode()
@@ -691,6 +734,31 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         self.assertEqual(result.control, transport._control("response-invalid", 8001))
         self.assertEqual(budget.end, 110.0)
 
+        # Even the one-byte empty-response probe uses both original checks.
+        role = transport._ResponseRole.SETUP_ACTIONS_WRITE
+        wire = b"HTTP/1.1 204 fixed\r\nContent-Length: 0\r\n\r\n"
+        for mode in ("late", "unexpected-eof", "nonempty"):
+            now = [100.0]
+            class Probe(io.BytesIO):
+                def read1(self, amount=-1):
+                    if self.tell() == len(wire):
+                        if mode == "late":
+                            now[0] = 110.0
+                        elif mode == "unexpected-eof":
+                            raise OSError("inert unclean TLS EOF")
+                        else:
+                            return b"x"
+                    return super().read1(amount)
+            selected = transport._Budget(100.0, monotonic=lambda: now[0], _profile=transport._ExchangeProfile.SETUP)
+            response = transport._ResponseBody(Probe(wire), selected, _role=role)
+            if mode == "unexpected-eof":
+                with self.assertRaises(OSError):
+                    transport._response_result(response, selected)
+            else:
+                row = transport._response_result(response, selected)
+                self.assertEqual(row.control["reason"], "network-unavailable" if mode == "late" else "response-invalid")
+            self.assertEqual(selected.end, 110.0)
+
     def test_pure_schedule_does_not_enter_live_factory_or_trust_reader(self):
         original_factory, original_ca = transport._make_live_reader, transport._fixed_ca
         before = {name: sys.modules.get(name) for name in ("http.client", "ssl", "_ssl")}
@@ -707,3 +775,56 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         finally:
             transport._make_live_reader, transport._fixed_ca = original_factory, original_ca
         self.assertEqual({name: sys.modules.get(name) for name in before}, before)
+
+        from unittest.mock import patch
+        from mobile_release import github_setup_remote as setup
+        P, R = transport._ExchangeProfile, transport._ResponseRole
+        target = setup.Target.parse({"projectBinding": "a" * 64, "repository": "owner/app", "accountId": "7",
+                                     "repositoryId": "11", "selection": {"kind": "actions_enabled", "enabled": True}})
+        before_policy = setup.Policy.parse("actions_enabled", {"enabled": False, "allowed_actions": "selected", "sha_pinning_required": True})
+        prepared = setup.Prepared.parse(setup.Prepared(target, before_policy, _TIME).value())
+        action = setup.Action.parse({"kind": "apply", "target": target.value(), "prepared": prepared.value()})
+        calls, factories = [], []
+        def factory(token, **kwargs):
+            factories.append((token, kwargs))
+            def exchange(method, path, body, *, _role):
+                transport._request_limits(P.SETUP, _role, method, path)
+                transport._setup_body(P.SETUP, _role, body)
+                calls.append((method, path, body, _role))
+                return transport.ReadResult({"status": 204, "body": None, "failure": "none"}, transport._control())
+            return exchange
+        with patch.object(transport, "_make_live_exchange", side_effect=factory):
+            reader = setup._make_live_reader(action, _SENTINEL, started=100.0, runtime_dir="/inert/runtime")
+            for step in ("account", "repository-before", "resource-before", "write", "resource-after", "repository-after"):
+                reader.read(step)
+            with self.assertRaises(ValueError):
+                reader.read("write")
+        self.assertEqual(factories, [(_SENTINEL, {"started": 100.0, "runtime_dir": "/inert/runtime",
+                                               "api_version": "2026-03-10", "_profile": P.SETUP})])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(calls[3], ("PUT", "/repos/owner/app/actions/permissions", setup._canonical(prepared.after.value()), R.SETUP_ACTIONS_WRITE))
+        self.assertEqual([call[3] for call in calls if call[0] == "GET"], [R.STANDARD] * 5)
+        for role, path, body in (
+            (R.SETUP_ACTIONS_WRITE, "/repos/owner/app/actions/permissions", prepared.after.value()),
+            (R.SETUP_WORKFLOW_WRITE, "/repos/owner/app/actions/permissions/workflow",
+             {"default_workflow_permissions": "read", "can_approve_pull_request_reviews": False}),
+        ):
+            transport._request_limits(P.SETUP, role, "PUT", path)
+            transport._setup_body(P.SETUP, role, _json(body))
+            for bad in (None, b"", b" " * 8193, _json({**body, "url": "https://untrusted.invalid"}),
+                        _json({k: int(v) if type(v) is bool else v for k, v in body.items()})):
+                with self.assertRaises(ValueError):
+                    transport._setup_body(P.SETUP, role, bad)
+            for method, badpath in (("POST", path), ("GET", path), ("DELETE", path), ("PUT", path + "?x=1"),
+                                    ("PUT", path + "/selected-actions"), ("PUT", "https://api.github.com" + path)):
+                with self.assertRaises(ValueError):
+                    transport._request_limits(P.SETUP, role, method, badpath)
+            for ordinary in (P.STANDARD, P.RELEASE_PREPARE):
+                with self.assertRaises(ValueError):
+                    transport._request_limits(ordinary, role, "PUT", path)
+        for badpath in ("/repos/owner/app/actions/workflows", "/user?x=1", "/repos/owner/app/contents/file"):
+            with self.assertRaises(ValueError):
+                transport._request_limits(P.SETUP, R.STANDARD, "GET", badpath)
+        with self.assertRaises(ValueError):
+            transport._make_live_exchange(_SENTINEL, started=100.0, runtime_dir="/inert/runtime",
+                                          api_version="2022-11-28", _profile=P.SETUP)

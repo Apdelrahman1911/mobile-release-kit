@@ -11,6 +11,9 @@ import { createNativeApi } from '../src/bridge.ts';
 import { GitHubSetupController, githubSetupStartReason, githubSnapshotFromInputs } from '../src/githubSetupController.ts';
 import { GITHUB_WORKFLOWS, githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupHelp, parseGitHubSetupResult } from '../src/githubSetupProtocol.ts';
 import { previewApi } from '../src/preview.ts';
+import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from '../src/GitHubRemoteSetupController.ts';
+import { githubRemoteSetupConfirmation, githubRemoteSetupError, githubRemoteSetupRequestFits, parseGitHubRemoteSetupStatus } from '../src/GitHubRemoteSetupProtocol.ts';
+
 
 const repository = 'inert/toolkit';
 const sha = 'a'.repeat(40);
@@ -744,4 +747,121 @@ test('reentrant invalidation before invocation and disposal do not publish or re
   assert.equal(notifications, 0);
   assert.equal(fixture.controller.getSnapshot().result, null);
   await fixture.controller.propose(); assert.equal(fixture.calls.length, 1);
+});
+
+// Actual remote settings parser/controller/bridge, inert fixed DATA and IPC only.
+const rsTime = '2026-10-09T12:00:00Z', rsExpiry = '2026-10-09T12:02:00Z';
+const rsSelection = () => ({ kind: 'actions_enabled', enabled: true });
+function rsIdle(revision = 1) { return { schemaVersion: 1, revision, sessionId: 'session-a', available: true, reason: 'none', operation: null, consent: null, observed: null }; }
+function rsOp(kind, phase, revision, changes = {}) {
+  return { ...rsIdle(revision), available: phase === 'settled', reason: phase === 'settled' ? 'none' : phase === 'cleanup-unknown' ? 'cleanup-unknown' : 'busy',
+    operation: { id: kind + '-a', kind, phase, reason: phase === 'cleanup-unknown' ? 'cleanup-unknown' : 'none', effect: kind === 'apply' ? 'unknown' : 'not-started', writeClaimed: null, writeAcknowledged: null, ...changes } };
+}
+function rsReview(revision = 3, selected = rsSelection()) {
+  const before = selected.kind === 'actions_enabled' ? { enabled: false, allowed_actions: 'selected', sha_pinning_required: true } : { default_workflow_permissions: 'read', can_approve_pull_request_reviews: false };
+  const after = selected.kind === 'actions_enabled' ? { ...before, enabled: selected.enabled } : { default_workflow_permissions: selected.defaultWorkflowPermissions, can_approve_pull_request_reviews: selected.canApprovePullRequestReviews };
+  return { ...rsOp('prepare', 'settled', revision, { writeClaimed: false, writeAcknowledged: false }), observed: structuredClone(before),
+    consent: { id: 'a'.repeat(32), expiresAt: rsExpiry, prepared: { target: { projectBinding: 'b'.repeat(64), repository: 'owner/app', accountId: '11', repositoryId: '22', selection: selected }, before, after, observedAt: rsTime, confirmation: githubRemoteSetupConfirmation(selected.kind, 'owner/app') } } };
+}
+function rsConnection() { return { mode: 'native', context: { documentId: 'doc', projectId: 'project', projectGeneration: 1, repository: 'owner/app' }, status: { revision: 12,
+  session: { id: 'session-a', projectId: 'project', targetRepository: 'owner/app', state: 'connected' }, account: { state: 'observed', value: { id: '11' } },
+  repository: { state: 'observed', value: { id: '22', fullName: 'owner/app' } } }, busy: null, uncertain: false, blocked: false, retirementPending: false }; }
+function rsDeferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
+async function rsFlush() { for (let i = 0; i < 16; i += 1) await Promise.resolve(); }
+function rsHarness() {
+  let current = rsIdle(), view = rsConnection(), listener = null, detached = 0, other = null; const calls = [];
+  const request = (kind, args) => { const d = rsDeferred(); calls.push({ kind, args: structuredClone(args), ...d }); return d.promise; };
+  const api = { mode: 'native', githubRemoteSetupStatus: async () => structuredClone(current), subscribeGitHubRemoteSetup: async (f) => { listener = f; return () => { detached += 1; listener = null; }; },
+    githubRemoteSetupPrepare: (v) => request('prepare', v), githubRemoteSetupApply: (v) => request('apply', v), githubRemoteSetupDiscard: (v) => request('discard', v), githubRemoteSetupCancel: (v) => request('cancel', v) };
+  const controller = new GitHubRemoteSetupController(() => view, () => other);
+  return { api, controller, calls, get state() { return controller.getSnapshot(); }, get detached() { return detached; },
+    last: (kind) => calls.filter((c) => c.kind === kind).at(-1), count: (kind) => calls.filter((c) => c.kind === kind).length,
+    emit(s) { current = structuredClone(s); listener?.(structuredClone(s)); }, reply(kind, s) { current = structuredClone(s); this.last(kind).resolve(structuredClone(s)); },
+    context(v) { view = v ?? { ...rsConnection(), context: null }; controller.syncContext(); }, block(v) { other = v; } };
+}
+async function rsAttached() { const h = rsHarness(); await h.controller.connect(h.api); h.controller.setSelection(rsSelection()); return h; }
+async function rsReady() { const h = await rsAttached(); h.controller.prepare(); h.reply('prepare', rsReview()); await rsFlush(); assert.ok(h.controller.currentConsent()); return h; }
+
+test('remote setup closed policy and consent preserve untouched fields and distinguish unknown writes', () => {
+  for (const selected of [rsSelection(), { kind: 'workflow_token_policy', defaultWorkflowPermissions: 'write', canApprovePullRequestReviews: true }]) {
+    const good = rsReview(3, selected); assert.ok(parseGitHubRemoteSetupStatus(good));
+    for (const mutate of [(s) => { s.consent.prepared.after.extra = true; }, (s) => { s.consent.prepared.target.repositoryId = 22; },
+      (s) => { s.consent.prepared.before = s.consent.prepared.after; }, (s) => { s.consent.prepared.confirmation += ' TRUST ME'; },
+      (s) => { s.consent.prepared.target.projectBinding = 'wrong'; }, (s) => { s.consent.prepared.after = {}; },
+      (s) => { s.consent.expiresAt = 'tomorrow'; }, (s) => { s.consent.prepared.target.selection.token = 'PRIVATE'; },
+      (s) => { s.consent.prepared.after[Object.keys(s.consent.prepared.after).find((k) => typeof s.consent.prepared.after[k] === 'boolean')] = 1; }]) {
+      const bad = structuredClone(good); mutate(bad); assert.equal(parseGitHubRemoteSetupStatus(bad), null);
+    }
+  }
+  for (const key of ['allowed_actions', 'sha_pinning_required']) { const s = rsReview(); s.consent.prepared.after[key] = key === 'allowed_actions' ? 'all' : false; assert.equal(parseGitHubRemoteSetupStatus(s), null); }
+  const unknown = rsOp('apply', 'cleanup-unknown', 6); assert.ok(parseGitHubRemoteSetupStatus(unknown));
+  for (const changes of [{ effect: 'readback-confirmed' }, { writeClaimed: false, writeAcknowledged: false }, { writeAcknowledged: true }]) assert.equal(parseGitHubRemoteSetupStatus({ ...unknown, operation: { ...unknown.operation, ...changes } }), null);
+  const success = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed: rsReview().consent.prepared.after };
+  assert.ok(parseGitHubRemoteSetupStatus(success)); assert.ok(parseGitHubRemoteSetupStatus({ ...success, available: false, reason: 'expired' })); assert.ok(parseGitHubRemoteSetupStatus({ ...success, available: false, reason: 'cleanup-unknown' }));
+  assert.equal(parseGitHubRemoteSetupStatus({ ...success, observed: null }), null);
+  for (const field of ['writeClaimed', 'writeAcknowledged']) { const bad = structuredClone(success); bad.operation[field] = null; assert.equal(parseGitHubRemoteSetupStatus(bad), null); }
+  assert.equal(parseGitHubRemoteSetupStatus({ ...rsIdle(), revision: 4294967294 }), null);
+  assert.ok(parseGitHubRemoteSetupStatus({ ...rsIdle(4294967294), available: false, reason: 'cleanup-unknown' }));
+  let reads = 0; const getter = rsIdle(); Object.defineProperty(getter, 'reason', { enumerable: true, get() { reads += 1; return 'none'; } });
+  assert.equal(parseGitHubRemoteSetupStatus(getter), null); assert.equal(reads, 0);
+  const error = githubRemoteSetupError({ code: 'github_remote_setup_refused_forbidden', message: 'PRIVATE' });
+  assert.equal(error.admission, 'not-admitted'); assert.equal(error.message.includes('PRIVATE'), false);
+  assert.equal(githubRemoteSetupError({ code: 'anything', admission: 'not-admitted' }).admission, 'unknown');
+});
+
+test('remote setup original controller consumes explicit review and retires stale or uncertain originals without retries', async () => {
+  const h = await rsReady(); h.controller.apply(); assert.equal(h.count('apply'), 0);
+  h.controller.setConfirmed(true); h.controller.apply(); h.controller.apply();
+  assert.equal(h.count('apply'), 1); assert.deepEqual(h.last('apply').args, { sessionId: 'session-a', expectedRevision: 3, consentId: 'a'.repeat(32), confirm: true });
+  assert.equal(h.controller.currentConsent(), null); assert.ok(githubRemoteSetupOwnerReason(h.state));
+  h.emit(rsOp('apply', 'running', 4)); h.last('apply').reject(new Error('PRIVATE')); await rsFlush(); assert.equal(h.state.uncertain, true);
+  h.context(null); assert.equal(h.state.originalTarget.repository, 'owner/app'); assert.equal(h.state.originalTarget.accountId, '11'); assert.equal(h.count('cancel'), 1); h.controller.cancel(); assert.equal(h.count('cancel'), 1); assert.equal(h.last('cancel').args, 'apply-a'); assert.equal(h.state.pending, true);
+  const done = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed: rsReview().consent.prepared.after };
+  h.reply('cancel', done); await rsFlush(); assert.equal(h.state.pending, false); assert.equal(h.state.uncertain, false); assert.equal(h.count('apply'), 1); assert.equal(h.controller.currentConsent(), null);
+  h.emit(rsOp('apply', 'running', 4)); assert.equal(h.state.status.revision, 6); h.controller.dispose();
+  // Invalidate before actual admission/reply, including an away-and-back context.
+  const stale = await rsAttached(); stale.controller.prepare(); stale.context(null); stale.context(rsConnection()); stale.controller.setSelection(rsSelection());
+  stale.reply('prepare', rsReview()); await rsFlush(); assert.equal(stale.controller.currentConsent(), null); assert.equal(stale.count('discard'), 1);
+  assert.deepEqual(stale.last('discard').args, { sessionId: 'session-a', expectedRevision: 3, consentId: 'a'.repeat(32) });
+  stale.last('discard').reject(new Error('unknown discard')); await rsFlush(); assert.equal(stale.state.uncertain, true);
+  stale.emit({ ...rsReview(4), consent: null }); await rsFlush(); assert.equal(stale.state.uncertain, false); assert.equal(stale.count('prepare'), 1); stale.controller.dispose();
+  const deferredStop = await rsAttached(); deferredStop.controller.prepare(); deferredStop.controller.beforeWorkspaceAction();
+  assert.equal(deferredStop.count('cancel'), 0); deferredStop.emit(rsOp('prepare', 'running', 2)); assert.equal(deferredStop.count('cancel'), 1);
+  deferredStop.controller.beforeWorkspaceAction(); deferredStop.emit(rsOp('prepare', 'running', 2)); assert.equal(deferredStop.count('cancel'), 1);
+  const cancelled = rsOp('prepare', 'settled', 3, { reason: 'cancelled', writeClaimed: false, writeAcknowledged: false });
+  deferredStop.reply('prepare', cancelled); deferredStop.reply('cancel', cancelled); await rsFlush(); assert.equal(deferredStop.state.pending, false); deferredStop.controller.dispose();
+  const edit = await rsReady(); edit.controller.beforeWorkspaceAction(); assert.equal(edit.controller.currentConsent(), null); assert.equal(edit.count('discard'), 1);
+  edit.reply('discard', { ...rsReview(4), consent: null }); await rsFlush(); assert.equal(edit.state.discarding, false); edit.controller.dispose();
+  const stopped = await rsAttached(); stopped.controller.prepare(); stopped.emit(rsOp('prepare', 'running', 2)); stopped.controller.cancel();
+  stopped.reply('prepare', rsReview()); await rsFlush(); assert.equal(stopped.controller.currentConsent(), null); assert.equal(stopped.count('discard'), 1);
+  stopped.reply('cancel', rsReview()); stopped.reply('discard', { ...rsReview(4), consent: null }); await rsFlush(); stopped.controller.dispose();
+  const unknown = await rsReady(); unknown.controller.setConfirmed(true); unknown.controller.apply(); unknown.emit(rsOp('apply', 'cleanup-unknown', 4));
+  assert.equal(unknown.state.uncertain, true); assert.equal(unknown.controller.canCancel(), true); unknown.reply('apply', done); await rsFlush();
+  assert.equal(unknown.state.uncertain, true); assert.notEqual(unknown.state.status.operation.effect, 'readback-confirmed'); assert.equal(unknown.count('apply'), 1); unknown.controller.dispose();
+  const replaced = await rsAttached(); replaced.controller.prepare(); replaced.emit(rsOp('prepare', 'running', 2));
+  await replaced.controller.connect({ ...replaced.api, mode: 'preview' }); assert.equal(replaced.detached, 0); assert.equal(replaced.count('cancel'), 1); assert.equal(replaced.last('cancel').args, 'prepare-a');
+  replaced.reply('prepare', { ...rsOp('prepare', 'settled', 3, { reason: 'cancelled', writeClaimed: false, writeAcknowledged: false }) }); await rsFlush(); assert.equal(replaced.detached, 0); replaced.reply('cancel', { ...rsOp('prepare', 'settled', 3, { reason: 'cancelled', writeClaimed: false, writeAcknowledged: false }) }); await rsFlush(); assert.equal(replaced.detached, 1); replaced.controller.dispose();
+  const unavailable = await rsAttached(); unavailable.block('another original'); unavailable.controller.prepare(); assert.equal(unavailable.count('prepare'), 0); unavailable.controller.dispose();
+  const reentrant = await rsAttached(); let retired = false;
+  reentrant.controller.subscribe(() => { if (reentrant.state.pending && !retired) { retired = true; reentrant.controller.beforeWorkspaceAction(); } });
+  reentrant.controller.prepare(); assert.equal(reentrant.count('prepare'), 0); assert.equal(reentrant.state.pending, false); reentrant.controller.dispose();
+  const denied = await rsAttached(); denied.controller.prepare(); denied.last('prepare').reject({ code: 'github_remote_setup_refused_forbidden' }); await rsFlush();
+  assert.equal(denied.state.pending, false); assert.equal(denied.state.uncertain, false); assert.equal(denied.count('prepare'), 1); denied.controller.dispose();
+  // Same revision data changes are never a new authoritative Status.
+  const contradictory = await rsAttached(); contradictory.emit({ ...rsIdle(), reason: 'busy' }); assert.equal(contradictory.state.uncertain, true); contradictory.controller.dispose();
+});
+
+test('remote setup bridge admits only five fixed commands and preview never synthesizes remote results', async () => {
+  const calls = []; let event = null; const api = createNativeApi('native', async (name, args) => { calls.push([name, structuredClone(args)]); return rsIdle(); }, async (name, handler) => { assert.equal(name, 'github-remote-setup-status'); event = handler; return () => {}; });
+  const prepareArgs = { sessionId: 'session-a', expectedRevision: 1, expectedConnectionRevision: 12, selection: rsSelection() };
+  const applyArgs = { sessionId: 'session-a', expectedRevision: 1, consentId: 'a'.repeat(32), confirm: true };
+  const discardArgs = { sessionId: 'session-a', expectedRevision: 1, consentId: 'a'.repeat(32) };
+  await api.githubRemoteSetupStatus(); await api.githubRemoteSetupPrepare(prepareArgs); await api.githubRemoteSetupApply(applyArgs); await api.githubRemoteSetupDiscard(discardArgs); await api.githubRemoteSetupCancel('operation-a');
+  assert.deepEqual(calls, [['github_remote_setup_status', {}], ['github_remote_setup_prepare', prepareArgs], ['github_remote_setup_apply', applyArgs], ['github_remote_setup_discard', discardArgs], ['github_remote_setup_cancel', { operationId: 'operation-a' }]]);
+  for (const bad of [{ ...prepareArgs, token: 'PRIVATE' }, { ...prepareArgs, expectedRevision: true }, { ...prepareArgs, expectedConnectionRevision: 0 }, { ...prepareArgs, selection: { kind: 'secret', enabled: true } }]) await assert.rejects(api.githubRemoteSetupPrepare(bad), (e) => e.admission === 'not-admitted');
+  assert.equal(calls.length, 5); assert.equal(githubRemoteSetupRequestFits('github_remote_setup_apply', { ...applyArgs, prepared: rsReview().consent.prepared }), false);
+  assert.equal(githubRemoteSetupRequestFits('github_remote_setup_apply', { ...applyArgs, confirm: 1 }), false);
+  let received = 'untouched'; await api.subscribeGitHubRemoteSetup((s) => { received = s; }); event({ ...rsIdle(), url: 'PRIVATE' }); assert.equal(received, null);
+  for (const method of ['githubRemoteSetupStatus', 'githubRemoteSetupPrepare', 'githubRemoteSetupApply', 'githubRemoteSetupDiscard', 'githubRemoteSetupCancel', 'subscribeGitHubRemoteSetup']) await assert.rejects(previewApi[method]({}), (e) => e.reason === 'runtime-unavailable');
+  const unavailable = createNativeApi('unavailable', async () => { throw new Error('must not invoke'); }); await assert.rejects(unavailable.githubRemoteSetupStatus(), (e) => e.admission === 'not-admitted');
 });

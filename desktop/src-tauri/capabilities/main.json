@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build tools can execute trusted project code only under native runtime/tool custody. No general HTTP, remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
+  "description": "Fixed passive queries, fixed macOS installation-location Finder requests and explicit original-owned read-only installation checks; explicitly confirmed installed-helper preparation and normal Quit, not Installer changes; finite local configuration, workflows, public metadata and saved-version edits; reviewed saved offline checks, Android builds, unsigned full-Xcode Mac archives and owned build-input recovery; qualified session or encrypted credential management. GitHub preflight permits only publisher-bound caller review, one-use nonpublishing dispatch and exact original-run observation. Build tools can execute trusted project code only under native runtime/tool custody. GitHub repository settings permit only separately reviewed, one-use Actions-enabled or workflow-token-policy changes on the same connected registered project. No general HTTP, arbitrary remote writes, event emission, filesystem, shell or opener authority; listen/unlisten is for owner status only.",
   "windows": ["main"],
   "local": true,
   "permissions": [
@@ -13,6 +13,8 @@
     "allow-release-evidence-choose", "allow-release-evidence-status", "allow-release-evidence-observe", "allow-release-evidence-cancel",
     "allow-start-environment-diagnostics", "allow-environment-diagnostics-status", "allow-cancel-environment-diagnostics",
     "allow-prepare-offline-preflight", "allow-start-offline-preflight", "allow-offline-preflight-status", "allow-cancel-offline-preflight",
+    "allow-artifact-inspection-pick", "allow-artifact-inspection-prepare", "allow-artifact-inspection-start",
+    "allow-artifact-inspection-cancel", "allow-artifact-inspection-status", "allow-artifact-inspection-discard",
     "allow-prepare-android-build", "allow-start-android-build", "allow-android-build-status", "allow-cancel-android-build",
     "allow-android-toolchain-catalog-status", "allow-refresh-android-toolchain-catalog", "allow-select-android-toolchain", "allow-cancel-android-toolchain-catalog",
     "allow-android-tool-sources-status", "allow-choose-android-tool-source", "allow-cancel-android-tool-source",
@@ -25,6 +27,8 @@
     "allow-close-config-edit", "allow-config-edit-status",
     "allow-github-workflow-edit-open", "allow-github-workflow-edit-prepare", "allow-github-workflow-edit-apply",
     "allow-github-workflow-edit-close", "allow-github-workflow-edit-status",
+    "allow-project-initialization-open", "allow-project-initialization-prepare", "allow-project-initialization-apply",
+    "allow-project-initialization-discard", "allow-project-initialization-status",
     "allow-metadata-text-observe", "allow-metadata-text-validate", "allow-metadata-text-edit-open", "allow-metadata-text-edit-prepare",
     "allow-metadata-text-edit-apply", "allow-metadata-text-edit-close", "allow-metadata-text-edit-status",
     "allow-metadata-images-catalog", "allow-metadata-images-choose", "allow-metadata-images-selection-status", "allow-metadata-images-selection-cancel",
@@ -37,6 +41,7 @@
     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",
     "allow-github-release-reconcile", "allow-github-release-pending", "allow-github-release-cancel",
+    "allow-github-remote-setup-status", "allow-github-remote-setup-prepare", "allow-github-remote-setup-apply", "allow-github-remote-setup-discard", "allow-github-remote-setup-cancel",
     "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
     "core:event:allow-listen", "core:event:allow-unlisten"

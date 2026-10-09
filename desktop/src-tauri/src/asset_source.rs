@@ -172,6 +172,12 @@ impl ProjectProbe {
 }
 // Metadata-only, point-in-time descendant proof. No native absolute path,
 // payload, source witness or reusable file/write authority reaches the DTO.
+/// Metadata from one actually settled picker probe, not a retained FD/snapshot.
+pub(crate) struct ArtifactProbe {
+    pub(crate) path: PathBuf, pub(crate) label: String,
+    pub(crate) kind: crate::artifact_inspection_protocol::Kind,
+    pub(crate) identity: crate::artifact_inspection_protocol::OriginalIdentity,
+}
 pub(crate) struct ProjectPathProbe { relative_path: String }
 impl ProjectPathProbe { pub(crate) fn into_relative_path(self) -> String { self.relative_path } }
 
@@ -218,7 +224,7 @@ fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<
 // The credential entry always selects Private; only the closed image entry
 // can select PublicImage, and both still require an actual regular file.
 #[derive(Clone, Copy)]
-enum LeafPolicy { Private, PublicImage }
+enum LeafPolicy { Private, PublicImage, Artifact }
 impl LeafPolicy {
     fn permits(self, identity: FileIdentity) -> bool {
         match self {
@@ -227,7 +233,7 @@ impl LeafPolicy {
             // excludes mount aliases from later target replacement too.
             // Read permission is checked by the original read-only open;
             // ordinary public 0644/0664 files need not be credential-private.
-            Self::PublicImage => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
+            Self::PublicImage | Self::Artifact => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
         }
     }
 }
@@ -1105,7 +1111,7 @@ pub(crate) use linux::assert_project_path_source_contracts;
 #[path = "asset_source_macos.rs"]
 mod macos;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
+pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_artifact, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

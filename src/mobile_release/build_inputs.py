@@ -166,6 +166,9 @@ def _stat(fd: int, name: str) -> os.stat_result | None:
 
 
 def _names(fd: int, limit: int = 4096, *, cancellation=None) -> set[str]:
+    artifact = getattr(cancellation, "_artifact_inspection_source", None) if cancellation is not None else None
+    if artifact is not None:
+        return set(artifact.require_operation().files.names(fd, limit=limit))
     if cancellation is not None and getattr(cancellation, "_android_build_source", None) is not None:
         # Only the original fixed Android operation can lend its bounded
         # iterator owner. Ordinary callers retain their existing semantics.
@@ -257,9 +260,16 @@ def _consumer_idle(guard: DefaultCancellation, *, lane_binding=None, desktop_bin
             return False
         if desktop_binding is not None:
             from .ios_archive_operation import IOSArchiveSnapshotBinding
-            return (lane_binding is None and type(desktop_binding) is IOSArchiveSnapshotBinding
+            if type(desktop_binding) is IOSArchiveSnapshotBinding:
+                return (lane_binding is None
+                        and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
+            from .desktop_artifact_inspection import ArtifactInspectionSnapshotBinding
+            return (lane_binding is None and type(desktop_binding) is ArtifactInspectionSnapshotBinding
                     and desktop_binding.dependents_settled_for(owner=owner, cancellation=guard))
         if lane_binding is None:
+            source = getattr(guard, "_artifact_inspection_source", None)
+            if source is not None:
+                return source.require_operation().dependents_settled()
             return True
         from ._store_lane_evidence import StoreLaneCallEvidence, StoreLaneResourceBinding
 
@@ -328,6 +338,10 @@ class _FD:
         self.guard, self.pid, self.number = guard, os.getpid(), None
         self.thread = threading.current_thread()
         self.open_state, self.close_state = "NEW", "NOT_ATTEMPTED"
+        artifact = getattr(guard, "_artifact_inspection_source", None)
+        self._artifact_operation = artifact.require_operation() if artifact is not None else None
+        if self._artifact_operation is not None:
+            self._artifact_operation.register_descriptor(self)
         source = guard._project_recovery_source
         if source is not None:
             # The existing original descriptor remains its only close owner.
@@ -381,6 +395,8 @@ class _FD:
             raise error
         if self.number is None:
             self.close_state = "CLOSED"  # NEW or a positive direct no-effect receipt only.
+            if parent and self._artifact_operation is not None:
+                self._artifact_operation.retired_descriptor(self)
             return
         try:
             # Default cancellation cannot cut between numeric retirement and the
@@ -406,6 +422,8 @@ class _FD:
                     raise interruption
                 raise fatal from None
             raise
+        if parent and self._artifact_operation is not None:
+            self._artifact_operation.retired_descriptor(self)
 
     def after_fork_child(self) -> None:
         if self.pid != os.getpid():
@@ -1724,6 +1742,8 @@ class InvocationCustody:
             guard._android_build_source.require_operation().bind_invocation(self)
         elif getattr(guard, "_ios_archive_source", None) is not None:
             guard._ios_archive_source.require_operation().bind_invocation(self)
+        elif getattr(guard, "_artifact_inspection_source", None) is not None:
+            guard._artifact_inspection_source.require_operation().bind_invocation(self)
 
     def _owner(self, *, cleanup: bool = False) -> None:
         _need(self.pid == os.getpid() and self.thread is threading.current_thread(),
@@ -1794,6 +1814,8 @@ class InvocationCustody:
         self.project_started = True
         expected_root = None
         source = getattr(self.cancellation, "_ios_archive_source", None)
+        if source is None:
+            source = getattr(self.cancellation, "_artifact_inspection_source", None)
         if source is not None:
             operation = source.require_operation()
             _need(operation.invocation is self, "iOS project requires its original invocation")
@@ -1810,6 +1832,8 @@ class InvocationCustody:
 
     @contextmanager
     def materialization(self, *, signing_lease: SigningLease | None) -> Iterator[BuildInputs]:
+        _need(getattr(self.cancellation, "_artifact_inspection_source", None) is None,
+              "artifact observation cannot borrow build materialization")
         self.require(root=self.root, cancellation=self.cancellation, signing_lease=signing_lease)
         _need(self.mode == "build" and self.project_owner is not None and self.child is None,
               "one materializer requires continuous project admission")
@@ -1838,6 +1862,11 @@ class InvocationCustody:
         self._owner(cleanup=True)
         if self.claimed:
             return
+        artifact = getattr(self.cancellation, "_artifact_inspection_source", None)
+        if artifact is not None:
+            operation = artifact.require_operation()
+            _need(operation.invocation is self and operation.dependents_settled(),
+                  "artifact consumers retain their original invocation")
         self.claimed, self.active = True, False
         actions = ([self.child.cleanup] if self.child is not None else [])
         actions += [frame.cleanup for frame in reversed(tuple(self.frames))]
@@ -1919,15 +1948,33 @@ class InvocationCustody:
     def _offline_preflight_root(self, guard: DefaultCancellation) -> tuple[int, dict[str, Any]]:
         """Compatibility borrow; Android cannot obtain an offline capability."""
         _need(getattr(guard, "_android_build_source", None) is None
-              and getattr(guard, "_ios_archive_source", None) is None,
+              and getattr(guard, "_ios_archive_source", None) is None
+              and getattr(guard, "_artifact_inspection_source", None) is None,
               "saved build operation cannot borrow the offline root")
         return self._unsigned_build_root(guard)
 
     def _offline_preflight_closed(self, guard: DefaultCancellation) -> bool:
         _need(getattr(guard, "_android_build_source", None) is None
-              and getattr(guard, "_ios_archive_source", None) is None,
+              and getattr(guard, "_ios_archive_source", None) is None
+              and getattr(guard, "_artifact_inspection_source", None) is None,
               "saved build operation cannot borrow offline closure")
         return self._unsigned_build_closed(guard)
+
+    def _artifact_inspection_root(self, operation) -> tuple[int, dict[str, Any]]:
+        from .desktop_artifact_inspection import ArtifactInspectionOperation
+        _need(type(operation) is ArtifactInspectionOperation and operation.invocation is self
+              and operation.guard is self.cancellation
+              and self.cancellation._artifact_inspection_source is operation.source
+              and operation.source.require_operation() is operation,
+              "artifact root requires its original invocation")
+        return self._unsigned_build_root(operation.guard)
+
+    def _artifact_inspection_closed(self, operation) -> bool:
+        from .desktop_artifact_inspection import ArtifactInspectionOperation
+        _need(type(operation) is ArtifactInspectionOperation and operation.invocation is self
+              and operation.guard is self.cancellation and operation.source.operation is operation,
+              "artifact closure requires its original invocation")
+        return self._unsigned_build_closed(operation.guard)
 
     def _android_build_root(self, operation) -> tuple[int, dict[str, Any]]:
         from .android_build_operation import AndroidBuildOperation
@@ -2139,6 +2186,8 @@ class _Project:
         self.check()
 
     def ensure_meta(self) -> int:
+        _need(getattr(self.guard, "_artifact_inspection_source", None) is None,
+              "artifact inspection cannot create project metadata")
         self.check()
         source = getattr(self.guard, "_android_build_source", None)
         if source is None:
@@ -2167,6 +2216,11 @@ class _Project:
         self.guard._check_owner()
         if self.claimed:
             return
+        artifact = getattr(self.guard, "_artifact_inspection_source", None)
+        if artifact is not None:
+            operation = artifact.require_operation()
+            _need(operation.invocation is not None and operation.invocation._original_project is self
+                  and operation.dependents_settled(), "artifact consumers retain their original project")
         self.claimed = True
         # Closing only our original description releases our lock; never LOCK_UN
         # an inherited/shared description or delete the persistent project root.

@@ -47,6 +47,7 @@ struct PhysicalAnchors { private: usize, var: DirectoryIdentity, tmp: DirectoryI
 
 pub(crate) struct SourceBook {
     slots: Vec<Descriptor>, probes: Vec<LeafProbe>, aliases: Vec<OriginAlias>, anchors: Option<PhysicalAnchors>, begun: bool, terminal: bool,
+    artifact_top: Option<(usize, crate::artifact_inspection_protocol::Kind, crate::artifact_inspection_protocol::OriginalIdentity)> ,
 }
 // Finite first-party control bound for the image lane, separate from the raw
 // image bytes. Count maximum descriptor/name/alias rosters, both borrowed path
@@ -63,8 +64,8 @@ pub(crate) const PUBLIC_IMAGES_SOURCE_CONTROL_BYTES: usize =
         + std::mem::size_of::<(usize, FileIdentity, Vec<DirectoryIdentity>, Option<OriginAlias>)>() + 512)
     + std::mem::size_of::<SourceBook>() + 4096;
 impl SourceBook {
-    pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), aliases: Vec::new(), anchors: None, begun: false, terminal: false } }
-    pub(crate) fn not_started(&self) -> bool { !self.begun && self.slots.is_empty() && self.probes.is_empty() && self.aliases.is_empty() && self.anchors.is_none() }
+    pub(crate) fn new() -> Self { Self { slots: Vec::new(), probes: Vec::new(), aliases: Vec::new(), anchors: None, begun: false, terminal: false, artifact_top: None } }
+    pub(crate) fn not_started(&self) -> bool { !self.begun && self.slots.is_empty() && self.probes.is_empty() && self.aliases.is_empty() && self.anchors.is_none() && self.artifact_top.is_none() }
     pub(crate) fn settled(&self) -> bool {
         self.terminal && self.slots.iter().all(|slot|
             matches!(slot.state, OriginalState::Closed | OriginalState::NoHandle) && slot.fd.is_none()
@@ -77,6 +78,7 @@ impl SourceBook {
         for slot in &self.slots { bytes = bytes.checked_add(slot.name.capacity())?; }
         for probe in &self.probes { bytes = bytes.checked_add(probe.name.capacity())?; }
         for alias in &self.aliases { bytes = bytes.checked_add(alias.name.capacity())?.checked_add(alias.target.capacity())?; }
+        if let Some((_,_,top))=&self.artifact_top { bytes=bytes.checked_add(top.retained_bytes()?)?; }
         Some(bytes)
     }
     #[cfg(test)]
@@ -314,6 +316,15 @@ impl SourceBook {
                 if identity(&physical, false)? != expected { return Err(Reason::SourceChanged); }
             }
             if file { self.private_acl(index, 1, stop)?; }
+        }
+        if let Some((index,kind,expected))=&self.artifact_top {
+            checkpoint(stop)?;
+            let actual=stat::fstat(self.fd(*index)?).map_err(|_|Reason::SourceChanged)?;
+            checkpoint(stop)?;
+            let slot=&self.slots[*index];let parent=slot.parent.ok_or(Reason::SourceRefused)?;
+            let named=stat::fstatat(self.fd(parent)?,OsStr::from_bytes(&slot.name),AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_|Reason::SourceChanged)?;
+            checkpoint(stop)?;
+            if artifact_identity(&actual,*kind)?!=*expected || artifact_identity(&named,*kind)?!=*expected {return Err(Reason::SourceChanged);}
         }
         Ok(())
     }
@@ -685,6 +696,49 @@ pub(crate) fn probe_vault_exclusion(book: &mut SourceBook, vault: Option<&Regist
     })();
     // Terminal same-held/name checks and actual one-use closes precede this
     // probe's return. The existing document owner separately requires child join.
+    book.finish(result,stop)
+}
+
+fn artifact_identity(s:&FileStat,kind:crate::artifact_inspection_protocol::Kind)->Result<crate::artifact_inspection_protocol::OriginalIdentity,Reason>{
+    use crate::artifact_inspection_protocol::OriginalIdentity;
+    let observed=OriginalIdentity{device:s.st_dev.to_string(),inode:s.st_ino.to_string(),mode:s.st_mode.into(),uid:s.st_uid,gid:s.st_gid,
+        nlink:s.st_nlink.to_string(),bytes:u64::try_from(s.st_size).map_err(|_|Reason::SourceRefused)?.to_string(),
+        mtime_seconds:s.st_mtime.to_string(),mtime_nanos:u32::try_from(s.st_mtime_nsec).map_err(|_|Reason::SourceRefused)?,
+        ctime_seconds:s.st_ctime.to_string(),ctime_nanos:u32::try_from(s.st_ctime_nsec).map_err(|_|Reason::SourceRefused)?,flags:s.st_flags};
+    if !observed.valid(kind){return Err(Reason::SourceRefused);}Ok(observed)
+}
+/// Same existing SourceBook, retained OUTSIDE the worker by its OriginalWork.
+/// Captures no artifact bytes and creates no continuous descriptor lease.
+pub(crate) fn probe_artifact(book:&mut SourceBook,root:&RegisteredRoot,path:PathBuf,role:crate::artifact_inspection_protocol::Role,
+    stop:&mut dyn FnMut()->bool)->Result<ArtifactProbe,Reason>{
+    use crate::artifact_inspection_protocol::{self as wire,Kind,Role};
+    if path.capacity()>PATH_LIMIT{return Err(Reason::Capacity);}
+    let root_parts=parts(&root.path)?;let selected=parts(&path)?;
+    let (name,parents)=selected.split_last().ok_or(Reason::SourceRefused)?;
+    let label=std::str::from_utf8(name).ok().filter(|s|wire::label(s)).ok_or(Reason::SourceRefused)?.to_owned();
+    if label.capacity()>255{return Err(Reason::Capacity);}
+    let capacity=roster_limit([root_parts.len(),parents.len()+source_extra(parents)],2)?;
+    book.begin(capacity,0,1)?;
+    let result=(||{
+        book.root(stop)?;book.anchor_private(stop)?;
+        let (project,_) =book.chain(&root_parts,false,stop)?;
+        if book.directory(*project.last().ok_or(Reason::SourceRefused)?)?!=root.identity.posix()?{return Err(Reason::SourceChanged);}
+        let (chain,_)=book.chain(parents,true,stop)?;let parent=*chain.last().ok_or(Reason::SourceRefused)?;
+        checkpoint(stop)?;
+        let before=stat::fstatat(book.fd(parent)?,OsStr::from_bytes(name),AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|_|Reason::SourceRefused)?;
+        checkpoint(stop)?;
+        let kind=match before.st_mode&SFlag::S_IFMT.bits(){v if v==SFlag::S_IFREG.bits()=>Kind::File,
+            v if v==SFlag::S_IFDIR.bits()&&role!=Role::Artifact=>Kind::Directory,_=>return Err(Reason::SourceRefused)};
+        let expected=artifact_identity(&before,kind)?;
+        let leaf=book.child_policy(parent,name,kind==Kind::File,LeafPolicy::Artifact,stop)?;
+        // Record the original complete tuple before ACL/final checks. Both the
+        // kept object and named top must still match after all other POSTs.
+        book.artifact_top=Some((leaf,kind,expected.clone()));
+        checkpoint(stop)?;let held=stat::fstat(book.fd(leaf)?).map_err(|_|Reason::SourceRefused)?;checkpoint(stop)?;
+        if artifact_identity(&held,kind)?!=expected{return Err(Reason::SourceChanged);}
+        if kind==Kind::File {book.private_acl(leaf,0,stop)?;}
+        Ok(ArtifactProbe{path:path.clone(),label,kind,identity:expected})
+    })();
     book.finish(result,stop)
 }
 

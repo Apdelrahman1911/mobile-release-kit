@@ -9,8 +9,15 @@ false, and other profiles remain closed. Source implementation or inert renderer
 checks are not qualification. The full Desktop remains incomplete; no standalone
 readiness or general installer qualification is claimed.
 
-Connect, remote GitHub setup, secret provisioning and dispatch remain
-unimplemented. Neither a preview nor local caller installation enables them.
+A qualified Mac runtime has a separate session-only GitHub connection. Its
+repository-settings card can review and apply two fixed settings: Actions
+enablement and default workflow token/pull-request approval policy. Each change
+requires its own fresh native review and explicit confirmation. Enabling Actions
+can allow configured workflows to run. Environment and secret provisioning and
+authenticated history remain unavailable. Neither this passive preview nor local
+caller installation authorizes remote changes. Nonpublishing preflight and
+protected release dispatch remain separate, independently gated actions, not
+release or Store readiness.
 
 ## Guided UI
 

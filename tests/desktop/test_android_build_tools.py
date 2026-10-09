@@ -1527,5 +1527,199 @@ class MacToolAdmissionDataTests(unittest.TestCase):
             tools._inventory_names(tools.binding.root, set())
         scan.assert_not_called()
 
+
+@contextmanager
+def artifact_inspection_tools_data(*, profile="android-registered-macos-arm64-v1"):
+    # Exact production types, deliberately inert fields and scoped original-port
+    # replacements. This tests closed routing, NOT native profile admission.
+    from contextlib import ExitStack
+    import io
+    from mobile_release.desktop_artifact_inspection import ArtifactInspectionOperation
+    from mobile_release._desktop_artifact_inspection_selection import ArtifactInspectionFiles, ArtifactInspectionArtifact
+    from mobile_release import android_build_tools_macos as mac
+    raw, provider, record, native = mac_encoded(profile=profile)
+    operation = object.__new__(ArtifactInspectionOperation)
+    operation.owner = Mock()
+    operation.guard = Guard(); operation.guard.check = Mock()
+    operation.source = types.SimpleNamespace(operation=operation, guard=operation.guard, active=True,
+        request_returned=True, close_claimed=False, failure_observed=Mock())
+    operation.guard._artifact_inspection_source = operation.source
+    operation.request = types.SimpleNamespace(native={"tools": {"android": native}})
+    operation.inputs = types.SimpleNamespace(config=object(), release=ReleaseVersion("1.2.3", 7))
+    operation.files = object.__new__(ArtifactInspectionFiles)
+    operation.files.operation = operation; operation.files.point = Mock()
+    operation.tools, operation.close_claimed = None, False
+    operation.checkpoint, operation.cleanup_checkpoint, operation.require = Mock(), Mock(), Mock()
+    operation.root = Path('/inert/registered-project')
+    operation.zip_metadata = None
+    operation.counters = {}
+    def charge(name, amount, limit):
+        before = operation.counters.get(name, 0)
+        if type(amount) is not int or amount < 0 or before > limit - amount:
+            raise subject.AndroidToolError("input-limit")
+        operation.counters[name] = before + amount
+    operation.charge = charge
+    operation.fail = lambda reason: (_ for _ in ()).throw(subject.AndroidToolError(reason))
+    tools = subject.AndroidValidationTools(operation, native); operation.tools = tools
+    tools.profile, tools._acquired = mac.parse_profile(raw, provider, record, tools.binding), True
+    artifact = object.__new__(ArtifactInspectionArtifact)
+    artifact.files, artifact._native, artifact._reader = operation.files, False, None
+    artifact.check = Mock(); artifact.size = 1024
+    operation.files.artifact = operation._artifact = artifact
+    events = []
+    @contextmanager
+    def reader():
+        original = io.BytesIO(b'original snapshot DATA')
+        artifact._reader = original; events.append('reader-open')
+        try:
+            yield original
+        finally:
+            artifact._reader = None; original.close(); events.append('reader-post-close')
+    @contextmanager
+    def native_input():
+        artifact.check(); artifact._native = True; events.append('native-open')
+        try:
+            yield snapshot
+        finally:
+            artifact.check(); artifact._native = False; events.append('native-post-close')
+    artifact.reader, artifact.native_input = reader, native_input
+    snapshot = WORK.parent / 'selected.aab'
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(ArtifactInspectionFiles, 'work_path', new_callable=PropertyMock, return_value=WORK))
+        stack.enter_context(patch.object(ArtifactInspectionArtifact, 'path', new_callable=PropertyMock, return_value=snapshot))
+        stack.enter_context(patch.object(tools, 'check'))
+        tools.require_signature_tools()
+        for role in ('bundletool', 'jarsigner', 'keytool'):
+            setattr(operation, role + '_command', lambda path, actual, name=role: getattr(tools, name + '_command')(path))
+        operation.command_environment = lambda: tools.command_environment(WORK, operation.inputs.release)
+        def captured(role, stdout, stderr):
+            assert type(stdout) is bytes and type(stderr) is bytes
+            events.append(('captured', role, len(stdout) + len(stderr)))
+            return stdout.decode('utf-8'), stderr.decode('utf-8')
+        def returned(role, code):
+            assert events[-1][:2] == ('captured', role)
+            events.append(('returned', role, code))
+        operation.captured, operation.returned = captured, returned
+        operation.command_error = Mock()
+        operation.signature_accepted = Mock()
+        yield tools, artifact, snapshot, events
+
+
+class ArtifactReadonlyAdmissionDataTests(unittest.TestCase):
+    def test_readonly_original_reuses_mac_provider_but_never_admits_build_or_signing(self):
+        for profile in MAC_DATA_PAIRS:
+            with self.subTest(profile=profile), artifact_inspection_tools_data(profile=profile) as (tools, artifact, snapshot, events):
+                self.assertIsNone(tools.task); self.assertIsNone(tools._project_data)
+                self.assertFalse(hasattr(tools.inputs, 'task')); self.assertFalse(hasattr(tools.inputs, 'check_signer'))
+                with artifact.native_input(), patch.object(subject.os, 'open') as opened:
+                    for name in ('bundletool', 'jarsigner', 'keytool'):
+                        argv = getattr(tools, name + '_command')(snapshot)
+                        self.assertTrue(argv[0].startswith(tools.binding.root + '/'))
+                        self.assertIn('Contents/Home/bin/', argv[0])
+                        self.assertIn(str(snapshot), ' '.join(argv))
+                    with self.assertRaises(subject.AndroidToolError): tools.bundletool_command(Path('/inert/wrong.aab'))
+                    for call in (lambda: tools.gradle_command(':app:bundleRelease', WORK),
+                                 lambda: tools.check_project_inputs({}), tools._signing_inputs,
+                                 tools.keystore_input_command, lambda: tools.aab_sign_command(object())):
+                        with self.assertRaises(subject.AndroidToolError): call()
+                    opened.assert_not_called()
+                self.assertEqual(events, ['native-open', 'native-post-close'])
+                self.assertFalse(tools._project_claimed)
+                for change in ('source', 'request', 'release', 'files', 'tools', 'retired'):
+                    with artifact_inspection_tools_data(profile=profile) as (bad, _, _, _):
+                        if change == 'source': bad.guard._artifact_inspection_source = object()
+                        elif change == 'request': bad.operation.request = object()
+                        elif change == 'release': bad.inputs.release = ReleaseVersion('1.2.3', 7)
+                        elif change == 'files': bad.operation.files = object()
+                        elif change == 'tools': bad.operation.tools = object()
+                        else: bad.source.active = False
+                        with self.assertRaises(subject.AndroidToolError): bad._owner()
+                tools.source.active = False
+                with self.assertRaises(subject.AndroidToolError): tools._owner()
+                tools._owner(active=False)  # Same original read-only finality query, not new work.
+
+    def test_observation_uses_actual_raw_roles_and_keeps_missing_tools_and_policy_distinct(self):
+        from mobile_release import android
+        from mobile_release.android_manifest import ManifestInspectionError
+        from contextlib import nullcontext
+        xml = ('<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.example.actual" '
+               'android:versionCode="7" android:versionName="1.2.3"><application/></manifest>')
+        fingerprint = 'a' * 64
+        certificate = 'Signer #1:\nCertificate #1:\nSHA256: ' + fingerprint + '\n'
+        def result(stdout, code=0): return types.SimpleNamespace(stdout=stdout.encode(), stderr=b'', returncode=code)
+        for case in ('valid', 'no-tools', 'bad-manifest', 'missing-xml', 'bad-signature', 'bad-signer', 'raw-decode', 'custody'):
+            with self.subTest(case=case), artifact_inspection_tools_data() as (tools, artifact, path, events), \
+                 patch.object(android, 'validate_aab_structure', return_value=['DATA']), \
+                 patch.object(android, 'run_owned') as native:
+                operation = tools.operation
+                # No expected certificate/property is available to the adapter.
+                self.assertFalse(hasattr(operation.inputs, 'expected_fingerprint'))
+                if case == 'no-tools':
+                    operation.tools = None
+                    with patch.dict(os.environ, {'MOBILE_RELEASE_BUNDLETOOL_JAR': '/must-not-read'}):
+                        observed = android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=None)
+                    self.assertTrue(observed.structure_ok); self.assertIsNone(observed.manifest)
+                    self.assertIsNone(observed.signature_ok); self.assertIsNone(observed.signer_sha256)
+                    native.assert_not_called(); self.assertEqual(events, []); continue
+                responses = [result('<bad/>' if case == 'bad-manifest' else xml),
+                             result('unverified' if case == 'bad-signature' else 'jar verified.\n'),
+                             result('not a certificate' if case == 'bad-signer' else certificate)]
+                native.side_effect = responses
+                if case == 'raw-decode':
+                    responses[0].stdout = b'\xff'
+                    with self.assertRaises(UnicodeDecodeError):
+                        android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                    operation.command_error.assert_called_once(); self.assertEqual(native.call_count, 1); continue
+                if case == 'custody':
+                    artifact.check.side_effect = RuntimeError('original failure')
+                    with self.assertRaisesRegex(RuntimeError, 'original failure'):
+                        android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                    native.assert_not_called(); continue
+                with (patch('mobile_release.android_manifest.parse_android_manifest', side_effect=ManifestInspectionError('runtime')) if case == 'missing-xml' else nullcontext()):
+                    observed = android.inspect_artifact_aab(path, artifact=artifact, cancellation=operation.guard, tools=tools)
+                self.assertTrue(observed.structure_ok)
+                self.assertEqual(observed.manifest_failed, case == 'bad-manifest')
+                self.assertEqual(observed.manifest_unavailable, case == 'missing-xml')
+                if observed.manifest is not None: self.assertEqual(observed.manifest.package, 'org.example.actual')
+                self.assertEqual(observed.signature_ok, case != 'bad-signature')
+                self.assertEqual(observed.signature_failed, case == 'bad-signature')
+                self.assertEqual(observed.signer_failed, case == 'bad-signer')
+                self.assertEqual(observed.signer_sha256, None if case in ('bad-signature', 'bad-signer') else fingerprint)
+                self.assertEqual(native.call_count, 2 if case == 'bad-signature' else 3)
+                for call in native.call_args_list:
+                    self.assertIs(call.kwargs['text'], False); self.assertEqual(call.kwargs['output_limit'], 2 * 1024 * 1024)
+                    self.assertIs(call.kwargs['cancellation'], operation.guard)
+                self.assertEqual(events[-1], 'native-post-close')
+                self.assertEqual([row[1] for row in events if type(row) is tuple and row[0] == 'returned'],
+                                 ['bundletool', 'jarsigner'] if case == 'bad-signature' else ['bundletool', 'jarsigner', 'keytool'])
+                operation.command_error.assert_not_called()
+                self.assertEqual(operation.signature_accepted.call_count, 0 if case == 'bad-signature' else 1)
+
+    def test_same_original_directory_prelude_limits_precede_integrity_and_exceptions_propagate(self):
+        from mobile_release import android, android_zip, android_zip_integrity
+        from mobile_release.artifact_inspection import ArtifactInspectionLimitError
+        from mobile_release.android_zip import ZipDirectoryPlan, ZipReadRange
+        for entries, central, expanded, refused in ((32768, 8*1024**2, 2*1024**3, False),
+                (32769, 8*1024**2, 0, True), (1, 8*1024**2+1, 0, True), (1, 100, 2*1024**3+1, True)):
+            with self.subTest(entries=entries, central=central, expanded=expanded), artifact_inspection_tools_data() as (tools, artifact, path, events):
+                plan = ZipDirectoryPlan(1024, 1000, entries, ZipReadRange(0, central))
+                metadata = types.SimpleNamespace(plan=plan, entries=tuple(types.SimpleNamespace(name=name)
+                    for name in ('BundleConfig.pb', 'base/manifest/AndroidManifest.xml', 'base/dex/classes.dex')))
+                observed = types.SimpleNamespace(metadata=metadata, expanded_bytes=expanded)
+                with patch.object(android_zip_integrity, '_read_range', return_value=b'bounded tail') as tail, \
+                     patch.object(android_zip, 'plan_zip_directory', return_value=plan), \
+                     patch.object(android_zip_integrity, 'inspect_zip_integrity', return_value=observed) as integrity:
+                    if refused:
+                        with self.assertRaises(ArtifactInspectionLimitError): android.validate_aab_structure(path, artifact=artifact)
+                    else:
+                        self.assertEqual(len(android.validate_aab_structure(path, artifact=artifact)), 3)
+                        self.assertIs(tools.operation.zip_metadata, metadata)
+                    self.assertEqual(integrity.call_count, 0 if entries>32768 or central>8*1024**2 else 1)
+                    tail.assert_called_once(); self.assertEqual(events, ['reader-open', 'reader-post-close'])
+        with artifact_inspection_tools_data() as (tools, artifact, path, events), \
+             patch.object(android, '_artifact_aab_directory_prelude', side_effect=RuntimeError('original stop')):
+            with self.assertRaisesRegex(RuntimeError, 'original stop'): android.validate_aab_structure(path, artifact=artifact)
+            self.assertEqual(events, ['reader-open', 'reader-post-close']); self.assertIsNone(tools.operation.zip_metadata)
+
 if __name__ == "__main__":
     unittest.main()

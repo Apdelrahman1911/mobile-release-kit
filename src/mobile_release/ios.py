@@ -96,12 +96,327 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _profile_validity(profile: dict[str, Any]) -> SigningValidityInterval:
+@dataclass(frozen=True, slots=True)
+class ArtifactIPAObservation:
+    """Actual IPA observations; never saved policy, provenance or release authority."""
+
+    structure_ok: bool
+    bundle_id: str
+    version_name: str
+    version_build: str
+    signer_sha256: str | None
+    team_id: str | None
+    signature_ok: bool | None
+    profile_ok: bool | None
+    current_validity_ok: bool | None
+    signature_reason: str
+    profile_reason: str
+    current_validity_reason: str
+
+
+class _ArtifactIPARejection(ValidationError):
+    """Only an explicit, settled signing/profile observation rejection."""
+
+    def __init__(self, kind: str, message: str) -> None:
+        if kind not in {"signature", "profile"}:
+            raise ValueError("invalid IPA observation rejection kind")
+        self.kind = kind
+        super().__init__(message)
+
+
+class _ArtifactIPASigning:
+    """Borrowed actual operation plus scalar observations, not another owner."""
+
+    def __init__(self, operation, cancellation) -> None:
+        self.operation, self.cancellation = operation, cancellation
+        self.check()
+        self.root, self.application = operation._ipa_layout
+        from .ios_artifacts import _Application
+        if (type(self.application) is not _Application or not isinstance(self.root, Path)
+                or type(self.application.all_inventory) is not dict):
+            raise ValidationError("artifact IPA layout is not the original admitted application")
+        self.inventory = self.application.all_inventory
+        self.lower: datetime | None = None
+        self.upper: datetime | None = None
+        self.interval_count = 0
+        self.validity_failed = False
+        self.profile_failed = False
+        self.profile_unavailable = False
+
+    def check(self) -> None:
+        if type(self) is not _ArtifactIPASigning:
+            raise ValidationError("IPA observation is not the closed borrowed context")
+        operation = self.operation
+        if _artifact_operation(operation.inspection_deadline) is not operation:
+            raise ValidationError("artifact IPA operation/deadline binding changed")
+        operation.require(operation.inputs.config, self.cancellation)
+        operation.inspection_checkpoint()
+        if hasattr(self, "root") and (operation._ipa_layout[0] != self.root
+                or operation._ipa_layout[1] is not self.application):
+            raise ValidationError("artifact IPA layout changed during observation")
+
+    def rejection(self, kind: str, message: str) -> _ArtifactIPARejection:
+        self.check()
+        error = _ArtifactIPARejection(kind, message)
+        self.operation.data_refusal(error)
+        return error
+
+    def pure(self, kind: str, function, *args, **kwargs):
+        # This wrapper is used ONLY around the named pure parsers/policy checks.
+        # Native calls, file reads, and arbitrary provider exceptions never enter it.
+        self.check()
+        try:
+            result = function(*args, **kwargs)
+        except ValidationError as error:
+            if type(error) is not ValidationError:
+                raise
+            self.operation.data_refusal(error)
+            raise self.rejection(kind, "IPA signing/profile content was rejected") from error
+        self.check()
+        return result
+
+    def interval(self, function, *args) -> SigningValidityInterval | None:
+        self.check()
+        self.interval_count += 1
+        try:
+            interval = function(*args)
+        except ValidationError as error:
+            if type(error) is not ValidationError:
+                raise
+            self.operation.data_refusal(error)
+            self.validity_failed = True
+            return None
+        # Scalar intersection: no second retained per-object/slice table.
+        self.lower = interval.lower_bound if self.lower is None else max(self.lower, interval.lower_bound)
+        self.upper = interval.upper_bound if self.upper is None else min(self.upper, interval.upper_bound)
+        if not interval.lower_bound <= _utc_now() < interval.upper_bound:
+            self.validity_failed = True
+        return interval
+
+    def relative(self, path: Path) -> str:
+        self.check()
+        try:
+            name = path.relative_to(self.root).as_posix()
+        except ValueError as error:
+            raise ValidationError("IPA native object is outside the admitted application") from error
+        name = "" if name == "." else name
+        if name and name not in self.inventory:
+            raise ValidationError("IPA native object is not in the admitted inventory")
+        return name
+
+    def executable(self, path: Path) -> Path | None:
+        name = self.relative(path)
+        if name and self.inventory[name] is not None:
+            return path
+        info_name = (name + "/" if name else "") + "Info.plist"
+        info = self.application.plists.get(info_name)
+        required = path.suffix.lower() in {".app", ".appex", ".framework", ".xpc"}
+        if info is None and not required:
+            return None
+        if type(info) is not tuple or len(info) != 2 or info[0] != "dict":
+            raise ValidationError("admitted signed bundle has no typed Info.plist")
+        executable = dict(info[1]).get("CFBundleExecutable")
+        if executable is None and not required:
+            return None
+        if (type(executable) is not tuple or len(executable) != 2 or executable[0] != "str"
+                or not executable[1] or executable[1] in {".", ".."}
+                or any(c in executable[1] for c in "/\\:")):
+            raise ValidationError("admitted signed executable binding is invalid")
+        result = path / executable[1]
+        if self.relative(result) not in self.application.binaries:
+            raise ValidationError("admitted executable has no original Mach-O slices")
+        return result
+
+    def architectures(self, path: Path) -> tuple[str | None, ...]:
+        executable = self.executable(path)
+        if executable is None:
+            return (None,)
+        slices = self.application.binaries.get(self.relative(executable))
+        if not slices:
+            raise ValidationError("admitted code object has no original Mach-O slices")
+        return tuple(f"{item.cpu},{item.subtype}" for item in slices)
+
+
+def _ipa_observation_options(observation: _ArtifactIPASigning | None) -> dict:
+    # Do not alter ordinary callers' kwargs/mocks/default behavior.
+    return {} if observation is None else {"_observation": observation}
+
+
+def _ipa_native_tools(deadline, *names: str) -> bool:
+    operation = _artifact_operation(deadline)
+    if operation is not None:
+        operation.inspection_checkpoint()
+        return all(_artifact_tool(name, deadline) is not None for name in names)
+    return sys.platform == "darwin" and all(shutil.which(name) for name in names)
+
+
+def _ipa_rejection(kind: str, message: str, observation: _ArtifactIPASigning | None) -> ValidationError:
+    return ValidationError(message) if observation is None else observation.rejection(kind, message)
+
+
+def _profile_validity_bounds(profile: dict[str, Any]) -> SigningValidityInterval:
     creation = profile.get("CreationDate")
     expiration = profile.get("ExpirationDate")
     if not isinstance(creation, datetime) or not isinstance(expiration, datetime):
         raise ValidationError("profile lacks valid CreationDate/ExpirationDate bounds")
-    interval = SigningValidityInterval(_utc_datetime(creation), _utc_datetime(expiration))
+    return SigningValidityInterval(_utc_datetime(creation), _utc_datetime(expiration))
+
+
+def _certificate_validity_bounds(before: list[str], after: list[str]) -> SigningValidityInterval:
+    if len(before) != 1 or len(after) != 1:
+        raise ValidationError("signing certificate output lacks unique validity bounds")
+    return SigningValidityInterval(_openssl_certificate_date(before[0]), _openssl_certificate_date(after[0]))
+
+
+def _ipa_profile_policy(profile: dict[str, Any], bundle_id: str, team_id: str) -> None:
+    # Shared with the existing saved-release validator. The caller decides
+    # whether bundle/team are configured expectations or observed internal facts.
+    entitlements = profile.get("Entitlements", {})
+    if not isinstance(entitlements, dict):
+        raise ValidationError("profile entitlements have an invalid structure")
+    app_identifier = entitlements.get("application-identifier")
+    teams = profile.get("TeamIdentifier", [])
+    if app_identifier != f"{team_id}.{bundle_id}":
+        raise ValidationError("profile application-identifier does not match team and bundle")
+    if type(teams) is not list or teams != [team_id]:
+        raise ValidationError("profile TeamIdentifier does not match configuration")
+    if entitlements.get("get-task-allow") is not False:
+        raise ValidationError("profile permits debugger attachment")
+    if entitlements.get("beta-reports-active") is not True:
+        raise ValidationError("profile is not enabled for App Store/TestFlight distribution")
+    if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
+        raise ValidationError("profile is not an App Store distribution profile")
+
+
+def _ipa_signed_entitlements_match(entitlements: dict[str, Any], bundle_id: str, team_id: str) -> bool:
+    return not (
+        entitlements.get("application-identifier") != f"{team_id}.{bundle_id}"
+        or entitlements.get("com.apple.developer.team-identifier") != team_id
+        or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
+    )
+
+
+def _codesign_team(code_path: Path, *, deadline, cancellation=None,
+                   _observation: _ArtifactIPASigning | None = None) -> str:
+    teams = []
+    architectures = (_code_architectures(code_path, deadline=deadline) if _observation is None
+                     else _observation.architectures(code_path))
+    for architecture in architectures:
+        details = _run_native(
+            ["codesign", "-d", *_architecture_options(architecture), "--verbose=4", str(code_path)],
+            deadline=deadline, cancellation=cancellation, text=True, timeout=30,
+        )
+        if details.returncode:
+            raise _ipa_rejection("signature", "codesign could not inspect a nested code architecture", _observation)
+        matches = re.findall(r"(?m)^TeamIdentifier=(.*)$", details.stderr + details.stdout)
+        if len(matches) != 1 or not re.fullmatch(r"[A-Z0-9]{10}", matches[0]):
+            raise _ipa_rejection("signature", "nested code architecture lacks a unique valid TeamIdentifier", _observation)
+        teams.append(matches[0])
+    if len(set(teams)) != 1:
+        raise _ipa_rejection("signature", "nested code architectures do not share one TeamIdentifier", _observation)
+    return teams[0]
+
+
+def inspect_artifact_ipa(operation, *, cancellation) -> ArtifactIPAObservation:
+    """Observe the actual private IPA layout, never substitute it for saved policy."""
+    from .ios_entitlements import validate_profile_entitlements
+
+    observation = _ArtifactIPASigning(operation, cancellation)
+    deadline = operation.inspection_deadline
+    app_path, application = operation._ipa_layout
+    info = dict(application.plists["Info.plist"][1])
+    # These strings were structurally admitted by the SAME layout parser.
+    bundle = info["CFBundleIdentifier"][1]
+    version = info["CFBundleShortVersionString"][1]
+    build = info["CFBundleVersion"][1]
+    signer = team = None
+    signature_ok = profile_ok = current_ok = None
+    signature_reason = profile_reason = current_reason = "prerequisite-not-run"
+    signing_tools = _ipa_native_tools(deadline, "codesign", "openssl")
+    profile_tools = _ipa_native_tools(deadline, "security", "openssl", "codesign")
+    if not signing_tools:
+        signature_reason = "tools-unavailable"
+    if not profile_tools:
+        profile_reason = "tools-unavailable"
+    # Every child/scratch is the existing owner. An unsettled child or scratch
+    # bypasses all DATA catches and prevents publication of this return value.
+    if signing_tools:
+        with _native_scratch(prefix="mobile-release-ipa-observation-", cancellation=cancellation) as (temporary, guard):
+            if guard is not cancellation:
+                raise ValidationError("IPA observation scratch changed its original cancellation owner")
+            try:
+                signer = _codesign_fingerprint(app_path, temporary, deadline=deadline,
+                    cancellation=cancellation, _observation=observation)
+                if signer is None:
+                    raise ValidationError("admitted IPA signing tools unexpectedly became unavailable")
+                team = _codesign_team(app_path, deadline=deadline, cancellation=cancellation,
+                                      _observation=observation)
+                nested = _nested_codesign_identities(app_path, temporary, deadline=deadline,
+                    cancellation=cancellation, _observation=observation)
+                if nested is None:
+                    raise ValidationError("admitted nested signing tools unexpectedly became unavailable")
+                for _, nested_team, nested_signer in nested:
+                    if nested_team != team or nested_signer != signer:
+                        raise observation.rejection("signature", "nested code signer/team differs from the application")
+                signature_ok, signature_reason = True, "none"
+            except _ArtifactIPARejection as error:
+                if error.kind != "signature":
+                    raise
+                operation.data_refusal(error)
+                signature_ok, signature_reason = False, "signature-invalid"
+            if profile_tools and signature_ok is True:
+                try:
+                    if observation.inventory.get("embedded.mobileprovision") is None:
+                        raise observation.rejection("profile", "application embedded profile is absent")
+                    profile = _profile_details(app_path / "embedded.mobileprovision", deadline=deadline,
+                                               cancellation=cancellation)
+                    if profile is None:
+                        raise ValidationError("admitted profile tools unexpectedly became unavailable")
+                    observation.pure("profile", _ipa_profile_policy, profile, bundle, team)
+                    observation.interval(_profile_validity_bounds, profile)
+                    authorized = observation.pure("profile", _profile_certificate_fingerprints, profile)
+                    entitlements = _codesign_entitlements(app_path, deadline=deadline,
+                        cancellation=cancellation, _observation=observation)
+                    if entitlements is None:
+                        raise ValidationError("admitted entitlement tools unexpectedly became unavailable")
+                    if signer not in authorized or not _ipa_signed_entitlements_match(entitlements, bundle, team):
+                        raise observation.rejection("profile", "profile/entitlements do not authorize the actual application signer")
+                    observation.pure("profile", validate_profile_entitlements, entitlements,
+                                     profile.get("Entitlements", {}), deadline=deadline)
+                    if observation.profile_failed:
+                        raise observation.rejection("profile", "nested profile/entitlement observation failed")
+                    if observation.profile_unavailable:
+                        profile_ok, profile_reason = None, "tools-unavailable"
+                    else:
+                        profile_ok, profile_reason = True, "none"
+                except _ArtifactIPARejection as error:
+                    if error.kind != "profile":
+                        raise
+                    operation.data_refusal(error)
+                    profile_ok, profile_reason = False, "profile-invalid"
+    observation.check()
+    if signature_ok is True and profile_ok is True:
+        if observation.interval_count < 2:
+            raise ValidationError("IPA observation lacks actual profile/certificate date evidence")
+        current_ok = (not observation.validity_failed and observation.lower is not None
+                      and observation.upper is not None
+                      and observation.lower <= _utc_now() < observation.upper)
+        current_reason = "none" if current_ok else "signing-time-invalid"
+    elif not signing_tools or not profile_tools:
+        current_reason = "tools-unavailable"
+    # Service still owns snapshot originals, final control POST and terminal
+    # joins. This local result alone is not a current saved-command result.
+    operation.snapshot.assert_unchanged()
+    observation.check()
+    return ArtifactIPAObservation(True, bundle, version, build, signer, team,
+        signature_ok, profile_ok, current_ok, signature_reason, profile_reason, current_reason)
+
+
+def _profile_validity(profile: dict[str, Any], *,
+                      _observation: _ArtifactIPASigning | None = None) -> SigningValidityInterval | None:
+    if _observation is not None:
+        return _observation.interval(_profile_validity_bounds, profile)
+    interval = _profile_validity_bounds(profile)
     interval.require_current()
     return interval
 
@@ -128,6 +443,29 @@ def validate_preparation_signing_time(
         raise ValidationError("preparation observation is outside the validated signing interval")
 
 
+def _artifact_operation(deadline):
+    # Lazy import only; actual authority is the closed original/deadline check
+    # in operation_for, never the class name or a supplied expiry value.
+    if type(deadline).__name__ != "_ArtifactInspectionDeadline":
+        return None
+    from .desktop_artifact_inspection import operation_for
+    return operation_for(deadline)
+
+
+def _artifact_tool(name: str, deadline) -> str | None:
+    operation = _artifact_operation(deadline)
+    if operation is None:
+        return None
+    operation.inspection_checkpoint()
+    if operation.request.native["tools"]["ios"] is None:
+        if operation.ios_tools is not None:
+            raise ValidationError("unrequested artifact system-tool original")
+        return None
+    if operation.ios_tools is None:
+        raise ValidationError("requested artifact system tools were not admitted")
+    return operation.ios_tools.program(name)
+
+
 def _validation_environment() -> dict[str, str]:
     return artifact_validation_environment(os.environ)
 
@@ -141,6 +479,9 @@ def _run_native(
     # inspection clock. This is cooperative bounding, not syscall preemption.
     if deadline is not None:
         deadline.check()
+    operation = _artifact_operation(deadline)
+    if operation is not None:
+        return operation.ios_native_call(argv, timeout=timeout, text=text, cancellation=cancellation)
     result = run_owned(argv, environ=_validation_environment(), capture=True, text=text,
                        timeout=timeout, output_limit=NATIVE_OUTPUT_LIMIT, cancellation=cancellation)
     if deadline is not None:
@@ -155,6 +496,12 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
     guard, owns = cancellation_owner(
         cancellation, ProcessCleanupError, "IPA native workspace cleanup is unconfirmed",
     )
+    source = guard._artifact_inspection_source
+    operation = None if source is None else source.require_operation()
+    if operation is not None:
+        if owns:
+            raise ValidationError("artifact scratch must borrow the original cancellation owner")
+        directory = operation.scratch_parent(prefix, directory)
     temporary = OwnedTemporaryDirectory(prefix=prefix, dir=directory)
     temporary.finalizer.detach()  # Before acquisition, including failed handoff.
     state = {"attempted": False, "acquired": False, "removed": False}
@@ -163,6 +510,9 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
 
     def cleanup() -> None:
         if not state["attempted"]:
+            if operation is not None and operation.has_scratch(record):
+                state["removed"] = True  # Known no acquisition, not a recursive-removal claim.
+                operation.scratch_removed(record)
             _RETAINED_NATIVE_SCRATCH.remove(record)
             return
         earlier = fatal_lifetime_error(scope._first_error, "IPA native consumer is uncontained")
@@ -184,6 +534,8 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
         name = temporary.name
         os.lstat(name)
         identity = temporary.state["identity"]
+        if operation is not None:
+            operation.scratch_before_cleanup(record)
         temporary.cleanup()  # Original PID, UID/mode and root-inode checks.
         try:
             os.lstat(name)
@@ -193,6 +545,8 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
             raise ProcessCleanupError("IPA native workspace remains after cleanup")
         if not state["acquired"] or identity is None:
             raise ProcessCleanupError("IPA native workspace acquisition was not confirmed")
+        if operation is not None:
+            operation.scratch_removed(record)
         _RETAINED_NATIVE_SCRATCH.remove(record)
 
     scope = CleanupScope(guard, cleanup, owns_cancellation=owns,
@@ -200,6 +554,8 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
     try:
         try:
             with scope:
+                if operation is not None:
+                    operation.register_scratch(record)
                 if owns:
                     guard.install()
                     guard.activate()
@@ -207,6 +563,8 @@ def _native_scratch(*, prefix: str, directory: Path | None = None,
                     state["attempted"] = True
                     temporary.acquire()
                     state["acquired"] = True
+                    if operation is not None:
+                        operation.scratch_acquired(record)
                 yield Path(temporary.name), guard
         finally:
             scope.__exit__(*exc_info())
@@ -294,6 +652,10 @@ def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None, 
         return None
     from .ios_profiles import load_authenticated_profile
 
+    operation = _artifact_operation(deadline)
+    if operation is not None:
+        operation.require(operation.inputs.config, cancellation)
+        operation.profile_preflight()  # Before even the evidence constructor can bind an original.
     evidence = ProfileCallEvidence(operation="load")
     primary = None
     try:
@@ -302,7 +664,17 @@ def _profile_details(path: Path, *, deadline: InspectionDeadline | None = None, 
         primary = error
     consume_profile_evidence(evidence, primary=primary,
                              message="embedded profile lifetime is unconfirmed; end this invocation")
+    if operation is not None:
+        operation.ios_tools.check()
+        operation.inspection_checkpoint()
     if primary is not None:
+        if operation is not None and type(primary) is ValidationError:
+            # Only an exact content/authentication rejection after the SAME
+            # original profile evidence and every source POST/close settled.
+            # ProcessError, capture uncertainty and original IO faults are not
+            # signing observations and cannot be downgraded here.
+            operation.data_refusal(primary)
+            raise _ArtifactIPARejection("profile", "embedded profile authentication was rejected") from primary
         raise primary
     return profile
 
@@ -358,18 +730,19 @@ def _codesign_fingerprint(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
     cancellation: DefaultCancellation | None = None,
+    _observation: _ArtifactIPASigning | None = None,
 ) -> str | None:
-    if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
+    if not _ipa_native_tools(deadline, "codesign", "openssl"):
         return None
     verify = _run_native(
         ["codesign", "--verify", "--all-architectures", "--deep", "--strict", "--verbose=2", str(app_path)],
         deadline=deadline, cancellation=cancellation, timeout=60,
     )
     if verify.returncode:
-        raise ValidationError("codesign rejected the exported application or nested code")
+        raise _ipa_rejection("signature", "codesign rejected the exported application or nested code", _observation)
     return _codesign_leaf_fingerprint(
         app_path, temporary / "signer", _validity_intervals=_validity_intervals, deadline=deadline,
-        cancellation=cancellation,
+        cancellation=cancellation, **_ipa_observation_options(_observation),
     )
 
 
@@ -401,6 +774,7 @@ def _codesign_leaf_fingerprint(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
     cancellation: DefaultCancellation | None = None,
+    _observation: _ArtifactIPASigning | None = None,
 ) -> str:
     deadline = deadline if deadline is not None else InspectionDeadline()
     fingerprints = []
@@ -408,13 +782,16 @@ def _codesign_leaf_fingerprint(
     # without a leaf cannot reuse a stale certificate from another invocation.
     with _native_scratch(prefix="mobile-release-leaf-", directory=prefix.parent,
                          cancellation=cancellation) as (directory, guard):
-        for index, architecture in enumerate(_code_architectures(code_path, deadline=deadline)):
+        architectures = (_code_architectures(code_path, deadline=deadline) if _observation is None
+                         else _observation.architectures(code_path))
+        for index, architecture in enumerate(architectures):
             fingerprints.append(_codesign_slice_fingerprint(
                 code_path, Path(directory) / f"slice-{index}-", architecture=architecture,
                 _validity_intervals=_validity_intervals, deadline=deadline, cancellation=guard,
+                **_ipa_observation_options(_observation),
             ))
     if len(set(fingerprints)) != 1:
-        raise ValidationError("signed code architectures do not share the same leaf signer")
+        raise _ipa_rejection("signature", "signed code architectures do not share the same leaf signer", _observation)
     return fingerprints[0]
 
 
@@ -423,6 +800,7 @@ def _codesign_slice_fingerprint(
     _validity_intervals: list[SigningValidityInterval] | None,
     deadline: InspectionDeadline,
     cancellation: DefaultCancellation | None = None,
+    _observation: _ArtifactIPASigning | None = None,
 ) -> str:
     extract = _run_native(
         ["codesign", "-d", *_architecture_options(architecture), "--extract-certificates", str(prefix), str(code_path)],
@@ -431,7 +809,7 @@ def _codesign_slice_fingerprint(
     certificate = prefix.parent / f"{prefix.name}0"
     if (extract.returncode or certificate.is_symlink() or not certificate.is_file()
             or not 0 < certificate.stat().st_size <= 1024 * 1024):
-        raise ValidationError("codesign could not extract the leaf signing certificate")
+        raise _ipa_rejection("signature", "codesign could not extract the leaf signing certificate", _observation)
     fingerprint = _run_native(
         [
             "openssl",
@@ -448,25 +826,22 @@ def _codesign_slice_fingerprint(
         deadline=deadline, cancellation=cancellation, text=True, timeout=30,
     )
     if fingerprint.returncode:
-        raise ValidationError("openssl could not inspect the leaf signing certificate")
+        raise _ipa_rejection("signature", "openssl could not inspect the leaf signing certificate", _observation)
     fingerprints = re.findall(
         r"(?m)^(?:sha256|SHA256) Fingerprint=((?:[0-9A-Fa-f]{2}:){31}[0-9A-Fa-f]{2}|[0-9A-Fa-f]{64})$",
         fingerprint.stdout,
     )
     if len(fingerprints) != 1:
-        raise ValidationError("signing certificate output lacks a SHA-256 fingerprint")
+        raise _ipa_rejection("signature", "signing certificate output lacks a SHA-256 fingerprint", _observation)
     before = re.findall(r"(?m)^notBefore=(.*)$", fingerprint.stdout)
     after = re.findall(r"(?m)^notAfter=(.*)$", fingerprint.stdout)
-    if len(before) != 1 or len(after) != 1:
-        raise ValidationError("signing certificate output lacks unique validity bounds")
-    interval = SigningValidityInterval(
-        _openssl_certificate_date(before[0]), _openssl_certificate_date(after[0])
-    )
-    # Default codesign verification can accept expired/postdated certificates.
-    # Native signature verification remains mandatory, but it is not this date
-    # check. Derive dates from the exact leaf extracted from the signed code.
-    interval.require_current()
-    if _validity_intervals is not None:
+    if _observation is None:
+        interval = _certificate_validity_bounds(before, after)
+        # Ordinary validation still requires the real current UTC instant.
+        interval.require_current()
+    else:
+        interval = _observation.interval(_certificate_validity_bounds, before, after)
+    if _validity_intervals is not None and interval is not None:
         _validity_intervals.append(interval)
     return fingerprints[0].replace(":", "").lower()
 
@@ -478,8 +853,9 @@ def _nested_codesign_identities(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
     cancellation=None,
+    _observation: _ArtifactIPASigning | None = None,
 ) -> list[tuple[Path, str, str]] | None:
-    if sys.platform != "darwin" or not shutil.which("codesign") or not shutil.which("openssl"):
+    if not _ipa_native_tools(deadline, "codesign", "openssl"):
         return None
     deadline = deadline if deadline is not None else InspectionDeadline()
     def is_macho(path: Path) -> bool:
@@ -489,31 +865,51 @@ def _nested_codesign_identities(
             with path.open("rb") as handle:
                 return handle.read(4) in MACHO_MAGICS
         except OSError as error:
-            raise ValidationError(
-                f"nested code could not be inspected safely: {path.name}"
-            ) from error
+            raise _ipa_rejection("signature", f"nested code could not be inspected safely: {path.name}", _observation) from error
 
     nested_candidates: set[Path] = set()
-    for path in app_path.rglob("*"):
-        if deadline is not None:
+    if _observation is not None:
+        if app_path != _observation.root:
+            raise ValidationError("nested observer is not bound to the admitted application")
+        _observation.check()
+        # Use the SAME complete tree and Mach-O metadata, not another rglob.
+        for name, value in _observation.inventory.items():
             deadline.check()
-        if path.is_symlink():
-            raise ValidationError(f"nested code must not be a symbolic link: {path.name}")
-        if path.suffix.lower() in NESTED_CODE_SUFFIXES and (
-            path.is_dir() or path.is_file()
-        ):
-            nested_candidates.add(path)
-        if is_macho(path):
-            nested_candidates.add(path)
-        if path.name == "CodeResources" and path.parent.name == "_CodeSignature":
-            signed_container = path.parent.parent
-            if signed_container != app_path:
-                nested_candidates.add(signed_container)
+            path = app_path / name
+            if path.suffix.lower() in NESTED_CODE_SUFFIXES:
+                nested_candidates.add(path)
+            if value is not None and value.magic in MACHO_MAGICS:
+                nested_candidates.add(path)
+            if path.name == "CodeResources" and path.parent.name == "_CodeSignature":
+                signed_container = path.parent.parent
+                if signed_container != app_path:
+                    nested_candidates.add(signed_container)
+            if len(nested_candidates) > MAX_NESTED_CODE_ITEMS:
+                raise _ipa_rejection("signature", "IPA contains too many nested signed-code components", _observation)
+    else:
+        for path in app_path.rglob("*"):
+            if deadline is not None:
+                deadline.check()
+            if path.is_symlink():
+                raise _ipa_rejection("signature", f"nested code must not be a symbolic link: {path.name}", _observation)
+            if path.suffix.lower() in NESTED_CODE_SUFFIXES and (
+                path.is_dir() or path.is_file()
+            ):
+                nested_candidates.add(path)
+            if is_macho(path):
+                nested_candidates.add(path)
+            if path.name == "CodeResources" and path.parent.name == "_CodeSignature":
+                signed_container = path.parent.parent
+                if signed_container != app_path:
+                    nested_candidates.add(signed_container)
     nested = sorted(nested_candidates, key=lambda item: item.as_posix())
     if len(nested) > MAX_NESTED_CODE_ITEMS:
-        raise ValidationError("IPA contains too many nested signed-code components")
-    profiled_bundles = [app_path] + [path for path in nested if path.is_dir() and path.suffix.lower() in {".app", ".appex"}]
-    profiled_executables = {_code_executable(path, deadline=deadline) for path in profiled_bundles}
+        raise _ipa_rejection("signature", "IPA contains too many nested signed-code components", _observation)
+    def directory(path: Path) -> bool:
+        return path.is_dir() if _observation is None else _observation.inventory[_observation.relative(path)] is None
+    profiled_bundles = [app_path] + [path for path in nested if directory(path) and path.suffix.lower() in {".app", ".appex"}]
+    profiled_executables = {(_code_executable(path, deadline=deadline) if _observation is None
+                             else _observation.executable(path)) for path in profiled_bundles}
     result: list[tuple[Path, str, str]] = []
     for index, code_path in enumerate(nested):
         requirement = _run_native(
@@ -530,64 +926,57 @@ def _nested_codesign_identities(
             deadline=deadline, cancellation=cancellation, timeout=30,
         )
         if requirement.returncode:
-            raise ValidationError(
-                f"nested code does not satisfy its designated requirement: {code_path.name}"
-            )
-        teams = []
-        for architecture in _code_architectures(code_path, deadline=deadline):
-            details = _run_native(
-                ["codesign", "-d", *_architecture_options(architecture), "--verbose=4", str(code_path)],
-                deadline=deadline, cancellation=cancellation, text=True, timeout=30,
-            )
-            if details.returncode:
-                raise ValidationError("codesign could not inspect a nested code architecture")
-            matches = re.findall(r"(?m)^TeamIdentifier=(.*)$", details.stderr + details.stdout)
-            if len(matches) != 1 or not re.fullmatch(r"[A-Z0-9]{10}", matches[0]):
-                raise ValidationError("nested code architecture lacks a unique valid TeamIdentifier")
-            teams.append(matches[0])
-        if len(set(teams)) != 1:
-            raise ValidationError("nested code architectures do not share one TeamIdentifier")
-        team = teams[0]
+            raise _ipa_rejection("signature", f"nested code does not satisfy its designated requirement: {code_path.name}", _observation)
+        team = _codesign_team(code_path, deadline=deadline, cancellation=cancellation,
+                              **_ipa_observation_options(_observation))
         fingerprint = _codesign_leaf_fingerprint(
             code_path, temporary / f"nested-signer-{index}-",
             _validity_intervals=_validity_intervals, deadline=deadline, cancellation=cancellation,
+            **_ipa_observation_options(_observation),
         )
-        if code_path.is_dir() and code_path.suffix.lower() in {".app", ".appex"}:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
-            if entitlements is None:
-                raise ValidationError(
-                    f"nested application entitlements could not be inspected: {code_path.name}"
+        try:
+            if directory(code_path) and code_path.suffix.lower() in {".app", ".appex"}:
+                entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation,
+                        **_ipa_observation_options(_observation))
+                if entitlements is None:
+                    raise _ipa_rejection("profile", f"nested application entitlements could not be inspected: {code_path.name}", _observation)
+                _validate_nested_bundle_security(
+                    code_path,
+                    entitlements=entitlements,
+                    team_id=team,
+                    signer_fingerprint=fingerprint,
+                    _validity_intervals=_validity_intervals,
+                    deadline=deadline,
+                    cancellation=cancellation, **_ipa_observation_options(_observation),
                 )
-            _validate_nested_bundle_security(
-                code_path,
-                entitlements=entitlements,
-                team_id=team,
-                signer_fingerprint=fingerprint,
-                _validity_intervals=_validity_intervals,
-                deadline=deadline,
-                cancellation=cancellation,
-            )
-        elif code_path not in profiled_executables:
-            entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation)
-            if entitlements is None or entitlements:
-                raise ValidationError(
-                    "profileless nested code has signed entitlement claims; frameworks, libraries, "
-                    "helpers and unsupported executable bundles cannot borrow an app's profile"
-                )
+            elif code_path not in profiled_executables:
+                entitlements = _codesign_entitlements(code_path, deadline=deadline, cancellation=cancellation,
+                        **_ipa_observation_options(_observation))
+                if entitlements is None or entitlements:
+                    raise _ipa_rejection("profile", "profileless nested code has signed entitlement claims; frameworks, libraries, "
+                        "helpers and unsupported executable bundles cannot borrow an app's profile", _observation)
+        except _ArtifactIPARejection as error:
+            if _observation is None or error.kind != "profile":
+                raise
+            _observation.operation.data_refusal(error)
+            _observation.profile_failed = True
         result.append((code_path, team, fingerprint))
     return result
 
 
 def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | None = None,
-                           cancellation: DefaultCancellation | None = None) -> dict[str, Any] | None:
-    if sys.platform != "darwin" or not shutil.which("codesign"):
+                           cancellation: DefaultCancellation | None = None,
+                           _observation: _ArtifactIPASigning | None = None) -> dict[str, Any] | None:
+    if not _ipa_native_tools(deadline, "codesign"):
         return None
     from .ios_der import decode_der_dictionary
     from .ios_entitlements import load_plist_dictionary, typed_value
 
     deadline = deadline if deadline is not None else InspectionDeadline()
     payload = None
-    for architecture in _code_architectures(app_path, deadline=deadline):
+    architectures = (_code_architectures(app_path, deadline=deadline) if _observation is None
+                     else _observation.architectures(app_path))
+    for architecture in architectures:
         representations = []
         for encoding, decode in (("--der", decode_der_dictionary), ("--xml", load_plist_dictionary)):
             result = _run_native(
@@ -595,14 +984,15 @@ def _codesign_entitlements(app_path: Path, *, deadline: InspectionDeadline | Non
                 deadline=deadline, cancellation=cancellation, timeout=30,
             )
             if result.returncode:
-                raise ValidationError("codesign could not inspect a signed entitlement architecture")
-            representations.append(decode(result.stdout, deadline=deadline) if result.stdout else {})
+                raise _ipa_rejection("profile", "codesign could not inspect a signed entitlement architecture", _observation)
+            representations.append((decode(result.stdout, deadline=deadline) if _observation is None else
+                _observation.pure("profile", decode, result.stdout, deadline=deadline)) if result.stdout else {})
         # --xml can render DER rather than the legacy XML signature slot. This
         # compares native decoder views; it is not independent legacy-slot proof.
         if typed_value(representations[0], deadline=deadline) != typed_value(representations[1], deadline=deadline):
-            raise ValidationError("signed entitlement DER/XML views disagree or modern DER is missing")
+            raise _ipa_rejection("profile", "signed entitlement DER/XML views disagree or modern DER is missing", _observation)
         if payload is not None and typed_value(payload, deadline=deadline) != typed_value(representations[0], deadline=deadline):
-            raise ValidationError("signed entitlements differ between code architectures")
+            raise _ipa_rejection("profile", "signed entitlements differ between code architectures", _observation)
         payload = representations[0]
     return payload
 
@@ -640,24 +1030,29 @@ def _validate_nested_bundle_security(
     _validity_intervals: list[SigningValidityInterval] | None = None,
     deadline: InspectionDeadline | None = None,
     cancellation=None,
+    _observation: _ArtifactIPASigning | None = None,
 ) -> None:
     """Bind a nested app/extension to its signer, profile, team, and release entitlements."""
 
     from .ios_entitlements import load_plist_dictionary, validate_profile_entitlements
 
-    info_path = code_path / "Info.plist"
-    try:
-        if (
-            info_path.is_symlink()
-            or not info_path.is_file()
-            or info_path.stat().st_size > 2 * 1024 * 1024
-        ):
-            raise OSError("unsafe nested Info.plist")
-        info = load_plist_dictionary(info_path.read_bytes(), deadline=deadline)
-    except OSError as error:
-        raise ValidationError(
-            f"nested application Info.plist is missing or invalid: {code_path.name}"
-        ) from error
+    if _observation is None:
+        info_path = code_path / "Info.plist"
+        try:
+            if (
+                info_path.is_symlink()
+                or not info_path.is_file()
+                or info_path.stat().st_size > 2 * 1024 * 1024
+            ):
+                raise OSError("unsafe nested Info.plist")
+            info = load_plist_dictionary(info_path.read_bytes(), deadline=deadline)
+        except OSError as error:
+            raise _ipa_rejection("profile", f"nested application Info.plist is missing or invalid: {code_path.name}", _observation) from error
+    else:
+        name = _observation.relative(code_path)
+        typed = _observation.application.plists[(name + "/" if name else "") + "Info.plist"]
+        values = dict(typed[1])
+        info = {"CFBundleIdentifier": values["CFBundleIdentifier"][1]}
     bundle_id = info.get("CFBundleIdentifier") if isinstance(info, dict) else None
     application_identifier = entitlements.get("application-identifier")
     if (
@@ -668,22 +1063,20 @@ def _validate_nested_bundle_security(
         or entitlements.get("com.apple.developer.team-identifier") != team_id
         or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
     ):
-        raise ValidationError(
-            f"nested application entitlements do not match its signing team: {code_path.name}"
-        )
+        raise _ipa_rejection("profile", f"nested application entitlements do not match its signing team: {code_path.name}", _observation)
     profile_path = code_path / "embedded.mobileprovision"
-    if profile_path.is_symlink() or not profile_path.is_file():
-        raise ValidationError(
-            f"nested application lacks a safe embedded provisioning profile: {code_path.name}"
-        )
+    if ((profile_path.is_symlink() or not profile_path.is_file()) if _observation is None else
+            _observation.inventory.get(_observation.relative(code_path) + "/embedded.mobileprovision") is None):
+        raise _ipa_rejection("profile", f"nested application lacks a safe embedded provisioning profile: {code_path.name}", _observation)
+    if _observation is not None and not _ipa_native_tools(deadline, "security", "openssl"):
+        _observation.profile_unavailable = True
+        return
     profile = _profile_details(profile_path, deadline=deadline, cancellation=cancellation)
     if profile is None:
-        raise ValidationError(
-            f"nested provisioning profile could not be inspected: {code_path.name}"
-        )
+        raise _ipa_rejection("profile", f"nested provisioning profile could not be inspected: {code_path.name}", _observation)
     profile_entitlements = profile.get("Entitlements")
     teams = profile.get("TeamIdentifier")
-    interval = _profile_validity(profile)
+    interval = _profile_validity(profile, **_ipa_observation_options(_observation))
     if (
         not isinstance(profile_entitlements, dict)
         or profile_entitlements.get("application-identifier") != application_identifier
@@ -693,13 +1086,15 @@ def _validate_nested_bundle_security(
         or team_id not in teams
         or profile.get("ProvisionedDevices")
         or profile.get("ProvisionsAllDevices")
-        or signer_fingerprint not in _profile_certificate_fingerprints(profile)
+        or signer_fingerprint not in (_profile_certificate_fingerprints(profile) if _observation is None else
+            _observation.pure("profile", _profile_certificate_fingerprints, profile))
     ):
-        raise ValidationError(
-            f"nested provisioning profile does not authorize the final signer: {code_path.name}"
-        )
-    validate_profile_entitlements(entitlements, profile_entitlements, deadline=deadline)
-    if _validity_intervals is not None:
+        raise _ipa_rejection("profile", f"nested provisioning profile does not authorize the final signer: {code_path.name}", _observation)
+    if _observation is None:
+        validate_profile_entitlements(entitlements, profile_entitlements, deadline=deadline)
+    else:
+        _observation.pure("profile", validate_profile_entitlements, entitlements, profile_entitlements, deadline=deadline)
+    if _validity_intervals is not None and interval is not None:
         _validity_intervals.append(interval)
 
 
@@ -812,21 +1207,7 @@ def _validate_ipa(
                         )
                     )
                 else:
-                    entitlements = profile.get("Entitlements", {})
-                    if not isinstance(entitlements, dict):
-                        raise ValidationError("profile entitlements have an invalid structure")
-                    app_identifier = entitlements.get("application-identifier")
-                    teams = profile.get("TeamIdentifier", [])
-                    if app_identifier != f"{expected_team_id}.{expected_bundle_id}":
-                        raise ValidationError("profile application-identifier does not match team and bundle")
-                    if type(teams) is not list or teams != [expected_team_id]:
-                        raise ValidationError("profile TeamIdentifier does not match configuration")
-                    if entitlements.get("get-task-allow") is not False:
-                        raise ValidationError("profile permits debugger attachment")
-                    if entitlements.get("beta-reports-active") is not True:
-                        raise ValidationError("profile is not enabled for App Store/TestFlight distribution")
-                    if profile.get("ProvisionedDevices") or profile.get("ProvisionsAllDevices"):
-                        raise ValidationError("profile is not an App Store distribution profile")
+                    _ipa_profile_policy(profile, expected_bundle_id, expected_team_id)
                     interval = _profile_validity(profile)
                     if _validity_intervals is not None:
                         _validity_intervals.append(interval)
@@ -850,12 +1231,7 @@ def _validate_ipa(
                             category="ios-artifact",
                         )
                     )
-                elif (
-                    entitlements.get("application-identifier")
-                    != f"{expected_team_id}.{expected_bundle_id}"
-                    or entitlements.get("com.apple.developer.team-identifier") != expected_team_id
-                    or ("get-task-allow" in entitlements and entitlements["get-task-allow"] is not False)
-                ):
+                elif not _ipa_signed_entitlements_match(entitlements, expected_bundle_id, expected_team_id):
                     raise ValidationError(
                         "application signed entitlements do not match the approved team/bundle release policy"
                     )

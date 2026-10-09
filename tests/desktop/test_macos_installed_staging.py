@@ -5465,7 +5465,7 @@ class MacInstalledData(unittest.TestCase):
         self.assertEqual(set(rows), {row["path"] for row in files})
         self.assertNotIn("project_recovery_bootstrap.py", rows)  # Historical supplier roster is unchanged.
         current_only = {"project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-                        "ios_archive_bootstrap.py", "github_release_bootstrap.py"}
+                        "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py"}
         self.assertEqual(TOOL.CURRENT_BOOTSTRAPS, TOOL.BOOTSTRAPS | current_only)
         self.assertEqual(len(TOOL.BOOTSTRAPS), 6)
         self.assertEqual(TOOL.PROTOCOL, "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e")

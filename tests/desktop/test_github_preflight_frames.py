@@ -66,6 +66,87 @@ class GitHubPreflightFrameTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 engine.parse_initial(frame(changed))
 
+        from mobile_release import _desktop_github_setup_engine as setup_engine
+        from mobile_release import _desktop_github_engine as private
+        from mobile_release import github_setup_remote as setup
+        from mobile_release._github_connection_transport import ReadResult, _control, _CloseFailure
+        target_data = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1", "repositoryId": "2",
+                       "selection": {"kind": "actions_enabled", "enabled": True}}
+        action_data = {"kind": "prepare", "target": target_data, "prepared": None}
+        initial_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "action": action_data})
+        request = setup.parse_initial(initial_data)
+        go_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "go": {"requestSha256": request.digest, "token": PRIVATE}})
+        def run_case(fault=None):
+            events, outgoing, closed = [], bytearray(), []
+            incoming = [initial_data, go_data, b""]
+            clock = [100.0]
+            def read(fd, size):
+                self.assertEqual(fd, 10)
+                events.append("read")
+                if len(incoming) == 2:
+                    self.assertIn(b'"ready"', outgoing)
+                    if fault == "bad-go":
+                        return incoming.pop(0).replace(request.digest.encode(), b"0" * 64)
+                    if fault == "late-go":
+                        clock[0] = 110.0
+                block = incoming.pop(0)
+                self.assertLessEqual(len(block), size)
+                return block
+            def write(fd, data):
+                self.assertEqual(fd, 11)
+                events.append("write")
+                if fault == "write":
+                    raise OSError("inert original output failure")
+                take = min(len(data), 37)  # Real bounded writer partial-progress path.
+                outgoing.extend(data[:take])
+                return take
+            def close(fd):
+                closed.append(fd)
+                if fault in {"close", "close-interrupt", "transport-and-close"} and fd == 12:
+                    if fault == "close-interrupt":
+                        raise KeyboardInterrupt()
+                    raise OSError("inert original close failure")
+            ports = SimpleNamespace(dup=lambda fd: 10 + fd, open=lambda *_args: 12,
+                                    set_inheritable=lambda *_args: None, dup2=lambda *_args, **_kwargs: None,
+                                    read=read, write=write, close=close, devnull="/inert/null", O_RDONLY=0,
+                                    path=setup_engine.os.path)
+            class Reader:
+                def __init__(self):
+                    self.cursor = setup.Schedule(setup.Action.parse(action_data))
+                def read(self, step, reference=None):
+                    self.cursor.claim(step, reference)
+                    events.append(step)
+                    if fault in {"transport-close", "transport-and-close"}:
+                        raise _CloseFailure("inert original transport close")
+                    body = ({"id": 1, "login": "owner"} if step == "account" else
+                            {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+                            if step.startswith("repository-") else
+                            {"enabled": False, "allowed_actions": "selected", "sha_pinning_required": True})
+                    return ReadResult({"status": 200, "body": body, "failure": "none"}, _control())
+            def factory(action, token, **kwargs):
+                self.assertEqual((action.value(), token, kwargs), (action_data, PRIVATE, {"started": 100.0, "runtime_dir": "/inert/runtime"}))
+                self.assertEqual(incoming, [])  # GO and its actual EOF already consumed.
+                events.append("factory")
+                return Reader()
+            timer = SimpleNamespace(monotonic=lambda: clock[0])
+            with patch.object(setup_engine, "os", ports), patch.object(private, "os", ports), \
+                 patch.object(setup_engine, "time", timer), patch.object(private, "time", timer), \
+                 patch.object(setup, "_make_live_reader", side_effect=factory):
+                status = setup_engine.main(started=100.0, runtime_dir="/inert/runtime")
+            return status, bytes(outgoing), events, closed
+        for fault in (None, "bad-go", "late-go", "write", "close", "close-interrupt", "transport-close", "transport-and-close"):
+            status, outgoing, events, closed = run_case(fault)
+            self.assertEqual(closed, [12, 11, 10])
+            self.assertNotIn(PRIVATE.encode(), outgoing)
+            self.assertEqual(status, 0 if fault is None else 74 if fault in {"close", "close-interrupt"} else 70)
+            if fault in {"bad-go", "late-go", "write"}:
+                self.assertNotIn("factory", events)
+            if fault is None or fault in {"close", "close-interrupt"}:
+                result = json.loads(outgoing.splitlines()[1])["result"]
+                self.assertEqual(result["reason"], "none")
+                self.assertFalse(result["writeClaimed"])
+                self.assertEqual(events[events.index("factory") + 1:], ["account", "repository-before", "resource-before", "repository-after"] + ["write"] * events[events.index("factory") + 1:].count("write"))
+
     def test_initial_and_go_frames_reject_extra_pipelined_duplicate_or_unbound_input(self):
         request = engine.parse_initial(frame(initial()))
         good = {"protocol": policy.PROTOCOL, "id": request.id,
@@ -80,6 +161,19 @@ class GitHubPreflightFrameTests(unittest.TestCase):
                     b'{"x":' * 40 + b"null" + b"}" * 40 + b"\n"):
             with self.assertRaises(ValueError):
                 engine.parse_initial(raw)
+
+        from mobile_release import _desktop_github_setup_engine as setup_engine
+        from mobile_release import github_setup_remote as setup
+        value = {"protocol": setup.PROTOCOL, "id": "setup", "action": {"kind": "prepare", "prepared": None,
+                 "target": {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1", "repositoryId": "2",
+                            "selection": {"kind": "actions_enabled", "enabled": True}}}}
+        raw = frame(value)
+        for supplied in (raw + raw, b" " * (setup.MAX_INITIAL_BYTES + 1), raw[:-1]):
+            parts = [supplied[:4096], supplied[4096:], b""] if len(supplied) > 4096 else [supplied, b""]
+            ports = SimpleNamespace(read=lambda _fd, _maximum: parts.pop(0))
+            with patch.object(setup_engine, "os", ports), patch.object(setup_engine, "time", SimpleNamespace(monotonic=lambda: 100.0)):
+                with self.assertRaises(ValueError):
+                    setup_engine._read_initial(10, 110.0)
 
     def test_pending_is_fresh_native_scope_only_and_go_contains_no_token(self):
         value = initial(); value["action"] = None
@@ -160,6 +254,37 @@ class GitHubPreflightBootstrapTests(unittest.TestCase):
                 self.assertEqual(code, 17)
                 entry.assert_called_once_with(started=11.0, runtime_dir="/inert/runtime")
                 self.assertEqual(system.path, ["/inert/core.zip"])
+
+        from mobile_release import _desktop_github_setup_engine as setup_engine
+        path = Path(__file__).resolve().parents[2] / "desktop" / "github_setup_bootstrap.py"
+        spec = importlib.util.spec_from_file_location("_mrk_setup_bootstrap_contract", path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        setup_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup_module)  # Real import only; __main__ is never invoked.
+        for platform, expected in (("darwin", 17), ("linux", 78), ("Darwin", 78), ("win32", 78)):
+            system = self._system(platform=platform)
+            with patch.object(setup_module, "sys", system), patch.object(setup_module, "__file__", "/inert/runtime/github_setup_bootstrap.py"), \
+                 patch.object(setup_module, "time", SimpleNamespace(monotonic=lambda: 11.0)), \
+                 patch.object(setup_engine, "main", return_value=17) as entry:
+                self.assertEqual(setup_module.main(), expected)
+            if expected == 17:
+                entry.assert_called_once_with(started=11.0, runtime_dir="/inert/runtime")
+                self.assertEqual(system.path, ["/inert/core.zip"])
+            else:
+                entry.assert_not_called()
+                self.assertEqual(system.path, [])
+        for changes in ({"argv": []}, {"argv": ["fixed"]}, {"argv": ["fixed", "relative.zip"]},
+                        {"argv": ["fixed", "/inert/core.zip", "extra"]},
+                        {"flags": SimpleNamespace(isolated=False, no_site=True)},
+                        {"flags": SimpleNamespace(isolated=True, no_site=False)},
+                        {"dont_write_bytecode": False}, {"version_info": (3, 10)}):
+            system = self._system(**changes)
+            with patch.object(setup_module, "sys", system), patch.object(setup_module, "__file__", "/inert/runtime/github_setup_bootstrap.py"), \
+                 patch.object(setup_module, "time", SimpleNamespace(monotonic=lambda: 11.0)), \
+                 patch.object(setup_engine, "main", side_effect=AssertionError("invalid Setup bootstrap entered engine")):
+                self.assertEqual(setup_module.main(), 78)
+            self.assertEqual(system.path, [])
 
     def test_other_platforms_flags_and_unbound_paths_refuse_before_engine_entry(self):
         module = self._bootstrap()

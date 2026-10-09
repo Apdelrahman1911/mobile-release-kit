@@ -735,6 +735,13 @@ impl Book {
         if let Some(gate)=&self.removal_gate{bytes=bytes.checked_add(gate.retained_bytes()?)?;}
         Some(bytes)
     }
+    fn retained_original_count(&self)->Option<usize>{
+        if !self.admission_custody_ready() {return None;}
+        if self.records.iter().any(|record|match record.state {
+            State::Owned=>record.fd.is_none(),State::NoHandle|State::Closed=>record.fd.is_some(),_=>true,
+        }) {return None;}
+        Some(self.records.iter().filter(|record|record.fd.is_some()).count())
+    }
     fn fd(&self, index: usize) -> Result<&OwnedFd> { self.records.get(index).and_then(|r| r.fd.as_ref()).ok_or(AdmissionFailure::Unknown) }
     fn reserve(&mut self, parent: Option<usize>, name: &str) -> Result<usize> {
         if self.records.len() >= 8256 || self.records.iter().filter(|r| r.fd.is_some()).count() >= 48 { return Err(AdmissionFailure::Bounds); }
@@ -1181,6 +1188,13 @@ macro_rules! slots {
                     _ => Some((AdmissionFailure::Unknown, Instant::now())),
                 }
             }
+            pub(crate) fn retained_original_count(&self)->Option<usize>{
+                if self.settlement{return None;}
+                match (&self.inspection,&self.acquisition){
+                    (Some(book),None)=>book.retained_original_count(),
+                    (None,Some(capability))=>capability.original.retained_original_count(),_=>None,
+                }
+            }
             pub(crate) fn retained_bytes(&self) -> Option<usize> {
                 let mut bytes = std::mem::size_of::<Self>();
                 match (&self.inspection, &self.acquisition) {
@@ -1231,6 +1245,7 @@ macro_rules! slots {
 slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
 slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
 slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
+slots!(GitHubSetupRuntimeSlots, GitHubSetupInstalledRuntime, runtime::GitHubSetupInstalledProfile);
 slots!(GitHubReleaseRuntimeSlots, GitHubReleaseInstalledRuntime, runtime::GitHubReleaseInstalledProfile);
 slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
 slots!(GitHubWorkflowRuntimeSlots, GitHubWorkflowInstalledRuntime, runtime::GitHubWorkflowInstalledProfile);
@@ -1239,6 +1254,7 @@ slots!(MetadataTextRuntimeSlots, MetadataTextInstalledRuntime, runtime::Metadata
 slots!(MetadataImagesRuntimeSlots, MetadataImagesInstalledRuntime, runtime::MetadataImagesInstalledProfile);
 slots!(ReleaseVersionRuntimeSlots, ReleaseVersionInstalledRuntime, runtime::ReleaseVersionInstalledProfile);
 slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveInstalledProfile);
+slots!(ArtifactInspectionRuntimeSlots, ArtifactInspectionInstalledRuntime, runtime::ArtifactInspectionInstalledProfile);
 
 // Inert checks over the same COMMON Book used by both new action slots.
 // No SnapshotBook/native handle is created; entered/missing are negative DATA.
@@ -1246,7 +1262,8 @@ slots!(IOSArchiveRuntimeSlots, IOSArchiveInstalledRuntime, runtime::IOSArchiveIn
 pub(crate) fn installed_github_actions_slots_data_check() -> bool {
     use std::any::TypeId;
     let types = [TypeId::of::<PassiveRuntimeSlots>(), TypeId::of::<GitHubReadOnlyRuntimeSlots>(),
-        TypeId::of::<GitHubPreflightRuntimeSlots>(), TypeId::of::<GitHubReleaseRuntimeSlots>()];
+        TypeId::of::<GitHubPreflightRuntimeSlots>(), TypeId::of::<GitHubReleaseRuntimeSlots>(),
+        TypeId::of::<GitHubSetupRuntimeSlots>()];
     for (index, original) in types.iter().enumerate() { if types[index + 1..].contains(original) { return false; } }
     macro_rules! inert_action {
         ($slot:ty) => {{
@@ -1283,6 +1300,7 @@ pub(crate) fn installed_github_actions_slots_data_check() -> bool {
     }
     inert_action!(GitHubPreflightRuntimeSlots);
     inert_action!(GitHubReleaseRuntimeSlots);
+    inert_action!(GitHubSetupRuntimeSlots);
     macro_rules! actual_prepare_return {
         ($capability:ident) => {{
             let selection = || VerifiedRuntime { python: PathBuf::from("/inert/python"),
@@ -1333,6 +1351,7 @@ pub(crate) fn installed_github_actions_slots_data_check() -> bool {
     }
     actual_prepare_return!(GitHubPreflightInstalledRuntime);
     actual_prepare_return!(GitHubReleaseInstalledRuntime);
+    actual_prepare_return!(GitHubSetupInstalledRuntime);
     true
 }
 #[cfg(test)]
@@ -1885,4 +1904,34 @@ impl VaultHelperSlots{
     pub(crate) fn gate_facts(&self)->native::vault_helper_filesystem::WorkerGateFacts{self.original.worker_gate_facts()}
     pub(crate) fn settled(&self)->bool{self.original.settled() && self.command_storage_empty()}
     pub(crate) fn retained_bytes(&self)->Option<usize>{self.original.retained_bytes()?.checked_add(std::mem::size_of::<Self>())}
+}
+
+impl ArtifactInspectionRuntimeSlots {
+    /// Called in the SAME inspection worker after runtime inspection. Only the
+    /// actual retained catalog loan can nominate its fixed protected root.
+    pub(crate) fn bind_artifact_tools(&mut self,source:&crate::saved_command_owner::ArtifactToolLoan,
+        profile:crate::artifact_inspection_protocol::Profile,end:Instant,stop:&watch::Receiver<bool>)
+        ->std::result::Result<crate::android_build_protocol::ToolchainBinding,BridgeError>{
+        let result=(||->Result<crate::android_build_protocol::ToolchainBinding>{
+            if self.settlement||self.acquisition.is_some()||self.selection.is_none(){return Err(AdmissionFailure::AlreadyUsed);}
+            let selected=source.selected_data().ok_or(AdmissionFailure::Identity)?;
+            let book=self.inspection.as_mut().ok_or(AdmissionFailure::Unknown)?;
+            if !book.inspected||book.prepared||!book.admission_custody_ready(){return Err(AdmissionFailure::AlreadyUsed);}
+            // Actual root-only original. The core separately authenticates the
+            // complete selected provider inventory before any read-only tool.
+            let selected_root=selected.root_data();
+            let root=book.chain(&selected_root,end,stop)?;
+            let id=book.records[root].identity.ok_or(AdmissionFailure::Identity)?;
+            if id.mode&0o7777!=0o555||id.uid!=0||id.gid!=0||id.flags!=0{return Err(AdmissionFailure::Ownership);}
+            native::no_xattrs(book.fd(root)?.as_fd()).map_err(native_error)?;
+            book.check_name(root,end,stop)?;
+            if !source.current(){return Err(AdmissionFailure::Identity);}
+            let profile=match profile{crate::artifact_inspection_protocol::Profile::MacosArm64=>crate::android_build_protocol::Profile::MacArm64,
+                crate::artifact_inspection_protocol::Profile::MacosX64=>crate::android_build_protocol::Profile::MacX64};
+            crate::android_build_protocol::ToolchainBinding::new_macos_data(profile,&selected_root,crate::android_build_protocol::RootIdentity{
+                device:u64::try_from(id.dev).map_err(native_error)?.to_string(),inode:id.ino.to_string(),mode:u32::from(id.mode),uid:id.uid,gid:id.gid},selected).map_err(native_error)
+        })();
+        if let Err(failure)=&result{if let Some(book)=self.inspection.as_ref(){book.note_acl(*failure,Instant::now());}}
+        result.map_err(|_|BridgeError::unavailable("The selected artifact inspector tool source changed or could not be admitted."))
+    }
 }

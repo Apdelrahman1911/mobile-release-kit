@@ -19,7 +19,7 @@ on:
         required: false
         type: choice
         default: allocation1
-        options: [allocation1, project-initialization4]
+        options: [allocation1, project-initialization4, artifact-setup10]
 
 permissions:
   contents: read
@@ -55,7 +55,7 @@ jobs:
           [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-intel-source-slots.yml@$GITHUB_REF" ]]
           case "$MRK_SOURCE_SLOTS_SELECTION" in
             allocation1) ;;
-            project-initialization4)
+            project-initialization4|artifact-setup10)
               [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]
               [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]] ;;
             *) exit 1 ;;

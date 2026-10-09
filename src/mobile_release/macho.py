@@ -356,8 +356,24 @@ def _thin(reader: _Reader, *, dsym: bool) -> MachOSlice:
     return MachOSlice(cpu, subtype, uuids[0], file_type, digest.hexdigest())
 
 
+def _artifact_operation(deadline: InspectionDeadline):
+    # Avoid changing standalone/signed callers' import closure. The real lookup
+    # (not this name check) authenticates the exact original inspection owner.
+    if type(deadline).__name__ != "_ArtifactInspectionDeadline":
+        return None
+    from .desktop_artifact_inspection import operation_for
+    operation = operation_for(deadline)
+    _require(operation is not None, "artifact inspection deadline is not an original")
+    return operation
+
+
 @contextmanager
 def _macho_descriptor(path: Path, deadline: InspectionDeadline):
+    operation = _artifact_operation(deadline)
+    if operation is not None:
+        with deadline.descriptor(path) as number:
+            yield number
+        return
     if type(deadline) is not InspectionDeadline:
         from .ios_archive_operation import _IOSInspectionDeadline
         if type(deadline) is _IOSInspectionDeadline:
@@ -377,6 +393,7 @@ def inspect_macho(path: Path, *, dsym: bool = False,
     """Inspect private immutable snapshot bytes without loading executable code."""
     deadline = deadline if deadline is not None else InspectionDeadline()
     deadline.check()
+    operation = _artifact_operation(deadline)
     try:
         with _macho_descriptor(path, deadline) as fd:
             attributes = os.fstat(fd)
@@ -384,11 +401,17 @@ def inspect_macho(path: Path, *, dsym: bool = False,
             reader = _Reader(fd, 0, attributes.st_size, deadline)
             magic = reader.read(0, 4)
             if magic in THIN:
+                if operation is not None:
+                    operation.retain_slices(1)
                 return (_thin(reader, dsym=dsym),)
             _require(magic in FAT, "input is not a supported thin/fat image")
             endian, wide = FAT[magic]
             count = struct.unpack(endian + "I", reader.read(4, 4))[0]
             _require(0 < count <= 32, "fat slice count is invalid")
+            if operation is not None:
+                # Reserve the complete admitted result before any slice parse
+                # or retained entry/result collection, including failed parses.
+                operation.retain_slices(count)
             entry_size = 32 if wide else 20
             entries = []
             cpus: set[tuple[int, int]] = set()

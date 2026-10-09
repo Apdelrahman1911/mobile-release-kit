@@ -251,12 +251,13 @@ pub fn swap_installation_state(root: BorrowedFd<'_>, archived: &str) -> io::Resu
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle }
+pub enum PanelKind { Project, Quit, File, VersionSource, IosProject, IosWorkspace, MetadataRoot, EvidenceFolder, PublicImages, AndroidJdk, AndroidSdk, AndroidGradle, ArtifactAab, ArtifactIpa, ArtifactArchive, ArtifactDsyms }
 impl PanelKind {
     fn code(self) -> c_int { match self {
         Self::Project => 1, Self::Quit => 2, Self::File => 3, Self::VersionSource => 4,
         Self::IosProject => 5, Self::IosWorkspace => 6, Self::MetadataRoot => 7, Self::EvidenceFolder => 8,
         Self::PublicImages => 9, Self::AndroidJdk => 10, Self::AndroidSdk => 11, Self::AndroidGradle => 12,
+        Self::ArtifactAab=>13,Self::ArtifactIpa=>14,Self::ArtifactArchive=>15,Self::ArtifactDsyms=>16,
     } }
     fn project_field(self) -> bool { matches!(self, Self::VersionSource | Self::IosProject | Self::IosWorkspace | Self::MetadataRoot) }
 }
@@ -2647,6 +2648,7 @@ mod observation {
                     4 => PanelKind::VersionSource, 5 => PanelKind::IosProject, 6 => PanelKind::IosWorkspace, 7 => PanelKind::MetadataRoot,
                     8 => PanelKind::EvidenceFolder, 9 => PanelKind::PublicImages,
                     10 => PanelKind::AndroidJdk, 11 => PanelKind::AndroidSdk, 12 => PanelKind::AndroidGradle,
+                    13=>PanelKind::ArtifactAab,14=>PanelKind::ArtifactIpa,15=>PanelKind::ArtifactArchive,16=>PanelKind::ArtifactDsyms,
                     _ => return Err(io::Error::from(io::ErrorKind::InvalidData)) };
                 let directory_readiness = observation_directory_readiness(kind, flags).ok_or(io::ErrorKind::InvalidData)?;
                 if !observation_name_sample_valid(kind, flags, name_sample) { return Err(io::ErrorKind::InvalidData.into()); }
@@ -2935,7 +2937,8 @@ mod tests {
         }
         // Android purposes are actual open panels, not unknown-kind sentinels.
         // Use the public purpose mapping while testing the same native classifier.
-        for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle] {
+        for purpose in [PanelKind::AndroidJdk, PanelKind::AndroidSdk, PanelKind::AndroidGradle,
+            PanelKind::ArtifactAab,PanelKind::ArtifactIpa,PanelKind::ArtifactArchive,PanelKind::ArtifactDsyms] {
             let kind = purpose.code();
             for (code, expected) in [(1, PanelResponse::Accept), (0, PanelResponse::Decline),
                 (-1000, PanelResponse::Other), (-1001, PanelResponse::Other),
@@ -2947,6 +2950,10 @@ mod tests {
                 let programmatic = unsafe { mrk_panel_response(kind, code, 1) };
                 assert_eq!(panel_response(programmatic).ok(), Some(PanelResponse::Other), "programmatic kind={kind} code={code}");
             }
+        }
+        for (kind,code) in [(PanelKind::ArtifactAab,13),(PanelKind::ArtifactIpa,14),(PanelKind::ArtifactArchive,15),(PanelKind::ArtifactDsyms,16)] {
+            assert_eq!(kind.code(),code);assert!(!kind.project_field());
+            assert!(project_field_initial(kind,Path::new("/inert")).is_err());
         }
         assert!(panel_response(-1).is_err());
         assert!(panel_response(3).is_err());

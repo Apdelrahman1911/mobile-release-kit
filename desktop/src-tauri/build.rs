@@ -241,6 +241,8 @@ fn main() {
             "release_evidence_choose", "release_evidence_status", "release_evidence_observe", "release_evidence_cancel",
             "start_environment_diagnostics", "environment_diagnostics_status", "cancel_environment_diagnostics",
             "prepare_offline_preflight", "start_offline_preflight", "offline_preflight_status", "cancel_offline_preflight",
+            "artifact_inspection_pick", "artifact_inspection_prepare", "artifact_inspection_start",
+            "artifact_inspection_cancel", "artifact_inspection_status", "artifact_inspection_discard",
             "prepare_android_build", "start_android_build", "android_build_status", "cancel_android_build",
             "android_toolchain_catalog_status", "refresh_android_toolchain_catalog", "select_android_toolchain", "cancel_android_toolchain_catalog",
             "android_tool_sources_status", "choose_android_tool_source", "cancel_android_tool_source",
@@ -267,6 +269,7 @@ fn main() {
             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
             "github_release_reconcile", "github_release_pending", "github_release_cancel",
+            "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

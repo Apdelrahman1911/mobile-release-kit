@@ -257,6 +257,10 @@ class ProfileCallEvidence:
             operation = source.require_operation()
             _require(operation.signing is not None)
             operation.signing.bind_profile(self)
+        artifact = getattr(guard, "_artifact_inspection_source", None)
+        if artifact is not None:
+            _require(source is None)
+            artifact.require_operation().bind_profile(self)
         if self._blocked:
             ledger._abort()
 
@@ -401,6 +405,10 @@ class ProfileCallEvidence:
                     operation = source.require_operation()
                     _require(operation.signing is not None)
                     operation.signing.finish_profile(self)
+                artifact = getattr(self._guard, "_artifact_inspection_source", None)
+                if artifact is not None:
+                    _require(source is None)
+                    artifact.require_operation().finish_profile(self)
         except BaseException as error:
             self._record_fault(error)
             if primary is None:

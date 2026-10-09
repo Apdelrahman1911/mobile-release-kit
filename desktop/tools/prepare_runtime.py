@@ -40,7 +40,7 @@ BOOTSTRAPS = (
 # select this complete roster explicitly; file presence never selects a domain.
 CURRENT_BOOTSTRAPS = (
     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-    "ios_archive_bootstrap.py", "github_release_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py",
 )
 GITHUB_CA_NAME = "github-ca.pem"
 MAX_GITHUB_CA_BYTES = 512 * 1024

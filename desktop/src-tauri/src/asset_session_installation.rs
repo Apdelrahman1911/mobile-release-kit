@@ -344,7 +344,7 @@ impl DocumentBinding {
         self.reconcile();
         let mut state = self.lock(); self.expire(&mut state, Instant::now());
         self.installation_check_gate(&state)?;
-        installation_memory::admitted(&state, CONTROL_RESERVE).map_err(error)?;
+        installation_memory::admitted(self,&state, CONTROL_RESERVE).map_err(error)?;
         let id = self.next_operation(&mut state).map_err(|failure| error(failure.reason))?;
         // One sampled constructor endpoint, before dispatch. No result/picker
         // callback can renew it, and no native allocation runs in construction.

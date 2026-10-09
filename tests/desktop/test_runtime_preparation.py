@@ -150,7 +150,7 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-            "ios_archive_bootstrap.py", "github_release_bootstrap.py",
+            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
