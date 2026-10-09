@@ -2219,6 +2219,8 @@ def failure_base(phase, selection, original, *, engineering=False):
         "queryObservations": [], "requireObservations": [], "dashboardReadiness": None,
         "markers": {"selectedCaseStarted": False, "selectedCaseFailed": False,
             "testExecuteFailed": False, "testingFailed": False, "xcodebuildError": False}}
+    if engineering and phase == "test":
+        value["engineeringFirstFailure"] = None
     if not engineering and phase == "build":
         value["compilerDiagnostics"] = []
         value["markers"]["buildFailed"] = False
@@ -2318,6 +2320,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     engineering_pattern = (re.escape(engineering_namespace) + rb"=v1;line=([1-9][0-9]{0,4});"
                            rb"check=(condition|singleton|actionable)")
     engineering_candidates, engineering_candidate = 0, None
+    first_namespace = b"MRK_MACOS_ENGINEERING_FIRST_FAILURE"
+    first_phases = (b"admission", b"launch", b"catalogue", b"guideSelection", b"artifactStatus", b"artifactSample",
+                    b"artifactValue", b"quitCancel", b"postCancel", b"quitConfirm", b"termination", b"terminal")
+    first_pattern = (re.escape(first_namespace) + rb"=v1;line=([1-9][0-9]{0,4});phase=("
+                     + b"|".join(first_phases) + rb")")
+    first_candidates, first_candidate, first_invalid = 0, None, False
     guide_namespace = b"MRK_MACOS_ENGINEERING_GUIDE_QUERY"
     guide_pattern = (re.escape(guide_namespace) + rb"=v1;property=(label|title);type=(any|button|checkBox)"
                      rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
@@ -2620,6 +2628,17 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                         "counts": dict(zip(artifact_states, map(int, match.group(2).split(b",")))),
                         "sample": "pre-wait", "nonAtomic": True})
                 # Keep checking fixed namespaces so mixed lines cannot hide old failures.
+            if engineering and (first_namespace in record or (record and first_namespace.startswith(record))
+                    or (not complete and any(record.endswith(first_namespace[:size])
+                                             for size in range(1, len(first_namespace))))):
+                first_candidates = min(2, first_candidates + 1)
+                match = re.fullmatch(first_pattern, record) if engineering_require and complete and stream == "stdout" else None
+                if first_candidates != 1 or match is None or int(match.group(1)) > 65535:
+                    first_invalid = True
+                    first_candidate = None
+                else:
+                    first_candidate = {"line": int(match.group(1)), "phase": match.group(2).decode("ascii")}
+                # Examine other fixed namespaces too; a mixed line cannot hide a duplicate.
             if engineering_require and (engineering_namespace in record
                     or (record and engineering_namespace.startswith(record))
                     or (not complete and any(record.endswith(engineering_namespace[:size])
@@ -2662,6 +2681,8 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         value["queryObservations"] = guide_rows  # Partial sets stay partial/nonAtomic, never padded or authoritative.
     if engineering_require and not artifact_invalid:
         value["queryObservations"].extend(artifact_rows)  # Partial sets remain partial, never zero-filled.
+    if engineering_require and first_candidates == 1 and not first_invalid:
+        value["engineeringFirstFailure"] = first_candidate
     if engineering_require and engineering_candidates:
         if engineering_candidates == 1 and engineering_candidate is not None:
             value["requireObservations"].append(engineering_candidate)
@@ -2686,9 +2707,9 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         while value["compilerDiagnostics"] and len(encoded(value)) + 1 > 4094:
             value["compilerDiagnostics"].pop()
             value["findingsTruncated"] = True
-    value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or output_invalid else "classified" if any(value[key]
+    value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or first_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
-        or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
+        or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 

@@ -70,7 +70,18 @@ final class NormalAppUITests: XCTestCase {
         private var last: TimeInterval
         private var unusable = false
         private(set) var firstFailure: String?
-        init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false) throws {
+        enum EngineeringPhase: String {
+            case admission, launch, catalogue, guideSelection, artifactStatus, artifactSample
+            case artifactValue, quitCancel, postCancel, quitConfirm, termination, terminal
+        }
+        private let engineeringDiagnostic: Bool
+        private var engineeringPhase: EngineeringPhase = .admission
+        func recordEngineeringPhase(_ phase: EngineeringPhase) {
+            // Last ENTERED fixed step only; never completion or a new observation.
+            if engineeringDiagnostic && firstFailure == nil { engineeringPhase = phase }
+        }
+        init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
+             engineeringDiagnostic: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
             guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300)),
                   (now + seconds).isFinite, now + seconds > now else {
@@ -78,9 +89,15 @@ final class NormalAppUITests: XCTestCase {
             }
             last = now
             deadline = now + seconds
+            self.engineeringDiagnostic = engineeringDiagnostic
         }
-        func fail(_ reason: String) -> Refusal {
-            if firstFailure == nil { firstFailure = reason }
+        func fail(_ reason: String, line: UInt = #line) -> Refusal {
+            if firstFailure == nil {
+                firstFailure = reason
+                if engineeringDiagnostic && line >= 1 && line <= 65535 {
+                    print("MRK_MACOS_ENGINEERING_FIRST_FAILURE=v1;line=\(line);phase=\(engineeringPhase.rawValue)")
+                }
+            }
             return .condition(firstFailure!)
         }
         private func now() throws -> TimeInterval {
@@ -368,13 +385,14 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
-                                      removal: Bool = false) throws {
+                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws {
         try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
         try require((ProcessInfo.processInfo.environment["MRK_NORMAL_UI_REMOVAL_CHANNEL"] != nil) == removal
                     && (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))
                     && !removalQuitObserved && removalChannel == nil,
                     "removal harness channel is exclusive to its fixed case")
-        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned)
+        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,
+                                  engineeringDiagnostic: engineeringDiagnostic)
         caseClock = clock
         journeyDeadline = clock.deadline
     }
@@ -529,7 +547,7 @@ final class NormalAppUITests: XCTestCase {
                                     dashboard: (DashboardSnapshot, DashboardWaiter)? = nil) throws {
         guard value else {
             let originalFailureAbsent = caseClock?.firstFailure == nil
-            let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)
+            let refusal = caseClock?.fail(reason, line: line) ?? Refusal.condition(reason)
             // A later caller must never be paired with an earlier latched reason.
             if packagedRequireDiagnosticActive && originalFailureAbsent && !packagedRequireDiagnosticEmitted
                 && line >= 1 && line <= 65535 {
@@ -827,8 +845,9 @@ final class NormalAppUITests: XCTestCase {
         defer { engineeringRequireDiagnosticActive = false }
         continueAfterFailure = false
         executionTimeAllowance = 60
-        try beginCase(seconds: 60) // Includes original host/source/input admission.
+        try beginCase(seconds: 60, engineeringDiagnostic: true) // Includes original host/source/input admission.
         let work = try engineeringWork()
+        caseClock?.recordEngineeringPhase(.launch)
         let app = try launchEngineeringMain(work: work)
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "engineering main did not enter foreground")
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "engineering main window missing")
@@ -841,6 +860,7 @@ final class NormalAppUITests: XCTestCase {
             try require(renderers.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "engineering renderer missing")
         }
         let renderer = try unique(renderers, "engineering renderer missing or ambiguous")
+        caseClock?.recordEngineeringPhase(.catalogue)
         // Wait on actual current-core guide data below, not a static UI heading.
         // Initial loading may settle; no retry/second app or fallback is allowed.
         _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Good releases start here.")), in: renderer)
@@ -865,6 +885,7 @@ final class NormalAppUITests: XCTestCase {
                                "actual core Apple guide is missing or repeated")
         try reveal(apple, in: renderer)
         try require(apple.isEnabled && apple.isHittable, "actual core guide selection unavailable")
+        caseClock?.recordEngineeringPhase(.guideSelection)
         apple.click() // Reference-only selection: no credential import or operation.
         _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Original Distribution P12")), in: renderer)
         _ = try unique(renderer.staticTexts.matching(identifier: "Reference guide · not a result"),
@@ -876,6 +897,7 @@ final class NormalAppUITests: XCTestCase {
         // Status invocation admission. An invoke failure remains visible until
         // a successful explicit checkStatus; equal-revision display is not a
         // separately correlated receipt for this button click.
+        caseClock?.recordEngineeringPhase(.artifactStatus)
         try click(renderer.buttons.matching(identifier: "Artifacts"), "engineering Artifacts navigation unavailable")
         _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Inspect selected artifact bytes")), in: renderer)
         let artifactStatusQuery = renderer.buttons.matching(identifier: "Check original artifact status")
@@ -893,6 +915,7 @@ final class NormalAppUITests: XCTestCase {
             "This native document supports reviewing selected artifact bytes. Actual originals and runtime are rechecked before inspection.",
             "The required bundled runtime is not qualified for this document. Missing optional verification tools are a separate unavailable check."
         ]))
+        caseClock?.recordEngineeringPhase(.artifactSample)
         // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.
         // Counts never choose acceptance; 5 means more than four, not exact five.
         let artifactDiagnosticTexts = [
@@ -916,6 +939,7 @@ final class NormalAppUITests: XCTestCase {
             print("MRK_MACOS_ENGINEERING_ARTIFACT_QUERY=v1;property=\(property);type=staticText;counts=\(counts.joined(separator: ","));sample=pre-wait;nonAtomic=1")
         }
         // End fixed artifact pre-wait diagnostic; original wait remains authoritative.
+        caseClock?.recordEngineeringPhase(.artifactValue)
         _ = try waitElement(artifactAvailability, in: renderer,
                             failures: ["No new artifact outcome confirmed"])
         try require(renderer.staticTexts.matching(identifier: "No new artifact outcome confirmed").count == 0,
@@ -931,22 +955,27 @@ final class NormalAppUITests: XCTestCase {
         // This proves only a validated native Status in this fresh application,
         // not artifact inspection, every ACL entry, or signed/runtime readiness.
 
+        caseClock?.recordEngineeringPhase(.quitCancel)
         let first = try quitSheet(app, window)
         try click(first.buttons.matching(identifier: "Cancel"), "engineering normal Quit Cancel unavailable")
         try waitGone(first)
         try require(app.state == .runningForeground && window.exists && window.isHittable,
                     "engineering Quit Cancel did not retain the same usable window")
+        caseClock?.recordEngineeringPhase(.postCancel)
         try click(renderer.buttons.matching(identifier: "Dashboard"), "engineering post-Cancel navigation unavailable")
         try engineeringDashboard(renderer)
+        caseClock?.recordEngineeringPhase(.quitConfirm)
         let second = try quitSheet(app, window)
         try click(second.buttons.matching(identifier: "Quit"), "engineering normal Quit confirmation unavailable")
         guard let clock = caseClock, let owner = originalLaunch, entryGateObservation == nil else {
             throw Refusal.condition("engineering original custody changed")
         }
+        caseClock?.recordEngineeringPhase(.termination)
         let end = try clock.end(within: 10)
         try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)), "engineering normal Quit did not stop UI")
         try owner.observeNormalTermination(until: end) // SAME absolute end and original.
         try require(app.state == .notRunning, "engineering UI changed after original termination")
+        caseClock?.recordEngineeringPhase(.terminal)
         try owner.acceptTerminal()
         normalQuitObserved = true // Existing teardown still rechecks this SAME original.
         _ = try remaining(1)

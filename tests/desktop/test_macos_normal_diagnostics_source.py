@@ -278,7 +278,115 @@ def without_artifact_status_group_source(source):
         raise AssertionError('artifact status group exact SOURCE differs')
     return source.replace(ARTIFACT_STATUS_GROUP_CURRENT, ARTIFACT_STATUS_GROUP_PRIOR, 1)
 
+# First-failure diagnostics undo exactly before every unchanged historical inverse.
+ENGINEERING_FIRST_FAILURE_REGIONS = (('        private(set) var firstFailure: String?\n'
+  '        init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false) throws {\n',
+  '        private(set) var firstFailure: String?\n'
+  '        enum EngineeringPhase: String {\n'
+  '            case admission, launch, catalogue, guideSelection, artifactStatus, artifactSample\n'
+  '            case artifactValue, quitCancel, postCancel, quitConfirm, termination, terminal\n'
+  '        }\n'
+  '        private let engineeringDiagnostic: Bool\n'
+  '        private var engineeringPhase: EngineeringPhase = .admission\n'
+  '        func recordEngineeringPhase(_ phase: EngineeringPhase) {\n'
+  '            // Last ENTERED fixed step only; never completion or a new observation.\n'
+  '            if engineeringDiagnostic && firstFailure == nil { engineeringPhase = phase }\n'
+  '        }\n'
+  '        init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             engineeringDiagnostic: Bool = false) throws {\n'),
+ ('            last = now\n            deadline = now + seconds\n',
+  '            last = now\n'
+  '            deadline = now + seconds\n'
+  '            self.engineeringDiagnostic = engineeringDiagnostic\n'),
+ ('        func fail(_ reason: String) -> Refusal {\n'
+  '            if firstFailure == nil { firstFailure = reason }\n'
+  '            return .condition(firstFailure!)\n'
+  '        }\n',
+  '        func fail(_ reason: String, line: UInt = #line) -> Refusal {\n'
+  '            if firstFailure == nil {\n'
+  '                firstFailure = reason\n'
+  '                if engineeringDiagnostic && line >= 1 && line <= 65535 {\n'
+  '                    '
+  'print("MRK_MACOS_ENGINEERING_FIRST_FAILURE=v1;line=\\(line);phase=\\(engineeringPhase.rawValue)")\n'
+  '                }\n'
+  '            }\n'
+  '            return .condition(firstFailure!)\n'
+  '        }\n'),
+ ('                                      removal: Bool = false) throws {\n',
+  '                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws '
+  '{\n'),
+ ('        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: '
+  'iosUnsigned)\n',
+  '        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: '
+  'iosUnsigned,\n'
+  '                                  engineeringDiagnostic: engineeringDiagnostic)\n'),
+ ('            let refusal = caseClock?.fail(reason) ?? Refusal.condition(reason)\n',
+  '            let refusal = caseClock?.fail(reason, line: line) ?? Refusal.condition(reason)\n'),
+ ('        try beginCase(seconds: 60) // Includes original host/source/input admission.\n',
+  '        try beginCase(seconds: 60, engineeringDiagnostic: true) // Includes original host/source/input '
+  'admission.\n'),
+ ('        let app = try launchEngineeringMain(work: work)\n',
+  '        caseClock?.recordEngineeringPhase(.launch)\n'
+  '        let app = try launchEngineeringMain(work: work)\n'),
+ ('        // Wait on actual current-core guide data below, not a static UI heading.\n',
+  '        caseClock?.recordEngineeringPhase(.catalogue)\n'
+  '        // Wait on actual current-core guide data below, not a static UI heading.\n'),
+ ('        apple.click() // Reference-only selection: no credential import or operation.\n',
+  '        caseClock?.recordEngineeringPhase(.guideSelection)\n'
+  '        apple.click() // Reference-only selection: no credential import or operation.\n'),
+ ('        try click(renderer.buttons.matching(identifier: "Artifacts"), "engineering Artifacts navigation '
+  'unavailable")\n',
+  '        caseClock?.recordEngineeringPhase(.artifactStatus)\n'
+  '        try click(renderer.buttons.matching(identifier: "Artifacts"), "engineering Artifacts navigation '
+  'unavailable")\n'),
+ ('        // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.\n',
+  '        caseClock?.recordEngineeringPhase(.artifactSample)\n'
+  '        // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.\n'),
+ ('        _ = try waitElement(artifactAvailability, in: renderer,\n',
+  '        caseClock?.recordEngineeringPhase(.artifactValue)\n'
+  '        _ = try waitElement(artifactAvailability, in: renderer,\n'),
+ ('        let first = try quitSheet(app, window)\n'
+  '        try click(first.buttons.matching(identifier: "Cancel"), "engineering normal Quit Cancel '
+  'unavailable")\n',
+  '        caseClock?.recordEngineeringPhase(.quitCancel)\n'
+  '        let first = try quitSheet(app, window)\n'
+  '        try click(first.buttons.matching(identifier: "Cancel"), "engineering normal Quit Cancel '
+  'unavailable")\n'),
+ ('        try click(renderer.buttons.matching(identifier: "Dashboard"), "engineering post-Cancel navigation '
+  'unavailable")\n',
+  '        caseClock?.recordEngineeringPhase(.postCancel)\n'
+  '        try click(renderer.buttons.matching(identifier: "Dashboard"), "engineering post-Cancel navigation '
+  'unavailable")\n'),
+ ('        let second = try quitSheet(app, window)\n'
+  '        try click(second.buttons.matching(identifier: "Quit"), "engineering normal Quit confirmation '
+  'unavailable")\n',
+  '        caseClock?.recordEngineeringPhase(.quitConfirm)\n'
+  '        let second = try quitSheet(app, window)\n'
+  '        try click(second.buttons.matching(identifier: "Quit"), "engineering normal Quit confirmation '
+  'unavailable")\n'),
+ ('        let end = try clock.end(within: 10)\n'
+  '        try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)), '
+  '"engineering normal Quit did not stop UI")\n',
+  '        caseClock?.recordEngineeringPhase(.termination)\n'
+  '        let end = try clock.end(within: 10)\n'
+  '        try require(app.wait(for: .notRunning, timeout: try clock.remaining(10, before: end)), '
+  '"engineering normal Quit did not stop UI")\n'),
+ ('        try owner.acceptTerminal()\n'
+  '        normalQuitObserved = true // Existing teardown still rechecks this SAME original.\n',
+  '        caseClock?.recordEngineeringPhase(.terminal)\n'
+  '        try owner.acceptTerminal()\n'
+  '        normalQuitObserved = true // Existing teardown still rechecks this SAME original.\n'))
+
+def without_engineering_first_failure_source(source):
+    for previous, current in reversed(ENGINEERING_FIRST_FAILURE_REGIONS):
+        if source.count(current) != 1:
+            raise AssertionError("engineering first-failure exact SOURCE differs")
+        source = source.replace(current, previous, 1)
+    return source
+
 def without_engineering_wait_status_source(source):
+    if "MRK_MACOS_ENGINEERING_FIRST_FAILURE" in source:
+        source = without_engineering_first_failure_source(source)
     if "artifactStatusGroup" in source or "Original artifact inspection status" in source:
         source = without_artifact_status_group_source(source)
     source = without_artifact_wait_diagnostic_source(source)
@@ -1645,7 +1753,37 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                     self.restored_semantic_heading_queries(changed)
 
         # New diagnostic is removed exactly before ALL unchanged historical pins.
-        actual_artifact_source = (ROOT / SWIFT).read_text()
+        first_source = (ROOT / SWIFT).read_text()
+        first_original = without_engineering_first_failure_source(first_source)
+        self.assertEqual(hashlib.sha256(first_original.encode()).hexdigest(),
+                         '76cf81ab6ebcc4f576528405fc784461837619628b0144db27e1db31a0d15ea8')
+        # Missing/duplicated/changed first-failure regions cannot pass a historical pin.
+        for previous, current in reversed(ENGINEERING_FIRST_FAILURE_REGIONS):
+            for replacement in (previous, current + current, current.replace('engineering', 'foreign', 1)):
+                if replacement == current:
+                    continue
+                bad_first = first_source.replace(current, replacement, 1)
+                self.assertNotEqual(bad_first, first_source)
+                with self.assertRaises(AssertionError):
+                    without_engineering_first_failure_source(bad_first)
+        first_clock = first_source.split('private final class CaseClock {', 1)[1].split('private final class', 1)[0]
+        first_fail = first_clock.split('func fail(', 1)[1].split('private func now()', 1)[0]
+        self.assertEqual(first_fail.count('MRK_MACOS_ENGINEERING_FIRST_FAILURE'), 1)
+        self.assertLess(first_fail.index('if firstFailure == nil'), first_fail.index('firstFailure = reason'))
+        self.assertLess(first_fail.index('firstFailure = reason'), first_fail.index('print('))
+        self.assertIn('engineeringDiagnostic && line >= 1 && line <= 65535', first_fail)
+        self.assertNotIn('systemUptime', first_fail)
+        self.assertNotIn('\\(reason)', first_fail)
+        self.assertEqual(first_source.count('engineeringDiagnostic: true'), 1)
+        self.assertIn('caseClock?.fail(reason, line: line)', first_source)
+        first_case = first_source.split('func testEngineeringMainCatalogueAndQuit() throws {', 1)[1].split(
+            '// End engineering main fixture', 1)[0]
+        phases = ('launch', 'catalogue', 'guideSelection', 'artifactStatus', 'artifactSample', 'artifactValue',
+                  'quitCancel', 'postCancel', 'quitConfirm', 'termination', 'terminal')
+        phase_sites = ['caseClock?.recordEngineeringPhase(.' + phase + ')' for phase in phases]
+        self.assertEqual(first_source.count('caseClock?.recordEngineeringPhase('), len(phases))
+        self.assertEqual([first_case.index(site) for site in phase_sites], sorted(first_case.index(site) for site in phase_sites))
+        actual_artifact_source = first_original
         raw_status = actual_artifact_source
         # Current scope cannot be a global duplicate refusal paragraph. These
         # exact inverses preserve all earlier ordinary/native-owner source pins.
