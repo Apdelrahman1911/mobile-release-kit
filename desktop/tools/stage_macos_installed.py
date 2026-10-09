@@ -2509,6 +2509,244 @@ def audit_command(args):
             "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}
 
 
+# Fixed Install-only product envelope. The existing flat component/Remove
+# parsers above remain unchanged. These are the same closed productbuild
+# forms observed by macos_e2_native_fixture.context_xar/context_product; this
+# reader adds only the one SOURCE-selected presentation resource, not an
+# extraction API, alternate payload, package choice or general XML policy.
+INSTALL_COMPONENT = "MobileReleaseKit.pkg"
+INSTALL_PRESENTATION = ("Distribution.xml", "InstallerReadMe.html")
+INSTALL_PRESENTATION_LIMIT = 8192
+
+
+def install_product_sources(selection):
+    selection = selected_build(selection)
+    definition, readme = (read(DESKTOP / "macos-installed-inputs" / name, INSTALL_PRESENTATION_LIMIT)
+                          for name in INSTALL_PRESENTATION)
+    token = b"__MRK_PACKAGE_VERSION__"
+    need(definition.count(token) == 1, "install-product-source-version")
+    definition = definition.replace(token, selection.package_version.encode("ascii"))
+    need(0 < len(definition) <= INSTALL_PRESENTATION_LIMIT and 0 < len(readme) <= INSTALL_PRESENTATION_LIMIT,
+         "install-product-source-bound")
+    return definition, readme
+
+
+def install_product_xml(body):
+    need(type(body) is bytes and 0 < len(body) <= INSTALL_PRESENTATION_LIMIT, "install-product-xml")
+    try:
+        text = body.decode("utf-8", "strict")
+    except UnicodeError as error:
+        raise Refused("install-product-xml") from error
+    # Parse only the text whose grammar was checked. Byte-parser encoding
+    # autodetection must not hide a zero-interleaved DTD/entity declaration.
+    need("\0" not in text and "<!DOCTYPE" not in text.upper()
+         and "<!ENTITY" not in text.upper(), "install-product-xml")
+    value = ET.fromstring(text)
+    need(sum(1 for _ in value.iter()) <= 64, "install-product-xml")
+    return value
+
+
+def install_product_distribution(body, expected):
+    def tree(element):
+        return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
+                tuple((tree(child), (child.tail or "").strip()) for child in element))
+    actual = install_product_xml(body)
+    references = actual.findall("pkg-ref")
+    # Exact macOS26 context-product observations only, not a general duplicate
+    # reference merge or authorization to add an action. The metadata reference
+    # has no payload/bundle and is the final child of the original definition.
+    if len(references) == 2:
+        metadata = references[1]
+        need(list(actual)[-1] is metadata and metadata.attrib == {"id": PACKAGE_ID}
+             and not (metadata.text or "").strip() and not (metadata.tail or "").strip()
+             and len(metadata) == 1, "install-product-distribution")
+        bundle = metadata[0]
+        need(bundle.tag == "bundle-version" and not bundle.attrib and not list(bundle)
+             and not (bundle.text or "").strip() and not (bundle.tail or "").strip(),
+             "install-product-distribution")
+        actual.remove(metadata)
+    for reference in actual.findall("pkg-ref"):
+        for name, value in (("installKBytes", "0"), ("updateKBytes", "0"), ("onConclusion", "None")):
+            if name in reference.attrib:
+                need(reference.attrib.pop(name) == value, "install-product-distribution")
+        if (reference.text or "").strip() == "#" + INSTALL_COMPONENT:
+            reference.text = INSTALL_COMPONENT
+    need(tree(actual) == tree(install_product_xml(expected)), "install-product-distribution")
+
+
+def install_product_members(body):
+    """Closed outer Install XAR using the existing context's member syntax.
+
+    Native signature/timestamp/staple verification and final whole-P binding
+    remain mandatory in the existing owner. Signature/ticket bytes are not
+    filesystem members and are not treated as authority by this DATA audit.
+    """
+    need(type(body) is bytes and 28 <= len(body) <= MAX_BYTES, "install-product-xar-bound")
+    magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
+    algorithms = {1: ("sha1", 20), 3: ("sha256", 32), 4: ("sha512", 64)}
+    need((magic, header, version) == (0x78617221, 28, 1) and 0 < compressed <= 1024 * 1024
+         and 0 < expanded <= 2 * 1024 * 1024 and header + compressed <= len(body)
+         and checksum in algorithms, "install-product-xar-header")
+    packed_toc = body[header:header + compressed]
+    toc_body = inflate(packed_toc, expanded)
+    need(len(toc_body) == expanded, "install-product-xar-toc")
+    try:
+        toc_text = toc_body.decode("utf-8", "strict")
+    except UnicodeError as error:
+        raise Refused("install-product-xar-toc") from error
+    need("\0" not in toc_text and "<!DOCTYPE" not in toc_text.upper()
+         and "<!ENTITY" not in toc_text.upper(), "install-product-xar-toc")
+    root = ET.fromstring(toc_text)
+    need(root.tag == "xar" and not root.attrib and [child.tag for child in root] == ["toc"],
+         "install-product-xar-toc")
+    toc = root[0]
+    need(not toc.attrib and all(child.tag in ("creation-time", "checksum", "file", "signature", "x-signature") for child in toc)
+         and len(toc.findall("checksum")) == 1 and len(toc.findall("creation-time")) <= 1
+         and len(toc.findall("signature")) <= 1 and len(toc.findall("x-signature")) <= 1,
+         "install-product-xar-toc")
+    for element in toc.findall("creation-time"):
+        need(not element.attrib and not list(element), "install-product-xar-toc")
+    for tag in ("signature", "x-signature"):
+        for element in toc.findall(tag):
+            # Existing native productsign/pkgutil own this opaque signature
+            # metadata. It may not hide another filesystem member/tree.
+            need(not any(child.tag == "file" for child in element.iter()), "install-product-xar-toc")
+    algorithm, checksum_size = algorithms[checksum]
+    check = toc.find("checksum")
+    need(check.attrib == {"style": algorithm} and [child.tag for child in check] == ["offset", "size"]
+         and check.findtext("offset") == "0" and check.findtext("size") == str(checksum_size)
+         and all(not child.attrib and not list(child) for child in check), "install-product-xar-checksum")
+    heap = header + compressed
+    need(body[heap:heap + checksum_size] == hashlib.new(algorithm, packed_toc).digest(),
+         "install-product-xar-checksum")
+    allowed = {"Distribution", "Resources", "Resources/InstallerReadMe.html", INSTALL_COMPONENT,
+               INSTALL_COMPONENT + "/PackageInfo", INSTALL_COMPONENT + "/Scripts"}
+    queue = [(element, "") for element in toc.findall("file")]
+    members, directories, identifiers, intervals, expanded_bytes = {}, set(), set(), [], 0
+    while queue:
+        need(len(queue) + len(identifiers) <= 6, "install-product-xar-count")
+        element, parent = queue.pop(0)
+        file_id = element.get("id")
+        need(set(element.attrib) == {"id"} and type(file_id) is str
+             and re.fullmatch(r"[1-9][0-9]{0,3}", file_id) and file_id not in identifiers,
+             "install-product-xar-id")
+        identifiers.add(file_id)
+        metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
+                    "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime"}
+        need(all(child.tag in metadata for child in element), "install-product-xar-metadata")
+        names, types = element.findall("name"), element.findall("type")
+        repeated = (len(names) == 2 and len(types) == 1 and types[0].text == "file"
+                    and len(element.findall("data")) == 1 and not element.findall("file")
+                    and all(not node.attrib and not list(node) and not (node.tail or "").strip() for node in names)
+                    and type(names[0].text) is str and names[0].text == names[1].text
+                    and parent + names[0].text in allowed)
+        need(len(types) == 1 and (len(names) == 1 or repeated)
+             and all(len(element.findall(tag)) <= 1 for tag in metadata - ({"file", "name"} if repeated else {"file"})),
+             "install-product-xar-duplicate")
+        for child in element:
+            if child.tag == "FinderCreateTime":
+                need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
+                     and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
+                     and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child)
+                     and type(child.findtext("time")) is str
+                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time"))
+                     and type(child.findtext("nanoseconds")) is str
+                     and re.fullmatch(r"0|[1-9][0-9]{0,8}", child.findtext("nanoseconds")),
+                     "install-product-xar-metadata")
+            elif child.tag not in ("file", "data"):
+                need(not child.attrib and not list(child), "install-product-xar-metadata")
+            if child.tag in ("inode", "deviceno"):
+                need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
+                     "install-product-xar-metadata")
+        name, kind = element.findtext("name"), element.findtext("type")
+        need(type(name) is str and name and "/" not in name and "\\" not in name and name not in (".", ".."),
+             "install-product-xar-name")
+        name = parent + name
+        need(name in allowed and name not in members and name not in directories, "install-product-xar-roster")
+        if kind == "directory":
+            need(not parent and name in ("Resources", INSTALL_COMPONENT) and element.find("data") is None
+                 and len(element.findall("file")) == (1 if name == "Resources" else 2), "install-product-xar-directory")
+            directories.add(name)
+            queue.extend((child, name + "/") for child in element.findall("file"))
+            continue
+        need(kind == "file" and not element.findall("file") and len(element.findall("data")) == 1,
+             "install-product-xar-file")
+        data = element.find("data")
+        required, optional = {"length", "offset", "size", "encoding"}, {"archived-checksum", "extracted-checksum"}
+        need(not data.attrib and required <= {child.tag for child in data} <= required | optional
+             and len({child.tag for child in data}) == len(data), "install-product-xar-data")
+        texts = [data.findtext(key) for key in ("length", "offset", "size")]
+        need(all(type(value) is str and re.fullmatch(r"0|[1-9][0-9]{0,9}", value) for value in texts)
+             and all(not data.find(key).attrib and not list(data.find(key)) for key in ("length", "offset", "size")),
+             "install-product-xar-range")
+        length, offset, size = map(int, texts)
+        limit = INSTALL_PRESENTATION_LIMIT if name in ("Distribution", "Resources/InstallerReadMe.html") else MAX_BYTES
+        need(0 < length <= MAX_BYTES and 0 < size <= limit and expanded_bytes + size <= MAX_BYTES
+             and offset >= checksum_size and heap + offset + length <= len(body)
+             and all(offset + length <= low or offset >= high for low, high in intervals), "install-product-xar-range")
+        encoding = data.find("encoding")
+        need(encoding.attrib in ({"style": "application/octet-stream"}, {"style": "application/x-gzip"})
+             and not list(encoding) and not (encoding.text or "").strip(), "install-product-xar-encoding")
+        packed = body[heap + offset:heap + offset + length]
+        decoded = packed if encoding.get("style") == "application/octet-stream" else inflate(packed, size, gzip=packed[:2] == b"\x1f\x8b")
+        need(len(decoded) == size, "install-product-xar-size")
+        for tag, content in (("archived-checksum", packed), ("extracted-checksum", decoded)):
+            item = data.find(tag)
+            if item is not None:
+                need(set(item.attrib) == {"style"} and item.get("style") in ("sha1", "sha256", "sha512")
+                     and not list(item) and item.text == hashlib.new(item.get("style"), content).hexdigest(),
+                     "install-product-xar-member-checksum")
+        members[name] = decoded
+        expanded_bytes += size
+        intervals.append((offset, offset + length))
+    presentation = {"Distribution", "Resources/InstallerReadMe.html"}
+    need(set(members) == presentation | {INSTALL_COMPONENT}
+         or set(members) == presentation | {INSTALL_COMPONENT + "/PackageInfo", INSTALL_COMPONENT + "/Scripts"},
+         "install-product-xar-roster")
+    need(directories == ({"Resources"} if INSTALL_COMPONENT in members else {"Resources", INSTALL_COMPONENT}),
+         "install-product-xar-directory")
+    return members
+
+
+def prepare_install_product_command(args):
+    definition, readme = install_product_sources(source_build_selection(command_target(args)))
+    write_tree(args.output, {"Distribution": (definition, 0o444),
+                            "resources/InstallerReadMe.html": (readme, 0o444)}, root_mode=0o700)
+    return {"schemaVersion": 1, "distributionSha256": digest(definition), "readMeSha256": digest(readme),
+            "qualification": "fixed-install-presentation-prepared-not-built-or-GUI-qualified"}
+
+
+def audit_install_product_command(args):
+    need(getattr(args, "fixture", False) is False and getattr(args, "remove", False) is False,
+         "fixed-install-product-purpose")
+    selection = source_build_selection(command_target(args))
+    scripts, original, original_members, identifier, _owner = original_package(
+        args.scripts, args.original_package, selection=selection)
+    definition, readme = install_product_sources(selection)
+    package = read(args.package)
+    members = install_product_members(package)
+    install_product_distribution(members["Distribution"], definition)
+    need(members["Resources/InstallerReadMe.html"] == readme, "install-product-readme")
+    if INSTALL_COMPONENT in members:
+        component = xar_members(members[INSTALL_COMPONENT])
+    else:
+        component = {name: members[INSTALL_COMPONENT + "/" + name] for name in ("PackageInfo", "Scripts")}
+    need(set(component) == {"PackageInfo", "Scripts"}
+         and component["PackageInfo"] == original_members["PackageInfo"], "install-product-component")
+    package_info(component["PackageInfo"], selection=selection)
+    archive = component["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        archive = inflate(archive, MAX_BYTES, gzip=True)
+    actual = cpio_members(archive)
+    expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
+    need(actual == expected, "complete-root-owned-scripts-correspondence")
+    return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
+            "originalPackageSha256": digest(original), "packageInfoSha256": digest(component["PackageInfo"]),
+            "packageIdentifier": identifier, "scriptFileCount": len(scripts), "finalDestinationPayloadEntries": 0,
+            "productDistributionSha256": digest(members["Distribution"]), "productReadMeSha256": digest(readme),
+            "qualification": "fixed-install-product-and-scripts-audited-not-installed-or-GUI-qualified"}
+
+
 def remove_scripts_command(args):
     selection = source_build_selection(command_target(args))
     need(sha(args.expected_remover), "remove-program-anchor")

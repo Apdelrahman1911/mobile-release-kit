@@ -889,7 +889,9 @@ fn stop_quit(state: &mut DocumentState, at: Instant) {
         quit.stop();
     }
 }
-#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+#[cfg(any(test, all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(feature = "desktop-shell", target_os = "macos", target_pointer_width = "64",
+        any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
 fn accepted_quit_cleanup_end(state: &DocumentState) -> Option<Instant> {
     if state.stopping && state.quit_accepted && state.quit.as_ref().is_some_and(|quit| quit.stopped()) {
         state.quit_cleanup_end

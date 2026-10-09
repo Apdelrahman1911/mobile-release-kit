@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import stat
@@ -44,12 +45,57 @@ def workflow_step(workflow, name):
     return workflow.split(marker, 1)[1].split("      - name: ", 1)[0]
 
 
+# Exact independent shipping-compile job only. All prior installed/source
+# assertions receive their unchanged bytes; a partial or altered job refuses.
+SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd9469503e9ee123a8758ed99662bcae273e12c', '      - verify/desktop-macos-preview\n'), (20759, 47, '44222096a313a399009b17793d392fec11cb7a20988cd4e0bc36023dad3a6c5f', '        run: |\n'), (24134, 42, '4e4810b6121d5c821d53c96394a4a5a3149338f9703c5e31ab3dc60526b5a144', '        run: |\n'), (326387, 74208, '4a74a4d98e113504d89eed6aaf0e979f7d232ef1026c3a8673f1e19c8bb521b0', ''))
+
+
+# Ordinary Install presentation only. Preserve both historical whole-workflow
+# inverse stacks byte-for-byte; a partial/altered product region is not ignored.
+INSTALL_PRODUCT_WORKFLOW_INVERSE = ((108130, 217, '8b87b9b0b3e8ac89ee8e9b1a7220391eb723c318c97ac2456e4df9383b6cb2af', '          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-unsigned"\n          [[ ! -e "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" ]] || exit 1\n'), (108515, 92, '4a2d1b9cb0b5f33ec56d16c48bf394c817eb903617c909b1ab7e756396edca87', '              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" \\\n'), (108845, 173, 'e22272f841ce8a1d0103144f86b07a6f1135464eb7eee018d42184c3333c4a5e', '          # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.\n'), (109104, 115, '24ebdf18c54cfa3c91d92f0ee23a44cfbb60d6ffa6aea5f4b837135bb18a2d0e', '      - name: Sign and notarize the completed scripts-only Installer package before final P\n'), (109846, 260, 'ac6b48901eabbef4f5e3c0ac970c51f45c100405432d1fa383eced046e839b2b', '          # A separate Installer identity signs the completed Scripts XAR.\n'))
+
+
+def without_install_product_workflow(source):
+    marker = "      - name: Build fixed Installer presentation then sign and notarize the completed outer package before final P\n"
+    if marker not in source:
+        if "package-component" in source or "SOURCE ReadMe envelope" in source:
+            raise AssertionError("partial Install product workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(INSTALL_PRODUCT_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("Install product workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "659016d8b299a5497ab895162695d3927b55e4dda96750cd3e5f9a742467bd00":
+        raise AssertionError("Install product workflow inverse changed prior source")
+    return value.decode()
+
+
+def without_shipping_compile_workflow(source):
+    source = without_install_product_workflow(source)
+    marker = "  shipping-image-compile:\n"
+    if marker not in source:
+        if any(value in source for value in ("verify/desktop-macos-image-compile", "mrk_installed_source_inventory", "mrk_installed_direct_rust")):
+            raise AssertionError("partial shipping compile workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(SHIPPING_COMPILE_WORKFLOW_INVERSE):
+        actual = value[start:start + length]
+        if hashlib.sha256(actual).hexdigest() != expected:
+            raise AssertionError("shipping compile workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d":
+        raise AssertionError("shipping compile workflow inverse changed prior source")
+    return value.decode()
+
+
 # Exact Remove-output successor only. No original Install/instrumented workflow
 # safety assertion is weakened by the independent, fixed preview-only route.
 REMOVE_OUTPUT_WORKFLOW_INVERSE = ((629, 328, '11cd9e875296bd66a7fe4932b8774e3152110f531eec148ab376851c3f918b67', '    # Timed-step union445min; SOURCE scopes select disjoint UI work.\n    # Preview345 / recovery339 / installed210 / dormant ARM Android267 / dormant iOS243, plus5 overhead.\n    # Android adds build9 + preparation22 + test23 + summary3;272 <=350.\n    # iOS installed-only adds build9 + test22 + summary2;248 <=350, never preview+24.\n'), (150120, 9028, '9d50426024c5a0b7935ae93ee5c06be69221dce04aff47f27c4b8a4b610cada1', ''), (159699, 296, '757619f49bf177bc5404bec36b927f406b9ca1ddc8bbc79609c4ad7981e8105d', ''), (160791, 225, 'adbb7994c243addb230dcff883b114ded25035ee8931a15b6bb6aca2238a89fd', ''), (315226, 521, 'b37eab9482c0d97fa90e1f37e948849a9b3f7d8cfc3bda939e630b8bb07a0726', ''))
 
 
 def without_remove_output_workflow(source):
+    source = without_shipping_compile_workflow(source)
     marker = "      - name: Prepare the fixed two-file removal package without executing it\n"
     if marker not in source:
         if "finalize-remove-package --target" in source or "finalize-remove-image --target" in source or "package-remove --target" in source:
@@ -608,8 +654,37 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(signed), len(body) + 32)
         return bytes(signed)
 
-    def final_package_xar(self, members, *, signed=False):
+    def final_package_xar(self, members, *, signed=False, product=False):
         """Tiny literal XAR/CMS/ticket shapes, NOT native cryptographic material."""
+        if product:
+            # Same DATA fixture, now the fixed two-level product form. A real
+            # compressed-TOC checksum is not a valid package/code signature.
+            tree, heap, cursor = {}, [], [20, 0]
+            for path, body in members.items():
+                node = tree
+                parts = path.split("/")
+                for part in parts[:-1]:
+                    node = node.setdefault(part, {})
+                node[parts[-1]] = body
+            def node_xml(name, value):
+                cursor[1] += 1
+                prefix = '<file id="' + str(cursor[1]) + '"><name>' + name + '</name>'
+                if type(value) is dict:
+                    return prefix + '<type>directory</type>' + ''.join(node_xml(k, v) for k, v in value.items()) + '</file>'
+                offset = cursor[0]; cursor[0] += len(value); heap.append(value)
+                return (prefix + '<type>file</type><data><length>' + str(len(value))
+                        + '</length><offset>' + str(offset) + '</offset><size>' + str(len(value))
+                        + '</size><encoding style="application/octet-stream"/></data></file>')
+            records = ''.join(node_xml(name, value) for name, value in tree.items())
+            if signed:
+                records += ('<signature style="RSA"><offset>' + str(cursor[0]) + '</offset><size>16</size></signature>'
+                            '<x-signature style="CMS"><offset>' + str(cursor[0] + 16) + '</offset><size>16</size></x-signature>')
+                heap.append(b"INERT RSA DATA!!" + b"INERT CMS DATA!!")
+            toc = ('<?xml version="1.0"?><xar><toc><checksum style="sha1"><offset>0</offset><size>20</size></checksum>'
+                   + records + '</toc></xar>').encode('ascii')
+            compressed = TOOL.zlib.compress(toc)
+            return (struct.pack('>IHHQQI', 0x78617221, 28, 1, len(compressed), len(toc), 1)
+                    + compressed + hashlib.sha1(compressed).digest() + b''.join(heap))
         records, heap, offset = [], [], 0
         for index, (name, body) in enumerate(members.items(), 1):
             records.append('<file id="' + str(index) + '"><name>' + name + '</name><type>file</type><data>'
@@ -636,13 +711,26 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         files, packager_members = package_data(uid=os.getuid(), gid=os.getgid(), selection=selected)
         unsigned_members = package_data(selection=selected)[1]
         TOOL.write_tree(work / "scripts", files, root_mode=0o755)
-        (work / "package-unsigned").mkdir(mode=0o700)
+        product = role == "ordinary-image"
+        component = self.final_package_xar(unsigned_members)
+        if product:
+            source = Path(__file__).absolute().parents[2]
+            for name in TOOL.INSTALL_PRESENTATION:
+                path = checkout / "desktop/macos-installed-inputs" / name
+                path.write_bytes((source / "desktop/macos-installed-inputs" / name).read_bytes()); path.chmod(0o644)
+            definition, readme = TOOL.install_product_sources(selected)
+            outer_members = {"Distribution": definition, "Resources/InstallerReadMe.html": readme,
+                             TOOL.INSTALL_COMPONENT: component}
+        else:
+            outer_members = unsigned_members
+        initial_parent = "package-component" if product else "package-unsigned"
+        (work / initial_parent).mkdir(mode=0o700)
         original = self.final_package_xar(packager_members)
-        unsigned = self.final_package_xar(unsigned_members)
-        signed = self.final_package_xar(unsigned_members, signed=True)
+        unsigned = self.final_package_xar(outer_members, product=product) if product else component
+        signed = self.final_package_xar(outer_members, signed=True, product=product)
         ticket = b"INERT APPENDED PACKAGE TICKET DATA ONLY\0t8lr"
         for path, body in ((work / "MobileReleaseKit-original.pkg", original),
-                           (work / "package-unsigned/MobileReleaseKit.pkg", unsigned)):
+                           (work / initial_parent / "MobileReleaseKit.pkg", component)):
             path.write_bytes(body); path.chmod(0o600)
         for name in ("stage_macos_installed.py", "macos_android_helper_package.py"):
             path = checkout / "desktop/tools" / name
@@ -653,7 +741,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         profile = checkout / module.NOTARY_PROFILE
         profile.write_bytes(TOOL.canonical(notary_profile) + b"\n"); profile.chmod(0o644)
         state = SimpleNamespace(checkout=checkout, work=work, environment=environment, target=target, role=role,
-            original=original, unsigned=unsigned, signed=signed, ticket=ticket, clock=clock, observations=observations,
+            original=original, component=component, unsigned=unsigned, signed=signed, ticket=ticket, clock=clock, observations=observations,
             failure=failure, primary=RuntimeError("INERT final-package original failure"), tools={}, signature_text=None)
 
         def command(argv, **options):
@@ -675,7 +763,25 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 clock[0] += 1800_000_000_000
             output = b""
             path = work / operation.target_name / "signed-package/MobileReleaseKit.pkg"
-            if called.startswith("final-package-resolve-"):
+            if called == "final-package-productbuild":
+                presentation = work / operation.target_name / "product-input"
+                output_path = work / "package-unsigned/MobileReleaseKit.pkg"
+                self.assertEqual(argv, ["/usr/bin/productbuild", "--distribution", str(presentation / "Distribution"),
+                    "--package-path", str(work / "package-component"), "--resources", str(presentation / "resources"), str(output_path)])
+                self.assertEqual((presentation / "Distribution").read_bytes(), definition)
+                self.assertEqual((presentation / "resources/InstallerReadMe.html").read_bytes(), readme)
+                self.assertEqual(stat.S_IMODE((presentation / "resources").stat().st_mode), 0o555)
+                self.assertEqual(stat.S_IMODE((presentation / "Distribution").stat().st_mode), 0o444)
+                self.assertEqual(stat.S_IMODE((presentation / "resources/InstallerReadMe.html").stat().st_mode), 0o444)
+                self.assertEqual((work / "package-component/MobileReleaseKit.pkg").read_bytes(), component)
+                self.assertFalse(output_path.exists())
+                changed = dict(outer_members)
+                if failure == "product-readme": changed["Resources/InstallerReadMe.html"] += b"not SOURCE"
+                elif failure == "product-distribution": changed["Distribution"] = definition.replace(b'allow-external-scripts="false"', b'allow-external-scripts="true"')
+                elif failure == "product-resource": changed["Resources/other.html"] = b"extra"
+                elif failure == "product-component": changed[TOOL.INSTALL_COMPONENT] = original
+                output_path.write_bytes(self.final_package_xar(changed, product=True)); output_path.chmod(0o600)
+            elif called.startswith("final-package-resolve-"):
                 name = called.removeprefix("final-package-resolve-")
                 self.assertEqual(argv, ["/usr/bin/xcrun", "--find", name])
                 output = (str(state.tools[name]["path"]) + "\n").encode("utf-8")
@@ -694,7 +800,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     (path.parent / "unlisted").write_bytes(b"INERT other native output")
                 elif failure == "signed-scripts":
                     changed = dict(unsigned_members, Scripts=unsigned_members["Scripts"].replace(b"DATA\n", b"DIFF\n"))
-                    path.write_bytes(self.final_package_xar(changed, signed=True))
+                    if product:
+                        changed = dict(outer_members, **{TOOL.INSTALL_COMPONENT: self.final_package_xar(changed)})
+                    path.write_bytes(self.final_package_xar(changed, signed=True, product=product))
             elif called in ("final-package-signature-before", "final-package-signature-after"):
                 self.assertIsNone(operation.credential_active)
                 self.assertEqual(argv, ["/usr/sbin/pkgutil", "--check-signature", str(path)])
@@ -2091,13 +2199,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         # Actual same-original filesystem/auth/audit/publication transitions;
         # productsign/pkgutil/notarytool/stapler are inert native-return DATA.
-        # Both target/role pairs traverse the complete nine-call phase once.
+        # Ordinary Install adds its actual ten-call fixed product phase; the
+        # separate observation role keeps all nine existing flat-package calls.
         for target in (module.ARM_TARGET, module.INTEL_TARGET):
             for role in ("ordinary-image", "installed-shell-observation"):
                 with self.subTest(finalPackageTarget=target, role=role), tempfile.TemporaryDirectory() as directory:
                     fixture = self.final_package_fixture(Path(directory), target=target, role=role)
                     operation = fixture.operation
                     peak, register, original_close = [0], operation.register, operation.close
+                    original_fchmod, retirement_modes = module.os.fchmod, []
                     active = {id(row): row for row in operation.entries if not row["closed"]}
                     def record_original(*args, **kwargs):
                         entry = register(*args, **kwargs)
@@ -2110,15 +2220,63 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         finally:
                             if entry["closed"] and entry["fd"] is None:
                                 active.pop(id(entry), None)
+                    def chmod_original(fd, mode):
+                        entries = [entry for entry in operation.entries if entry["role"] == "install-product-retirement-directory"
+                                   and entry["fd"] == fd and not entry["closed"]]
+                        if entries:
+                            self.assertEqual(len(entries), 1)
+                            entry = entries[0]
+                            self.assertTrue(operation.notary_retiring)
+                            self.assertEqual(operation.stage, "notary-known-private-retirement")
+                            self.assertIs(entry["parent_entry"], operation.install_product_root)
+                            self.assertEqual((entry["name"], mode), ("resources", 0o700))
+                            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o555)
+                            self.assertEqual(os.listdir(fd), ["InstallerReadMe.html"])
+                            presentation = fixture.work / operation.target_name / "product-input"
+                            self.assertEqual(stat.S_IMODE((presentation / "Distribution").stat().st_mode), 0o444)
+                            self.assertEqual(stat.S_IMODE((presentation / "resources/InstallerReadMe.html").stat().st_mode), 0o444)
+                        result = original_fchmod(fd, mode)
+                        if entries:
+                            self.assertEqual(stat.S_IMODE(os.fstat(fd).st_mode), 0o700)
+                            retirement_modes.append(entries[0])
+                        return result
                     with (self.final_package_fixture_call(fixture), mock.patch.object(operation, "register", new=record_original),
-                          mock.patch.object(operation, "close", new=close_original)):
-                        returned = operation.execute()
-                    self.assertEqual([row[0] for row in fixture.observations], list(module.FINAL_PACKAGE_ROLES))
+                          mock.patch.object(operation, "close", new=close_original),
+                          mock.patch.object(module.os, "fchmod", new=chmod_original)):
+                        try:
+                            returned = operation.execute()
+                        except module.Refused:
+                            # Fixed finite receipt fields, never native output,
+                            # argv/environment, private paths or credentials.
+                            def label(value):
+                                return value if type(value) is str and len(value) <= 96 and re.fullmatch(r"[A-Za-z0-9_-]+", value) else None
+                            def flag(value):
+                                return value if type(value) is bool else None
+                            failure = operation.receipt.get("failure", {})
+                            diagnostic = {"phase": label(operation.phase), "lastStage": label(operation.stage),
+                                "failure": {key: label(failure.get(key)) for key in ("stage", "type", "reason")},
+                                "cleanupErrorCount": len(operation.errors),
+                                "cleanupErrors": [{key: label(row.get(key)) for key in ("stage", "role", "type")}
+                                                  for row in operation.errors[:16]],
+                                "expectedRoles": list(module.final_package_roles(False, role)), "callCount": len(operation.calls),
+                                "calls": [{"role": label(row.get("role")), "returned": flag(row.get("returned")),
+                                    "status": row.get("returncode") if type(row.get("returncode")) is int and -65536 < row["returncode"] < 65536 else None,
+                                    "capturesSettled": flag(row.get("capturesSettled"))} for row in operation.calls[:10]],
+                                "credentialCallCount": len(operation.credential_calls),
+                                "targetRetired": flag(operation.receipt.get("targetRetired")),
+                                "originalClosesKnown": flag(operation.receipt.get("originalClosesKnown"))}
+                            self.fail("final-package-finite-receipt " + json.dumps(diagnostic, sort_keys=True, separators=(",", ":")))
+                    expected_roles = module.final_package_roles(False, role)
+                    self.assertIs(module.os.fchmod, original_fchmod)
+                    self.assertEqual(len(retirement_modes), 1 if role == "ordinary-image" else 0)
+                    self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in retirement_modes))
+                    self.assertEqual([row[0] for row in fixture.observations], list(expected_roles))
                     self.assertEqual(tuple(row["role"] for row in operation.credential_calls), module.INSTALLER_CREDENTIAL_ROSTER)
-                    self.assertEqual((len(operation.calls), len(operation.credential_calls)), (9, 20))
+                    self.assertEqual((len(operation.calls), len(operation.credential_calls)), (10 if role == "ordinary-image" else 9, 20))
                     self.assertFalse(active)
                     self.assertLessEqual(max(peak), 60)  # Same inherited64 FD limit, including stdio.
-                    self.assertEqual([row[2]["timeout"] for row in fixture.observations], [30, 30, 60, 30, 1200, 30, 30, 30, 30])
+                    self.assertEqual([row[2]["timeout"] for row in fixture.observations],
+                                     ([30] if role == "ordinary-image" else []) + [30, 30, 60, 30, 1200, 30, 30, 30, 30])
                     self.assertEqual(operation.notary_observed, fixture.clock[0])
                     self.assertTrue(operation.receipt["passed"] and operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
                     self.assertTrue(all(row["closed"] for row in operation.entries))
@@ -2131,6 +2289,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
                     self.assertEqual((fixture.work / "MobileReleaseKit-original.pkg").read_bytes(), fixture.original)
                     self.assertEqual((fixture.work / "package-unsigned/MobileReleaseKit.pkg").read_bytes(), fixture.unsigned)
+                    if role == "ordinary-image":
+                        self.assertEqual((fixture.work / "package-component/MobileReleaseKit.pkg").read_bytes(), fixture.component)
+                        self.assertNotEqual(fixture.component, fixture.unsigned)
+                        self.assertNotEqual(module.digest(fixture.component), returned)
+                        self.assertEqual(TOOL.install_product_members(fixture.unsigned)[TOOL.INSTALL_COMPONENT], fixture.component)
                     final_path = fixture.work / "package-final/MobileReleaseKit.pkg"
                     final_body = final_path.read_bytes()
                     self.assertEqual(final_body, fixture.signed + fixture.ticket)
@@ -2158,10 +2321,22 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.digest(notary_body), len(final_body), returned,
                         TOOL.build_release_data(release_body, target=target)["release"], module.digest(release_body))
                     self.assertEqual(module.final_package_receipt(record_body, *arguments), record["finalPackage"])
+                    if role == "ordinary-image":
+                        missing_product = copy.deepcopy(record)
+                        missing_product["originalCalls"] = missing_product["originalCalls"][1:]
+                        with self.assertRaises(module.Refused):
+                            module.final_package_receipt(TOOL.canonical(missing_product), *arguments)
+                        wrong_role = copy.deepcopy(record)
+                        wrong_role["packageRole"] = "installed-shell-observation"
+                        wrong_environment = dict(fixture.environment, MRK_MACOS_PACKAGE_ROLE="installed-shell-observation")
+                        with self.assertRaises(module.Refused):
+                            module.final_package_receipt(TOOL.canonical(wrong_role), wrong_environment, *arguments[1:])
                     # Same closed parser with a separate purpose; this DATA
                     # conversion is NOT a real Remove package/signature pass.
                     remove_record = copy.deepcopy(record)
                     remove_record["phase"] = "finalize-remove-package"
+                    if role == "ordinary-image":
+                        remove_record["originalCalls"] = remove_record["originalCalls"][1:]
                     remove_record["finalPackage"].update(kind="mrk-final-remover-package", scriptFileCount=2)
                     self.assertEqual(module.final_package_receipt(TOOL.canonical(remove_record), *arguments, remove=True),
                                      remove_record["finalPackage"])
@@ -2833,12 +3008,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # Only these three SOURCE-fixed stager I/O calls share this boundary.
         # A primary refusal may mask its local close error; an exception never
         # clears the caller's completion latch or permits another operation.
-        io_roles = (("final-audit", "audit_command"), ("result-absence", "installer_result_absent_command"),
-                    ("v2-readback", "observation_command"))
-        for role, function in io_roles:
-            with self.subTest(stager=role), tempfile.TemporaryDirectory() as temporary:
+        io_roles = (("final-audit", "audit_install_product_command", "ordinary-image"),
+                    ("final-audit", "audit_command", "installed-shell-observation"),
+                    ("result-absence", "installer_result_absent_command", "ordinary-image"),
+                    ("v2-readback", "observation_command", "ordinary-image"))
+        for role, function, package_role in io_roles:
+            with self.subTest(stager=role, packageRole=package_role), tempfile.TemporaryDirectory() as temporary:
                 checkout, work, environment, owner, _ = self.fixture(Path(temporary))
+                environment = dict(environment, MRK_MACOS_PACKAGE_ROLE=package_role)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                self.assertEqual(operation.install_product, package_role == "ordinary-image")
                 operation.package_started = operation.package_observed = 0
                 operation.package_endpoint = endpoint
                 primary = TOOL.Refused("installer-export-name-occupied")
@@ -2853,7 +3032,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                       mock.patch.object(module.time, "monotonic_ns", return_value=100)):
                     with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
                         operation.execute()
-                self.assertEqual(called.call_count, 1)
+                failure = operation.receipt.get("failure", {})
+                self.assertEqual(called.call_count, 1, {"selectedStager": function, "packageRole": package_role,
+                    "failure": {key: value[:96] if type(value) is str else None
+                                for key in ("stage", "type", "reason") for value in (failure.get(key),)}})
                 self.assertEqual(operation.stager_io_pending, role)
                 self.assertFalse(operation.package_settled())
                 self.assertFalse(operation.receipt["targetRetired"] or operation.receipt["originalClosesKnown"])
@@ -2876,6 +3058,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     operation.package_diagnostic(SimpleNamespace(), capture=True)
 
             clean = module.Operation(SimpleNamespace(), Path("/DATA"), Path("/DATA/work"), "package-install", environment, TOOL)
+            self.assertEqual(clean.install_product, package_role == "ordinary-image")
             clean.package_started = clean.package_observed = 0; clean.package_endpoint = endpoint
             expected, argument = {"DATA": "completed"}, SimpleNamespace()
             with (mock.patch.object(TOOL, function, return_value=expected) as called,
@@ -3237,7 +3420,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         # Every primary fixed role must be an actual typed returned/settled0.
         # Unknown/malformed/nonzero/late originals never become a final-P pass.
-        for role in module.FINAL_PACKAGE_ROLES:
+        for role in module.final_package_roles(False, "ordinary-image"):
             for outcome in ("owner", "nonzero", "malformed", "late"):
                 failure = role + "-" + outcome
                 with self.subTest(finalOriginal=failure), tempfile.TemporaryDirectory() as directory:
@@ -3245,7 +3428,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     operation = fixture.operation
                     with self.final_package_fixture_call(fixture), self.assertRaises(module.Refused):
                         operation.execute()
-                    expected = list(module.FINAL_PACKAGE_ROLES[:module.FINAL_PACKAGE_ROLES.index(role) + 1])
+                    roles = module.final_package_roles(False, "ordinary-image")
+                    expected = list(roles[:roles.index(role) + 1])
                     self.assertEqual([row[0] for row in fixture.observations], expected)
                     self.assertFalse(operation.receipt["passed"])
                     self.assertNotIn("finalPackage", operation.receipt)
@@ -3261,11 +3445,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     if role == "final-package-sign":
                         self.assertTrue(operation.signing_mutation_pending)
                         self.assertFalse(operation.receipt["targetRetired"])
-                    if role == "final-package-staple":
+                    if role in ("final-package-productbuild", "final-package-staple"):
                         self.assertTrue(operation.notary_mutation_pending)
                         self.assertFalse(operation.receipt["targetRetired"])
 
-        for failure in ("signed-input-changed", "signed-roster", "signed-scripts", "submit-json", "submit-status", "log-sha", "log-id",
+        for failure in ("product-readme", "product-distribution", "product-resource", "product-component",
+                "signed-input-changed", "signed-roster", "signed-scripts", "submit-json", "submit-status", "log-sha", "log-id",
                 "final-package-signature-before-untrusted", "final-package-signature-before-untimestamped", "final-package-signature-before-chain",
                 "final-package-signature-after-untrusted", "final-package-signature-after-untimestamped", "final-package-signature-after-chain",
                 "ticket-replaced", "ticket-oversize", "ticket-prefix", "ticket-mode", "invalid", "invalid-log-failure"):
@@ -3278,6 +3463,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotIn("finalPackage", operation.receipt)
                 self.assertFalse((fixture.work / "package-final").exists())
                 roles = [row[0] for row in fixture.observations]
+                if failure.startswith("product-"):
+                    self.assertEqual(roles, ["final-package-productbuild"])
+                    self.assertNotIn("final-package-sign", roles)
                 if failure.startswith("ticket-"):
                     self.assertEqual(roles[-1], "final-package-staple")
                     self.assertTrue(operation.notary_mutation_pending)
@@ -3346,15 +3534,52 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse(later.receipt["passed"])
                 self.assertEqual(later.calls, [])
 
+        # Actual context-manager admission stops at the inert private-key DATA
+        # boundary: no key decode/allocation/IO occurs in these guard controls.
+        # Ordinary Install has five roles before submit, flat/Remove four;
+        # equal length alone must not admit a different original history.
+        flat_prefix = ("final-package-resolve-notarytool", "final-package-resolve-stapler",
+                       "final-package-sign", "final-package-signature-before")
+        for remove, package_role in ((False, "ordinary-image"), (False, "installed-shell-observation"),
+                                     (True, "ordinary-image"), (True, "installed-shell-observation")):
+            product = not remove and package_role == "ordinary-image"
+            prefix = (("final-package-productbuild",) if product else ()) + flat_prefix
+            other_prefix = flat_prefix if product else ("final-package-productbuild",) + flat_prefix
+            histories = (("valid", prefix), ("missing", prefix[:-1]),
+                ("extra", prefix + ("final-package-submit",)),
+                ("wrong", prefix[:-1] + ("final-package-validate",)),
+                ("permuted", (prefix[1], prefix[0]) + prefix[2:]),
+                ("other-purpose", other_prefix), ("key-held", prefix), ("unknown", prefix))
+            for label, history in histories:
+                with self.subTest(notaryKeyPrefix=label, remove=remove, packageRole=package_role):
+                    state = SimpleNamespace(phase="finalize-remove-package" if remove else "finalize-package",
+                        removal=remove, environment={"MRK_MACOS_PACKAGE_ROLE": package_role},
+                        calls=[{"role": role} for role in history], notary_key=object() if label == "key-held" else None,
+                        notary_known=lambda: label != "unknown")
+                    boundary = RuntimeError("INERT before private-key DATA")
+                    with mock.patch.object(module, "notary_key_data", side_effect=boundary) as key_data:
+                        if label == "valid":
+                            with self.assertRaises(RuntimeError) as raised:
+                                with module.Operation.notary_key_scope(state):
+                                    self.fail("private-key DATA boundary unexpectedly returned")
+                            self.assertIs(raised.exception, boundary)
+                            key_data.assert_called_once_with(state.environment)
+                        else:
+                            with self.assertRaisesRegex(module.Refused, "^notary-key-purpose$"):
+                                with module.Operation.notary_key_scope(state):
+                                    self.fail("invalid purpose prefix entered private-key scope")
+                            key_data.assert_not_called()
+
         # Finite held-original close/publication faults. Close injection first
         # consumes the REAL original FD, then reports uncertainty; no retry is
         # permitted and the retained target cannot acquire success authority.
-        for failure in ("key-close", "invalid-key-close", "key-directory-close", "output-close", "mode-after-effect", "rename-after-effect",
+        for failure in ("product-source-close", "product-component-close", "product-retirement-close", "product-retirement-mode", "key-close", "invalid-key-close", "key-directory-close", "output-close", "mode-after-effect", "rename-after-effect",
                         "published-readback", "receipt-close"):
             with self.subTest(finalPackageBoundary=failure), tempfile.TemporaryDirectory() as directory:
                 fixture = self.final_package_fixture(Path(directory), failure="invalid" if failure == "invalid-key-close" else None)
                 operation = fixture.operation
-                injected = OSError("INERT original close/publication failure")
+                injected = (KeyboardInterrupt("INERT product original close interruption") if failure.startswith("product-")
+                            else OSError("INERT original close/publication failure"))
                 observed = []
                 original_close, original_fchmod, original_rename = module.os.close, module.os.fchmod, module.os.rename
                 original_stream = operation.notary_stream
@@ -3365,10 +3590,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                             # Operation.close consumes entry['fd'] before the
                             # syscall. Match its retained original full9 instead.
                             expected = entry.get("identity")
-                            if expected is not None and entry["role"] in ("notary-private-key", "notary-key-directory", "final-package-signed-original"):
+                            if (expected is not None and (not failure.startswith("product-") or entry["fd"] is None and not entry["closed"])
+                                    and entry["role"] in ("install-product-readme", "install-product-component", "install-product-retirement-directory", "notary-private-key", "notary-key-directory", "final-package-signed-original")):
                                 actual = module.os.fstat(fd)
                                 same = (actual.st_dev, actual.st_ino) == expected[:2]
-                                wanted = {"key-close": "notary-private-key", "invalid-key-close": "notary-private-key", "key-directory-close": "notary-key-directory",
+                                wanted = {"product-source-close": "install-product-readme", "product-component-close": "install-product-component",
+                                          "product-retirement-close": "install-product-retirement-directory",
+                                          "key-close": "notary-private-key", "invalid-key-close": "notary-private-key", "key-directory-close": "notary-key-directory",
                                           "output-close": "final-package-signed-original"}.get(failure)
                                 if same and entry["role"] == wanted:
                                     chosen = failure
@@ -3383,6 +3611,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 def chmod(fd, mode):
                     selected = (failure == "mode-after-effect" and not observed and operation.stage == "final-package-mode-and-publication"
                                 and operation.final_package_output is not None and fd == operation.final_package_output["fd"] and mode == 0o444)
+                    selected = selected or (failure == "product-retirement-mode" and not observed and operation.notary_retiring and mode == 0o700
+                        and any(entry["role"] == "install-product-retirement-directory" and entry["fd"] == fd and not entry["closed"]
+                                for entry in operation.entries))
                     result = original_fchmod(fd, mode)
                     if selected:
                         observed.append(failure)
@@ -3423,6 +3654,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     # A provisional serialized pass is not a returned helper0.
                     # The following fixed caller still requires its status0.
                     self.assertFalse((fixture.work / "package-finalization.status").exists())
+                if failure in ("product-source-close", "product-component-close"):
+                    self.assertNotIn("final-package-sign", [row[0] for row in fixture.observations])
+                    self.assertFalse((fixture.work / "package-final").exists())
+                if failure in ("product-retirement-close", "product-retirement-mode"):
+                    self.assertEqual([row[0] for row in fixture.observations], list(module.final_package_roles(False, "ordinary-image")))
+                    self.assertTrue(operation.notary_unknown)
+                    self.assertTrue((fixture.work / operation.target_name / "product-input/resources/InstallerReadMe.html").is_file())
+                    self.assertTrue((fixture.work / "package-final/MobileReleaseKit.pkg").is_file())
+                    self.assertEqual(operation.errors[-1], {"stage": "notary-private-state-retained", "type": "Refused" if failure.endswith("close") else "KeyboardInterrupt"})
                 if failure in ("key-close", "invalid-key-close", "key-directory-close"):
                     self.assertNotIn("final-package-staple", [row[0] for row in fixture.observations])
                 if failure == "invalid-key-close":
@@ -4200,7 +4440,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
-        actual = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
                  "Emit the genuine removal descriptor and readonly carrier without Installer",
@@ -5101,6 +5341,160 @@ class MacInstalledData(unittest.TestCase):
                           self.assertRaises(TOOL.Refused)):
                         TOOL.audit_command(args)
 
+        # The actual ordinary Install envelope, not an unused ReadMe or a
+        # fourth DMG file. Exercise bytes through the real closed outer/inner
+        # readers; synthetic signature/ticket bytes are explicitly NOT native.
+        for target in TOOL.MAC_TARGETS:
+            selection = TOOL.source_build_selection(target)
+            definition, readme = TOOL.install_product_sources(selection)
+            files, original_members = package_data(uid=501, gid=20, selection=selection)
+            root_members = package_data(selection=selection)[1]
+            component = MacAndroidHelperPackagingData.final_package_xar(self, root_members)
+            expected = {"Distribution": definition, "Resources/InstallerReadMe.html": readme,
+                        TOOL.INSTALL_COMPONENT: component}
+            nested = {key: value for key, value in expected.items() if key != TOOL.INSTALL_COMPONENT}
+            nested.update({TOOL.INSTALL_COMPONENT + "/" + key: value for key, value in root_members.items()})
+            args = SimpleNamespace(target=target, scripts=Path("/scripts"), package=Path("/outer.pkg"),
+                                   original_package=Path("/original.pkg"), fixture=False)
+            def audit_product(body):
+                with (mock.patch.object(TOOL, "original_package", return_value=(files, b"original", original_members, TOOL.PACKAGE_ID, (501, 20))),
+                      mock.patch.object(TOOL, "read", side_effect=lambda path, *limits, **keywords:
+                          body if path == args.package else source_read(path, *limits, **keywords))):
+                    return TOOL.audit_install_product_command(args)
+            for layout in (expected, nested):
+                body = MacAndroidHelperPackagingData.final_package_xar(self, layout, product=True, signed=True)
+                for output in (body, body + b"INERT APPENDED TICKET"):
+                    result = audit_product(output)
+                    self.assertEqual((result["packageSize"], result["packageSha256"]), (len(output), TOOL.digest(output)))
+                    self.assertNotEqual(result["packageSha256"], TOOL.digest(component))
+                    self.assertEqual(result["originalPackageSha256"], TOOL.digest(b"original"))
+                    self.assertEqual(result["productReadMeSha256"], TOOL.digest(readme))
+                    self.assertEqual(result["packageInfoSha256"], TOOL.digest(original_members["PackageInfo"]))
+                    self.assertEqual(result["finalDestinationPayloadEntries"], 0)
+                    self.assertIn("not-installed-or-GUI-qualified", result["qualification"])
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.xar_members(output)  # Existing flat/Remove grammar did not widen.
+            for mutation in ("readme", "missing-readme", "extra-resource", "other-component", "extra-package",
+                             "component-info", "component-owner", "component-payload", "scripts", "version", "url",
+                             "external", "script", "choice", "must-close", "action", "no-checksum", "toc-checksum"):
+                changed = dict(expected)
+                if mutation == "readme": changed["Resources/InstallerReadMe.html"] += b"not SOURCE"
+                elif mutation == "missing-readme": del changed["Resources/InstallerReadMe.html"]
+                elif mutation == "extra-resource": changed["Resources/other.html"] = b"extra"
+                elif mutation == "other-component": changed["other.pkg"] = changed.pop(TOOL.INSTALL_COMPONENT)
+                elif mutation == "extra-package": changed["other.pkg"] = component
+                elif mutation.startswith("component-") or mutation == "scripts":
+                    selected = dict(root_members)
+                    if mutation == "component-info": selected["PackageInfo"] += b"\n"
+                    elif mutation == "component-owner": selected = original_members
+                    elif mutation == "component-payload": selected["Payload"] = b"unowned destination payload"
+                    else: selected["Scripts"] = selected["Scripts"].replace(b"DATA\n", b"DIFF\n")
+                    changed[TOOL.INSTALL_COMPONENT] = MacAndroidHelperPackagingData.final_package_xar(self, selected)
+                elif mutation == "version": changed["Distribution"] = definition.replace(selection.package_version.encode(), b"999.1.2")
+                elif mutation == "url": changed["Distribution"] = definition.replace(b'>MobileReleaseKit.pkg<', b'>https://example.invalid/other.pkg<')
+                elif mutation == "external": changed["Distribution"] = definition.replace(b'allow-external-scripts="false"', b'allow-external-scripts="true"')
+                elif mutation in ("script", "choice", "must-close", "action"):
+                    extra = {"script": b'<script>function override(){return true;}</script>',
+                             "choice": b'<choice id="other" visible="true"/>',
+                             "must-close": b'<must-close><app id="dev.mobile-release-kit.desktop"/></must-close>',
+                             "action": b'<installation-check script="true"/>'}[mutation]
+                    changed["Distribution"] = definition.replace(b'</installer-gui-script>', extra + b'</installer-gui-script>')
+                body = MacAndroidHelperPackagingData.final_package_xar(self, changed, product=True)
+                if mutation == "no-checksum": body = body[:24] + bytes(4) + body[28:]
+                elif mutation == "toc-checksum":
+                    packed_size = struct.unpack_from('>Q', body, 8)[0]
+                    start = 28 + packed_size
+                    body = body[:start] + bytes([body[start] ^ 1]) + body[start + 1:]
+                with self.subTest(installProductTarget=target, mutation=mutation), self.assertRaises(TOOL.Refused):
+                    audit_product(body)
+            # Closed outer TOC metadata, not an opaque extra package tree.
+            base = MacAndroidHelperPackagingData.final_package_xar(self, expected, product=True)
+            packed_size = struct.unpack_from('>Q', base, 8)[0]
+            toc = TOOL.zlib.decompress(base[28:28 + packed_size])
+            for extra in (b'<unreviewed/>', b'<signature><file id="90"/></signature>'):
+                changed_toc = toc.replace(b'</toc>', extra + b'</toc>')
+                packed = TOOL.zlib.compress(changed_toc)
+                changed = (struct.pack('>IHHQQI', 0x78617221, 28, 1, len(packed), len(changed_toc), 1)
+                           + packed + hashlib.sha1(packed).digest() + base[28 + packed_size + 20:])
+                with self.assertRaises(TOOL.Refused):
+                    audit_product(changed)
+            # Both actual XML readers must reject non-UTF8 encodings before
+            # parsing; a byte DTD check misses interleaved UTF16/32 bytes. The
+            # entity substitutions below would expand to the SAME allowed tree.
+            definition_text = definition.decode("utf-8").split("?>", 1)[1]
+            toc_text = toc.decode("utf-8").split("?>", 1)[1]
+            for codec, label in (("utf-8", "UTF-8"), ("utf-16", "UTF-16"),
+                                 ("utf-16-le", "UTF-16"), ("utf-16-be", "UTF-16"),
+                                 ("utf-32", "UTF-32"), ("utf-32-le", "UTF-32"), ("utf-32-be", "UTF-32")):
+                for variant in ("encoding", "doctype", "entity"):
+                    if codec == "utf-8" and variant == "encoding":
+                        continue  # Real unmodified UTF8 success is checked above.
+                    declaration = '<?xml version="1.0" encoding="' + label + '"?>\n'
+                    distribution_text, member_text = definition_text, toc_text
+                    distribution_dtd = '<!DOCTYPE installer-gui-script>\n' if variant == "doctype" else ""
+                    member_dtd = '<!DOCTYPE xar>\n' if variant == "doctype" else ""
+                    if variant == "entity":
+                        distribution_dtd = '<!DOCTYPE installer-gui-script [<!ENTITY component "MobileReleaseKit.pkg">]>\n'
+                        member_dtd = '<!DOCTYPE xar [<!ENTITY member "Distribution">]>\n'
+                        self.assertIn('>MobileReleaseKit.pkg<', distribution_text)
+                        self.assertIn('<name>Distribution</name>', member_text)
+                        distribution_text = distribution_text.replace('>MobileReleaseKit.pkg<', '>&component;<', 1)
+                        member_text = member_text.replace('<name>Distribution</name>', '<name>&member;</name>', 1)
+                    changed = dict(expected, Distribution=(declaration + distribution_dtd + distribution_text).encode(codec))
+                    product = MacAndroidHelperPackagingData.final_package_xar(self, changed, product=True)
+                    with self.subTest(xml="Distribution", codec=codec, variant=variant), self.assertRaises(TOOL.Refused):
+                        audit_product(product)
+                    changed_toc = (declaration + member_dtd + member_text).encode(codec)
+                    packed = TOOL.zlib.compress(changed_toc)
+                    product = (struct.pack('>IHHQQI', 0x78617221, 28, 1, len(packed), len(changed_toc), 1)
+                               + packed + hashlib.sha1(packed).digest() + base[28 + packed_size + 20:])
+                    with self.subTest(xml="TOC", codec=codec, variant=variant), self.assertRaises(TOOL.Refused):
+                        audit_product(product)
+            # Exact already-observed inert productbuild defaults normalize;
+            # an extra active attribute or a nonzero size does not.
+            generated = TOOL.ET.fromstring(definition)
+            reference = generated.find("pkg-ref")
+            reference.attrib.update(installKBytes="0", updateKBytes="0", onConclusion="None")
+            reference.text = "#" + TOOL.INSTALL_COMPONENT
+            extra = TOOL.ET.SubElement(generated, "pkg-ref", {"id": TOOL.PACKAGE_ID})
+            TOOL.ET.SubElement(extra, "bundle-version")
+            TOOL.install_product_distribution(TOOL.ET.tostring(generated), definition)
+            for key, value in (("installKBytes", "1"), ("onConclusion", "RequireRestart"), ("active", "true")):
+                changed = copy.deepcopy(generated)
+                changed.find("pkg-ref").set(key, value)
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.install_product_distribution(TOOL.ET.tostring(changed), definition)
+            self.assertEqual(TOOL.ET.fromstring(definition).find("readme").get("file"), "InstallerReadMe.html")
+            readme_tag = b'<readme file="InstallerReadMe.html" mime-type="text/html"/>'
+            self.assertEqual(definition.count(readme_tag), 1)
+            self.assertEqual(TOOL.ET.fromstring(definition).findall("conclusion"), [])
+            self.assertNotIn(b"This information can also appear at the end of installation.", readme)
+            self.assertIn(b"It does not replace Installer's actual success or failure result.", readme)
+            # The unchanged SOURCE-tree validator rejects reintroduced roles;
+            # neither an extra conclusion nor loss/duplication of the ReadMe is inert.
+            for layout in (expected, nested):
+                for changed_definition in (
+                    definition.replace(b'</installer-gui-script>',
+                        b'<conclusion file="InstallerReadMe.html" mime-type="text/html"/></installer-gui-script>'),
+                    definition.replace(readme_tag, b'', 1),
+                    definition.replace(readme_tag, readme_tag + readme_tag, 1),
+                ):
+                    self.assertNotEqual(changed_definition, definition)
+                    body = MacAndroidHelperPackagingData.final_package_xar(
+                        self, dict(layout, Distribution=changed_definition), product=True, signed=True)
+                    with self.assertRaisesRegex(TOOL.Refused, "^install-product-distribution$"):
+                        audit_product(body)
+            self.assertNotIn(b"<script", readme.lower())
+            for phrase in (b"Different failures have different causes", b"same release", b"Installer Log", b"Do not"):
+                self.assertIn(phrase, readme)
+            self.assertEqual(ANDROID_HELPER.final_package_roles(False, "ordinary-image"),
+                             ("final-package-productbuild",) + ANDROID_HELPER.FINAL_PACKAGE_ROLES)
+            for remove, role in ((True, "ordinary-image"), (False, "installed-shell-observation")):
+                self.assertEqual(ANDROID_HELPER.final_package_roles(remove, role), ANDROID_HELPER.FINAL_PACKAGE_ROLES)
+            for remove, role in ((1, "ordinary-image"), (False, "untrusted-role")):
+                with self.assertRaises(ANDROID_HELPER.Refused):
+                    ANDROID_HELPER.final_package_roles(remove, role)
+
         # Completed archive -> existing schema2: target/policy/source/actual
         # package are independent inputs, not learned from installed records.
         package, signed = b"completed DATA only", b"raw signature DATA, not cryptographic evidence"
@@ -5306,7 +5700,22 @@ class MacInstalledData(unittest.TestCase):
         # I intentionally has no Aqua workflow: that separately-based source
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
-        workflow = path.read_text(encoding="utf-8")
+        current = path.read_text(encoding="utf-8")
+        product_name = "Build fixed Installer presentation then sign and notarize the completed outer package before final P"
+        component = workflow_step(current, "Build the fixed one-shot root Installer and scripts-only package")
+        product = workflow_step(current, product_name)
+        self.assertIn('/usr/bin/xar -c -f "$MRK_MACOS_WORK/package-component/MobileReleaseKit.pkg"', component)
+        self.assertNotIn("package-unsigned", component)
+        self.assertEqual(product.count('macos_android_helper_package.py finalize-package --target "$MRK_MACOS_TARGET"'), 1)
+        self.assertIn("timeout-minutes: 32", product)
+        self.assertIn("1740s work / 1800s hard", product)
+        self.assertNotIn("/usr/bin/productbuild", product)  # The original belongs to the existing helper, not an unowned shell child.
+        self.assertNotIn("/usr/sbin/installer", product)
+        for old, changed in (("package-component", "package-unsigned"), ("30s", "90s"),
+                             (product_name, product_name + " altered")):
+            with self.assertRaises(AssertionError):
+                without_install_product_workflow(current.replace(old, changed, 1))
+        workflow = without_shipping_compile_workflow(current)
         probe = workflow.index("- name: Fail fast on native Scripts ownership and package format")
         sdk = workflow.index("- name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive")
         self.assertLess(probe, sdk)
@@ -5354,7 +5763,7 @@ class MacInstalledData(unittest.TestCase):
                 self.assertLess(workflow.index(final_call), audit)
                 self.assertIn("        timeout-minutes: 32\n", finalized)
                 self.assertIn('if [[ "$finalization_status" != 0 ]]; then exit "$finalization_status"; fi', finalized)
-                self.assertIn('[[ "$finalization_status_saved" == 0 ]] || exit 1', finalized)
+                self.assertIn('[[ "$finalization_status_saved" == 0 ]] || exit "$finalization_status_saved"', finalized)
                 self.assertLess(package.index('finalization = self.package_finalization_input(original, body)'),
                                 package.index('audit = self.package_stager_io("final-audit",'))
                 self.assertLess(package.index('audit = self.package_stager_io("final-audit",'),
@@ -5370,8 +5779,19 @@ class MacInstalledData(unittest.TestCase):
                                 methods["finalize_package"].index('self.receipt["finalPackage"]'))
                 self.assertLess(package.index('audit = self.package_stager_io("final-audit",'),
                                 package.index('self.package_call("installer",'))
-                self.assertIn('if operation == "final-audit":\n                result = self.stager.audit_command(args)',
+                self.assertIn('audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command',
                               methods["package_stager_io"])
+                self.assertIn('result = audit(args)', methods["package_stager_io"])
+                self.assertIn('self.final_package_call("final-package-productbuild", ["/usr/bin/productbuild",',
+                              methods["build_install_product"])
+                self.assertIn('component_audit = self.final_package_io(', methods["build_install_product"])
+                self.assertIn('self.stager.prepare_install_product_command', methods["build_install_product"])
+                self.assertIn('self.install_product_original = entry', methods["final_package_adopt_product"])
+                self.assertLess(methods["final_package_call"].index('self.call(role,'),
+                                methods["final_package_call"].index('self.final_package_adopt_product()'))
+                self.assertIn('self.final_package_audit(unsigned,', methods["finalize_package"])
+                self.assertLess(methods["finalize_package"].index('self.final_package_audit(unsigned,'),
+                                methods["finalize_package"].index('self.retire_install_product_inputs()'))
             else:
                 self.assertIn('--original-package "$MRK_MACOS_WORK/' + basename + '-original.pkg"', block)
             self.assertNotIn('sudo', block)
@@ -5645,7 +6065,7 @@ class MacInstalledData(unittest.TestCase):
         if aqua.is_file():
             paths.append(aqua)  # A validates both; I does not pretend it includes A.
         for path in paths:
-            workflow = path.read_text(encoding="utf-8")
+            workflow = without_shipping_compile_workflow(path.read_text(encoding="utf-8"))
             exports = workflow_evidence_paths(workflow)
             installer_name = ("Application installation uses only standard privileged Installer; app and Python stay nonroot"
                               if path.name == "desktop-macos-aqua.yml"
@@ -8010,6 +8430,444 @@ class MacCurrentRuntimeData(unittest.TestCase):
         guide = (root / "desktop/packaging/macos-installed.md").read_text(encoding="utf-8")
         self.assertIn("ordinary4 remains a separate later obligation", guide)
         self.assertIn("No normal P2/project-picker qualification bit is enabled", guide)
+
+        # Independent compile-only job. Run only its pure fixed validators on
+        # inert DATA; never execute the inline main, npm, Cargo or a dylib here.
+        import math
+        import re
+        actual_shipping = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
+        shipping = actual_shipping.split("  shipping-image-compile:\n", 1)[1]
+        self.assertEqual(hashlib.sha256(without_shipping_compile_workflow(actual_shipping).encode()).hexdigest(), '03f8546fb009e0f9bc316da6e4b58ff7d851884a364af0caaaf05043602ca11d')
+        self.assertEqual(actual_shipping.count("      - verify/desktop-macos-image-compile\n"), 1)
+        self.assertEqual(re.findall(r"^    if: (.+)$", shipping, re.M),
+                         ["github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'"])
+        self.assertIn("    runs-on: macos-26\n    timeout-minutes: 35\n", shipping)
+        self.assertEqual(re.findall(r"^        timeout-minutes: ([0-9]+)$", shipping, re.M), ["1", "2", "4", "24", "2"])
+        for anchor in ("mrk_installed_source_inventory", "mrk_installed_direct_rust"):
+            self.assertEqual(actual_shipping.count("        run: &" + anchor + " |\n"), 1)
+            self.assertEqual(shipping.count("        run: *" + anchor + "\n"), 1)
+        for forbidden in ("secrets.", "    environment:", "/usr/sbin/installer", "xcodebuild", "codesign", "notarytool", "package-install"):
+            self.assertNotIn(forbidden, shipping)
+        build = workflow_step(actual_shipping, "Build genuine frontend and the fixed shipping facade without launching it")
+        opening = "          \"$MRK_PYTHON\" -I -S -B - <<'PY_SHIPPING_IMAGE_COMPILE'\n"
+        self.assertEqual(build.count(opening), 1)
+        body = build.split(opening, 1)[1].split("          PY_SHIPPING_IMAGE_COMPILE\n", 1)[0]
+        program = ''.join(line[10:] if line.startswith('          ') else line for line in body.splitlines(keepends=True))
+        tree = ast.parse(program)
+        pure_names = {"need", "pairs", "finite_float", "document", "identity", "tool_shape_data", "returned_data", "commands_data",
+                      "artifact_data", "cleanup_allowed_data", "passed_data", "controller_config_data",
+                      "controller_audit_data", "controller_record_data", "controller_runtime_data", "owner_error_data"}
+        constants = {"TARGET", "RUST_RELEASE", "RUST_COMMIT", "ROLES", "CAPTURE", "SOURCE_LIMIT", "ARTIFACT_REASONS",
+                     "CONTROLLER_BASE", "CONTROLLER_DIRS", "CONTROLLER_EXES", "CONTROLLER_SCRIPTS", "CONTROLLER_FILES", "CONTROLLER_REASONS"}
+        selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in pure_names
+                    or isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id in constants]
+        self.assertEqual({node.name for node in selected if isinstance(node, ast.FunctionDef)}, pure_names)
+        ns = {"json": json, "math": math, "stat": stat, "Path": Path, "hashlib": hashlib, "re": re,
+              "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "<fixed-shipping-pure-DATA>", "exec"), ns)
+        self.assertIn("work_end, hard_end = start + 1320, start + 1440", program)
+        self.assertIn("timeout=timeout,", program)
+        self.assertEqual(program.count("owner.run_owned("), 1)
+        self.assertIn("if not pending and input_originals_known:", program)
+        self.assertIn("shutil.rmtree.avoids_symlink_attacks", program)
+        self.assertNotIn("subprocess.run(", program)
+        self.assertNotIn("shell=True", program)
+        self.assertNotIn("qualification.main(", program)
+        self.assertNotIn("MRK_GITHUB_TOOLING_MANIFEST_SHA256=", program)
+        for variable in ("MRK_MACOS_INSTALL_SOURCE_COMMIT=source", "MRK_IMAGE_RELEASE_ID=release['release']",
+                         "npm_config_userconfig=", "npm_config_globalconfig=", "npm_config_registry='https://registry.npmjs.org/'"):
+            self.assertIn(variable, program)
+        # Fixed tool shape is a pre-veto observation, never admitted identity.
+        # Execute the actual nested tool/retirement statements on inert ports;
+        # no native tool file is opened, read, hashed, modified or executed here.
+        main_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        tool_node = next(node for node in main_node.body if isinstance(node, ast.FunctionDef) and node.name == 'tool')
+        retire_nodes = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                        for node in parent.finalbody if isinstance(node, ast.If)
+                        and ast.unparse(node.test) == 'not pending and input_originals_known']
+        self.assertEqual(len(retire_nodes), 1)
+        tool_code = compile(ast.Module(body=[tool_node], type_ignores=[]), '<fixed-shipping-tool-DATA>', 'exec')
+        retire_code = compile(ast.Module(body=retire_nodes, type_ignores=[]), '<fixed-shipping-tool-close-DATA>', 'exec')
+        checks = ('regular', 'ownerAllowed', 'writeProtected', 'positiveLinks', 'executableAllowed', 'sizeAllowed')
+        valid_info = dict(st_dev=1, st_ino=2, st_mode=stat.S_IFREG | 0o755, st_uid=501, st_gid=20,
+                          st_nlink=1, st_size=4096, st_mtime_ns=3, st_ctime_ns=4)
+        cases = [('regular', {'st_mode': stat.S_IFDIR | 0o755}), ('ownerAllowed', {'st_uid': 777}),
+                 ('writeProtected', {'st_mode': stat.S_IFREG | 0o775}), ('positiveLinks', {'st_nlink': 0}),
+                 ('executableAllowed', {'st_mode': stat.S_IFREG | 0o644}), ('sizeAllowed', {'st_size': 0}),
+                 ('sizeAllowed', {'st_size': 256 * 1024 * 1024 + 1})]
+        for refused, change in cases:
+            with self.subTest(tool_shape=refused, change=change):
+                info = SimpleNamespace(**dict(valid_info, **change))
+                shape = ns['tool_shape_data'](info, 501, True)
+                self.assertEqual(set(shape), {'mode', 'uid', 'gid', 'nlink', 'size', 'executableRequired', *checks})
+                self.assertIs(shape[refused], False)
+                self.assertTrue(all(type(shape[key]) is bool and shape[key] is (key != refused) for key in checks))
+                self.assertEqual(tuple(shape[key] for key in ('mode', 'uid', 'gid', 'nlink', 'size')),
+                                 tuple(getattr(info, key) for key in ('st_mode', 'st_uid', 'st_gid', 'st_nlink', 'st_size')))
+                ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(return_value=info),
+                                        getuid=mock.Mock(return_value=501), close=mock.Mock())
+                local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(return_value='unused'),
+                             pending=False, input_originals_known=True, close_ok=True, receipt={})
+                exec(tool_code, local)
+                with self.assertRaisesRegex(ValueError, '^compile-tool-shape$'):
+                    local['tool'](Path('/synthetic-fixed-tool'))
+                ports.open.assert_called_once_with(Path('/synthetic-fixed-tool'), 123)
+                ports.fstat.assert_called_once_with(41)
+                local['tool_hash'].assert_not_called()
+                ports.close.assert_not_called()
+                self.assertEqual(local['tools'], [dict(path=Path('/synthetic-fixed-tool'), fd=41,
+                                                      identity=None, sha256=None, observedShape=shape)])
+                # Existing pending-original barrier retains the very same fd.
+                local['pending'] = True
+                exec(retire_code, local)
+                ports.close.assert_not_called()
+                self.assertEqual(local['tools'][0]['fd'], 41)
+                local['pending'] = False
+                if refused == 'positiveLinks': ports.close.side_effect = OSError('inert close refusal')
+                exec(retire_code, local)
+                ports.close.assert_called_once_with(41)
+                self.assertIsNone(local['tools'][0]['fd'])
+                self.assertIs(local['receipt']['toolOriginalsClosed'], refused != 'positiveLinks')
+                self.assertIsNone(local['tools'][0]['identity'])
+                self.assertEqual(local['tools'][0]['observedShape'], shape)
+        for change, executable in [({}, True), ({'st_uid': 0}, True), ({'st_nlink': 2}, True),
+                                   ({'st_size': 256 * 1024 * 1024}, True),
+                                   ({'st_mode': stat.S_IFREG | 0o644}, False)]:
+            info = SimpleNamespace(**dict(valid_info, **change))
+            shape = ns['tool_shape_data'](info, 501, executable)
+            self.assertTrue(all(shape[key] is True for key in checks))
+            ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(return_value=info),
+                                    getuid=mock.Mock(return_value=501), close=mock.Mock())
+            local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(return_value='a' * 64),
+                         pending=False, input_originals_known=True, close_ok=True, receipt={})
+            exec(tool_code, local)
+            self.assertEqual(local['tool'](Path('/synthetic-fixed-tool'), executable), Path('/synthetic-fixed-tool'))
+            self.assertEqual(local['tools'][0]['identity'], ns['identity'](info))
+            local['tool_hash'].assert_called_once_with(local['tools'][0])
+            self.assertEqual(local['tools'][0]['sha256'], 'a' * 64)
+            exec(retire_code, local)
+            ports.close.assert_called_once_with(41)
+            self.assertIs(local['receipt']['toolOriginalsClosed'], True)
+        # A non-returning fstat supplies no observation and keeps the admitted fd
+        # for the unchanged outer consuming-close path, not a guessed identity.
+        ports = SimpleNamespace(open=mock.Mock(return_value=41), fstat=mock.Mock(side_effect=OSError('inert fstat')),
+                                getuid=mock.Mock(return_value=501), close=mock.Mock())
+        local = dict(ns, os=ports, flags=123, tools=[], tool_hash=mock.Mock(),
+                     pending=False, input_originals_known=True, close_ok=True, receipt={})
+        exec(tool_code, local)
+        with self.assertRaises(OSError): local['tool'](Path('/synthetic-fixed-tool'))
+        self.assertIsNone(local['tools'][0]['observedShape'])
+        self.assertIsNone(local['tools'][0]['identity'])
+        local['tool_hash'].assert_not_called()
+        exec(retire_code, local)
+        ports.close.assert_called_once_with(41)
+        self.assertIs(local['receipt']['toolOriginalsClosed'], True)
+        self.assertIn("observedShape=row['observedShape']) for row in tools]", program)
+        checkout, work = Path("/synthetic-checkout"), Path("/synthetic-work")
+        node, npm, rust = Path("/synthetic-node/bin/node"), Path("/synthetic-node/lib/node_modules/npm/bin/npm-cli.js"), Path("/synthetic-rust/bin")
+        argv = ns['commands_data'](node, npm, rust, work)
+        self.assertEqual(len(argv), 7)
+        self.assertEqual(argv[4], [str(node), str(npm), 'ci', '--ignore-scripts', '--no-audit', '--no-fund', '--cache', str(work / 'npm-cache')])
+        self.assertEqual(argv[5], [str(node), str(npm), 'run', 'build'])
+        self.assertEqual(argv[6], [str(rust / 'cargo'), 'build', '--locked', '--release', '--jobs', '1', '--manifest-path',
+                                  '../helpers/macos-desktop-image/Cargo.toml', '--lib', '--target', 'aarch64-apple-darwin',
+                                  '--message-format=json-render-diagnostics'])
+        returned = CompletedProcess(argv[6], 0, b'actual bounded DATA', b'')
+        self.assertTrue(ns['returned_data'](returned, argv[6], 4096))
+        for bad in (CompletedProcess(argv[5], 0, b'', b''), CompletedProcess(argv[6], True, b'', b''),
+                    CompletedProcess(argv[6], 0, '', b''), CompletedProcess(argv[6], 0, b'x' * 4097, b'')):
+            self.assertFalse(ns['returned_data'](bad, argv[6], 4096))
+        # Actual workflow projection on inert owner exceptions; no process or main executes.
+        class OwnerError(Exception):
+            def __init__(self, message, mask=None):
+                super().__init__(message)
+                self.dispatched, self.contained, self.cleanup_complete = True, True, False
+                self.owner_failure_mask = mask
+        class Interrupted(KeyboardInterrupt):
+            dispatched, contained = True, False
+        owner_types = SimpleNamespace(ProcessError=OwnerError, ProcessInterrupted=Interrupted)
+        diagnose = lambda error: ns['owner_error_data'](error, owner_types)
+        diagnostic = diagnose(OwnerError('owned command produced incomplete output', 63))
+        self.assertEqual(diagnostic, dict(available=True, chainTruncated=False, typedFacts=[dict(
+            kind='process-error', dispatched=True, contained=True, cleanupComplete=False,
+            ownerFailureMask=63, reason='incomplete-output')]))
+        for mask in (None, True, False, -1, 0, 64, '2'):
+            self.assertIsNone(diagnose(OwnerError('private credential/path never exported', mask))['typedFacts'][0]['ownerFailureMask'])
+        for mask in (1, 2, 4, 8, 16, 32):
+            self.assertEqual(diagnose(OwnerError('owned command output exceeds its bound', mask))['typedFacts'][0]['ownerFailureMask'], mask)
+        hidden = OwnerError('private credential/path never exported')
+        hidden.dispatched, hidden.contained, hidden.cleanup_complete = 1, 'yes', None
+        row = diagnose(hidden)['typedFacts'][0]
+        self.assertEqual((row['dispatched'], row['contained'], row['cleanupComplete'], row['reason']), (None, None, None, 'unknown'))
+        self.assertNotIn('private credential/path', json.dumps(diagnose(hidden)))
+        nontext = OwnerError(object())
+        self.assertEqual(diagnose(nontext)['typedFacts'][0]['reason'], 'unknown')
+        interrupted = diagnose(Interrupted())['typedFacts'][0]
+        self.assertEqual((interrupted['kind'], interrupted['contained'], interrupted['cleanupComplete'], interrupted['ownerFailureMask']),
+                         ('interrupted', False, None, None))
+        self.assertEqual(ns['owner_error_data'](hidden, None), dict(available=False, typedFacts=[], chainTruncated=False))
+        wrapped = ValueError('private wrapper text')
+        wrapped.__cause__ = hidden; hidden.__context__ = wrapped
+        self.assertEqual(len(diagnose(wrapped)['typedFacts']), 1)
+        self.assertFalse(diagnose(wrapped)['chainTruncated'])
+        head = OwnerError('unknown')
+        for _ in range(20):
+            parent = OwnerError('unknown'); parent.__cause__ = head; head = parent
+        self.assertEqual(len(diagnose(head)['typedFacts']), 16)
+        self.assertTrue(diagnose(head)['chainTruncated'])
+        self.assertEqual(program.count('owner_error_data(error, owner)'), 2)  # definition + catch only
+        self.assertIn("receipt['failure']['ownerDiagnostic'] = dict(available=False)", program)
+        self.assertIn("owner = None", program)
+        self.assertIn("pending = True; receipt['originalPending'] = True", program)
+        self.assertIn("if not pending and input_originals_known:", program)
+        _target, output, rows, _macho = normal_cargo_fixture(work / 'cargo-target', checkout=checkout)
+        # Cargo emits a separate custom-build artifact for this SAME manifest.
+        build_script = copy.deepcopy(rows[0])
+        build_script['target'] = dict(name='build-script-build', kind=['custom-build'], crate_types=['bin'],
+                                      src_path=str(checkout / 'desktop/helpers/macos-desktop-image/build.rs'))
+        build_script['filenames'] = [str(work / 'cargo-target/release/build/fixed/build-script-build')]
+        build_script['executable'] = build_script['filenames'][0]
+        rows.append(build_script)
+        rows.append({'reason': 'build-finished', 'success': True})
+        encoded = lambda value: b''.join(json.dumps(row, separators=(',', ':')).encode() + b'\n' for row in value)
+        self.assertEqual(ns['artifact_data'](encoded(rows), checkout, work), output)
+        mutations = [lambda v: v.pop(), lambda v: v.append(dict(v[-1])), lambda v: v[-1].update(success=False),
+                     lambda v: v[-1].update(success=1), lambda v: v[0].update(fresh=True),
+                     lambda v: v[0].update(filenames=[str(output) + '.other']), lambda v: v[0]['profile'].update(test=True),
+                     lambda v: v[0]['target'].update(kind=['test']), lambda v: v[0]['target'].update(src_path='/other.rs'),
+                     lambda v: v[1].update(features=['desktop-shell', 'custom-protocol', 'macos-installed-observation']),
+                     lambda v: v[1]['features'].append('macos-installed-desktop-image'), lambda v: v.insert(0, dict(v[0]))]
+        for mutate in mutations:
+            changed = copy.deepcopy(rows); mutate(changed)
+            with self.assertRaises(ValueError): ns['artifact_data'](encoded(changed), checkout, work)
+        for raw in (b'', encoded(rows).rstrip(b'\n'), b'{"reason":"build-finished","success":true,"success":true}\n',
+                    b'{"reason":"build-finished","success":true,"number":1e9999}\n'):
+            with self.assertRaises(ValueError): ns['artifact_data'](raw, checkout, work)
+        output_hash_node = next(node for node in ast.walk(main_node) if isinstance(node, ast.FunctionDef) and node.name == 'output_hash')
+        original_body = next(node for node in output_hash_node.body if isinstance(node, ast.Try)).body
+        observed = next(node for node in original_body if isinstance(node, ast.Assign)
+                        and ast.unparse(node.targets[0]) == "receipt['facadeArtifactObserved']")
+        guard = next(node for node in original_body if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                     and isinstance(node.value.func, ast.Name) and node.value.func.id == 'need')
+        self.assertLess(original_body.index(observed), original_body.index(guard))
+        artifact_shape_code = compile(ast.Module(body=[observed, guard], type_ignores=[]), '<artifact-original-shape-DATA>', 'exec')
+        info_values = dict(st_mode=stat.S_IFREG | 0o755, st_uid=501, st_gid=20, st_nlink=1, st_size=4096)
+        for mutation in ({}, {'st_nlink': 2}, {'st_nlink': 0}, {'st_uid': 0}, {'st_size': 0}, {'st_size': 256 * 1024 * 1024 + 1}):
+            receipt = {}; info = SimpleNamespace(**dict(info_values, **mutation))
+            env = dict(ns, receipt=receipt, info=info, os=SimpleNamespace(getuid=lambda: 501))
+            if mutation:
+                with self.assertRaisesRegex(ValueError, '^compile-artifact-file$'): exec(artifact_shape_code, env)
+            else: exec(artifact_shape_code, env)
+            shape = receipt['facadeArtifactObserved']
+            self.assertEqual(set(shape), {'mode', 'uid', 'gid', 'nlink', 'size', 'regular', 'ownerAllowed', 'singleLink', 'sizeAllowed'})
+            self.assertEqual(shape['nlink'], info.st_nlink)
+            self.assertEqual(shape['singleLink'], info.st_nlink == 1)
+            self.assertNotIn('sha256', shape)  # A refused original was never hashed/qualified.
+            self.assertNotIn('facadeArtifactVerified', receipt)
+        self.assertIn('compile-artifact-file', ns['ARTIFACT_REASONS'])
+        self.assertNotIn('arbitrary private message', ns['ARTIFACT_REASONS'])
+        command_rows = [dict(role=role, returned=True, capturesSettled=True, returncode=0) for role in ns['ROLES']]
+        good = dict(commands=command_rows, originalPending=False, sourcePost=True, toolsPost=True, inputOriginalsKnown=True,
+                    frontendGenerated=True, facadeArtifactVerified=True, toolOriginalsClosed=True, generatedOutputsRetired=True,
+                    installedQualified=False, runtimeQualified=False, launched=False, signed=False, failure=None,
+                    pythonControllerPrepared=True, pythonControllerPost=True, pythonControllerRetired=True)
+        self.assertTrue(ns['passed_data'](good))
+        for key in ('sourcePost', 'toolsPost', 'inputOriginalsKnown', 'frontendGenerated', 'facadeArtifactVerified',
+                    'toolOriginalsClosed', 'generatedOutputsRetired', 'pythonControllerPrepared', 'pythonControllerPost', 'pythonControllerRetired'):
+            self.assertFalse(ns['passed_data'](dict(good, **{key: False})), key)
+        for key in ('originalPending', 'installedQualified', 'runtimeQualified', 'launched', 'signed'):
+            self.assertFalse(ns['passed_data'](dict(good, **{key: True})), key)
+        self.assertFalse(ns['passed_data'](dict(good, failure={'stage': 'actual-child'})))
+        self.assertFalse(ns['passed_data'](dict(good, commands=command_rows[:-1])))
+        for key, value in (('returned', False), ('capturesSettled', False), ('role', 'other'), ('returncode', True)):
+            bad = copy.deepcopy(command_rows); bad[-1][key] = value
+            self.assertFalse(ns['cleanup_allowed_data'](bad, False, True, True))
+        failed_original = copy.deepcopy(command_rows); failed_original[-1]['returncode'] = 65
+        self.assertTrue(ns['cleanup_allowed_data'](failed_original, False, True, True))
+        self.assertFalse(ns['passed_data'](dict(good, commands=failed_original)))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, True, True, True))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, False, False, True))
+        self.assertFalse(ns['cleanup_allowed_data'](command_rows, False, True, False))
+        facade = tomllib.loads((root / 'desktop/helpers/macos-desktop-image/Cargo.toml').read_text())
+        self.assertEqual(facade['lib']['crate-type'], ['cdylib'])
+        self.assertIs(facade['lib']['test'], False)
+        self.assertEqual(facade['dependencies']['mobile-release-kit-desktop']['features'], ['macos-installed-desktop-image'])
+        package = json.loads((root / 'desktop/package.json').read_text())
+        self.assertEqual(package['scripts']['build'], 'tsc --noEmit -p tsconfig.json && vite build')
+        app_cargo = tomllib.loads((root / 'desktop/src-tauri/Cargo.toml').read_text())
+        self.assertEqual(app_cargo['features']['macos-installed-desktop-image'],
+                         ['desktop-shell', 'custom-protocol', 'mrk-macos-installed-native/desktop-image'])
+        tauri = json.loads((root / 'desktop/src-tauri/tauri.conf.json').read_text())
+        self.assertEqual(tauri['build']['frontendDist'], '../dist')
+        native_build = (root / 'desktop/native/macos-installed-native/build.rs').read_text()
+        self.assertIn('MRK_MACOS_INSTALL_SOURCE_COMMIT', native_build)
+        self.assertIn('MRK_IMAGE_RELEASE_ID', native_build)
+        evidence = workflow_step(actual_shipping, 'Preserve only bounded public compile evidence; upload is not qualification')
+        public = re.findall(r'^            \$\{\{ steps.compile_work.outputs.root \}\}/([^\n]+)$', evidence, re.M)
+        self.assertEqual(public, ['source-inventory.json', 'compile-receipt.json', 'npm-ci.stdout', 'npm-ci.stderr',
+                                  'frontend-build.stdout', 'frontend-build.stderr', 'shipping-image-build.stdout', 'shipping-image-build.stderr'])
+        for text in (actual_shipping.replace("run: *mrk_installed_source_inventory", "run: *other", 1),
+                     actual_shipping.replace("timeout-minutes: 35", "timeout-minutes: 36", 1),
+                     actual_shipping.replace("  shipping-image-compile:\n", "  wrong-compile:\n", 1)):
+            with self.assertRaises(AssertionError): without_shipping_compile_workflow(text)
+
+        # The vendor bootstrap may be 0775; the actual compile controller may
+        # not. Exercise the exact new record/runtime validators on tiny DATA,
+        # never create an environment or import/execute vendor venv here.
+        controller_work = Path('/synthetic-controller-work')
+        work_identity = (7, 10, stat.S_IFDIR | 0o700, 501, 20, 2, 64, 100, 200)
+        base_identity = [1, 11, stat.S_IFREG | 0o775, 0, 80, 1, 135696, 100, 200]
+        config = ns['controller_config_data'](controller_work)
+        source_hash = 'a' * 64
+        controller_rows = []
+        for index, name in enumerate(ns['CONTROLLER_DIRS'] + ns['CONTROLLER_FILES']):
+            directory = name in ns['CONTROLLER_DIRS']
+            executable = name in ns['CONTROLLER_EXES']
+            mode = (stat.S_IFDIR | 0o700) if directory else stat.S_IFREG | (0o755 if executable else 0o600)
+            size = 64 if directory else base_identity[6] if executable else len(config) if name == 'pyvenv.cfg' else 64
+            digest = None if directory else source_hash if executable else hashlib.sha256(config).hexdigest() if name == 'pyvenv.cfg' else 'b' * 64
+            controller_rows.append(dict(path=name, identity=[7, 100 + index, mode, 501, 20, 2 if directory else 1, size, 100, 200], sha256=digest))
+        controller_record = dict(schemaVersion=1, baseExecutable=ns['CONTROLLER_BASE'], baseIdentity=base_identity,
+                                 baseSha256=source_hash, baseOriginalClosed=True, relativeExecutable='bin/python3.14',
+                                 rows=controller_rows, totalBytes=sum(row['identity'][6] for row in controller_rows if row['path'] in ns['CONTROLLER_FILES']))
+        self.assertIs(ns['controller_record_data'](controller_record, controller_work, work_identity), controller_record)
+        self.assertFalse(ns['tool_shape_data'](SimpleNamespace(**dict(valid_info, st_mode=base_identity[2], st_uid=0, st_gid=80)), 501, True)['writeProtected'])
+        self.assertTrue(ns['tool_shape_data'](SimpleNamespace(**valid_info), 501, True)['writeProtected'])
+        self.assertEqual(len(controller_rows), 15)
+        self.assertEqual(ns['CONTROLLER_EXES'], ('bin/python3.14', 'bin/python3', 'bin/python', 'bin/𝜋thon'))
+        self.assertEqual(len(config.splitlines()), 5)
+        self.assertIn(b'--copies --without-pip --without-scm-ignore-files /synthetic-controller-work/python-controller\n', config)
+        mutations = [lambda v: v.update(baseOriginalClosed=False), lambda v: v.update(schemaVersion=True),
+                     lambda v: v.update(relativeExecutable='bin/python3'), lambda v: v.update(baseExecutable='/another/python'),
+                     lambda v: v['baseIdentity'].__setitem__(2, stat.S_IFREG | 0o777),
+                     lambda v: v['baseIdentity'].__setitem__(3, 501), lambda v: v['baseIdentity'].__setitem__(5, 2),
+                     lambda v: v['rows'].pop(), lambda v: v['rows'].append(copy.deepcopy(v['rows'][0])),
+                     lambda v: v['rows'][5].update(path='lib64'), lambda v: v['rows'][6].update(sha256='b' * 64),
+                     lambda v: v['rows'][7].update(sha256='b' * 64),
+                     lambda v: v['rows'][7]['identity'].__setitem__(2, stat.S_IFREG | 0o775),
+                     lambda v: v['rows'][7]['identity'].__setitem__(2, stat.S_IFLNK | 0o755),
+                     lambda v: v['rows'][7]['identity'].__setitem__(5, 2),
+                     lambda v: v['rows'][7]['identity'].__setitem__(1, v['rows'][8]['identity'][1]),
+                     lambda v: v['rows'][6]['identity'].__setitem__(2, stat.S_IFREG | 0o644),
+                     lambda v: v['rows'][0]['identity'].__setitem__(2, stat.S_IFDIR | 0o775),
+                     lambda v: v.update(totalBytes=v['totalBytes'] + 1)]
+        for change in mutations:
+            value = copy.deepcopy(controller_record); change(value)
+            with self.assertRaises(ValueError): ns['controller_record_data'](value, controller_work, work_identity)
+        runtime = dict(executable='/synthetic-controller-work/python-controller/bin/python3.14',
+                       prefix='/synthetic-controller-work/python-controller', execPrefix='/synthetic-controller-work/python-controller',
+                       basePrefix='/Library/Frameworks/Python.framework/Versions/3.14',
+                       baseExecPrefix='/Library/Frameworks/Python.framework/Versions/3.14', version=[3, 14, 7],
+                       isolated=True, noSite=True, dontWriteBytecode=True, filesystemEncoding='utf-8')
+        self.assertTrue(ns['controller_runtime_data'](runtime, controller_work))
+        for key, value in [('executable', ns['CONTROLLER_BASE']), ('prefix', runtime['basePrefix']),
+                           ('execPrefix', runtime['basePrefix']), ('basePrefix', '/other/base'), ('version', [3, 14, 6]),
+                           ('isolated', False), ('noSite', False), ('dontWriteBytecode', False), ('filesystemEncoding', 'ascii')]:
+            with self.assertRaisesRegex(ValueError, '^controller-runtime$'):
+                ns['controller_runtime_data'](dict(runtime, **{key: value}), controller_work)
+        for event in ('subprocess.Popen', 'os.system', 'os.fork', 'os.forkpty', 'os.posix_spawn', 'os.exec',
+                      'socket.__new__', 'socket.connect', 'socket.getaddrinfo'):
+            self.assertFalse(ns['controller_audit_data'](event), event)
+        for event in ('open', 'os.scandir', 'os.mkdir', 'os.chmod', 'shutil.copyfile', 'import'):
+            self.assertTrue(ns['controller_audit_data'](event), event)
+        admission = workflow_step(actual_shipping, 'Admit the exact nonroot ARM compile-only route and fresh work')
+        self.assertIn('/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 -I -S -B -', admission)
+        admission_body = admission.split("<<'PY_SHIPPING_COMPILE_ADMIT'\n", 1)[1].split('          PY_SHIPPING_COMPILE_ADMIT\n', 1)[0]
+        admission_program = ''.join(line[10:] if line.startswith('          ') else line for line in admission_body.splitlines(keepends=True))
+        admission_tree = ast.parse(admission_program)
+        # The two processes share exact SOURCE validators, not a serialized
+        # executable or a caller-supplied bootstrap module.
+        for name in ('controller_config_data', 'controller_audit_data', 'controller_record_data', 'controller_runtime_data'):
+            original = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            prepared = next(node for node in admission_tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+            self.assertEqual(ast.dump(original, include_attributes=False), ast.dump(prepared, include_attributes=False))
+        creations = [node for node in ast.walk(admission_tree) if isinstance(node, ast.Call)
+                     and isinstance(node.func, ast.Attribute) and node.func.attr == 'create'
+                     and isinstance(node.func.value, ast.Call)
+                     and ast.unparse(node.func.value.func) == 'venv.EnvBuilder']
+        self.assertEqual(len(creations), 1)
+        self.assertEqual([ast.unparse(argument) for argument in creations[0].args], ['controller_root'])
+        options = {keyword.arg: keyword.value for keyword in creations[0].func.value.keywords}
+        self.assertEqual(set(options), {'system_site_packages', 'clear', 'symlinks', 'upgrade', 'with_pip', 'upgrade_deps', 'scm_ignore_files'})
+        for key in set(options) - {'scm_ignore_files'}: self.assertIs(ast.literal_eval(options[key]), False)
+        self.assertEqual(ast.unparse(options['scm_ignore_files']), 'frozenset()')
+        self.assertEqual(admission_program.count('sys.addaudithook(preparation_audit)'), 1)
+        self.assertIn("need(controller_audit_data(event), 'controller-unexpected-process')", admission_program)
+        self.assertIn('prep_work_end, prep_hard_end = prep_start + 45, prep_start + 60', admission_program)
+        self.assertLess(admission_program.index('prep_start = time.monotonic()'), admission_program.index('tempfile.mkdtemp('))
+        self.assertIn('for relative in CONTROLLER_SCRIPTS:', admission_program)
+        self.assertEqual(admission_program.count('os.fchmod(fd, 0o600)'), 1)
+        for forbidden in ('os.chmod(', 'subprocess.run(', 'subprocess.Popen(', 'ensurepip', 'shutil.rmtree(', '--upgrade-deps'):
+            self.assertNotIn(forbidden, admission_program)
+        self.assertIn("python = str(controller_root / 'bin/python3.14')", admission_program)
+        self.assertIn("MRK_PYTHON=' + python", admission_program)
+        self.assertIn("need(os.environ.get('MRK_PYTHON') == runtime['executable'], 'controller-runtime')", program)
+        self.assertIn("tools[-1]['sha256'] == controller['baseSha256']", program)
+        self.assertLess(program.index('controller_runtime_data(runtime, work)'), program.index('tool(Path(sys.executable)'))
+        self.assertLess(program.index("roots.append((work / 'python-controller'"), program.index("for name in ('npm-cache'"))
+        self.assertIn('for path, before in reversed(roots):', program)  # private controller is last.
+        self.assertIn("if path == work / 'python-controller': receipt['pythonControllerRetired'] = True", program)
+        cleanup_gates = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                         for node in parent.finalbody if isinstance(node, ast.If)
+                         and "receipt['pythonControllerPrepared']" in ast.unparse(node.test)]
+        self.assertEqual(len(cleanup_gates), 1)
+        cleanup_code = compile(ast.Expression(cleanup_gates[0].test), '<fixed-controller-cleanup-DATA>', 'eval')
+        cleanup_inputs = dict(ns, receipt=good, pending=False, close_ok=True, input_originals_known=True)
+        self.assertTrue(eval(cleanup_code, cleanup_inputs))
+        for key in ('pythonControllerPrepared', 'pythonControllerPost', 'sourcePost', 'toolsPost'):
+            self.assertFalse(eval(cleanup_code, dict(cleanup_inputs, receipt=dict(good, **{key: False}))), key)
+        for key, value in (('pending', True), ('close_ok', False), ('input_originals_known', False)):
+            self.assertFalse(eval(cleanup_code, dict(cleanup_inputs, **{key: value})), key)
+
+        # Execute the exact new directory-original close and the subsequent
+        # production guards on inert ports. An exceptional close must not be
+        # repaired by another census, even when the completed commands permit
+        # cleanup and every later POST could otherwise be successful.
+        controller_node = next(node for node in main_node.body
+                               if isinstance(node, ast.FunctionDef) and node.name == 'controller_post')
+        directory_finalizers = [node.finalbody for node in ast.walk(controller_node)
+                                if isinstance(node, ast.Try) and node.finalbody]
+        self.assertEqual(len(directory_finalizers), 1)
+        directory_close = compile(ast.Module(body=directory_finalizers[0], type_ignores=[]),
+                                  '<fixed-controller-original-close-DATA>', 'exec')
+        post_guards = [node for parent in main_node.body if isinstance(parent, ast.Try)
+                       for final in parent.finalbody if isinstance(final, ast.Try)
+                       for node in final.body if isinstance(node, ast.If)
+                       and ast.unparse(node.test) == 'not pending and input_originals_known']
+        self.assertEqual(len(post_guards), 1)
+        post_guard_code = compile(ast.Module(body=post_guards, type_ignores=[]),
+                                  '<fixed-controller-final-post-DATA>', 'exec')
+        for close_error in (None, OSError('inert consuming close'),
+                            KeyboardInterrupt('inert consuming close'), SystemExit('inert consuming close')):
+            ports = SimpleNamespace(close=mock.Mock(side_effect=close_error))
+            local = dict(cleanup_inputs, os=ports, fd=73,
+                         receipt=dict(good, commands=good['commands'][:1]))
+            if close_error is None:
+                exec(directory_close, local)
+            else:
+                with self.assertRaises(type(close_error)) as caught:
+                    exec(directory_close, local)
+                self.assertIs(caught.exception, close_error)
+            ports.close.assert_called_once_with(73)
+            self.assertIs(local['input_originals_known'], close_error is None)
+            self.assertIs(eval(cleanup_code, local), close_error is None)
+            if close_error is not None:
+                first_failure = dict(stage='command-boundary', kind=type(close_error).__name__)
+                local['receipt'].update(failure=first_failure, pythonControllerPost=False,
+                                        toolsPost=False, toolOriginalsClosed=False)
+                probes = {name: mock.Mock() for name in ('read', 'source_post', 'tools_post', 'configs_post', 'controller_post')}
+                local.update(probes, controller=object(), tools=[dict(fd=41)])
+                exec(post_guard_code, local)
+                exec(retire_code, local)
+                for probe in probes.values(): probe.assert_not_called()
+                ports.close.assert_called_once_with(73)  # no retry or unrelated original consumption.
+                self.assertEqual(local['tools'], [dict(fd=41)])
+                self.assertIs(local['receipt']['failure'], first_failure)
+                self.assertFalse(local['receipt']['pythonControllerPost'])
+                self.assertFalse(local['receipt']['toolOriginalsClosed'])
+                local['receipt'].update(pythonControllerPost=True, toolsPost=True)
+                self.assertFalse(eval(cleanup_code, local))  # a later good census cannot clear unknown.
 
 
 

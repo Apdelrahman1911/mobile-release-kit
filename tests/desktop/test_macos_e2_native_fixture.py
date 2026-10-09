@@ -2840,12 +2840,18 @@ class InstallerContextTests(unittest.TestCase):
         # here is not an observed productbuild or GUI Installer execution.
         distribution_source = (PATH.parents[1] / "macos-installed-inputs/Distribution.xml").read_bytes()
         readme = (PATH.parents[1] / "macos-installed-inputs/InstallerReadMe.html").read_bytes()
-        self.assertEqual(fixture.digest(distribution_source), "02f90d45759692d95c9c3ca8599f7c4a597cf3d07df9f47cda18ae4e26fc021a")
-        self.assertEqual(fixture.digest(readme), "361f0e5ea46d1b4ccad9b8302afd35c7b9f8f4b8600cc339393532a5d6e1ff71")
+        self.assertEqual(fixture.digest(distribution_source), "f93aabf5a9576ca4ca163678d3b8cc34de65516293458c7f98d1095c8c2d9c36")
+        self.assertEqual(fixture.digest(readme), "48a23a68fe1e1f5d995b79ba79e28e0909c8c1ed1f7a530ba2c42722bb3063d9")
         presentation = (distribution_source, readme)
         distribution, resource = fixture.context_presentation_data(*presentation)
         self.assertEqual(resource, readme)
-        self.assertEqual(fixture.digest(distribution), "e04f7696d5af2db7225932ac2352a659959c9cb0360826daa3d68e91c51d974e")
+        # One mandatory pre-install page; no optional duplicate resource role.
+        readme_tag = b'<readme file="InstallerReadMe.html" mime-type="text/html"/>'
+        self.assertEqual(distribution.count(readme_tag), 1)
+        self.assertEqual(fixture.context_xml(distribution, 65536).findall("conclusion"), [])
+        self.assertNotIn(b"This information can also appear at the end of installation.", readme)
+        self.assertIn(b"It does not replace Installer's actual success or failure result.", readme)
+        self.assertEqual(fixture.digest(distribution), "8a12d783ae85a505c53087fc153205603a91ed1684f3d35f81210a12366e4c49")
         self.assertEqual(distribution.count(fixture.CONTEXT_IDENTIFIERS[1].encode("ascii")), 2)
         for changed in ((distribution_source + b" ", readme), (distribution_source, readme + b" "),
                         (bytearray(distribution_source), readme), (distribution_source, b"")):
@@ -2878,6 +2884,17 @@ class InstallerContextTests(unittest.TestCase):
             ):
                 changed = dict(expected, Distribution=changed_distribution)
                 with self.assertRaises(fixture.Refused):
+                    fixture.context_product(self.xar(changed, directory=directory), component, members,
+                                            presentation=presentation)
+            for changed_distribution in (
+                distribution.replace(b'</installer-gui-script>',
+                    b'<conclusion file="InstallerReadMe.html" mime-type="text/html"/></installer-gui-script>'),
+                distribution.replace(readme_tag, b'', 1),
+                distribution.replace(readme_tag, readme_tag + readme_tag, 1),
+            ):
+                self.assertNotEqual(changed_distribution, distribution)
+                changed = dict(expected, Distribution=changed_distribution)
+                with self.assertRaisesRegex(fixture.Refused, "^context-product-distribution$"):
                     fixture.context_product(self.xar(changed, directory=directory), component, members,
                                             presentation=presentation)
             for mode in ("foreign-resource", "second-resource", "symlink-resource", "renamed-directory"):

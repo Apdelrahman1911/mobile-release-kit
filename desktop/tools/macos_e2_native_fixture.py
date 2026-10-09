@@ -258,9 +258,9 @@ CONTEXT_README_SOURCE = "desktop/macos-installed-inputs/InstallerReadMe.html"
 CONTEXT_PRESENTATION_ARTIFACT = "installer-context-product-presentation"
 CONTEXT_PRESENTATION_RESOURCE = "Resources/InstallerReadMe.html"
 CONTEXT_PRESENTATION_PINS = {
-    "distributionSourceSha256": "02f90d45759692d95c9c3ca8599f7c4a597cf3d07df9f47cda18ae4e26fc021a",
-    "readmeSourceSha256": "361f0e5ea46d1b4ccad9b8302afd35c7b9f8f4b8600cc339393532a5d6e1ff71",
-    "inputDistributionSha256": "e04f7696d5af2db7225932ac2352a659959c9cb0360826daa3d68e91c51d974e",
+    "distributionSourceSha256": "f93aabf5a9576ca4ca163678d3b8cc34de65516293458c7f98d1095c8c2d9c36",
+    "readmeSourceSha256": "48a23a68fe1e1f5d995b79ba79e28e0909c8c1ed1f7a530ba2c42722bb3063d9",
+    "inputDistributionSha256": "8a12d783ae85a505c53087fc153205603a91ed1684f3d35f81210a12366e4c49",
 }
 CONTEXT_RECEIPT_ROLES = ("context-component-receipt-diagnostic-query", "context-component-receipt-diagnostic-census")
 CONTEXT_POST_CENSUS_ROLES = ("context-component-receipt-post-census", "context-product-receipt-post-census")

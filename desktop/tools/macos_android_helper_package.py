@@ -227,6 +227,13 @@ FINAL_PACKAGE_ROLES = ("final-package-resolve-notarytool", "final-package-resolv
                        "final-package-sign", "final-package-signature-before", "final-package-submit",
                        "final-package-log", "final-package-staple", "final-package-validate",
                        "final-package-signature-after")
+def final_package_roles(remove, package_role):
+    need(type(remove) is bool and package_role in ("ordinary-image", "installed-shell-observation"),
+         "final-package-fixed-purpose")
+    return (("final-package-productbuild",) + FINAL_PACKAGE_ROLES
+            if not remove and package_role == "ordinary-image" else FINAL_PACKAGE_ROLES)
+
+
 IMAGE_CREDENTIAL_ROLES = {
     "distribution-image": ("distribution-sign", "distribution-verify-signature"),
     "observation-image": ("observation-sign", "observation-verify-signature"),
@@ -417,11 +424,12 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
                                                   "developerIdOrNotarizationQualified", "productReady"))
          and value["directStagerIOPending"] is None and value["cleanupErrors"] == [], "final-package-receipt-finality")
     calls, auxiliary = value["originalCalls"], value["credentialOriginals"]
-    need(type(calls) is list and len(calls) == len(FINAL_PACKAGE_ROLES)
+    roles = final_package_roles(remove, value["packageRole"])
+    need(type(calls) is list and len(calls) == len(roles)
          and type(auxiliary) is list and len(auxiliary) == len(INSTALLER_CREDENTIAL_ROSTER), "final-package-receipt-original-count")
     def sha(item):
         return type(item) is str and re.fullmatch(r"[0-9a-f]{64}", item) is not None and item != "0" * 64
-    for row, role in zip(calls, FINAL_PACKAGE_ROLES):
+    for row, role in zip(calls, roles):
         need(type(row) is dict and set(row) == {"role", "entered", "returned", "capturesSettled", "returncode", "stdoutSha256", "stderrSha256"}
              and row["role"] == role and all(row[key] is True for key in ("entered", "returned", "capturesSettled"))
              and type(row["returncode"]) is int and row["returncode"] == 0
@@ -931,6 +939,9 @@ class Operation:
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
         self.removal = phase in REMOVE_PHASES
+        # The existing SOURCE-selected ordinary workflow alone ships this UI.
+        # Aqua observation and the separate Remove package keep their flat form.
+        self.install_product = not self.removal and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
         self.package_filename = "Remove.pkg" if self.removal else "MobileReleaseKit.pkg"
         self.scripts_name = "remove-scripts" if self.removal else "scripts"
         self.packager_filename = "Remove-original.pkg" if self.removal else "MobileReleaseKit-original.pkg"
@@ -958,6 +969,9 @@ class Operation:
         self.final_package_roots, self.final_package_inputs = [], []
         self.final_package_output_root = self.final_package_output = self.final_package_sha = None
         self.final_package_complete = False
+        self.install_presentation_sources = []
+        self.install_product_root = self.install_product_output_root = self.install_product_original = None
+        self.install_component_inputs = None
         self.final_image_roots, self.final_image_inputs = [], []
         self.final_image_original = self.final_image_output_root = self.final_image_output = self.final_image_sha = None
         self.final_image_complete = self.final_image_mount_verified = False
@@ -1137,10 +1151,11 @@ class Operation:
                  "notary-original-dispatch-boundary")
             self.notary_clock()
         if self.phase in FINAL_PACKAGE_PHASES:
+            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
             need(not self.notary_retiring and not self.notary_unknown and not self.errors
-                 and self.stager_io_pending is None and len(self.calls) < len(FINAL_PACKAGE_ROLES)
-                 and role == FINAL_PACKAGE_ROLES[len(self.calls)]
-                 and self.notary_mutation_pending == (role == "final-package-staple")
+                 and self.stager_io_pending is None and len(self.calls) < len(roles)
+                 and role == roles[len(self.calls)]
+                 and self.notary_mutation_pending == (role in ("final-package-productbuild", "final-package-staple"))
                  and self.signing_mutation_pending == (role == "final-package-sign")
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "final-package-original-dispatch-boundary")
@@ -1868,11 +1883,14 @@ class Operation:
         return digestor.hexdigest()
 
     def notary_tool(self, name):
-        need(name in ("notarytool", "stapler"), "notary-fixed-tool")
-        fixed = NOTARY_XCODE / "usr/bin" / name
+        need(name in ("notarytool", "stapler", "productbuild"), "notary-fixed-tool")
+        need(name != "productbuild" or self.phase == "finalize-package" and self.install_product,
+             "install-product-fixed-tool")
+        fixed = Path("/usr/bin/productbuild") if name == "productbuild" else NOTARY_XCODE / "usr/bin" / name
         canonical = fixed.resolve(strict=True)
         applications = NOTARY_XCODE.parents[2]
-        need(canonical.is_absolute() and len(canonical.parts) <= 16
+        need(canonical == fixed if name == "productbuild" else
+             canonical.is_absolute() and len(canonical.parts) <= 16
              and applications.resolve(strict=True) in canonical.parents, "notary-selected-tool-path")
         # Both the fixed Xcode.app alias and its independently resolved chain
         # are originals. xcrun output cannot choose a different tool or root.
@@ -1882,7 +1900,9 @@ class Operation:
             info = path.lstat()
             selected_alias = stat.S_ISLNK(info.st_mode) and path == NOTARY_XCODE.parent.parent
             above_applications = path in applications.parents
-            need(info.st_uid in (0, os.getuid())
+            need((info.st_uid == 0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
+                  and not info.st_mode & 0o022) if name == "productbuild" else
+                 info.st_uid in (0, os.getuid())
                  and (selected_alias or (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
                       and (above_applications or not info.st_mode & 0o022)), "notary-selected-tool-ancestry")
             originals.append((path, signature(info), os.readlink(path) if stat.S_ISLNK(info.st_mode) else None))
@@ -2042,7 +2062,12 @@ class Operation:
 
     @contextlib.contextmanager
     def notary_key_scope(self):
-        need((self.phase in NOTARY_PHASES and len(self.calls) == 5 or self.phase in FINAL_PACKAGE_PHASES and len(self.calls) == 4
+        package_prefix = None
+        if self.phase in FINAL_PACKAGE_PHASES:
+            roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
+            package_prefix = roles[:roles.index("final-package-submit")]
+        need((self.phase in NOTARY_PHASES and len(self.calls) == 5
+              or self.phase in FINAL_PACKAGE_PHASES and tuple(call["role"] for call in self.calls) == package_prefix
               or self.phase in FINAL_IMAGE_PHASES and len(self.calls) == 3)
              and self.notary_key is None
              and self.notary_known(), "notary-key-purpose")
@@ -2239,6 +2264,46 @@ class Operation:
             if self.notary_final is not None:
                 item = self.notary_final
                 need(self.notary_snapshot(item["entry"], item["path"], work=False) == item["snapshot"], "notary-final-input-post")
+            if self.install_product_root is not None:
+                # Only our freshly generated presentation needs deletion
+                # permission. Its native input stayed readonly through every
+                # returned call and the full snapshot POST immediately above.
+                root = self.install_product_root
+                items = [item for item in self.notary_roots if item["entry"] is root]
+                need(self.install_product and self.phase == "finalize-package"
+                     and root.get("parent_entry") is self.target_entry and root["name"] == "product-input"
+                     and len(items) == 1 and items[0]["path"] == self.work / self.target_name / "product-input",
+                     "install-product-retirement-root")
+                expected = items[0]["snapshot"]["directories"]
+                need(set(expected) == {"", "resources"}
+                     and set(items[0]["snapshot"]["files"]) == {"Distribution", "resources/InstallerReadMe.html"}
+                     and expected[""][1] == ("Distribution", "resources")
+                     and expected["resources"][1] == ("InstallerReadMe.html",), "install-product-retirement-roster")
+                self.recheck_directory(root)
+                need(root["identity"] == expected[""][0] and stat.S_IMODE(root["identity"][2]) == 0o700,
+                     "install-product-retirement-root-original")
+                child = None
+                try:
+                    self.notary_clock(work=False)
+                    fd = os.open("resources", READ_FLAGS | os.O_DIRECTORY, dir_fd=root["fd"])
+                    child = self.register(fd, "install-product-retirement-directory", "directory", root["fd"], "resources")
+                    child["parent_entry"] = root
+                    child["identity"] = directory_identity(os.fstat(fd))
+                    self.recheck_directory(child)
+                    need(child["identity"] == expected["resources"][0]
+                         and stat.S_IMODE(child["identity"][2]) == 0o555
+                         and os.listdir(fd) == ["InstallerReadMe.html"], "install-product-retirement-original")
+                    self.notary_clock(work=False)
+                    os.fchmod(fd, 0o700)
+                    child["identity"] = directory_identity(os.fstat(fd))
+                    need(child["identity"] == (expected["resources"][0][:2]
+                         + (stat.S_IFDIR | 0o700,) + expected["resources"][0][3:]), "install-product-retirement-mode")
+                    self.recheck_directory(child)
+                    self.notary_clock(work=False)
+                finally:
+                    if child is not None:
+                        self.close(child)  # Same consuming original, never a cached closed FD.
+                need(child["closed"] and not self.errors, "install-product-retirement-close-unknown")
             if self.notary_copy is not None:
                 root = self.notary_copy["entry"]
                 expected = self.notary_copy["snapshot"]["directories"]
@@ -2711,6 +2776,13 @@ class Operation:
             self.package_sources.append((certificate, value))
             certificates.append(value)
         need(hashlib.sha1(certificates[0]).hexdigest() == selected["leafSha1"], "installer-source-leaf")
+        if self.install_product:
+            for name in self.stager.INSTALL_PRESENTATION:
+                source = self.source_original("desktop/macos-installed-inputs/" + name,
+                                              "source-install-presentation-" + name, 8192)
+                original = (source, self.read(source))
+                self.package_sources.append(original)
+                self.install_presentation_sources.append(original)
         self.installer_selection, self.installer_certificates = selected, tuple(certificates)
         self.installer_profile_sha = digest(body)
         return selected
@@ -2750,6 +2822,8 @@ class Operation:
             names = {"tmp"}
             if self.final_package_output_root is not None:
                 names.add("signed-package")
+            if self.install_product_root is not None:
+                names.add("product-input")
             if self.notary_key is not None:
                 names.add("notary-key")
             need(set(os.listdir(self.target_entry["fd"])) == names, "final-package-target-census")
@@ -2761,7 +2835,8 @@ class Operation:
     def final_package_audit(self, entry, path):
         self.notary_post()
         size, sha = entry["identity"][6], self.notary_stream(entry)
-        result = self.final_package_io("final-package-original-audit", self.stager.audit_command,
+        audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
+        result = self.final_package_io("final-package-original-audit", audit,
             argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
                                original_package=self.work / self.packager_filename,
                                **({"remove": True, "expected_remover": self.environment.get("MRK_MACOS_REMOVER_SHA256")} if self.removal else {})))
@@ -2816,8 +2891,9 @@ class Operation:
         self.notary_mutation_pending = False  # Only after full same-original POST.
 
     def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
+        roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
         need(self.phase in FINAL_PACKAGE_PHASES and self.final_package_known() and not self.notary_retiring
-             and len(self.calls) < len(FINAL_PACKAGE_ROLES) and role == FINAL_PACKAGE_ROLES[len(self.calls)],
+             and len(self.calls) < len(roles) and role == roles[len(self.calls)],
              "final-package-fixed-role-order")
         need((self.notary_key is not None) == (role in ("final-package-submit", "final-package-log"))
              and (self.credential_active is None or role == "final-package-sign"
@@ -2837,12 +2913,14 @@ class Operation:
         changing = role == "final-package-staple"
         before = self.final_package_output["identity"] if changing else None
         before_sha = self.final_package_sha if changing else None
-        self.notary_mutation_pending = changing
+        self.notary_mutation_pending = changing or role == "final-package-productbuild"
         self.signing_mutation_pending = role == "final-package-sign"
         try:
             result = self.call(role, argv, environment, cwd=self.work, timeout=timeout, limit=limit)
             self.notary_clock()
-            if role == "final-package-sign":
+            if role == "final-package-productbuild":
+                self.final_package_adopt_product()
+            elif role == "final-package-sign":
                 self.final_package_adopt_signed()
             elif changing:
                 self.final_package_appended(before, before_sha)
@@ -2894,6 +2972,111 @@ class Operation:
         self.stager_io_pending = None
         self.notary_post()
 
+    def build_install_product(self):
+        """One productbuild original inside the existing final-package owner.
+
+        The component and UI SOURCE are held inputs, never final P. The new
+        outer file is adopted only after that same original returns zero and
+        its captures/close receipts are complete. Unknown effects stay pending.
+        """
+        need(self.install_product and self.phase == "finalize-package" and not self.calls
+             and len(self.install_presentation_sources) == 2, "fixed-install-product-purpose")
+        component_parent = self.directory(self.work_entry, "package-component", "install-product-component-directory")
+        need(os.listdir(component_parent["fd"]) == [self.package_filename], "install-product-component-roster")
+        self.final_package_roots.append((component_parent, {self.package_filename}))
+        component = self.original(component_parent, self.package_filename, "install-product-component", self.stager.MAX_BYTES,
+                                  (0o444, 0o600, 0o644))
+        self.install_component_inputs = (component_parent, component)
+        component_sha = self.notary_stream(component)
+        self.final_package_inputs.append((component, component_sha))
+        component_audit = self.final_package_io("install-product-component-audit", self.stager.audit_command,
+            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name,
+                package=self.work / "package-component" / self.package_filename,
+                original_package=self.work / self.packager_filename))
+        need(type(component_audit) is dict and component_audit.get("packageSha256") == component_sha
+             and component_audit.get("packageSize") == component["identity"][6], "install-product-component-audit")
+        product_input = self.work / self.target_name / "product-input"
+        prepared = self.final_package_io("install-product-presentation-prepare", self.stager.prepare_install_product_command,
+            argparse.Namespace(target=self.target, output=product_input))
+        root = self.directory(self.target_entry, "product-input", "install-product-presentation-directory")
+        self.install_product_root = root
+        resources = self.directory(root, "resources", "install-product-resource-directory")
+        need(set(os.listdir(root["fd"])) == {"Distribution", "resources"}
+             and os.listdir(resources["fd"]) == ["InstallerReadMe.html"], "install-product-presentation-roster")
+        definition = self.original(root, "Distribution", "install-product-distribution", 8192, (0o444,))
+        readme = self.original(resources, "InstallerReadMe.html", "install-product-readme", 8192, (0o444,))
+        source_definition, source_readme = (self.read(entry) for entry, _body in self.install_presentation_sources)
+        selection = self.stager.build_release_data(self.read(self.release_entry), target=self.target)
+        need(source_definition.count(b"__MRK_PACKAGE_VERSION__") == 1, "install-product-source-version")
+        expected = source_definition.replace(b"__MRK_PACKAGE_VERSION__", selection["packageVersion"].encode("ascii"))
+        need(self.read(definition) == expected and self.read(readme) == source_readme
+             and type(prepared) is dict and prepared.get("distributionSha256") == digest(expected)
+             and prepared.get("readMeSha256") == digest(source_readme), "install-product-presentation-source")
+        self.notary_roots.append({"entry": root, "path": product_input,
+                                  "snapshot": self.notary_snapshot(root, product_input)})
+        # The retained root/snapshot binds these same named originals on every
+        # later POST. Consume these initial validation FDs before the native
+        # child, rather than growing the existing simultaneous-FD allowance.
+        for entry in (readme, definition, resources):
+            self.close(entry)
+            need(entry["closed"] and not self.errors, "install-product-presentation-close")
+        def output_directory():
+            self.recheck_directory(self.work_entry)
+            os.mkdir(self.unsigned_package_name, 0o700, dir_fd=self.work_entry["fd"])
+            parent = self.directory(self.work_entry, self.unsigned_package_name, "install-product-output-directory")
+            self.install_product_output_root = parent
+            need(stat.S_IMODE(parent["identity"][2]) == 0o700 and not os.listdir(parent["fd"]),
+                 "install-product-output-fresh")
+            self.final_package_roots.append((parent, set()))
+        self.final_package_io("install-product-output-directory", output_directory)
+        self.notary_tool("productbuild")
+        result = self.final_package_call("final-package-productbuild", ["/usr/bin/productbuild",
+            "--distribution", str(product_input / "Distribution"),
+            "--package-path", str(self.work / "package-component"),
+            "--resources", str(product_input / "resources"),
+            str(self.work / self.unsigned_package_name / self.package_filename)])
+        need(type(result.returncode) is int and result.returncode == 0 and self.install_product_original is not None,
+             "install-product-original-required")
+        return self.install_product_original
+
+    def final_package_adopt_product(self):
+        # A build start, timeout or nonzero result is not an outer package. This
+        # exact named file is observed only after the actual successful original.
+        need(self.install_product and self.notary_mutation_pending and self.install_product_original is None,
+             "install-product-adoption-order")
+        self.stage = self.stager_io_pending = "install-product-original-adoption"
+        parent = self.install_product_output_root
+        self.recheck_directory(parent)
+        need(os.listdir(parent["fd"]) == [self.package_filename], "install-product-output-roster")
+        entry = self.original(parent, self.package_filename, "install-product-unsigned-original", self.stager.MAX_BYTES,
+                              (0o444, 0o600, 0o644))
+        self.install_product_original = entry
+        sha = self.notary_stream(entry)
+        self.final_package_inputs.append((entry, sha))
+        self.final_package_roots = [(root, {self.package_filename} if root is parent else names)
+                                    for root, names in self.final_package_roots]
+        self.notary_clock()
+        self.stager_io_pending = None
+        self.notary_mutation_pending = False
+
+    def retire_install_product_inputs(self):
+        # Only after the returned productbuild, its full POST and the actual
+        # outer audit. These originals have no further native users; the final
+        # package remains bound to the original pkgbuild/Scripts/SOURCE inputs.
+        need(self.install_product and self.final_package_known() and self.install_component_inputs is not None,
+             "install-product-input-retirement")
+        self.notary_post()
+        parent, component = self.install_component_inputs
+        tool = self.notary_tools["productbuild"]
+        for entry in (component, parent, tool["entry"]):
+            self.close(entry)
+            need(entry["closed"] and not self.errors, "install-product-input-close")
+        self.final_package_inputs = [(entry, sha) for entry, sha in self.final_package_inputs if entry is not component]
+        self.final_package_roots = [(root, names) for root, names in self.final_package_roots if root is not parent]
+        del self.notary_tools["productbuild"]
+        self.install_component_inputs = None
+        self.notary_post()
+
     def finalize_package(self):
         need(self.phase in FINAL_PACKAGE_PHASES and self.signing is not None
              and not any(name in self.environment for name in CREDENTIAL_VARIABLES), "final-package-configured-purpose")
@@ -2909,15 +3092,21 @@ class Operation:
         scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
         self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
                                   "snapshot": self.notary_snapshot(scripts, self.work / self.scripts_name)})
-        parent = self.directory(self.work_entry, self.unsigned_package_name, "final-package-unsigned")
-        need(os.listdir(parent["fd"]) == [self.package_filename], "final-package-unsigned-roster")
-        self.final_package_roots.append((parent, {self.package_filename}))
-        unsigned = self.original(parent, self.package_filename, "final-package-unsigned-original", self.stager.MAX_BYTES, (0o444, 0o600, 0o644))
         packager = self.original(self.work_entry, self.packager_filename, "final-package-packager-original", self.stager.MAX_BYTES,
                                 (0o444, 0o600, 0o644))
-        for entry in (unsigned, packager):
-            self.final_package_inputs.append((entry, self.notary_stream(entry)))
+        self.final_package_inputs.append((packager, self.notary_stream(packager)))
+        if not self.install_product:
+            parent = self.directory(self.work_entry, self.unsigned_package_name, "final-package-unsigned")
+            need(os.listdir(parent["fd"]) == [self.package_filename], "final-package-unsigned-roster")
+            self.final_package_roots.append((parent, {self.package_filename}))
+            unsigned = self.original(parent, self.package_filename, "final-package-unsigned-original", self.stager.MAX_BYTES,
+                                     (0o444, 0o600, 0o644))
+            self.final_package_inputs.append((unsigned, self.notary_stream(unsigned)))
+        else:
+            unsigned = self.build_install_product()
         unsigned_audit = self.final_package_audit(unsigned, self.work / self.unsigned_package_name / self.package_filename)
+        if self.install_product:
+            self.retire_install_product_inputs()
         def output_directory():
             self.recheck_directory(self.target_entry)
             os.mkdir("signed-package", 0o700, dir_fd=self.target_entry["fd"])
@@ -3601,7 +3790,8 @@ class Operation:
         self.stager_io_pending = operation
         try:
             if operation == "final-audit":
-                result = self.stager.audit_command(args)
+                audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
+                result = audit(args)
             elif operation == "remove-input":
                 result = self.stager.remove_input_command(args)
             elif operation == "result-absence":
@@ -4200,7 +4390,7 @@ class Operation:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
         roles = (FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
-                 FINAL_PACKAGE_ROLES if self.phase in FINAL_PACKAGE_PHASES else
+                 final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"]) if self.phase in FINAL_PACKAGE_PHASES else
                  NOTARY_ROLES if self.phase in NOTARY_PHASES else
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
