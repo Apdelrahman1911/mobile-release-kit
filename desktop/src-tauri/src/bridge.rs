@@ -461,6 +461,26 @@ impl DesktopBridge {
         let root = self.project_root(&project_id)?;
         self.edits.open_published(publisher, window, project_id, root)
     }
+    pub(crate) fn open_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Open) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let project_id = args.project_id().to_owned();
+        let ticket = self.edits.initialization_open_ticket(window, args)?;
+        let selected = project_id.clone();
+        document.initialization_edit_admit_published(|_| Ok(selected), |bridge, registration, publisher|
+            bridge.edits.open_initialization_published(publisher, window, project_id, registration, ticket))
+    }
+    pub(crate) fn prepare_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Prepare) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.prepare_initialization_published(publisher, window, args, registration))
+    }
+    pub(crate) fn apply_project_initialization(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+        args: crate::project_initialization_edit_protocol::Apply) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+        let session_id = args.session_id.clone();
+        document.initialization_edit_admit_published(|bridge| bridge.edits.initialization_project(window, &session_id), |bridge, registration, publisher|
+            bridge.edits.apply_initialization_published(publisher, window, args, registration))
+    }
     pub(crate) fn open_workflow_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
         project_id: String) -> Result<crate::github_workflow_edit_protocol::WorkflowEditStatus, BridgeError> {
         // A ticket contains only preallocated identity/executor DATA. The real

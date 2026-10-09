@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { AssetSessionController, assetCancellationReason, assetContextReason, assetImageOperationPending, assetIntentPending, assetSessionReason, assetStorageReason } from '../src/assetSessionController.ts';
-import { ASSET_KINDS, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
+import { ASSET_KINDS, ASSET_REASON_HELP, SESSION_FIELDS, assetError, assetJsonFits, assetLabelFits, assetRequestFits, assetStorageWritable, isAssetFileKind, parseAssetStatus } from '../src/assetSessionProtocol.ts';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { sessionControlHelp, sessionKindHelp, sessionTargetLabel } from '../src/assetSessionHelp.ts';
@@ -1215,6 +1215,44 @@ test('unlock is explicit and its delayed completion only submits the already req
     assert.equal(h.controller.getSnapshot().status.records[0].payloadState, 'not-checked');
     assert.equal(h.calls.some((call) => ['prepare', 'bind', 'choose', 'open'].includes(call.command)), false);
   } finally { h.controller.dispose(); }
+  // A failed native Unlock retires its vault lease. These are redacted status
+  // DATA, not a simulated Keychain call or proof of native cleanup.
+  for (const settlement of ['pending', 'unknown', 'late-known', 'known']) {
+    const phase = settlement === 'pending' ? 'stopping' : settlement === 'unknown' ? 'unknown' : 'idle';
+    const recovered = harness(status(4, { mode: 'closed', context: null,
+      operation: operation({ operationId: 3, operation: 'unlock', phase, settlement,
+        reason: 'vault-keyring-locked', assessment: null, preview: null }) }));
+    try {
+      await recovered.controller.connect(recovered.api); await settle();
+      assert.equal(recovered.controller.getSnapshot().status.mode, 'closed');
+      assert.equal(recovered.controller.unlock(), false, `${settlement}: closed is not an unlock target`);
+      assert.deepEqual(recovered.calls.map((call) => call.command), ['listen', 'status']);
+      assert.equal(recovered.controller.open('encrypted'), settlement === 'known', `${settlement}: original cleanup gates reopen`);
+      if (settlement !== 'known') {
+        assert.deepEqual(recovered.calls.map((call) => call.command), ['listen', 'status']);
+        continue;
+      }
+      assert.deepEqual(recovered.latest('open').args, { mode: 'encrypted' });
+      assert.equal(recovered.controller.unlock(), false, 'the original Open acknowledgement is still pending');
+      recovered.latest('open').resolve(vaultStatus(5, { context: null,
+        persistence: { state: 'locked', reason: 'none', keyAccess: 'locked' },
+        operation: operation({ operationId: 4, operation: 'open-vault', phase: 'idle', assessment: null, preview: null }) }));
+      await settle();
+      assert.deepEqual(recovered.calls.map((call) => call.command), ['listen', 'status', 'open'], 'reopen does not automatically retrieve a key');
+      assert.equal(recovered.controller.unlock(), true);
+      assert.deepEqual(recovered.latest('unlock').args, {});
+      recovered.latest('unlock').resolve(vaultStatus(6, { context: null,
+        operation: operation({ operationId: 5, operation: 'unlock', phase: 'idle', assessment: null, preview: null }) }));
+      await settle();
+      recovered.latest('context').resolve(vaultStatus(7, {
+        operation: operation({ operationId: 5, operation: 'unlock', phase: 'idle', assessment: null, preview: null }) }));
+      await settle();
+      assert.deepEqual(recovered.calls.map((call) => call.command), ['listen', 'status', 'open', 'unlock', 'context']);
+      assert.equal(recovered.controller.getSnapshot().contextCurrent, true);
+      assert.deepEqual(recovered.controller.getSnapshot().status.records, []);
+      assert.deepEqual(recovered.controller.getSnapshot().status.assignments, []);
+    } finally { recovered.controller.dispose(); }
+  }
 });
 
 test('encrypted live help keeps user labels nonsecret and saving distinct from actual stored-revision assessment', () => {
@@ -1233,6 +1271,13 @@ test('encrypted live help keeps user labels nonsecret and saving distinct from a
   assert.match(sessionControlHelp(guide, 'mode', 'encrypted').where, /unavailable vault does not disable.*memory-only/);
   assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').where, /already be unlocked.*Keychain Access/);
   assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').format, /without asking for a Keychain prompt.*creating or unlocking a Keychain.*no plaintext fallback/);
+  assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').where, /failed unlock closed.*known original cleanup.*Open encrypted vault.*explicitly choose Unlock vault/);
+  assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').failure, /Pending, unknown or late-known cleanup does not authorize another attempt/);
+  assert.match(sessionControlHelp(guide, 'unlock', 'encrypted').failure, /Reopening is not initialization or repair.*does not read or assign/);
+  assert.match(ASSET_REASON_HELP['vault-keyring-locked'], /cleanup to be known.*session has closed.*Open encrypted vault before choosing Unlock vault/);
+  assert.match(ASSET_REASON_HELP['vault-keyring-locked'], /Do not retry while cleanup is pending, unknown or late-known/);
+  assert.match(ASSET_REASON_HELP['vault-keyring-locked'], /existing login keychain yourself.*does not unlock or replace.*plaintext fallback.*Status does not access the keyring/);
+  assert.match(ASSET_REASON_HELP['cleanup-unknown'], /Do not retry, replace or assume private buffers are gone/);
   assert.equal(sessionTargetLabel(guide, { type: 'vault', change: 'initialize' }, []), 'New encrypted private-input vault');
   const subject = { type: 'record', kind: 'google-wif', change: 'assign', recordId: C, recordRevision: 1 };
   assert.match(sessionTargetLabel(guide, subject, [vaultRecord({ label: '<nonsecret text>' })], 'encrypted'), /<nonsecret text> · item 1 · revision 1/);

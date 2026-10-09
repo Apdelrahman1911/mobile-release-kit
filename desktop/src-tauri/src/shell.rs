@@ -858,6 +858,42 @@ async fn config_edit_status(webview: Webview, request: tauri::ipc::Request<'_>, 
 }
 
 #[tauri::command]
+async fn project_initialization_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::initialization_open(request_body(&request)?)?;
+    state.bridge.open_project_initialization(&state.document, window, args)
+}
+#[tauri::command]
+async fn project_initialization_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::initialization_prepare(request_body(&request)?)?;
+    state.bridge.prepare_project_initialization(&state.document, window, args)
+}
+#[tauri::command]
+async fn project_initialization_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::initialization_apply(request_body(&request)?)?;
+    state.bridge.apply_project_initialization(&state.document, window, args)
+}
+#[tauri::command]
+async fn project_initialization_discard(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    let window = edit_window(&webview)?;
+    let args = edit_commands::close(request_body(&request)?)?;
+    state.bridge.edits.close_initialization(window, &args.session_id)
+}
+#[tauri::command]
+async fn project_initialization_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_initialization_edit_protocol::InitializationStatus, BridgeError> {
+    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+    edit_window(&webview)?;
+    edit_commands::status(request_body(&request)?)?;
+    state.bridge.edits.initialization_status()
+}
+
+#[tauri::command]
 async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     let window = edit_window(&webview)?;
@@ -1677,6 +1713,7 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut project_recovery_guard = project_recovery_guard;
         let mut ios_archive_guard = ios_archive_guard;
         if enter.await.is_err() { return; }
+        let mut initialization_revision = None;
         let mut metadata_revision = None;
         let mut images_edit_revision = None;
         let mut images_selection_revision = None;
@@ -1722,6 +1759,12 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
             // Clients subscribe first, fetch status, and count down from that
             // receipt. Native deadlines still belong to the original owner.
             let revision = *revisions.borrow();
+            if initialization_revision != Some(revision) {
+                if let Ok(status) = edits.initialization_status() {
+                    initialization_revision = Some(status.status_revision);
+                    let _ = app.emit_to(MAIN_WINDOW, crate::project_initialization_edit_protocol::EVENT, &status);
+                }
+            }
             if metadata_revision != Some(revision) {
                 if let Ok(status) = edits.metadata_text_status() {
                     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
@@ -3398,6 +3441,8 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             open_config_edit, prepare_config_edit, apply_config_edit, close_config_edit, config_edit_status,
             github_workflow_edit_open, github_workflow_edit_prepare, github_workflow_edit_apply,
             github_workflow_edit_close, github_workflow_edit_status,
+            project_initialization_open, project_initialization_prepare, project_initialization_apply,
+            project_initialization_discard, project_initialization_status,
             metadata_text_observe, metadata_text_validate, metadata_text_edit_open, metadata_text_edit_prepare,
             metadata_text_edit_apply, metadata_text_edit_close, metadata_text_edit_status,
             metadata_images_catalog, metadata_images_choose, metadata_images_selection_status, metadata_images_selection_cancel,

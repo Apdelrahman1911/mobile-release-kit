@@ -263,3 +263,19 @@ mod tests {
         assert!(apply(&json!({"sessionId":SESSION,"planToken":REVISION,"intent":"recover"})).is_err());
     }
 }
+
+pub(crate) fn initialization_open(body: &Value) -> Result<crate::project_initialization_edit_protocol::Open, BridgeError> {
+    let value: crate::project_initialization_edit_protocol::Open = decode(body, REQUEST_LIMIT)?;
+    if !value.valid() { return Err(BridgeError::invalid()); }
+    Ok(value)
+}
+pub(crate) fn initialization_prepare(body: &Value) -> Result<crate::project_initialization_edit_protocol::Prepare, BridgeError> {
+    let value: crate::project_initialization_edit_protocol::Prepare = decode(body, 256)?;
+    if !token(&value.session_id) || !token(&value.revision) { return Err(BridgeError::invalid()); }
+    Ok(value)
+}
+pub(crate) fn initialization_apply(body: &Value) -> Result<crate::project_initialization_edit_protocol::Apply, BridgeError> {
+    let value: crate::project_initialization_edit_protocol::Apply = decode(body, 256)?;
+    if !token(&value.session_id) || !token(&value.plan_token) { return Err(BridgeError::invalid()); }
+    Ok(value)
+}

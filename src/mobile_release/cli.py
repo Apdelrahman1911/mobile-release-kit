@@ -27,6 +27,7 @@ from .ios import (
 )
 from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 from .init_transaction import IGNORE_LINES, InitInterrupted, InitWorkspace, validate_paths
+from .initialization_payloads import metadata_skeleton as _metadata_skeleton
 from .metadata import build_metadata_archive, metadata_findings
 from .preflight import doctor, preflight
 from .provenance import (
@@ -304,40 +305,6 @@ def _validate_init_destination(
         raise ValidationError(f"refusing to overwrite {label}: {destination}")
     if destination.exists() and not destination.is_file():
         raise ValidationError(f"{label} destination is not a regular file: {destination}")
-
-
-def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
-    metadata = configuration.get("metadata", {})
-    root = str(metadata.get("root", "release/store")).rstrip("/")
-    paths: list[str] = []
-    if configuration.get("android", {}).get("enabled"):
-        for locale in metadata.get("androidLocales", []):
-            paths.extend(
-                f"{root}/android/{locale}/{name}"
-                for name in (
-                    "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"
-                )
-            )
-    if configuration.get("ios", {}).get("enabled"):
-        for locale in metadata.get("iosLocales", []):
-            paths.extend(
-                f"{root}/ios/{locale}/{name}"
-                for name in (
-                    "description.txt",
-                    "keywords.txt",
-                    "privacy_url.txt",
-                    "support_url.txt",
-                    "release_notes.txt",
-                )
-            )
-        paths.extend(
-            (
-                f"{root}/review/ios-beta-notes.txt",
-                f"{root}/review/ios-notes.txt",
-                f"{root}/testflight/what-to-test.txt",
-            )
-        )
-    return tuple(sorted(paths))
 
 
 def _init_proposal(root: Path, *, include_git: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:

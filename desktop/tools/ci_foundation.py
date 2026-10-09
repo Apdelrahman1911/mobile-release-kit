@@ -774,6 +774,15 @@ SOURCE_SLOTS_REMOVAL_TESTS = (
     "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
     "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
 )
+SOURCE_SLOTS_INITIALIZATION_SELECTION = "project-initialization4"
+SOURCE_SLOTS_INITIALIZATION_EVIDENCE = "desktop-macos-project-initialization-data-v1"
+# Fixed lexical libtest order, not caller-provided names or a runtime permit.
+SOURCE_SLOTS_INITIALIZATION_TESTS = (
+    'edit_owner::workflow_domain_tests::initialization_intent_original_slot_and_recovery_finality_are_closed',
+    'project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded',
+    'project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents',
+    'project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply',
+)
 SOURCE_SLOTS_BUILD_INPUTS = (
     ("desktop/macos-installed-inputs/build-release-intel.json", 4096),
     ("desktop/src-tauri/Cargo.toml", 1024 * 1024),
@@ -2944,9 +2953,11 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
         require(event == "push", "Engineering main compilation requires its fixed push ref")
     require(event == "push" or event == "workflow_dispatch" and environment.get("MRK_EXPECTED_SHA") == sha,
             "Compiler workflow event or exact dispatch source differs")
+    initialization = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_initialization(environment)
     return {"workflowPath": profile["workflow"], "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
-            "runId": run_id, "attempt": attempt}
+            "runId": run_id, "attempt": attempt,
+            **({"sourceSlotsSelection": SOURCE_SLOTS_INITIALIZATION_SELECTION} if initialization else {})}
 
 
 def workflow_native_binding(environment: dict[str, str]) -> dict[str, str]:
@@ -3066,9 +3077,13 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         expected.update(sourceTree=context["sourceTree"], sourceSlots=context["sourceSlots"], node=None)
         if removal:
             expected.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+        elif source_slots_is_initialization(context):
+            expected.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
         if phase == "compile":
             expected["testResult"] = (validate_source_slots_removal_result(value.get("testResult")) if removal
-                                      else validate_source_slots_result(value.get("testResult")))
+                                      else validate_source_slots_initialization_result(value.get("testResult"))
+                                      if source_slots_is_initialization(context) else validate_source_slots_result(value.get("testResult")))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -7170,7 +7185,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
                 and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
         value["testResult"] = (validate_source_slots_removal_result(source_slots_result) if source_slots_is_removal(context)
-                               else validate_source_slots_result(source_slots_result))
+                               else validate_source_slots_initialization_result(source_slots_result)
+                               if source_slots_is_initialization(context) else validate_source_slots_result(source_slots_result))
     if main_compiled is not None:
         require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
                 and compiled is None, "Unexpected engineering main artifact")
@@ -7196,6 +7212,9 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
             value.update(sourceTree=context["sourceTree"], sourceSlots=context["sourceSlots"])
             if source_slots_is_removal(context):
                 value.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+            elif source_slots_is_initialization(context):
+                value.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7635,7 +7654,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     context.update(binding)
     if scope == SOURCE_SLOTS_SCOPE:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "SourceSlots source tree differs")
-        context["sourceSlots"] = source_slots_selection(slots_removal)
+        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context))
         if slots_removal:
             context["sourceSlotsBuild"] = slots_build
     if engineering_work is not None:
@@ -7708,6 +7727,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         public.update(expectedRust=compiler["release"], compiler=compiler, sourceSlots=context["sourceSlots"], node=None)
         if source_slots_is_removal(context):
             public.update(scope=SOURCE_SLOTS_REMOVAL_EVIDENCE, sourceSlotsBuild=context["sourceSlotsBuild"])
+        elif source_slots_is_initialization(context):
+            public.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
         public["notQualified"].extend(("other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration", "signing", "installed-runtime"))
     if scope == MAC_COMPILE_SCOPE:
         compiler = compiler_binding(context)
@@ -7797,6 +7819,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
         if scope == SOURCE_SLOTS_SCOPE:
             removal = source_slots_is_removal(context)
             require(removal == (os.environ.get("GITHUB_REF") == SOURCE_SLOTS_REMOVAL_REF)
+                    and source_slots_is_initialization(context) == source_slots_requested_initialization(os.environ)
                     and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
                     and type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -8523,8 +8546,34 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
     return observed_node
 
 
-def source_slots_selection(removal: bool = False) -> dict:
-    require(type(removal) is bool, "Unknown Intel DATA selector")
+def source_slots_requested_initialization(environment: dict) -> bool:
+    selection = environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1")
+    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION),
+            "Unknown fixed Intel DATA dispatch selection")
+    if selection == SOURCE_SLOTS_INITIALIZATION_SELECTION:
+        require(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and environment.get("GITHUB_REF") == SOURCE_SLOTS_REF
+                and environment.get("MRK_EXPECTED_SHA") == environment.get("GITHUB_SHA"),
+                "Initialization DATA requires exact fixed-ref dispatch")
+        return True
+    return False
+
+
+def source_slots_is_initialization(context: dict) -> bool:
+    if "sourceSlotsSelection" not in context:
+        return False
+    require(type(context["sourceSlotsSelection"]) is str
+            and context["sourceSlotsSelection"] == SOURCE_SLOTS_INITIALIZATION_SELECTION,
+            "Initialization DATA context selection differs")
+    return True
+
+
+def source_slots_selection(removal: bool = False, *, initialization: bool = False) -> dict:
+    require(type(removal) is bool and type(initialization) is bool and not (removal and initialization),
+            "Unknown Intel DATA selector")
+    if initialization:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS)}
     if removal:
         return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_REMOVAL_FEATURE],
                 "testTarget": "bin", "binary": "mrk-macos-remove", "tests": list(SOURCE_SLOTS_REMOVAL_TESTS)}
@@ -8573,7 +8622,8 @@ def source_slots_build_inputs(source: Path) -> dict:
 
 def source_slots_is_removal(context: dict) -> bool:
     removal = source_slots_removal_workflow(context.get("workflowRef"))
-    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal)),
+    initialization = source_slots_is_initialization(context)
+    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization)),
             "SourceSlots context selector differs from its workflow")
     if removal:
         validate_source_slots_build(context.get("sourceSlotsBuild"))
@@ -8611,6 +8661,32 @@ def source_slots_removal_test_result(raw: bytes) -> dict:
                          + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
     require(match is not None, "Intel removal DATA stdout is missing, extra, ignored or failed")
     return validate_source_slots_removal_result({"tests": list(SOURCE_SLOTS_REMOVAL_TESTS), "running": 3, "passed": 3,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_initialization_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Initialization DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_INITIALIZATION_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 4), ("passed", 4), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Initialization DATA did not pass exactly its four selected tests")
+    return value
+
+
+def source_slots_initialization_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Initialization DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Initialization DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_INITIALIZATION_TESTS)
+    match = re.fullmatch(r"\n?running 4 tests\n" + rows
+                         + r"\ntest result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Initialization DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_initialization_result({"tests": list(SOURCE_SLOTS_INITIALIZATION_TESTS), "running": 4, "passed": 4,
                                                  "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
 
 
@@ -8983,6 +9059,7 @@ def phase_source_slots(name: str, context: dict) -> None:
     """One closed Intel graph through the existing original run/cleanup owner."""
     require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and context.get("platform") == "macos", "Wrong SourceSlots context")
     removal = source_slots_is_removal(context)
+    initialization = source_slots_is_initialization(context)
     require(name in ("acquire", "compile", "clean"), "Wrong SourceSlots phase")
     root, source = Path(context["root"]), Path(context["source"])
     if name == "clean":
@@ -9035,7 +9112,7 @@ def phase_source_slots(name: str, context: dict) -> None:
             # Reuse one Cargo-fingerprinted compile; only the literal exact case
             # follows it. No ignored filter, arbitrary selector or other graph.
             test_args = (["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
-                          *SOURCE_SLOTS_REMOVAL_TESTS] if removal
+                          *(SOURCE_SLOTS_REMOVAL_TESTS if removal else SOURCE_SLOTS_INITIALIZATION_TESTS)] if removal or initialization
                          else [SOURCE_SLOTS_TEST, "--", "--exact", "--test-threads=1"])
             # JSON short changes only rendered, not the full compiler-message payload.
             # B needs no artifact JSON: preserve all diagnostics in bounded short text.
@@ -9099,7 +9176,8 @@ def phase_source_slots(name: str, context: dict) -> None:
                     raise command_failure from None
                 raise
             if check == "mac-source-slots-data-test":
-                result = source_slots_removal_test_result(raw) if removal else source_slots_test_result(raw)
+                result = (source_slots_removal_test_result(raw) if removal else source_slots_initialization_test_result(raw)
+                          if initialization else source_slots_test_result(raw))
         last_check = "source-post"
         source_slots_source_guard(source, root)
         source_slots_inputs_unchanged(context)
@@ -9118,6 +9196,9 @@ def phase_source_slots(name: str, context: dict) -> None:
         if removal:
             failure["sourceSlots"] = context["sourceSlots"]
             failure["sourceSlotsBuild"] = context["sourceSlotsBuild"]
+        elif initialization:
+            failure.update(scope=SOURCE_SLOTS_INITIALIZATION_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_INITIALIZATION_SELECTION)
         if name == "compile" and last_check == "headless-test-compile-only":
             if compiler_diagnostic is None:
                 compiler_diagnostic = source_slots_diagnostic_unavailable(None, "original-unavailable")

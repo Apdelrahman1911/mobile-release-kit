@@ -1,3 +1,6 @@
+import { initializationRequestFits, parseProjectInitializationStatus, initializationError } from './projectInitializationProtocol.ts';
+import type { ProjectInitializationCommand } from './projectInitializationProtocol.ts';
+import type { ProjectInitializationStatus } from './projectInitializationTypes.ts';
 import { installationError, installationCheckError, installationPreparationError, parseInstallationReveal, parseInstallationCancel,
   parseInstallationStatus, parseInstallationPreparationRequest, parseInstallationPreparationStatus } from './installation.ts';
 import type { ApiError, AppInfo, BridgeMode, Catalog, ConfigEditStatus, ConfigPreview, ConfigSuggestion, DesktopApi, JsonObject, ProjectReference, ProjectSnapshot, SuggestionHints, ValidationResult } from './types.ts';
@@ -55,7 +58,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -228,6 +231,14 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!result) throw { code: 'AssetStatusInvalid' };
       return result;
     } catch (error) { throw assetError(error); }
+  };
+  const initializationCall = async (command: ProjectInitializationCommand, args: unknown): Promise<ProjectInitializationStatus> => {
+    try {
+      if (!initializationRequestFits(command,args)) throw {code:'ProjectInitializationRequestInvalid'};
+      const status=parseProjectInitializationStatus(await call<unknown>(command,structuredClone(args) as Record<string,unknown>));
+      if(!status)throw {code:'ProjectInitializationStatusInvalid'};
+      return structuredClone(status);
+    }catch(error){throw initializationError(error);}
   };
   const workflowCall = async (command: GitHubWorkflowEditCommand, args: unknown): Promise<GitHubWorkflowEditStatus> => {
     try {
@@ -501,6 +512,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (mode !== 'native' || !listen) throw { code: 'NativeBridgeRequired', message: 'Native edit status events are unavailable. Saving is disabled.', retryable: false } satisfies ApiError;
       try { return await listen('config-edit-state', onStatus); }
       catch (error) { throw apiError(error); }
+    },
+    openProjectInitialization: (request) => initializationCall('project_initialization_open',request),
+    prepareProjectInitialization: (sessionId,revision,intent) => initializationCall('project_initialization_prepare',{sessionId,revision,intent}),
+    applyProjectInitialization: (sessionId,planToken,intent) => initializationCall('project_initialization_apply',{sessionId,planToken,intent}),
+    discardProjectInitialization: (sessionId) => initializationCall('project_initialization_discard',{sessionId}),
+    projectInitializationStatus: () => initializationCall('project_initialization_status',{}),
+    subscribeProjectInitialization: async (onStatus) => {
+      if(mode!=='native'||!listen)throw initializationError({code:'NativeBridgeRequired'});
+      try{return await listen('project-initialization-state-changed',onStatus);}catch(error){throw initializationError(error);}
     },
     openGitHubWorkflowRecovery: (projectId) => workflowCall('github_workflow_edit_open', { projectId, intent: 'recover' }),
     prepareGitHubWorkflowRecovery: (sessionId, revision) => workflowCall('github_workflow_edit_prepare', { sessionId, revision, intent: 'recover' }),

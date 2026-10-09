@@ -169,6 +169,45 @@ def source_slots_receipt(phase):
     return value
 
 
+# Independent expected tuple in actual lexical libtest output order.
+INITIALIZATION_CASES = (
+    'edit_owner::workflow_domain_tests::initialization_intent_original_slot_and_recovery_finality_are_closed',
+    'project_initialization_edit_protocol::tests::complete_inventory_and_redacted_review_remain_closed_and_bounded',
+    'project_initialization_edit_protocol::tests::fixed_open_and_response_shapes_never_borrow_other_edit_intents',
+    'project_initialization_edit_protocol::tests::recovery_keeps_historical_effects_but_never_mints_clean_before_apply',
+)
+
+
+def initialization_environment():
+    return {**source_slots_environment(), "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_EXPECTED_SHA": "1" * 40,
+            "MRK_SOURCE_SLOTS_SELECTION": "project-initialization4"}
+
+
+def initialization_context():
+    return {**source_slots_context(), **helper.compile_workflow_binding(initialization_environment(), helper.SOURCE_SLOTS_SCOPE),
+            "sourceSlots": {"target": "x86_64-apple-darwin", "features": ["development-runtime"],
+                            "testTarget": "lib", "tests": list(INITIALIZATION_CASES)}}
+
+
+def initialization_result():
+    return {"tests": list(INITIALIZATION_CASES), "running": 4, "passed": 4, "failed": 0,
+            "ignored": 0, "measured": 0, "filtered": 7}
+
+
+def initialization_stdout():
+    return ("\nrunning 4 tests\n" + "".join("test " + name + " ... ok\n" for name in INITIALIZATION_CASES)
+            + "\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s\n\n").encode()
+
+
+def initialization_receipt(phase):
+    value = source_slots_receipt(phase)
+    value.update(scope="desktop-macos-project-initialization-data-v1", sourceSlots=initialization_context()["sourceSlots"],
+                 sourceSlotsSelection="project-initialization4")
+    if phase == "compile":
+        value["testResult"] = initialization_result()
+    return value
+
+
 def source_slots_paths(events, captures):
     MemoryPath, _ = memory_paths(events)
     class Capture(io.StringIO):
@@ -719,6 +758,53 @@ class ShellCompileContractTests(unittest.TestCase):
             loaded = deepcopy(b); loaded["sourceSlots"] = source_slots_context()["sourceSlots"]
             with self.assertRaises(helper.CheckFailure):
                 helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+
+
+        # C uses the SAME original workflow/owner with one actual dispatch-only
+        # tuple. A stale task cannot switch between C and the legacy default.
+        cenv, c = initialization_environment(), initialization_context()
+        self.assertEqual(helper.SOURCE_SLOTS_INITIALIZATION_TESTS, INITIALIZATION_CASES)
+        self.assertEqual(tuple(sorted(INITIALIZATION_CASES)), INITIALIZATION_CASES)
+        self.assertEqual(helper.source_slots_selection(initialization=True), c["sourceSlots"])
+        self.assertFalse(helper.source_slots_is_removal(c)); self.assertTrue(helper.source_slots_is_initialization(c))
+        for value in (None, 0, 1, [], {}, "allocation1", "project-initialization4"):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_selection(initialization=value)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_selection(True, initialization=True)
+        for key, value in (("MRK_SOURCE_SLOTS_SELECTION", "foreign"), ("MRK_SOURCE_SLOTS_SELECTION", None),
+                           ("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", helper.SOURCE_SLOTS_REMOVAL_REF),
+                           ("MRK_EXPECTED_SHA", "2" * 40), ("GITHUB_WORKFLOW_SHA", "2" * 40)):
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**cenv, key: value}, helper.SOURCE_SLOTS_SCOPE)
+        for wrong in ({**c, "sourceSlotsSelection": None}, {**c, "sourceSlotsBuild": intel_removal_build()},
+                      {**c, "sourceSlots": source_slots_context()["sourceSlots"]},
+                      {**c, "workflowRef": intel_removal_context()["workflowRef"]}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_is_removal(wrong)
+        self.assertIn("options: [allocation1, project-initialization4]", workflow)
+        self.assertIn("MRK_SOURCE_SLOTS_SELECTION: ${{ inputs.selection || 'allocation1' }}", workflow)
+        self.assertIn('[[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]', workflow)
+        events = []
+        MemoryPath, _ = memory_paths(events)
+        loaded = deepcopy(c)
+        with patch.dict(helper.os.environ, {**cenv, "MRK_DESKTOP_CI_ROOT": c["root"]}, clear=True), \
+                patch.object(helper, "Path", MemoryPath), patch.object(helper, "ordinary"), \
+                patch.object(helper, "hash_file", return_value=c["workflowSha256"]), \
+                patch.object(helper, "read_bounded_json", side_effect=lambda *args: deepcopy(loaded)), \
+                patch.object(helper, "source_slots_source_guard"):
+            self.assertEqual(helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE), c)
+            loaded = source_slots_context()
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            loaded = deepcopy(c)
+            with patch.dict(helper.os.environ, {"MRK_SOURCE_SLOTS_SELECTION": "allocation1"}), self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            for key, value in (("tests", list(reversed(INITIALIZATION_CASES))), ("testTarget", "bin"),
+                               ("features", ["desktop-shell"]), ("target", "aarch64-apple-darwin")):
+                loaded = deepcopy(c); loaded["sourceSlots"][key] = value
+                with self.assertRaises(helper.CheckFailure):
+                    helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -1273,6 +1359,43 @@ class ShellCompileContractTests(unittest.TestCase):
             if fault is None:
                 self.assertEqual(posts, ["source", "build", "build", "source"])
                 self.assertEqual(len([event for event in events if event[0] == "closed"]), 4)
+
+
+        # C's result and receipt are not old allocation/remover qualification.
+        c, positive = initialization_context(), initialization_stdout()
+        self.assertEqual(helper.source_slots_initialization_test_result(positive), initialization_result())
+        swapped = positive.replace(INITIALIZATION_CASES[0].encode(), b"swap").replace(
+            INITIALIZATION_CASES[1].encode(), INITIALIZATION_CASES[0].encode()).replace(b"swap", INITIALIZATION_CASES[1].encode())
+        for broken in (b"", b"\xff", positive.decode(), b"x" * (1024 * 1024 + 1), source_slots_stdout(), intel_removal_stdout(),
+                       positive.replace(b"running 4 tests", b"running 0 tests"), positive.replace(b"4 passed", b"0 passed"),
+                       positive.replace(b"0 failed", b"1 failed"), positive.replace(b"0 ignored", b"1 ignored"),
+                       positive.replace(b"... ok", b"... ignored", 1), positive.replace(b"7 filtered", b"65536 filtered"),
+                       positive.replace(INITIALIZATION_CASES[0].encode(), INITIALIZATION_CASES[1].encode()),
+                       positive.replace(("test " + INITIALIZATION_CASES[0] + " ... ok\n").encode(), b""),
+                       positive + positive, positive + b"extra\n", swapped):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_initialization_test_result(broken)
+        for key, value in (("passed", True), ("running", 3), ("ignored", 1), ("filtered", False),
+                           ("tests", list(reversed(INITIALIZATION_CASES))), ("tests", tuple(INITIALIZATION_CASES))):
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_source_slots_initialization_result({**initialization_result(), key: value})
+        for phase in ("acquire", "compile"):
+            expected = initialization_receipt(phase); published = []
+            self.assertEqual(helper.validate_compile_receipt(expected, c, phase), expected)
+            with patch.object(helper, "write_json", side_effect=lambda path, value: published.append((str(path), deepcopy(value)))):
+                helper.phase_receipt(c, phase, [row["check"] for row in expected["checks"]], node=None,
+                                     source_slots_result=initialization_result() if phase == "compile" else None)
+            self.assertEqual(published, [(c["root"] + "/" + phase + "-checks.json", expected)])
+            for other in (source_slots_context(), intel_removal_context()):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt(expected, other, phase)
+            for key, value in (("scope", helper.SOURCE_SLOTS_EVIDENCE), ("sourceSlotsSelection", "allocation1"),
+                               ("sourceSlots", source_slots_context()["sourceSlots"]), ("node", helper.NODE), ("attempt", "100")):
+                with self.assertRaises(helper.CheckFailure):
+                    helper.validate_compile_receipt({**expected, key: value}, c, phase)
+        for result in (source_slots_result(), intel_removal_result(), None):
+            with patch.object(helper, "write_json", side_effect=AssertionError("no false publication")), self.assertRaises(helper.CheckFailure):
+                helper.phase_receipt(c, "compile", list(helper.SOURCE_SLOTS_CHECKS["compile"]), source_slots_result=result)
 
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):
         names = set(helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES + helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES)
@@ -2009,6 +2132,130 @@ class ShellCompileContractTests(unittest.TestCase):
                 # empty except for the mandatory actual libtest stdout.
                 self.assertEqual(captures[bound["root"] + "/target/source-slots-compile.stdout"], b"")
                 self.assertEqual(captures[bound["root"] + "/target/source-slots-test.stderr"], b"")
+
+        # Original success is insufficient without the exact four-test stdout,
+        # source POST and the unchanged aggregate endpoint. Both raw streams
+        # remain private, exclusive and consuming-closed even on failure.
+        initialization_bound = initialization_context()
+        expected_order = ["rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"]
+        for fault in (None, "compile-nonzero", "test-nonzero", "zero-tests", "ignored", "readback", "source-post",
+                      "late-test", "reversed-test", "late-receipt", "publication-failure", "expired-before-tools"):
+            events, captures, calls, publications, clock = [], {}, [], [], [100.0]
+            SlotsPath, writer, read = source_slots_paths(events, captures)
+            source_calls = []
+            def source_original(*args, **kw):
+                source_calls.append("source")
+                if fault == "source-post" and len(source_calls) == 2:
+                    raise helper.CheckFailure("source original changed")
+            def original(argv, **kw):
+                calls.append((list(map(str, argv)), {**kw, "env": dict(kw["env"])}))
+                if kw["check"] == "rust-version-target":
+                    return "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+                if kw["check"] == "mac-cargo-version":
+                    return "cargo 1.98.0 (abcdef123 2026-09-01)"
+                if kw["check"] == "headless-test-compile-only":
+                    if fault in ("compile-nonzero", "publication-failure"):
+                        raise helper.CheckFailure("original compile nonzero")
+                elif kw["check"] == "mac-source-slots-data-test":
+                    body = initialization_stdout()
+                    if fault == "zero-tests":
+                        body = body.replace(b"running 4 tests", b"running 0 tests").replace(b"4 passed", b"0 passed")
+                    if fault == "ignored":
+                        body = body.replace(b"0 ignored", b"1 ignored")
+                    kw["output"].write(body.decode())
+                    if fault == "test-nonzero":
+                        raise helper.CheckFailure("original test nonzero")
+                    if fault == "late-test":
+                        clock[0] = 970.0
+                    if fault == "reversed-test":
+                        clock[0] = 99.0
+                return ""
+            def read_original(path, expected):
+                if fault == "readback":
+                    raise helper.CheckFailure("output original changed")
+                return read(path, expected)
+            def publication(path, value):
+                if fault == "publication-failure":
+                    raise OSError("inert publication failure")
+                publications.append((str(path), deepcopy(value)))
+                if fault == "late-receipt" and path.name == "compile-checks.json":
+                    clock[0] = 970.0
+            observed_clock = []
+            def clock_original():
+                observed_clock.append(clock[0])
+                return 970.0 if fault == "expired-before-tools" and len(observed_clock) > 1 else clock[0]
+            with self.subTest(original_fault=fault), patch.object(helper, "Path", SlotsPath), \
+                    patch.object(helper, "ordinary"), patch.object(helper, "source_unchanged", side_effect=source_original), \
+                    patch.object(helper, "source_slots_source_guard"), patch.object(helper, "run", side_effect=original), \
+                    patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read_original), \
+                    patch.object(helper, "write_json", side_effect=publication), patch.object(helper.time, "monotonic", side_effect=clock_original), \
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-not-forwarded"}, clear=True):
+                if fault is None:
+                    helper.phase_source_slots("compile", initialization_bound)
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.phase_source_slots("compile", initialization_bound)
+            checks = [kw["check"] for _, kw in calls]
+            if fault == "expired-before-tools":
+                self.assertFalse(checks)
+            elif fault in ("compile-nonzero", "publication-failure", "readback"):
+                self.assertEqual(checks, expected_order[:-1])
+            else:
+                self.assertEqual(checks, expected_order)
+            commands = [(argv, kw) for argv, kw in calls if "output" in kw]
+            for argv, kw in commands:
+                self.assertIn("--locked", argv); self.assertIn("--offline", argv)
+                self.assertEqual(argv[argv.index("--jobs") + 1], "1")
+                self.assertIn("--no-default-features", argv)
+                self.assertEqual(argv[argv.index("--features") + 1], "development-runtime")
+                self.assertEqual(argv[argv.index("--target") + 1], "x86_64-apple-darwin")
+                self.assertEqual(argv[argv.index("--manifest-path") + 1], initialization_bound["source"] + "/desktop/src-tauri/Cargo.toml")
+                self.assertEqual(argv[argv.index("--target-dir") + 1], initialization_bound["root"] + "/target")
+                self.assertIn("--lib", argv)
+                self.assertFalse(any(value in argv for value in ("--ignored", "--release", "registration-helper", "desktop-shell")))
+                self.assertEqual(kw["env"]["RUSTUP_AUTO_INSTALL"], "0")
+                self.assertEqual(kw["env"]["GITHUB_SHA"], initialization_bound["sourceSha"])
+                self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", kw["env"])
+                self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
+                self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
+                if kw["check"] == "headless-test-compile-only":
+                    self.assertEqual(argv[-2:], ["--message-format=json,json-diagnostic-short", "--no-run"])
+                else:
+                    self.assertNotIn("--message-format=json", argv)
+                    self.assertNotIn("--message-format=json,json-diagnostic-short", argv)
+                    self.assertNotIn("--no-run", argv)
+                    self.assertEqual(argv[argv.index("--"):], ["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *INITIALIZATION_CASES])
+            passed = [value for path, value in publications if path.endswith("/compile-checks.json")]
+            failures = [value for path, value in publications if path.endswith("/source-slots-failure.json")]
+            self.assertEqual(passed, [initialization_receipt("compile")] if fault in (None, "late-receipt") else [])
+            self.assertEqual(len(failures), 0 if fault in (None, "publication-failure") else 1)
+            for failure in failures:
+                expected_fields = {"schemaVersion", "scope", "phase", "status", "lastFixedStage",
+                    "sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt"}
+                if failure["lastFixedStage"] == "headless-test-compile-only":
+                    expected_fields.add("compilerDiagnostic")
+                    self.assertEqual(failure["compilerDiagnostic"], {"state": "unavailable", "reason": "original-unavailable",
+                                     "returnCode": None, "errors": [], "sources": []})
+                if failure["lastFixedStage"] in {"headless-test-compile-only", "mac-source-slots-data-test"}:
+                    expected_fields.add("originalCommandReturnCode")
+                    self.assertEqual(failure["originalCommandReturnCode"], None if fault in {
+                        "compile-nonzero", "test-nonzero"} else 0)
+                expected_fields.update(("sourceSlots", "sourceSlotsSelection"))
+                self.assertEqual(failure["scope"], "desktop-macos-project-initialization-data-v1")
+                self.assertEqual(failure["sourceSlots"], initialization_bound["sourceSlots"])
+                self.assertEqual(failure["sourceSlotsSelection"], "project-initialization4")
+                self.assertEqual(set(failure), expected_fields)
+                self.assertEqual(failure["status"], "failed-or-unknown")
+                self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
+                self.assertNotIn("synthetic-not-forwarded", json.dumps(failure))
+            if fault is None:
+                self.assertEqual(len(source_calls), 2)
+                self.assertTrue(all(event[2] == ("x",) for event in events if event[0] == "open"))
+                self.assertEqual(len([event for event in events if event[0] == "closed"]), 4)
+                # Successful commands may legitimately leave both raw streams
+                # empty except for the mandatory actual libtest stdout.
+                self.assertEqual(captures[initialization_bound["root"] + "/target/source-slots-compile.stdout"], b"")
+                self.assertEqual(captures[initialization_bound["root"] + "/target/source-slots-test.stderr"], b"")
 
         # The unchanged run owner keeps its private-output contract and actual
         # original exit/timeout handling; subprocess.run is never entered here.

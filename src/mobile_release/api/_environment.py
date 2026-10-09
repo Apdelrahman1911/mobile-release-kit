@@ -183,7 +183,7 @@ def environment_requirements(params: object) -> EnvironmentRequirementsResult:
             "All tool presence, versions and native behavior remain unknown. Expected baselines are policy, not observations.",
             "Build/archive prerequisites do not include every final artifact, credential, account, network or release-lifecycle check.",
             "iOS native operations require local or hosted macOS. Android Windows native execution remains separately unqualified.",
-            "This screen neither installs nor selects tools. Native doctor, builds and release operations remain unavailable.",
+            "This list only explains prerequisites; it does not install, select or run tools. Use the separate tool checks or build controls to check what is available. Reading this list does not enable a build or release.",
             "Bundled-runtime and non-SDK helper delivery are separate requirements; normal Desktop use must not require a manual Python, Rust or CLI setup.",
         ],
         "assurance": assurance("schema-policy"),

@@ -77,7 +77,7 @@ pub enum NativeFinality { Pending, Settled, Unknown }
 pub enum EditAvailability { Available, UnsupportedPlatform, RuntimeUnqualified, CleanupUnknown, Shutdown, OtherEditActive }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages }
+pub(crate) enum EditDomain { Configuration, GitHubWorkflows, MetadataText, ReleaseVersion, MetadataImages, ProjectInitialization }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,6 +103,8 @@ pub struct EditProjection {
     pub(crate) release_version: Option<crate::release_version_edit_protocol::Details>,
     #[serde(skip)]
     pub(crate) metadata_images: Option<crate::metadata_images_edit_protocol::Details>,
+    #[serde(skip)]
+    pub(crate) initialization: Option<crate::project_initialization_edit_protocol::Details>,
     pub project_id: String, pub session_id: String, pub owner_generation: String,
     pub phase: Phase, pub review_remaining_ms: u32, pub checkout: Option<Checkout>,
     pub prepared: Option<Prepared>,
@@ -118,6 +120,7 @@ impl EditProjection {
                 Some(recovery) => recovery.checkout.as_ref().map(|c| c.revision.as_str()),
                 None => self.checkout.as_ref().map(|c| c.revision.as_str()),
             },
+            EditDomain::ProjectInitialization => self.initialization.as_ref()?.revision(),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.revision(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.revision(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.revision(),
@@ -130,6 +133,7 @@ impl EditProjection {
                 Some(recovery) => recovery.prepared.as_ref().map(|p| p.plan_token.as_str()),
                 None => self.prepared.as_ref().map(|p| p.plan_token.as_str()),
             },
+            EditDomain::ProjectInitialization => self.initialization.as_ref()?.plan_token(),
             EditDomain::GitHubWorkflows => self.workflow.as_ref()?.plan_token(),
             EditDomain::MetadataText => self.metadata_text.as_ref()?.plan_token(),
             EditDomain::ReleaseVersion => self.release_version.as_ref()?.plan_token(),
@@ -137,14 +141,26 @@ impl EditProjection {
         }
     }
     pub(crate) fn configuration_valid(&self) -> bool {
-        self.domain == EditDomain::Configuration && self.workflow.is_none() && self.metadata_text.is_none()
+        self.domain == EditDomain::Configuration && self.initialization.is_none() && self.workflow.is_none() && self.metadata_text.is_none()
             && self.release_version.is_none() && self.metadata_images.is_none()
             && self.recovery.as_ref().is_none_or(|recovery|
                 self.checkout.is_none() && self.prepared.is_none() && recovery.valid())
     }
+    pub(crate) fn initialization_projection(&self) -> Result<crate::project_initialization_edit_protocol::Projection, BridgeError> {
+        use crate::project_initialization_edit_protocol::{DOMAIN, Projection};
+        if self.domain != EditDomain::ProjectInitialization || self.recovery.is_some() || self.workflow.is_some()
+            || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some()
+            || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        let detail = self.initialization.as_ref().filter(|detail| detail.valid()).ok_or_else(BridgeError::protocol)?;
+        Ok(Projection { domain: DOMAIN, intent: detail.intent, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
+            owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
+            checkout: detail.checkout.clone(), prepared: detail.prepared.clone(), conflict: detail.conflict.clone(),
+            apply_submitted: self.apply_submitted, core_outcome: self.core_outcome.clone(), native_reason: self.native_reason,
+            native_finality: self.native_finality, late_settled: self.late_settled })
+    }
     pub(crate) fn workflow_projection(&self) -> Result<crate::github_workflow_edit_protocol::Projection, BridgeError> {
         use crate::github_workflow_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::GitHubWorkflows || self.recovery.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
+        if self.domain != EditDomain::GitHubWorkflows || self.initialization.is_some() || self.recovery.is_some() || self.metadata_text.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.workflow.as_ref().ok_or_else(BridgeError::protocol)?;
         Ok(Projection { domain: DOMAIN, project_id: self.project_id.clone(), session_id: self.session_id.clone(),
             owner_generation: self.owner_generation.clone(), phase: self.phase, review_remaining_ms: self.review_remaining_ms,
@@ -154,7 +170,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_text_projection(&self) -> Result<crate::metadata_text_edit_protocol::Projection, BridgeError> {
         use crate::metadata_text_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataText || self.recovery.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
+        if self.domain != EditDomain::MetadataText || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.release_version.is_some() || self.metadata_images.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
         let detail = self.metadata_text.as_ref().ok_or_else(BridgeError::protocol)?;
@@ -169,7 +185,7 @@ impl EditProjection {
     }
     pub(crate) fn release_version_projection(&self) -> Result<crate::release_version_edit_protocol::Projection, BridgeError> {
         use crate::release_version_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::ReleaseVersion || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
+        if self.domain != EditDomain::ReleaseVersion || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some() || self.metadata_images.is_some()
             || self.checkout.is_some() || self.prepared.is_some() { return Err(BridgeError::protocol()); }
         let detail = self.release_version.as_ref().ok_or_else(BridgeError::protocol)?;
         if detail.recovery.is_some() && (detail.checkout.is_some() || detail.prepared.is_some() || detail.submission.is_some()) { return Err(BridgeError::protocol()); }
@@ -181,7 +197,7 @@ impl EditProjection {
     }
     pub(crate) fn metadata_images_projection(&self) -> Result<crate::metadata_images_edit_protocol::Projection, BridgeError> {
         use crate::metadata_images_edit_protocol::{DOMAIN, Projection};
-        if self.domain != EditDomain::MetadataImages || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
+        if self.domain != EditDomain::MetadataImages || self.initialization.is_some() || self.recovery.is_some() || self.workflow.is_some() || self.metadata_text.is_some()
             || self.release_version.is_some() || self.checkout.is_some() || self.prepared.is_some() {
             return Err(BridgeError::protocol());
         }
@@ -235,7 +251,7 @@ fn summary(value: &Value) -> bool {
         _ => false,
     }
 }
-fn preview(value: &Value) -> bool {
+pub(crate) fn preview(value: &Value) -> bool {
     if !keys(value, &["schemaVersion", "validation", "comparison", "fields", "assurance"])
         || value["schemaVersion"].as_u64() != Some(1) || !assurance(&value["assurance"]) { return false; }
     let validation = &value["validation"];
@@ -434,6 +450,9 @@ pub enum RecoveryIntent { Recover }
 pub struct PrepareConfigurationRecovery { pub session_id: String, pub revision: String, pub intent: RecoveryIntent }
 
 pub enum ChildFrame {
+    InitializationOpened(crate::project_initialization_edit_protocol::Opened),
+    InitializationPrepared(crate::project_initialization_edit_protocol::PreparedReply),
+    InitializationTerminal(u32, crate::project_initialization_edit_protocol::TerminalReply),
     Opened(Opened), Prepared(PreparedReply), Terminal(u32, TerminalReply),
     ConfigurationRecoveryOpened(RecoveryOpened), ConfigurationRecoveryPrepared(RecoveryPreparedReply),
     WorkflowOpened(crate::github_workflow_edit_protocol::Opened),
@@ -465,6 +484,7 @@ impl ChildFrame {
             Self::MetadataTextOpened(_) | Self::MetadataTextPrepared(_) | Self::MetadataTextTerminal(..) | Self::MetadataTextRecoveryOpened(_) | Self::MetadataTextRecoveryPrepared(_) => EditDomain::MetadataText,
             Self::ReleaseVersionOpened(_) | Self::ReleaseVersionPrepared(_) | Self::ReleaseVersionTerminal(..) | Self::ReleaseVersionRecoveryOpened(_) | Self::ReleaseVersionRecoveryPrepared(_) => EditDomain::ReleaseVersion,
             Self::MetadataImagesOpened(_) | Self::MetadataImagesPrepared(_) | Self::MetadataImagesTerminal(..) => EditDomain::MetadataImages,
+            Self::InitializationOpened(_) | Self::InitializationPrepared(_) | Self::InitializationTerminal(..) => EditDomain::ProjectInitialization,
         }
     }
 }
@@ -718,4 +738,12 @@ mod ignore_vocabulary_tests {
         assert!(!bad.valid()); // Configuration still has exactly two destinations.
         let mut bad = original; bad.files[1].path = "release/metadata/android/en-US/title.txt".into(); assert!(!bad.valid());
     }
+}
+
+pub(crate) fn ignore_additions_valid(lines: &[String]) -> bool {
+    let mut previous = None;
+    lines.iter().all(|line| {
+        let Some(index) = IGNORE_LINES.iter().position(|allowed| *allowed == line.as_str()) else { return false; };
+        let ordered = previous.is_none_or(|old| old < index); previous = Some(index); ordered
+    })
 }

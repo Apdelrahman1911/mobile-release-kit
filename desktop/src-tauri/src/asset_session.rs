@@ -3140,6 +3140,13 @@ impl DocumentBinding {
     ) -> Result<T, BridgeError> {
         self.registered_edit_admit_published(crate::edit_protocol::EditDomain::GitHubWorkflows, project_id, enqueue)
     }
+    pub(crate) fn initialization_edit_admit_published<T>(
+        &self,
+        project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
+        enqueue: impl FnOnce(&DesktopBridge, crate::edit_owner::RegisteredEditRoot, &RegistrationPublisher) -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.registered_edit_admit_published(crate::edit_protocol::EditDomain::ProjectInitialization, project_id, enqueue)
+    }
     pub(crate) fn metadata_text_edit_admit_published<T>(
         &self,
         project_id: impl FnOnce(&DesktopBridge) -> Result<String, BridgeError>,
@@ -3176,7 +3183,7 @@ impl DocumentBinding {
         selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
         if !matches!(domain, crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::GitHubWorkflows
-            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages)
+            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::ProjectInitialization)
             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
         self.expire(state, Instant::now());
         if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }

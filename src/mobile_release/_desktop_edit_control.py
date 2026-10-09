@@ -14,7 +14,7 @@ import time
 from typing import TYPE_CHECKING
 
 from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL,
-                                     METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL,
+                                     METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, INITIALIZATION_PROTOCOL,
                                      VERSION_REQUEST_LIMIT, REQUEST_LIMIT, parse_request)
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 class EditInput:
     def __init__(self, started: float, *, protocol: str = PROTOCOL) -> None:
-        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL}:
+        if type(protocol) is not str or protocol not in {PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, INITIALIZATION_PROTOCOL}:
             raise ProtocolError("Invalid fixed edit domain")
         self.protocol = protocol
         self.request_limit = VERSION_REQUEST_LIMIT if protocol == VERSION_PROTOCOL else REQUEST_LIMIT

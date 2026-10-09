@@ -253,6 +253,8 @@ fn main() {
             "close_config_edit", "config_edit_status",
             "github_workflow_edit_open", "github_workflow_edit_prepare", "github_workflow_edit_apply",
             "github_workflow_edit_close", "github_workflow_edit_status",
+            "project_initialization_open", "project_initialization_prepare", "project_initialization_apply",
+            "project_initialization_discard", "project_initialization_status",
             "metadata_text_observe", "metadata_text_validate", "metadata_text_edit_open", "metadata_text_edit_prepare",
             "metadata_text_edit_apply", "metadata_text_edit_close", "metadata_text_edit_status",
             "metadata_images_catalog", "metadata_images_choose", "metadata_images_selection_status", "metadata_images_selection_cancel",

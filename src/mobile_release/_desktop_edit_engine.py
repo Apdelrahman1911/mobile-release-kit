@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from ._desktop_edit_control import EditInput
-from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL,
+from ._desktop_edit_protocol import (EditRequest, ProtocolError, PROTOCOL, WORKFLOW_PROTOCOL, METADATA_PROTOCOL, VERSION_PROTOCOL, IMAGES_PROTOCOL, INITIALIZATION_PROTOCOL,
                                      registered_identity, response)
 from .build_inputs import _attempt_all
 from .cancellation import CleanupScope, DefaultCancellation
@@ -37,6 +37,11 @@ from .release_version_edit import (apply_release_version_edit, capture_release_v
                                    discard_release_version_edit, prepare_release_version_edit)
 from .metadata_images_edit import (apply_metadata_images_edit, capture_metadata_images_edit,
                                    discard_metadata_images_edit, prepare_metadata_images_edit)
+
+from .project_initialization import (InitializationConflict, capture_project_initialization,
+    prepare_project_initialization, apply_project_initialization, discard_project_initialization,
+    capture_project_initialization_recovery, prepare_project_initialization_recovery,
+    apply_project_initialization_recovery, discard_project_initialization_recovery)
 
 from .saved_text_recovery import (apply_saved_text_recovery, capture_saved_text_recovery,
                                   discard_saved_text_recovery, prepare_saved_text_recovery,
@@ -66,25 +71,27 @@ class _Engine:
         if type(workflows) is not bool or domain is not None and workflows:
             raise ProtocolError("Invalid fixed edit domain")
         selected = ("github_workflows" if workflows else "configuration") if domain is None else domain
-        if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images"}:
+        if type(selected) is not str or selected not in {"configuration", "github_workflows", "metadata_text", "release_version", "metadata_images", "project_initialization"}:
             raise ProtocolError("Invalid fixed edit domain")
         self.domain = selected
         self.workflows = selected == "github_workflows"  # Existing private constructor compatibility.
         self.guard = DefaultCancellation(ValidationError, "configuration edit custody did not settle")
         protocol = {"configuration": PROTOCOL, "github_workflows": WORKFLOW_PROTOCOL,
                     "metadata_text": METADATA_PROTOCOL, "release_version": VERSION_PROTOCOL,
-                    "metadata_images": IMAGES_PROTOCOL}[selected]
+                    "metadata_images": IMAGES_PROTOCOL, "project_initialization": INITIALIZATION_PROTOCOL}[selected]
         self.input = EditInput(started, protocol=protocol)
         self.lease: InitRootLease | None = None
         self.authority: Any = None
         self.last_request: EditRequest | None = None
         self.published_token: str | None = None
         self.outcome: CoreEditOutcome | InitApplyOutcome | None = None
-        self.conflict: WorkflowConflict | None = None
+        self.conflict: WorkflowConflict | InitializationConflict | None = None
         self.image_intent: str | None = None
         self.workflow_intent: str | None = None
         self.saved_text_recovery = False
         self.configuration_recovery = False
+        self.initialization_recovery = False
+        self.initialization_intent: str | None = None
         self.first: BaseException | None = None
         self.frames = 0
         self.stdout_bytes = 0
@@ -107,7 +114,7 @@ class _Engine:
                                        "invalid_params" if isinstance(error, ProtocolError) else "filesystem_error")
         # pending_state from a read-only recovery inspection is not a first
         # failure. Latch this actual failure without losing inspected facts.
-        if (self.configuration_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
+        if (self.configuration_recovery or self.initialization_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
             workflow_recovery_outcome(self.lease, reason=proposed.reason)
         if self.saved_text_recovery and self.lease is not None:
             saved_text_recovery_outcome(self.lease, reason=proposed.reason)
@@ -122,7 +129,7 @@ class _Engine:
             effect, journal, resources = current.effect, current.journal, current.resources
         else:
             effect, journal, resources = proposed.effect, proposed.journal, proposed.resources
-        if (self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and native is not None:
+        if (self.configuration_recovery or self.initialization_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and native is not None:
             reason = native.reason  # Its recovery ledger, not display pending_state, owns the first actual failure.
         else:
             reason = (current.reason if current is not None and current.reason != "none" else
@@ -136,12 +143,14 @@ class _Engine:
             # Inspected attention is not a failed save. Keep its original ledger;
             # do not relax normal CoreEditOutcome or synthesize a primary error.
             return saved_text_recovery_outcome(self.lease)
-        if (self.configuration_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
+        if (self.configuration_recovery or self.initialization_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover") and self.lease is not None:
             observed = workflow_recovery_outcome(self.lease)
             return CoreEditOutcome(observed.effect, observed.journal, observed.resources, observed.reason)
         return CoreEditOutcome("not_started", "not_created", "settled", "none")
 
     def _check_workflow_intent(self, request: EditRequest) -> None:
+        if self.domain == "project_initialization" and request.params.get("intent") != self.initialization_intent:
+            raise ProtocolError("Initialization and current-inspection recovery intents cannot be exchanged")
         if self.domain == "configuration" and (request.params.get("intent") == "recover") != self.configuration_recovery:
             raise ProtocolError("Configuration edit and recovery intents cannot be exchanged")
         if self.domain in {"metadata_text", "release_version"} and (request.params.get("intent") == "recover") != self.saved_text_recovery:
@@ -154,6 +163,11 @@ class _Engine:
             if self.authority is not None:
                 if self.saved_text_recovery:
                     discard_saved_text_recovery(self.authority)
+                elif self.domain == "project_initialization":
+                    if self.initialization_recovery:
+                        discard_project_initialization_recovery(self.authority)
+                    else:
+                        discard_project_initialization(self.authority)
                 elif self.domain == "github_workflows":
                     if self.workflow_intent == "recover":
                         discard_github_workflow_recovery(self.authority)
@@ -219,7 +233,14 @@ class _Engine:
         root = _root(request.params["root"])
         self.saved_text_recovery = self.domain in {"metadata_text", "release_version"} and request.params.get("intent") == "recover"
         self.configuration_recovery = self.domain == "configuration" and request.params.get("intent") == "recover"
-        if self.domain == "github_workflows":
+        if self.domain == "project_initialization":
+            self.initialization_intent = request.params["intent"]
+            self.initialization_recovery = self.initialization_intent == "recover"
+            self.lease = InitRootLease(root, cancellation=self.guard,
+                profile=TypedEditProfile.PROJECT_INITIALIZATION,
+                registered_identity=registered_identity(request.params["registeredIdentity"]),
+                initialization_recovery=self.initialization_recovery)
+        elif self.domain == "github_workflows":
             self.workflow_intent = request.params.get("intent", "edit")
             # The closed lease compares all five facts to raw original fstat on
             # acquire and subsequent checks BEFORE any workflow observation.
@@ -251,7 +272,17 @@ class _Engine:
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.lease.acquire()
-        if self.saved_text_recovery:
+        if self.domain == "project_initialization":
+            if self.initialization_recovery:
+                checkout = capture_project_initialization_recovery(self.lease)
+            else:
+                draft = request.params.pop("draft")
+                try:
+                    checkout = capture_project_initialization(self.lease, draft,
+                        request.params["toolingRepository"], request.params["toolingSha"])
+                finally:
+                    del draft
+        elif self.saved_text_recovery:
             checkout = capture_saved_text_recovery(self.lease)
         elif self.domain == "github_workflows":
             checkout = (capture_github_workflow_recovery(self.lease) if self.workflow_intent == "recover" else
@@ -278,7 +309,11 @@ class _Engine:
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = checkout
-        if self.saved_text_recovery:
+        if self.domain == "project_initialization":
+            details = {"recovery": checkout.view} if self.initialization_recovery else {"observed": checkout.observed}
+            opened = response(request, "opened", {"intent": self.initialization_intent, "revision": checkout.revision,
+                                                  **details, "scopeResources": "settled"})
+        elif self.saved_text_recovery:
             opened = response(request, "opened", {"revision": checkout.revision, "recovery": checkout.view,
                                                   "scopeResources": "settled"})
         elif self.domain == "github_workflows":
@@ -311,7 +346,14 @@ class _Engine:
             self.outcome = self._discard_outcome()
             return
         self._check_workflow_intent(request)
-        if self.saved_text_recovery:
+        if self.domain == "project_initialization":
+            plan = (prepare_project_initialization_recovery(self.lease, checkout, request.params["revision"])
+                    if self.initialization_recovery else
+                    prepare_project_initialization(self.lease, checkout, request.params["revision"]))
+            if type(plan) is InitializationConflict:
+                self.conflict, self.outcome = plan, plan.outcome
+                return  # No token or prepared frame; retire/close the original checkout first.
+        elif self.saved_text_recovery:
             plan = prepare_saved_text_recovery(self.lease, checkout, request.params["revision"])
         elif self.domain == "github_workflows":
             plan = (prepare_github_workflow_recovery(self.lease, checkout, request.params["revision"])
@@ -347,7 +389,9 @@ class _Engine:
         else:
             raise ProtocolError("Invalid fixed edit domain")
         self.authority = plan
-        details = {"recovery" if self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover" else "view": plan.view}
+        details = {"recovery" if self.configuration_recovery or self.initialization_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover" else "view": plan.view}
+        if self.domain == "project_initialization":
+            details["intent"] = self.initialization_intent
         prepared = response(request, "prepared", {"revision": plan.revision, "planToken": plan.token,
                                                    **details, "scopeResources": "settled"})
         self.input.idle()
@@ -365,7 +409,10 @@ class _Engine:
         self._check_workflow_intent(request)
         if request.params["planToken"] != plan.token:
             raise ProtocolError("The original plan token is required")
-        if self.saved_text_recovery:
+        if self.domain == "project_initialization":
+            self.outcome = (apply_project_initialization_recovery(self.lease, plan) if self.initialization_recovery else
+                            apply_project_initialization(self.lease, plan))
+        elif self.saved_text_recovery:
             self.outcome = apply_saved_text_recovery(self.lease, plan)
         elif self.domain == "github_workflows":
             self.outcome = (apply_github_workflow_recovery(self.lease, plan) if self.workflow_intent == "recover" else
@@ -390,7 +437,7 @@ class _Engine:
         if self.last_request is None:
             raise ProtocolError("No accepted edit request")
         outcome = self.outcome
-        if outcome is None and (self.configuration_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover"):
+        if outcome is None and (self.configuration_recovery or self.initialization_recovery or self.saved_text_recovery or self.domain == "github_workflows" and self.workflow_intent == "recover"):
             outcome = self._discard_outcome()
         if outcome is None and self.domain == "metadata_images" and self.image_intent == "recover" and self.lease is not None:
             observed = self.lease.last_outcome
@@ -408,6 +455,13 @@ class _Engine:
         if self.domain in {"github_workflows", "metadata_text", "release_version", "metadata_images"}:
             result["kind"] = "outcome"
             if self.domain == "github_workflows" and self.conflict is not None:
+                del result["planToken"]
+                result.update(kind="conflict", revision=self.conflict.revision, conflict=self.conflict.view)
+        if self.domain == "project_initialization":
+            result.update(kind="outcome", intent=self.initialization_intent or self.last_request.params.get("intent"))
+            if (type(self.conflict) is InitializationConflict
+                    and (outcome.effect, outcome.journal, outcome.resources, outcome.reason)
+                    == ("not_started", "not_created", "settled", "none")):
                 del result["planToken"]
                 result.update(kind="conflict", revision=self.conflict.revision, conflict=self.conflict.view)
         self.write(response(self.last_request, "terminal", result), terminal=True)

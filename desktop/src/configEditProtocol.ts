@@ -111,7 +111,7 @@ function summary(value: unknown): boolean {
     : !Object.hasOwn(value, 'count');
 }
 
-function preview(value: unknown): boolean {
+export function isConfigPreview(value: unknown): boolean {
   if (!keys(value, ['schemaVersion', 'validation', 'comparison', 'fields', 'assurance']) || value.schemaVersion !== 1 || !assurance(value.assurance)) return false;
   const validation = value.validation;
   if (!keys(validation, ['valid', 'state', 'issues', 'requirements', 'assurance']) || validation.valid !== true || validation.state !== 'format-valid' ||
@@ -147,7 +147,7 @@ function preparedView(value: unknown): value is PreparedConfigView {
       !Array.isArray(value.files) || value.files.length !== 2 ||
       !file(value.files[0], 'release/mobile-release.json', ['create', 'replace', 'preserve'], CONFIG_BYTES) ||
       !file(value.files[1], '.gitignore', ['create', 'append', 'preserve'], IGNORE_BYTES) ||
-      !list(value.ignoreAdditions, (item) => oneOf(item, IGNORE_LINES), IGNORE_LINES.length) || !preview(value.preview)) return false;
+      !list(value.ignoreAdditions, (item) => oneOf(item, IGNORE_LINES), IGNORE_LINES.length) || !isConfigPreview(value.preview)) return false;
   const config = value.files[0];
   const ignore = value.files[1];
   if (value.rewritesConfigFormatting !== (config.action === 'replace') || (value.createReleaseDirectory && config.action !== 'create')) return false;

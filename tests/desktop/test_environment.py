@@ -58,6 +58,12 @@ class EnvironmentRequirementsTests(unittest.TestCase):
                 self.assertEqual(result["coverage"], "toolchain-prerequisites-only")
                 self.assertEqual(result["nativeInspection"], "unavailable")
                 self.assertEqual(result["dependencyCompleteness"], "unknown")
+                limitations = " ".join(result["limitations"])
+                self.assertIn("This list only explains prerequisites; it does not install, select or run tools.", limitations)
+                self.assertIn("Use the separate tool checks or build controls to check what is available.", limitations)
+                self.assertIn("Reading this list does not enable a build or release.", limitations)
+                self.assertNotIn("builds and release operations remain unavailable", limitations)
+                self.assertIn("All tool presence, versions and native behavior remain unknown", limitations)
                 self.assertEqual(result["assurance"], {
                     "basis": "schema-policy", "projectCodeExecuted": False, "toolsProbed": False,
                     "credentialsRead": False, "gitObserved": False, "storeContacted": False,

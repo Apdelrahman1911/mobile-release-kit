@@ -1,3 +1,5 @@
+import { validInitializationCompletion } from './projectInitialization.ts';
+import type { ConfirmedInitialization } from './projectInitialization.ts';
 import { blockingAncestor, getValue, sameJson, setValue } from './catalog.ts';
 import { pathsOverlap } from './preparation.ts';
 import { isU32, normalEditResult, configRecoveryResult } from './configEditProtocol.ts';
@@ -61,6 +63,7 @@ export interface ProjectSession {
   nextRemovalId: number;
   editError: ApiError | null;
   lastSave: SavedDraftRevision | null;
+  lastInitialization?: {sessionId:string;windowGeneration:string;statusRevision:number};
   saveRecoveryRequired: boolean;
   saveRecoveryNeedsReload: boolean;
   recoveryReloadRequest: number | null;
@@ -77,7 +80,7 @@ export const initialWorkspace: WorkspaceState = { selectedId: null, projects: {}
 export interface RetainedEditAttention {
   projectId: string;
   projectName: string | null;
-  domain: 'Project settings' | 'GitHub workflow files' | 'Public Store text' | 'Saved version values';
+  domain: 'Project initialization' | 'Project settings' | 'GitHub workflow files' | 'Public Store text' | 'Saved version values';
   page: 'settings' | 'github' | 'metadata' | 'dashboard';
 }
 
@@ -90,12 +93,14 @@ export function retainedEditAttention(
   workflows: readonly { projectId: string }[],
   metadataProjects: readonly string[],
   versionProjects: readonly string[] = [],
+  initializationProjects: readonly {projectId:string}[] = [],
 ): RetainedEditAttention[] {
   const row = (projectId: string, domain: RetainedEditAttention['domain'], page: RetainedEditAttention['page']): RetainedEditAttention => {
     const loaded = Object.hasOwn(projects, projectId) ? projects[projectId] : undefined;
     return { projectId, projectName: loaded?.project.id === projectId ? loaded.project.name : null, domain, page };
   };
   return [
+    ...initializationProjects.map(({projectId})=>row(projectId,'Project initialization','dashboard')),
     ...configuration.map(({ projectId }) => row(projectId, 'Project settings', 'settings')),
     ...workflows.map(({ projectId }) => row(projectId, 'GitHub workflow files', 'github')),
     ...metadataProjects.map((projectId) => row(projectId, 'Public Store text', 'metadata')),
@@ -126,6 +131,8 @@ export type WorkspaceAction =
   | { type: 'suggest-failed'; projectId: string; requestId: number; error: ApiError }
   | { type: 'adopt-suggestion'; projectId: string; requestId: number }
   | { type: 'config-save-intent'; projectId: string }
+  | { type: 'initialization-intent'; projectId: string }
+  | { type: 'initialization-final'; projectId: string; completion: ConfirmedInitialization }
   | { type: 'config-save-final'; projectId: string; receipt: ConfirmedConfigSave }
   | { type: 'config-save-recovery'; projectId: string; attention: ConfigRecoveryAttention }
   | { type: 'config-recovery-final'; projectId: string; completion: ConfigRecoveryCompletion };
@@ -349,6 +356,25 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // Retire an in-flight snapshot too; only a new explicit refresh can bind.
       next = { ...session, savedConfigContent: null, snapshotRequest: null };
       break;
+    case 'initialization-intent':
+      next={...session,snapshotRequest:null,snapshotPredatesSave:true,savedConfigContent:null,
+        lastSave:session.lastSave?{...session.lastSave,resultingBaselineGeneration:null}:null,
+        validation:null,validatedRevision:null,validatedBaselineGeneration:null,validationRequest:null,validationError:null,
+        review:null,reviewRequest:null,reviewError:null,suggestion:null,suggestionRequest:null,suggestionError:null};
+      break;
+    case 'initialization-final': {
+      const completion=action.completion, {binding,projection,statusRevision}=completion;
+      if(!validInitializationCompletion(completion)||binding.projectId!==action.projectId||session.lastInitialization?.windowGeneration===binding.windowGeneration && (session.lastInitialization.sessionId===projection.sessionId||session.lastInitialization.statusRevision>=statusRevision))return state;
+      next={...session,lastInitialization:{sessionId:projection.sessionId,windowGeneration:binding.windowGeneration,statusRevision},snapshotRequest:null,snapshotPredatesSave:true,savedConfigContent:null,
+        lastSave:session.lastSave?{...session.lastSave,resultingBaselineGeneration:null}:null,
+        validation:null,validatedRevision:null,validatedBaselineGeneration:null,validationRequest:null,validationError:null,
+        review:null,reviewRequest:null,reviewError:null,suggestion:null,suggestionRequest:null,suggestionError:null};
+      // Core may pin a different $schema in the generated saved configuration.
+      // Its redacted preview cannot establish raw equality to the input draft.
+      // Keep baseline/draft/undo and all counters; only explicit refresh then
+      // user-confirmed discard may adopt observed saved configuration.
+      break;
+    }
     case 'config-save-final': {
       const { binding, projection, sessionId, planToken, statusRevision, result } = action.receipt;
       const prepared = projection.prepared;

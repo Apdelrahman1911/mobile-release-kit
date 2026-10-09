@@ -1,3 +1,4 @@
+import { initializationError } from './projectInitializationProtocol.ts';
 import { installationError, installationCheckError, installationPreparationError } from './installation.ts';
 import { projectRecoveryError } from './projectRecoveryProtocol.ts';
 import { offlinePreflightError } from './offlinePreflightProtocol.ts';
@@ -79,6 +80,7 @@ const editUnavailable = async (): Promise<never> => {
   throw { code: 'PreviewOnly', message: 'Browser preview has no native edit owner, save plan or finality. No save operation was performed.', retryable: false } satisfies ApiError;
 };
 const assetUnavailable = async (): Promise<never> => { throw assetError({ code: 'AssetSessionUnavailable' }); };
+const initializationUnavailable=async():Promise<never>=>{throw initializationError({code:'PreviewOnly'});};
 const workflowUnavailable = async (): Promise<never> => { throw workflowEditError({ code: 'PreviewOnly' }); };
 const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnectionError({ code: 'github_connection_refused_unqualified' }));
 const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
@@ -219,6 +221,12 @@ export const previewApi: DesktopApi = {
   closeConfigEdit: editUnavailable,
   configEditStatus: editUnavailable,
   subscribeConfigEdit: editUnavailable,
+  openProjectInitialization: initializationUnavailable,
+  prepareProjectInitialization: initializationUnavailable,
+  applyProjectInitialization: initializationUnavailable,
+  discardProjectInitialization: initializationUnavailable,
+  projectInitializationStatus: initializationUnavailable,
+  subscribeProjectInitialization: initializationUnavailable,
   openGitHubWorkflowRecovery: workflowUnavailable,
   prepareGitHubWorkflowRecovery: workflowUnavailable,
   applyGitHubWorkflowRecovery: workflowUnavailable,
