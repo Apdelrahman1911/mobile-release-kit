@@ -14,6 +14,11 @@ concurrency:
 
 jobs:
   e2_fixture:
+    name: e2_fixture (${{ matrix.removal_part }})
+    strategy:
+      fail-fast: false
+      matrix:
+        removal_part: [shipping5, fixture8]
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'
     runs-on: macos-26
     timeout-minutes: 100
@@ -73,7 +78,13 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # Same990s owner: old5 plus B3/O3/ordinary-emitter1/observer-emitter1 DATA; seven serial graphs.
+          # Separate fresh owners, not a renewed deadline: shipping5 has3 Cargo originals,
+          # fixture8 has4. Both parts are required for13; neither implies aggregate success.
+          case '${{ matrix.removal_part }}' in
+            shipping5) removal_argument=--qualify-removal-parent-shipping-data ;;
+            fixture8) removal_argument=--qualify-removal-parent-fixture-data ;;
+            *) exit 1 ;;
+          esac
           # No Installer transaction, live removal, signing, SM, Keychain or app launch.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
@@ -86,7 +97,7 @@ jobs:
             RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \
             DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \
             '${{ steps.python.outputs.python-path }}' -I -S -B \
-            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py "$removal_argument"
 
       - name: Publish only the closed source-bound fixture summary
         id: publication
@@ -97,6 +108,7 @@ jobs:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
           MRK_MACOS_WORK: ${{ steps.prepare.outputs.root }}
           MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}
+          MRK_REMOVAL_PART: ${{ matrix.removal_part }}
         run: |
           builtin source ./desktop/tools/macos_maintenance_fixture_publish.sh
 
@@ -104,7 +116,7 @@ jobs:
         if: always() && steps.publication.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: macos-maintenance-fixture-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: macos-maintenance-fixture-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.removal_part }}
           path: ${{ steps.prepare.outputs.root }}/e2-workflow-result.json
           if-no-files-found: error
           retention-days: 14
@@ -120,6 +132,9 @@ jobs:
           REMOVAL_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_data_qualified }}
           REMOVAL_INTEGRATION_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_integration_data_qualified }}
           REMOVAL_PARENT_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_parent_data_qualified }}
+          REMOVAL_PARENT_PART_QUALIFIED: ${{ steps.publication.outputs.removal_parent_part_qualified }}
+          REMOVAL_PARENT_PART: ${{ steps.publication.outputs.removal_parent_part }}
+          EXPECTED_REMOVAL_PART: ${{ matrix.removal_part }}
           REMOVAL_CHANGES_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_changes_data_qualified }}
           REMOVAL_RECOVERY_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_recovery_data_qualified }}
           REGISTRATION_QUALIFIED: ${{ steps.publication.outputs.registration_qualified }}
@@ -128,7 +143,7 @@ jobs:
           PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}
         run: |
           set -euo pipefail
-          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$CONTEXT_COMPLETED" == false && "$PRODUCT_ARGUMENT_OBSERVED" == false && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == true && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]
+          [[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$CONTEXT_COMPLETED" == false && "$PRODUCT_ARGUMENT_OBSERVED" == false && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_PART_QUALIFIED" == true && "$REMOVAL_PARENT_PART" == "$EXPECTED_REMOVAL_PART" && ( "$REMOVAL_PARENT_PART" == shipping5 || "$REMOVAL_PARENT_PART" == fixture8 ) && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]
           # No protected-root/receipt adoption or process scan here.
           # Owner retirement is immediate and original-finality-gated. Shared
           # Cargo/Rust/Python homes and required evidence remain untouched.

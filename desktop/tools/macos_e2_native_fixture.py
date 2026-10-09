@@ -172,6 +172,10 @@ INTEGRATION_SOURCES = (
 )
 # Seven fixed originals: old Remover3/Record1/Installer1 plus B3/O3/emitter1/observer-emitter1 DATA; no live removal.
 PARENT_ARGUMENT = "--qualify-removal-parent-data"
+PARENT_PART_ARGUMENTS = {
+    "--qualify-removal-parent-shipping-data": "shipping5",
+    "--qualify-removal-parent-fixture-data": "fixture8",
+}
 PARENT_ROLES = ("removal-parent-rust-tests", "removal-record-rust-tests", "removal-installer-rust-tests", "removal-abrupt-rust-tests", "removal-observer-rust-tests", "removal-emitter-rust-tests", "removal-observer-emitter-rust-tests")
 PARENT_RUST_TESTS = (
     "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
@@ -3037,12 +3041,26 @@ def observer_emitter_rust_tests_result(stdout):
     return observer_emitter_rust_test_record()
 
 
-def removal_parent_data_result(result, source, rows):
-    """Only this returned seven-original role DATA scope; never transaction authority."""
+def parent_part_data(part):
+    """Closed selection only; neither a clock renewal nor partial-pass credit."""
+    need(part is None or type(part) is str and part in ("shipping5", "fixture8"), "removal-parent-part")
+    keys = ("parentRustTests", "recordRustTests", "installerRustTests", "abruptRustTests",
+            "observerRustTests", "emitterRustTests", "observerEmitterRustTests")
+    if part == "shipping5":
+        return PARENT_ROLES[:3], keys[:3], "removal-parent-shipping-data"
+    if part == "fixture8":
+        return PARENT_ROLES[3:], keys[3:], "removal-parent-fixture-data"
+    return PARENT_ROLES, keys, "removal-parent-data"
+
+
+def removal_parent_data_result(result, source, rows, *, part=None):
+    """Exact full historical selection or one explicit part; never aggregate credit."""
+    roles, selected_keys, artifact = parent_part_data(part)
+    all_keys = parent_part_data(None)[1]
     need(type(result) is dict and identity(source, 40) and result.get("source") == source
          and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
          and result.get("outcome") == "passed" and result.get("passed") is True
-         and result.get("failure") is None and result.get("phase") == PARENT_ROLES[-1], "removal-owner-result")
+         and result.get("failure") is None and result.get("phase") == roles[-1], "removal-owner-result")
     need(all(result.get(key) is True for key in ("sourceClosesKnown", "outputClosesKnown", "protectedClosesKnown", "scratchRetired"))
          and result.get("cleanupErrors") == []
          and all(result.get(key) is False for key in ("installerEntered", "installationReturnedSuccess", "nativeEntered",
@@ -3056,23 +3074,39 @@ def removal_parent_data_result(result, source, rows):
          and result["serviceLayoutObservation"]["selected"] is False and result["serviceLayoutObservation"]["started"] is False
          and result["btmLogObservation"]["state"] == "not-requested", "removal-owner-scope")
     artifacts = result.get("artifacts")
-    need(type(artifacts) is dict and set(artifacts) == {"removal-parent-data"}, "removal-artifacts")
-    data = artifacts["removal-parent-data"]
-    need(type(data) is dict and set(data) == {"clock", "parentRustTests", "recordRustTests", "installerRustTests", "sourceHashes", "abruptRustTests", "observerRustTests", "emitterRustTests", "observerEmitterRustTests"}, "removal-record")
+    need(type(artifacts) is dict and set(artifacts) == {artifact}, "removal-artifacts")
+    data = artifacts[artifact]
+    expected_fields = {"clock", "sourceHashes", *all_keys}
+    if part is not None:
+        expected_fields |= {"schemaVersion", "part"}
+    need(type(data) is dict and set(data) == expected_fields, "removal-record")
+    if part is not None:
+        need(type(data["schemaVersion"]) is int and data["schemaVersion"] == 1
+             and data["part"] == part, "removal-parent-part-binding")
     registration_clock_data(data["clock"])
-    _rust_tests_data(data["parentRustTests"], parent_rust_test_record(), "installer-worker-rust-test")
-    _rust_tests_data(data["recordRustTests"], record_rust_test_record(), "removal-record-rust-test")
-    _rust_tests_data(data["installerRustTests"], installer_rust_test_record(), "removal-installer-rust-test")
-    _rust_tests_data(data["abruptRustTests"], abrupt_rust_test_record(), "removal-abrupt-rust-test")
-    _rust_tests_data(data["observerRustTests"], observer_rust_test_record(), "removal-observer-rust-test")
-    _rust_tests_data(data["emitterRustTests"], emitter_rust_test_record(), "removal-emitter-rust-test")
-    _rust_tests_data(data["observerEmitterRustTests"], observer_emitter_rust_test_record(), "removal-observer-emitter-rust-test")
+    if "parentRustTests" in selected_keys:
+        _rust_tests_data(data["parentRustTests"], parent_rust_test_record(), "installer-worker-rust-test")
+    if "recordRustTests" in selected_keys:
+        _rust_tests_data(data["recordRustTests"], record_rust_test_record(), "removal-record-rust-test")
+    if "installerRustTests" in selected_keys:
+        _rust_tests_data(data["installerRustTests"], installer_rust_test_record(), "removal-installer-rust-test")
+    if "abruptRustTests" in selected_keys:
+        _rust_tests_data(data["abruptRustTests"], abrupt_rust_test_record(), "removal-abrupt-rust-test")
+    if "observerRustTests" in selected_keys:
+        _rust_tests_data(data["observerRustTests"], observer_rust_test_record(), "removal-observer-rust-test")
+    if "emitterRustTests" in selected_keys:
+        _rust_tests_data(data["emitterRustTests"], emitter_rust_test_record(), "removal-emitter-rust-test")
+    if "observerEmitterRustTests" in selected_keys:
+        _rust_tests_data(data["observerEmitterRustTests"], observer_emitter_rust_test_record(), "removal-observer-emitter-rust-test")
+    for key in all_keys:
+        if key not in selected_keys:
+            need(data[key] is None, "removal-parent-unselected-record")
     need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(PARENT_SOURCES)
          and all(identity(data["sourceHashes"][name], 64) and data["sourceHashes"][name] == rows[name]["sha256"]
                  for name in PARENT_SOURCES), "removal-source-binding")
     calls = result.get("originalCalls")
-    need(type(calls) is list and len(calls) == 7 and all(type(call) is dict for call in calls)
-         and [call.get("role") for call in calls] == list(PARENT_ROLES), "removal-call-roster")
+    need(type(calls) is list and len(calls) == len(roles) and all(type(call) is dict for call in calls)
+         and [call.get("role") for call in calls] == list(roles), "removal-call-roster")
     for call in calls:
         need(set(call) == {"role", "entered", "returned", "workTimeoutSeconds", "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
              and call["entered"] is True and call["returned"] is True
@@ -3080,7 +3114,7 @@ def removal_parent_data_result(result, source, rows):
              and type(call["workTimeoutSeconds"]) is int and 0 < call["workTimeoutSeconds"] <= 480
              and type(call["outputLimitBytes"]) is int and call["outputLimitBytes"] == 4194304
              and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
-    return {"scope": "removal-parent-record-compiled-data-only", "clock": data["clock"],
+    value = {"scope": "removal-parent-record-compiled-data-only", "clock": data["clock"],
             "parentRustTests": data["parentRustTests"], "recordRustTests": data["recordRustTests"],
             "installerRustTests": data["installerRustTests"],
             "abruptRustTests": data["abruptRustTests"],
@@ -3090,6 +3124,10 @@ def removal_parent_data_result(result, source, rows):
             "sourceHashes": data["sourceHashes"], "originalCalls": calls,
             "liveRemovalQualified": False, "installerTransactionQualified": False,
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
+
+    if part is not None:
+        value.update(schemaVersion=1, part=part, scope="removal-parent-part-compiled-data-only")
+    return value
 
 
 def changes_rust_test_record(role):
@@ -3889,7 +3927,7 @@ def admit(environment):
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], [CHANGES_ARGUMENT], [RECOVERY_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], *([argument] for argument in PARENT_PART_ARGUMENTS), [CHANGES_ARGUMENT], [RECOVERY_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -4078,7 +4116,7 @@ class Operation:
     """One finite fixture operation. run_owned is the only process controller."""
 
     def __init__(self, owner, source, stager, work, environment, *, service_layout=False, context_receipts=False,
-                 service_cocoa=False, registration_reservation=False, removal_data=False, removal_integration=False, removal_parent=False, removal_changes=False, removal_recovery=False):
+                 service_cocoa=False, registration_reservation=False, removal_data=False, removal_integration=False, removal_parent=False, removal_changes=False, removal_recovery=False, removal_parent_part=None):
         need(type(service_layout) is bool and type(context_receipts) is bool and type(service_cocoa) is bool
              and type(registration_reservation) is bool and type(removal_data) is bool and type(removal_integration) is bool and type(removal_parent) is bool and type(removal_changes) is bool and type(removal_recovery) is bool
              and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data, removal_integration, removal_parent, removal_changes, removal_recovery)) <= 1,
@@ -4086,7 +4124,10 @@ class Operation:
         self.registration_selected = registration_reservation
         self.removal_selected = removal_data or removal_integration or removal_parent or removal_changes or removal_recovery
         self.removal_integration_selected = removal_integration
+        parent_part_data(removal_parent_part)
+        need(removal_parent or removal_parent_part is None, "removal-parent-part-without-route")
         self.removal_parent_selected = removal_parent
+        self.removal_parent_part = removal_parent_part
         self.removal_changes_selected = removal_changes
         self.removal_recovery_selected = removal_recovery
         self.registration_deadline = self.registration_last = None
@@ -5771,6 +5812,9 @@ class Operation:
                 "nativeRustTests": None, "appRustTests": None, "sourceHashes": {}}
         integration = getattr(self, "removal_integration_selected", False)
         parent_only = getattr(self, "removal_parent_selected", False)
+        parent_part = getattr(self, "removal_parent_part", None)
+        parent_roles, _parent_keys, parent_artifact = parent_part_data(parent_part)
+        need(parent_only or parent_part is None, "removal-parent-part-without-route")
         changes = getattr(self, "removal_changes_selected", False)
         recovery = getattr(self, "removal_recovery_selected", False)
         if integration:
@@ -5780,12 +5824,14 @@ class Operation:
             data.pop("appRustTests")
             data["parentRustTests"] = data["recordRustTests"] = data["installerRustTests"] = None
             data["abruptRustTests"] = data["observerRustTests"] = data["emitterRustTests"] = data["observerEmitterRustTests"] = None
+            if parent_part is not None:
+                data.update(schemaVersion=1, part=parent_part)
         if changes:
             data["parentRustTests"] = data["emitterRustTests"] = None
         if recovery:
             data.pop("appRustTests")
             data["parentRustTests"] = None
-        artifact = "removal-recovery-data" if recovery else "removal-changes-data" if changes else "removal-parent-data" if parent_only else "removal-integration-data" if integration else "removal-data"
+        artifact = "removal-recovery-data" if recovery else "removal-changes-data" if changes else parent_artifact if parent_only else "removal-integration-data" if integration else "removal-data"
         sources = RECOVERY_SOURCES if recovery else CHANGES_SOURCES if changes else PARENT_SOURCES if parent_only else INTEGRATION_SOURCES if integration else REMOVAL_SOURCES
         self.artifacts[artifact] = data
         try:
@@ -5831,6 +5877,8 @@ class Operation:
                      ("--features", "macos-remove-observer-producer", "--example", "macos_remove_producer"),
                      PARENT_EMITTER_RUST_TESTS, observer_emitter_rust_tests_result, "observerEmitterRustTests"),
                 )
+            if parent_only and parent_part is not None:
+                batches = tuple(batch for batch in batches if batch[0] in parent_roles)
             if changes:
                 batches = (
                     (CHANGES_ROLES[0], INSTALLER, ("--features", "macos-installed-remover", "--bin", "mrk-macos-remove"),
@@ -5996,7 +6044,9 @@ def main():
                               registration_reservation=sys.argv[1:] == [REGISTRATION_ARGUMENT],
                               removal_data=sys.argv[1:] == [REMOVAL_ARGUMENT],
                               removal_integration=sys.argv[1:] == [INTEGRATION_ARGUMENT],
-                              removal_parent=sys.argv[1:] == [PARENT_ARGUMENT],
+                              removal_parent=(sys.argv[1:] == [PARENT_ARGUMENT] or sys.argv[1:] in
+                                              ([argument] for argument in PARENT_PART_ARGUMENTS)),
+                              removal_parent_part=PARENT_PART_ARGUMENTS.get(sys.argv[1]) if len(sys.argv) == 2 else None,
                               removal_changes=sys.argv[1:] == [CHANGES_ARGUMENT],
                               removal_recovery=sys.argv[1:] == [RECOVERY_ARGUMENT])
         value = operation.execute()
@@ -6031,7 +6081,7 @@ def main():
             elif operation.removal_changes_selected:
                 removal_changes_data_result(value, os.environ["GITHUB_SHA"], source.rows)
             elif operation.removal_parent_selected:
-                removal_parent_data_result(value, os.environ["GITHUB_SHA"], source.rows)
+                removal_parent_data_result(value, os.environ["GITHUB_SHA"], source.rows, part=operation.removal_parent_part)
             elif operation.removal_integration_selected:
                 removal_integration_data_result(value, os.environ["GITHUB_SHA"], source.rows)
             else:

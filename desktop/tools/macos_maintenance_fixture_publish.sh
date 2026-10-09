@@ -3,7 +3,7 @@ umask 077
 ulimit -n 1024
 cd /Users/runner/work/mobile-release-kit/mobile-release-kit
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
-  MRK_MACOS_WORK="$MRK_MACOS_WORK" MRK_NATIVE_STEP_OUTCOME="$MRK_NATIVE_STEP_OUTCOME" \
+  MRK_MACOS_WORK="$MRK_MACOS_WORK" MRK_NATIVE_STEP_OUTCOME="$MRK_NATIVE_STEP_OUTCOME" MRK_REMOVAL_PART="${MRK_REMOVAL_PART-}" \
   GITHUB_SHA="$GITHUB_SHA" GITHUB_WORKFLOW_SHA="$GITHUB_WORKFLOW_SHA" \
   GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" GITHUB_OUTPUT="$GITHUB_OUTPUT" \
   "$MRK_PYTHON" -I -S -B - <<'PY_PUBLISH'
@@ -70,7 +70,9 @@ if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
 REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
-REMOVAL_PARENT_SELECTED = True  # Exact Remover3, Record1, and ordinary Installer1 DATA only.
+REMOVAL_PARENT_SELECTED = True  # Each explicit part qualifies only its fixed DATA roster.
+REMOVAL_PARENT_PART = os.environ.get("MRK_REMOVAL_PART", "") or None
+PARENT_SELECTED_ROLES = fixture.parent_part_data(REMOVAL_PARENT_PART)[0]
 CONTEXT_PRODUCT_SELECTED = False  # Prior product/$1 observation remains independently qualified.
 REMOVAL_CHANGES_SELECTED = False  # Historical changed11 scope remains independently validated.
 REMOVAL_RECOVERY_SELECTED = False  # NativeRecovery4 unchanged; no overlapping rerun.
@@ -133,6 +135,10 @@ OWNER_DIAGNOSTIC_PHASES = (
 )
 
 OWNER_DIAGNOSTIC_REFUSALS = (
+    'removal-parent-unselected-record',
+    'removal-parent-part-without-route',
+    'removal-parent-part-binding',
+    'removal-parent-part',
     'removal-app-rust-test-bound',
     'removal-app-rust-test-framing',
     'removal-app-rust-test-record',
@@ -460,6 +466,7 @@ summary = {
     "removalData": None, "removalDataQualified": False, "removalDataDiagnostic": None,
     "removalIntegrationData": None, "removalIntegrationDataQualified": False, "removalIntegrationDataDiagnostic": None,
     "removalParentData": None, "removalParentDataQualified": False, "removalParentDataDiagnostic": None,
+    "removalParentPart": REMOVAL_PARENT_PART, "removalParentPartQualified": False,
     "removalChangesData": None, "removalChangesDataQualified": False, "removalChangesDataDiagnostic": None,
     "removalRecoveryData": None, "removalRecoveryDataQualified": False, "removalRecoveryDataDiagnostic": None,
     "failure": "owner-result-missing-or-refused", "accepted": False,
@@ -572,7 +579,7 @@ try:
     service_layout = None
     selected_roles = (fixture.CONTEXT_ROLES if CONTEXT_PRODUCT_SELECTED else
                       fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
-                      fixture.PARENT_ROLES if REMOVAL_PARENT_SELECTED else
+                      PARENT_SELECTED_ROLES if REMOVAL_PARENT_SELECTED else
                       fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
                       fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES)
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
@@ -778,7 +785,7 @@ try:
     parent_last = None
     if outcome == "success" and REMOVAL_PARENT_SELECTED:
         try:
-            parent_data = fixture.removal_parent_data_result(result, source, rows)
+            parent_data = fixture.removal_parent_data_result(result, source, rows, part=REMOVAL_PARENT_PART)
             parent_last = fixture.registration_publication_tick(
                 parent_data, fixture.decimal(parent_data["clock"]["lastNs"]))
         except BaseException:
@@ -876,7 +883,8 @@ try:
         registrationReservation=registration, registrationReservationQualified=registration_qualified, registrationFailure=registration_failure,
         removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,
         removalIntegrationData=integration_data, removalIntegrationDataQualified=integration_qualified, removalIntegrationDataDiagnostic=integration_diagnostic,
-        removalParentData=parent_data, removalParentDataQualified=parent_qualified, removalParentDataDiagnostic=parent_diagnostic,
+        removalParentData=parent_data, removalParentDataQualified=parent_qualified and REMOVAL_PARENT_PART is None,
+        removalParentPartQualified=parent_qualified and REMOVAL_PARENT_PART is not None, removalParentDataDiagnostic=parent_diagnostic,
         removalChangesData=changes_data, removalChangesDataQualified=changes_qualified, removalChangesDataDiagnostic=changes_diagnostic,
         removalRecoveryData=recovery_data, removalRecoveryDataQualified=recovery_qualified, removalRecoveryDataDiagnostic=recovery_diagnostic,
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
@@ -895,6 +903,7 @@ except BaseException:
     summary['removalIntegrationDataDiagnostic'] = None
     summary['removalParentData'] = None
     summary['removalParentDataQualified'] = False
+    summary['removalParentPartQualified'] = False
     summary['removalParentDataDiagnostic'] = None
     summary['removalChangesData'] = None
     summary['removalChangesDataQualified'] = False
@@ -933,6 +942,7 @@ finally:
         summary['removalIntegrationDataDiagnostic'] = None
         summary['removalParentData'] = None
         summary['removalParentDataQualified'] = False
+        summary['removalParentPartQualified'] = False
         summary['removalParentDataDiagnostic'] = None
         summary['removalChangesData'] = None
         summary['removalChangesDataQualified'] = False
@@ -965,7 +975,7 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
-    if summary["removalParentDataQualified"]:
+    if summary["removalParentDataQualified"] or summary["removalParentPartQualified"]:
         parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
     if summary["removalChangesDataQualified"]:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)
@@ -983,7 +993,7 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
-    if summary["removalParentDataQualified"]:
+    if summary["removalParentDataQualified"] or summary["removalParentPartQualified"]:
         parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
     if summary["removalChangesDataQualified"]:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)
@@ -1007,6 +1017,8 @@ try:
                 + (b"removal_data_qualified=true\n" if summary["removalDataQualified"] else b"removal_data_qualified=false\n")
                 + (b"removal_integration_data_qualified=true\n" if summary["removalIntegrationDataQualified"] else b"removal_integration_data_qualified=false\n")
                 + (b"removal_parent_data_qualified=true\n" if summary["removalParentDataQualified"] else b"removal_parent_data_qualified=false\n")
+                + (b"removal_parent_part_qualified=true\n" if summary["removalParentPartQualified"] else b"removal_parent_part_qualified=false\n")
+                + (b"removal_parent_part=" + (REMOVAL_PARENT_PART or "none").encode("ascii") + b"\n")
                 + (b"removal_changes_data_qualified=true\n" if summary["removalChangesDataQualified"] else b"removal_changes_data_qualified=false\n")
                 + (b"removal_recovery_data_qualified=true\n" if summary["removalRecoveryDataQualified"] else b"removal_recovery_data_qualified=false\n"))
         fixture.need(os.write(fd, line) == len(line), "summary-step-output-write")
@@ -1021,7 +1033,7 @@ try:
         removal_last = fixture.registration_publication_tick(summary["removalData"], removal_last)
     if summary["removalIntegrationDataQualified"]:
         integration_last = fixture.registration_publication_tick(summary["removalIntegrationData"], integration_last)
-    if summary["removalParentDataQualified"]:
+    if summary["removalParentDataQualified"] or summary["removalParentPartQualified"]:
         parent_last = fixture.registration_publication_tick(summary["removalParentData"], parent_last)
     if summary["removalChangesDataQualified"]:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)

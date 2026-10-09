@@ -4475,7 +4475,9 @@ class InstallerContextTests(unittest.TestCase):
         # Context remains callable, but this source selects only the linked DATA batch.
         self.assertIn('CONTEXT_PRODUCT_SELECTED = False', publish)
         self.assertIn('REMOVAL_PARENT_SELECTED = True', publish)
-        self.assertIn('--qualify-removal-parent-data', workflow)
+        self.assertIn('shipping5) removal_argument=--qualify-removal-parent-shipping-data ;;', workflow)
+        self.assertIn('fixture8) removal_argument=--qualify-removal-parent-fixture-data ;;', workflow)
+        self.assertNotIn('--qualify-removal-parent-data', workflow)
         self.assertEqual(publish.count('fixture.context_publication_tick('), 4)
         self.assertGreater(publish.rindex('fixture.context_publication_tick('), publish.index('os.close(fd)'))
         self.assertIn('"$PRODUCT_ARGUMENT_OBSERVED" == false', workflow)
