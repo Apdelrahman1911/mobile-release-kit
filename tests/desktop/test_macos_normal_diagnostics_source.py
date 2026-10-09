@@ -118,7 +118,101 @@ ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
 IOS_UNSIGNED_SWIFT_INVERSE = [(70, 71, '9bac829257dc5bfc3a439aac882d2dd08d941c3f649245b3d7a768774a240fb6', '        init(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (72, 73, '66f825502f9177249fae4721b875432bc67fb64cb82913b6316d1774c5a49dfd', '            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),\n'), (213, 214, '6cd754f487e73847150b083af7e63e879a8dbac5ad665697097f9ec96855aa0e', '        func healthy() throws {\n'), (216, 218, '6a92da92d5532c709c9f3120362f8254966396700c0466f327c01b0ab76b5dfa', '            _ = try clock.remaining(1)\n'), (367, 368, 'fd8a6b3740680e236e8d1b7230c780d1b2047a08811daf14f32e2a626a9bbca2', '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (369, 370, '3e8ede215cecb56df70dc3f608cc5f1cee333b9789c9dc3c9dad5490f8a90700', '        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)\n'), (1057, 1058, 'fe1a506227717451d1ea704c49f67707355cf944c26b23254692342734be093f', '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }\n'), (1717, 1815, '8207c234f1e8514a6fc76d5ce60326720330a45af6f3d21a939a9c241306c9fc', ''), (2169, 2172, 'dcf34ab30490e5e6f7018fc3909338186a496fd715c7f6dcc02f3b100cbbb33e', '                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {\n'), (2299, 2386, 'b6ebcf146b2dff8f0aad636bf67b3dda1162b9a7dd958e017a298ee8b7610e59', ''), (2511, 2512, '24e72c6479ac7bc1e357f0db0edc814203f1521b12a87159a84c81f83cd3e3b0', ''), (2517, 2518, '206f1b83b020317dd90a1fe16c65d22dc46b4f99d00d66327b63ec35596f83d2', ''), (2719, 2720, 'df6605ab7490f24679c4a978e7c5b13f93f85210ea6444e2e2e9efcfcae013d6', '                let expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in\n'), (2724, 2727, 'c960cb683f36e92409c4c587c97282b29c14f0ae014559e7ee26c650e4b95da0', ''), (2743, 2745, 'b73ca4989daede170caf6b6b1a0998e75ea6ebba25d2f8d1a6fe0156cdd7d1ae', '            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"\n'), (2776, 2782, '1107bb850d890130bbb52690bf0a0cb605709f74d8472036002b6a5a015cc10c', ''), (2783, 2784, 'ea2d11d0ac471ad6c10e11edf0f41fed2d107ed6d1e06de7711e25de619a9398', '            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [\n'), (2787, 2788, '2498cc74fb404e00c579acc48e5cfdd4a0960767e13892af10381bc785c3fbc5', '            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals\n'), (2790, 2791, '1a888d6908be38a47f83ceeb92e6a3bf14a2a1a3aeb4652e02395e1b491f385b', '                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'), (2803, 2809, '49b024bd18a645445fbd6b19e3fe2cbad35bf22b7bc08bcde6f5579952779f55', ''), (3149, 3150, '419b3fec90b5f9f9cab66658f88de15a911c551aeb16763ab01e151d74198a49', ''), (3157, 3158, '6849ff7af4e41318c8523669ea36515c7f32c00a1e67b3ef51f7f9e9a490a51e', ''), (3183, 3185, '649cb7eca7a5aa1accb59bfe7e5ae11533ec19478cee237ef8c4c35cb2e98be4', '    // Explicit DATA-only native selection; not an Android-positive application case.\n'), (4951, 5171, 'daf86c7067443724d660940776c521e0d1655f9cc3701f3579faa2c0fbecd1b7', '')]
 
 
+# Progressive Unicode-character coordinates, each independently SHA-bound to
+# the reviewed V2 then V1 removal-only inverse. Historical iOS/Android tables stay exact.
+REMOVAL_UI_SWIFT_INVERSE = ((80622,
+  81151,
+  '769d6f8133da98a9246545d016242bcfe97b677112d9015e9139746eb9eeb633',
+  '            try click(renderer.buttons.matching(identifier: "Project settings"), "post-removal-Cancel '
+  'settings unavailable")\n'
+  '            try click(renderer.buttons.matching(identifier: "Dashboard"), "post-removal-Cancel Dashboard '
+  'unavailable")\n'),
+ (79308,
+  79699,
+  '24df5c9b2cc0d3504c70a04403eeb8493ffdd05dea796849a52ef35618061476',
+  '        let renderer = try unique(window.webViews, "removal renderer unavailable or ambiguous")\n'),
+ (403769,
+  404160,
+  '2c34411fe7d2fa2b70b5dda3868e01e7f4060cd223d19aab495b0d1d7f943f8a',
+  '        // Independent private consuming close after any partial setup or unknown\n'),
+ (402192,
+  402751,
+  '7767c4fd2d151d42c5d0b2ecdbaaacf6fbca0d622b388f52d65eaec4c2957811',
+  '                if let owner = originalLaunch { try owner.tearDown(normalQuit: normalQuitObserved) }\n'),
+ (63333,
+  81939,
+  '5b73f478c9711d94ad91041699c4942556b0b0b1153ffb770432a5408333d1f9',
+  '    // Finite synthetic files only. No existing project, .git, credential, tool\n'),
+ (19944,
+  20064,
+  'a9a620ff5278b840264427dd203fe578639f3bbd8cebcbb195f8c1cfa2ca72b5',
+  '        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved\n'),
+ (18886,
+  19544,
+  '579a5e4b6046df5507eabaa7cfa730d38f0e3a9e6cd58d1a5b2bd35d4db430b8',
+  '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: '
+  'Bool = false) throws {\n'
+  '        try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline '
+  'cannot be reset")\n'),
+ (2557,
+  2725,
+  '4c449e08120eadbecd8936b8ebbe53a5a1b2674fda21f943728e165599946cf7',
+  '    @MainActor private var normalQuitObserved = false\n'))
+
+
+# Closed progressive UTF8-byte inverse; historical assertions retain their exact original source.
+RELEASE_EVIDENCE_SOURCE_INVERSE = ((84244,
+  74,
+  'ca802d395d94fe8f4e95d598eae6af302f685430f6c2a44c58e0bcacf5636fce',
+  'workflowRefusal, savedVersionRecovery, androidSignedBuild'),
+ (86055,
+  15900,
+  '120e7e450ed499d1fb7ee976fced3d494494ebd3e18773d4185372d111305568',
+  '        // Extra selection-only DATA belongs only to the ordinary project-field case.\n'),
+ (105714,
+  117,
+  '741bed4c8e5237ce18636d45d36f26e761efcec66d164a23673db0e0bbc0cc51',
+  '        var projectPath: String { rootPath + "/project" }'),
+ (226077,
+  1322,
+  '386213f3bb5a42ed262cbc368ea1141492188759ffffd0e7510b04c748780e92',
+  '            if profile == .projectFields {\n                try Self.need(Set(originals.keys)'),
+ (237724,
+  344,
+  'afa3317976c40008d856a0ad4dbbf1be3ace0186118641a599b32a1b213f3c07',
+  '            if profile == .workflowRefusal {\n                try Self.need(current.count'),
+ (341352,
+  10403,
+  'b7e0e6930ae4301d528d0525a63344f16ca195b00691e3adb743621dc4bb100c',
+  '    @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {\n'))
+
+def without_release_evidence_source(source):
+    if 'static let releaseEvidenceDocuments:' not in source:
+        if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(RELEASE_EVIDENCE_SOURCE_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("release_evidence_source exact source region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != 'da621652977a2f09a32f670fe5ddefc0d135d1753b4fdfce792995872076dae8':
+        raise AssertionError("release_evidence_source predecessor source differs")
+    return value.decode()
+
+def without_removal_ui_source(source):
+    source = without_release_evidence_source(source)
+    for start, end, expected, original in REMOVAL_UI_SWIFT_INVERSE:
+        observed = source[start:end]
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('removal UI exact SOURCE region differs')
+        source = source[:start] + original + source[end:]
+    if hashlib.sha256(source.encode()).hexdigest() != '03c9285e0ed83a3b2d019cfa75ddd5e309c60dbc48ac162964755122279842b8':
+        raise AssertionError('removal UI inverse changed prior SOURCE')
+    return source
+
+
 def without_ios_unsigned_source(source):
+    source = without_removal_ui_source(source)
     rows = source.splitlines(keepends=True)
     for start, end, expected, original in reversed(IOS_UNSIGNED_SWIFT_INVERSE):
         observed = ''.join(rows[start:end])
