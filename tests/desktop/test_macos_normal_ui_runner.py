@@ -280,7 +280,18 @@ def without_artifact_wait_diagnostic_source(source):
         raise AssertionError('artifact wait diagnostic exact SOURCE differs')
     return source[:start] + source[end:]
 
+# Exact semantic status scope only; old diagnostic/owner/historical bytes are unchanged.
+ARTIFACT_STATUS_GROUP_PRIOR = '        let artifactAvailability = renderer.staticTexts.matching(NSPredicate(format: "title IN %@", [\n'
+ARTIFACT_STATUS_GROUP_CURRENT = '        let artifactStatusGroup = try waitElement(named(renderer, "Original artifact inspection status"),\n                                                  in: renderer, failures: ["No new artifact outcome confirmed"])\n        let artifactAvailability = artifactStatusGroup.staticTexts.matching(NSPredicate(format: "value IN %@", [\n'
+
+def without_artifact_status_group_source(source):
+    if source.count(ARTIFACT_STATUS_GROUP_CURRENT) != 1:
+        raise AssertionError('artifact status group exact SOURCE differs')
+    return source.replace(ARTIFACT_STATUS_GROUP_CURRENT, ARTIFACT_STATUS_GROUP_PRIOR, 1)
+
 def without_engineering_wait_status_source(source):
+    if "artifactStatusGroup" in source or "Original artifact inspection status" in source:
+        source = without_artifact_status_group_source(source)
     source = without_artifact_wait_diagnostic_source(source)
     if not any(current in source for _, current in ENGINEERING_WAIT_STATUS_REGIONS):
         return source
@@ -1842,7 +1853,23 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
     def test_source_packaged_require_site_is_forwarded_and_first_failure_only(self):
         # Current raw diagnostic sites are validated before historical inverses.
-        raw_wait = SWIFT.read_text()
+        raw_status = SWIFT.read_text()
+        # Current scope cannot be a global duplicate refusal paragraph. These
+        # exact inverses preserve all earlier ordinary/native-owner source pins.
+        self.assertEqual(raw_status.count(ARTIFACT_STATUS_GROUP_CURRENT), 1)
+        self.assertEqual(hashlib.sha256(without_artifact_status_group_source(raw_status).encode()).hexdigest(),
+                         'bfb649ba2c5c7e8309c09cd97d1dc549aead1d3df3fe8eed7d62423ab2db5405')
+        for changed_group in (
+                '',
+                ARTIFACT_STATUS_GROUP_CURRENT * 2,
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('Original artifact inspection status', 'Other status'),
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('artifactStatusGroup.staticTexts', 'renderer.staticTexts'),
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('value IN %@', 'title IN %@')):
+            bad_status = raw_status.replace(ARTIFACT_STATUS_GROUP_CURRENT, changed_group, 1)
+            self.assertNotEqual(bad_status, raw_status)
+            with self.assertRaises(AssertionError):
+                without_artifact_status_group_source(bad_status)
+        raw_wait = without_artifact_wait_diagnostic_source(without_artifact_status_group_source(raw_status))
         for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
             self.assertEqual(raw_wait.count(current), 1)
         for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:

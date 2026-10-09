@@ -269,7 +269,18 @@ def without_artifact_wait_diagnostic_source(source):
         raise AssertionError('artifact wait diagnostic exact SOURCE differs')
     return source[:start] + source[end:]
 
+# Exact semantic status scope only; old diagnostic/owner/historical bytes are unchanged.
+ARTIFACT_STATUS_GROUP_PRIOR = '        let artifactAvailability = renderer.staticTexts.matching(NSPredicate(format: "title IN %@", [\n'
+ARTIFACT_STATUS_GROUP_CURRENT = '        let artifactStatusGroup = try waitElement(named(renderer, "Original artifact inspection status"),\n                                                  in: renderer, failures: ["No new artifact outcome confirmed"])\n        let artifactAvailability = artifactStatusGroup.staticTexts.matching(NSPredicate(format: "value IN %@", [\n'
+
+def without_artifact_status_group_source(source):
+    if source.count(ARTIFACT_STATUS_GROUP_CURRENT) != 1:
+        raise AssertionError('artifact status group exact SOURCE differs')
+    return source.replace(ARTIFACT_STATUS_GROUP_CURRENT, ARTIFACT_STATUS_GROUP_PRIOR, 1)
+
 def without_engineering_wait_status_source(source):
+    if "artifactStatusGroup" in source or "Original artifact inspection status" in source:
+        source = without_artifact_status_group_source(source)
     source = without_artifact_wait_diagnostic_source(source)
     if not any(current in source for _, current in ENGINEERING_WAIT_STATUS_REGIONS):
         return source
@@ -1635,13 +1646,29 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
         # New diagnostic is removed exactly before ALL unchanged historical pins.
         actual_artifact_source = (ROOT / SWIFT).read_text()
+        raw_status = actual_artifact_source
+        # Current scope cannot be a global duplicate refusal paragraph. These
+        # exact inverses preserve all earlier ordinary/native-owner source pins.
+        self.assertEqual(raw_status.count(ARTIFACT_STATUS_GROUP_CURRENT), 1)
+        self.assertEqual(hashlib.sha256(without_artifact_status_group_source(raw_status).encode()).hexdigest(),
+                         'bfb649ba2c5c7e8309c09cd97d1dc549aead1d3df3fe8eed7d62423ab2db5405')
+        for changed_group in (
+                '',
+                ARTIFACT_STATUS_GROUP_CURRENT * 2,
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('Original artifact inspection status', 'Other status'),
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('artifactStatusGroup.staticTexts', 'renderer.staticTexts'),
+                ARTIFACT_STATUS_GROUP_CURRENT.replace('value IN %@', 'title IN %@')):
+            bad_status = raw_status.replace(ARTIFACT_STATUS_GROUP_CURRENT, changed_group, 1)
+            self.assertNotEqual(bad_status, raw_status)
+            with self.assertRaises(AssertionError):
+                without_artifact_status_group_source(bad_status)
         self.assertEqual(actual_artifact_source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN), 1)
         self.assertEqual(actual_artifact_source.count(ARTIFACT_WAIT_DIAGNOSTIC_END), 1)
         sample_start = actual_artifact_source.index(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN)
         sample_end = actual_artifact_source.index(ARTIFACT_WAIT_DIAGNOSTIC_END) + len(ARTIFACT_WAIT_DIAGNOSTIC_END)
         artifact_sample = actual_artifact_source[sample_start:sample_end]
         self.assertEqual(digest(artifact_sample.encode()), ARTIFACT_WAIT_DIAGNOSTIC_SHA256)
-        self.assertEqual(digest(without_artifact_wait_diagnostic_source(actual_artifact_source).encode()),
+        self.assertEqual(digest(without_artifact_wait_diagnostic_source(without_artifact_status_group_source(actual_artifact_source)).encode()),
                          'f2f33688e491bd0ae4ce1a0d357b214da03102601f1b7c051fd645f372daf135')
         # Literal roster equals actual UI text; no raw AX labels or guessed states.
         protocol = (ROOT / 'desktop/src/artifactInspectionProtocol.ts').read_text()
@@ -1659,6 +1686,16 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(actual_texts, texts)
         for text in texts[-2:]: self.assertIn(text, component)
         self.assertIn('artifactAvailabilityText[state.status.availability]', component)
+        expected_status_group = '    <div role="group" aria-label="Original artifact inspection status">\n      <p>{state.status?artifactAvailabilityText[state.status.availability]:\'Waiting for original native status.\'}</p>\n    </div>\n'
+        self.assertEqual(component.count(expected_status_group), 1)
+        self.assertEqual(component.count('aria-label="Original artifact inspection status"'), 1)
+        self.assertEqual(component.count('artifactAvailabilityText[state.status.availability]'), 1)
+        # Restoring only this element pair leaves the entire previous component.
+        self.assertEqual(hashlib.sha256(component.replace(expected_status_group, "    <p>{state.status?artifactAvailabilityText[state.status.availability]:'Waiting for original native status.'}</p>\n", 1).encode()).hexdigest(),
+                         'a7cd40312c41f6bb68ed42bdfb382e323bd2389c8e34e6038f72789a780d16fd')
+        self.assertNotIn('prepareReason', expected_status_group)
+        self.assertNotIn('pickerPending', expected_status_group)
+        self.assertNotIn('reason&&', expected_status_group)
         self.assertIn('for property in ["label", "title", "value"]', artifact_sample)
         self.assertIn('for text in artifactDiagnosticTexts', artifact_sample)
         self.assertEqual(artifact_sample.count('try remaining(1)'), 1)

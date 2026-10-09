@@ -80,7 +80,9 @@ export function ArtifactInspection({state,controller,projectName,onHelp,compact=
     <p className="save-note">IPA archives and debug symbols can be supported directories or packed ZIPs; symbols require the archive. No path is entered as text.</p>
     {selection&&<ul>{selection.items.map(item=><li key={item.selectionId}>{item.role}: <strong>{item.label}</strong> · {item.kind} · selected, not yet verified</li>)}</ul>}
     {state.pickerPending&&<p role="status">The original native picker or input probe is still active. Use the native panel’s Cancel; other actions stay disabled until original settlement.</p>}
-    <p>{state.status?artifactAvailabilityText[state.status.availability]:'Waiting for original native status.'}</p>
+    <div role="group" aria-label="Original artifact inspection status">
+      <p>{state.status?artifactAvailabilityText[state.status.availability]:'Waiting for original native status.'}</p>
+    </div>
     {!consent&&<><button type="button" className="button" disabled={prepareReason!==null} onClick={()=>void controller.prepare()}>Review artifact inspection</button>
       {prepareReason&&<p className="review-caution">{prepareReason}</p>}</>}
     {consent&&<div className="session-review" role="group" aria-label="Confirm selected artifact inspection">

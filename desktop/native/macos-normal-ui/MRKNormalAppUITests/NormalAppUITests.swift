@@ -887,7 +887,9 @@ final class NormalAppUITests: XCTestCase {
         artifactStatus.click() // Actual production bridge command; no fixture result.
         _ = try waitElement(artifactStatusQuery, in: renderer, enabled: true,
                             failures: ["No new artifact outcome confirmed"])
-        let artifactAvailability = renderer.staticTexts.matching(NSPredicate(format: "title IN %@", [
+        let artifactStatusGroup = try waitElement(named(renderer, "Original artifact inspection status"),
+                                                  in: renderer, failures: ["No new artifact outcome confirmed"])
+        let artifactAvailability = artifactStatusGroup.staticTexts.matching(NSPredicate(format: "value IN %@", [
             "This native document supports reviewing selected artifact bytes. Actual originals and runtime are rechecked before inspection.",
             "The required bundled runtime is not qualified for this document. Missing optional verification tools are a separate unavailable check."
         ]))
