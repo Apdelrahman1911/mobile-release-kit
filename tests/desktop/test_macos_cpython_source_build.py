@@ -8454,6 +8454,21 @@ class MacPythonSourceBuildTests(unittest.TestCase):
         seal = load(name, "macos_github_seal_build.py")
         try:
             seal.B = BUILD
+            # Run only the actual initial clean-environment assignment. The first
+            # tool admission is an inert stop, before any native/tool/source call.
+            receiver = SimpleNamespace(work=Path("/fixed-work"), private=Path("/fixed-work/private"),
+                mkdir=lambda path: object(),
+                protected_tool=lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("environment-only-stop")))
+            with patch.dict(seal.os.environ, {"ZERO_AR_DATE": "0", "AR": "not-inherited"}):
+                with self.assertRaisesRegex(ValueError, "^environment-only-stop$"):
+                    seal.SealBuild.prepare(receiver)
+            self.assertEqual(receiver.environment, {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/fixed-work/private/home",
+                "TMPDIR": "/fixed-work/private/tmp/", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+                "ZERO_AR_DATE": "1", "DEVELOPER_DIR": str(seal.DEVELOPER),
+                "CONFIG_SITE": "/dev/null", "PYTHONDONTWRITEBYTECODE": "1"})
+            source_text = (ROOT / "desktop/tools/macos_github_seal_build.py").read_text()
+            self.assertIn('B.need(B.read(build / "src/libsodium/.libs/libsodium.a", 64 * MIB) == archive, "canonical-installed-build-library")', source_text)
             for mode in ("ordinary", "wrong-target", "same-target-replaced", "post-target-changed", "unknown-child", "unknown-data", "other-name"):
                 with self.subTest(mode=mode), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
                     parent = root / "build/src/libsodium/.libs"

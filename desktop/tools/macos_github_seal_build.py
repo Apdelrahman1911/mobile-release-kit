@@ -825,6 +825,9 @@ class SealBuild:
             self.mkdir(self.private / name)
         self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.private / "home"),
             "TMPDIR": str(self.private / "tmp") + "/", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+            # Apple ranlib refreshes archive TOC dates during make install.
+            # Its documented deterministic mode preserves strict build/install byte identity.
+            "ZERO_AR_DATE": "1",
             "DEVELOPER_DIR": str(DEVELOPER), "CONFIG_SITE": "/dev/null", "PYTHONDONTWRITEBYTECODE": "1"}
         self.sandbox = self.protected_tool(Path("/usr/bin/sandbox-exec"), role="sandbox")
         self.xcrun = self.protected_tool(Path("/usr/bin/xcrun"), role="xcrun")
