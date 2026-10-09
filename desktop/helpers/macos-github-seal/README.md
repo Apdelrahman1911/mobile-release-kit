@@ -99,14 +99,28 @@ truncation/trailing/oversized-body refusal, and output size/write failure. A
 non-Mac `cargo test --bin mrk-github-seal` compiles only those tests; a normal
 non-Mac helper build is refused. Do not call these tests native crypto evidence.
 
-`macos_tests.rs` has one **actual canonical-library** group (run under separately
-admitted Mac controls, `--test-threads=1`). It covers empty/max/public plaintext,
-canonical low-order rejection, full returned input/output wiping and a clearly
-DATA-only first-error reducer assertion. It changes its own test child's limits
-and may abort if real entropy is unavailable. It does not prove independent
-interoperability, actual OS entropy failure, real helper pipe/exit custody, STOP
-or packaged-native admission. Those original-process tests and an independent
-public compatibility check remain required with the native two-phase owner.
+`macos_tests.rs` retains that **actual canonical-library** group, including all
+returned wiping/low-order/first-error assertions, and extends it with eight
+sequential real child originals under the existing build owner's10-second cap.
+Three unchanged release-helper children receive public0/3/max binary frames
+through actual pipes, close stdin, return exact ciphertext+EOF, close both
+reader originals and exit0. Canonical test-only `crypto_box_seal_open` must
+recover the exact published fixture; changed ciphertext must fail. Two more
+helper children really refuse trailing input and the low-order public key.
+
+One additional fixed-device probe test runs as two child controls: normal
+opens/checked closes of both `/dev/urandom` and `/dev/random`, then actual
+EPERM/EACCES for both under one fixed child-only sandbox policy. The eighth
+unchanged helper uses that same policy and valid frame: actual SIGABRT, no
+ciphertext, all parent pipe closes/EOF/wait. The canonical backend must be
+`sysrandom`; no RNG override/interposer or production protocol is added.
+Abort does NOT prove returned erasure, randombytes_close or child-FD closes.
+All input/key material is published test DATA, never application credentials.
+
+These are build-parent frame/exit/cleanup and entropy-device-denial checks, not
+installed Desktop publisher/Book/material-loan/STOP admission, independent
+interoperability, or a shipping qualification. Those native two-phase owner
+checks and independent public compatibility evidence remain required.
 
 No native phase slot, material loan, secret transport, UI, packaging selector or
 secret feature is activated by these files.
