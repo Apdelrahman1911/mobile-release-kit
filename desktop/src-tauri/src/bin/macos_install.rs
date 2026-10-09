@@ -14177,7 +14177,7 @@ mod installer {
                 check(book.originals[app].parent==Some(self.genesis_archive()) && book.originals[app].name=="app",
                     "removal-fixture-cut-app")?;
                 book.check_name(app,true)?;book.clock()?;
-                unsafe {nix::libc::_exit(86)}
+                native::removal_fixture_abrupt_exit()
             }
             fn final_namespace(&mut self,book:&mut Install)->Result<()> {
                 check((matches!(self.origin,RemovalPayloadOrigin::Resume{..}) && self.withdrawal_return.is_none()

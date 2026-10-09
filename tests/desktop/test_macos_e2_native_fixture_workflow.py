@@ -1700,7 +1700,32 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIsNone(report("prepare", None, [])["failure"])
         self.assertIsNone(report("prepare", None, [])["lastOriginalCall"])
         self.assertEqual(report("native-run", None, [dict(call, role="native-run", returned=False)])["lastOriginalCall"],
-                         {"role": "native-run", "returned": False, "returncode": None})
+                         {"role": "native-run", "returned": False, "returncode": None,
+                          "errorType": None, "dispatched": None, "contained": None, "cleanup_complete": None})
+        # An unreturned original keeps its finite recorded exception/custody
+        # facts, without claiming completion or exposing arbitrary error text.
+        for error_type in ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "ProcessInterrupted", "other", None):
+            interrupted = dict(call, role="removal-parent-rust-tests", returned=False,
+                               errorType=error_type, dispatched=True, contained=False, cleanup_complete=None)
+            value = report("removal-parent-rust-tests", "removal-original-refused-or-unknown", [interrupted])
+            self.assertEqual(value, {"diagnosticOnly": True, "phase": "removal-parent-rust-tests",
+                "failure": "removal-original-refused-or-unknown", "lastOriginalCall": {
+                    "role": "removal-parent-rust-tests", "returned": False, "returncode": None,
+                    "errorType": error_type, "dispatched": True, "contained": False, "cleanup_complete": None}})
+            self.assertIsNot(value["lastOriginalCall"], interrupted)
+        private_error = "synthetic-private-exception-never-published"
+        for bad in (private_error, True, 1, [], {}):
+            interrupted = dict(call, returned=False, errorType=bad, dispatched=bad, contained=bad,
+                               cleanup_complete=bad, message=private_error, stderr=private_error)
+            value = report("native-run", None, [interrupted])["lastOriginalCall"]
+            self.assertEqual(value["errorType"], "unknown")
+            for key in ("dispatched", "contained", "cleanup_complete"):
+                self.assertIs(value[key], bad if type(bad) is bool else None)
+            self.assertNotIn(private_error, repr(value))
+            self.assertEqual(set(value), {"role", "returned", "returncode", "errorType", "dispatched", "contained", "cleanup_complete"})
+        # Returned records cannot acquire exception facts or change their shape.
+        self.assertEqual(report("native-run", None, [dict(call, errorType="ProcessError", dispatched=True)])["lastOriginalCall"],
+                         {"role": "initial-receipt-query", "returned": True, "returncode": 1})
         marker = "synthetic-private-message-never-published"
         for phase, failure in ((marker, marker), (True, True), (None, 0), ([], {})):
             value = report(phase, failure, [dict(call, role=marker, stderr=marker, environment=marker)])
@@ -1719,7 +1744,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             self.assertIsNone(report("initial-receipt-query", "original-command-failed", calls)["lastOriginalCall"])
         self.assertEqual(report("native-run", "new-unlisted-reason", [dict(call, returncode=255)])["lastOriginalCall"]["returncode"], 255)
         # The fixed allowlist covers actual source refusal labels, not error text.
-        labels = {"original-operation-refused-or-unknown"}
+        labels = {"original-operation-refused-or-unknown", "removal-original-refused-or-unknown"}
         owner_tree = ast.parse(self.owner)
         for node in ast.walk(owner_tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)

@@ -87,7 +87,7 @@ macos-installed-desktop-image = ["desktop-shell", "custom-protocol", "mrk-macos-
 # Separate fixed eight-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
 # Independent nonshipping real-root roles; never the alternate-root eight-case fixture.
-macos-installed-removal-abrupt-fixture = ["macos-installed-remover"]
+macos-installed-removal-abrupt-fixture = ["macos-installed-remover", "mrk-macos-installed-native/installed-removal-abrupt-fixture"]
 macos-installed-removal-observer = ["macos-installed-remover"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]

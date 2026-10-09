@@ -390,7 +390,8 @@ OWNER_DIAGNOSTIC_REFUSALS = (
     "observer-source-changed", "observer-source-original", "one-fixture-image",
     "one-native-result-line", "one-native-role-library", "original-changed",
     "original-command-failed", "original-grew", "original-handle-bound",
-    "original-operation-refused-or-unknown", "original-owner-return", "original-short-read",
+    "original-operation-refused-or-unknown", "removal-original-refused-or-unknown",
+    "original-owner-return", "original-short-read",
     "original-unbound", "output-bound", "output-close-unknown", "output-readback",
     "output-short-write", "owner-result-bound", "owner-result-original-close", "owner-summary-write",
     "package-component-children", "package-component-path", "package-component-root",
@@ -432,7 +433,17 @@ def native_owner_failure_data(phase, failure, calls):
             role = row["role"] if row["role"] in OWNER_DIAGNOSTIC_ROLES else "unknown"
             returned, code = row["returned"], row.get("returncode")
             if not returned:
-                last = {"role": role, "returned": False, "returncode": None}
+                # Already-recorded finite custody facts only; never imply a
+                # completed command or copy an exception message into evidence.
+                error_type = row.get("errorType")
+                safe_error = (None if error_type is None else error_type
+                              if type(error_type) is str and error_type in
+                              ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "ProcessInterrupted", "other")
+                              else "unknown")
+                last = {"role": role, "returned": False, "returncode": None, "errorType": safe_error}
+                for name in ("dispatched", "contained", "cleanup_complete"):
+                    value = row.get(name)
+                    last[name] = value if type(value) is bool else None
             elif type(code) is int and 0 <= code <= 255:
                 last = {"role": role, "returned": True, "returncode": code}
     return {"diagnosticOnly": True, "phase": safe_phase, "failure": safe_failure,

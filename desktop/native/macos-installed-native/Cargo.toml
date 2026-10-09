@@ -20,6 +20,8 @@ desktop-image = []
 resident-image = ["android-registration-helper"]
 # Explicit nonshipping E2 image graph only; never selected by default.
 e2-native-fixture = []
+# Fixed abrupt removal fixture only; never selected by any ordinary role.
+installed-removal-abrupt-fixture = []
 # Explicit nonshipping package signer; excluded from every ordinary/image role.
 package-producer-signing = []
 

@@ -3,6 +3,24 @@
 #![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
+// Fixed nonshipping removal cut only. This feature has no native image role
+// and must not unify with an observer, helper, producer or E2 image graph.
+#[cfg(all(feature = "installed-removal-abrupt-fixture", any(
+    feature = "installed-observation", feature = "vault-helper",
+    feature = "android-registration-helper", feature = "desktop-image",
+    feature = "resident-image", feature = "e2-native-fixture",
+    feature = "package-producer-signing", mrk_wrapping_keychain_qualification
+)))]
+compile_error!("removal abrupt fixture requires its isolated native graph");
+/// Terminate only the explicit nonshipping removal-cut process with fixed86.
+/// The caller retains all effect/POST admission; this primitive grants none.
+#[cfg(feature = "installed-removal-abrupt-fixture")]
+pub fn removal_fixture_abrupt_exit() -> ! {
+    // SAFETY: no pointers or caller-controlled inputs. Darwin _exit terminates
+    // the process without Rust drops, stdio flushing or atexit handlers.
+    unsafe { nix::libc::_exit(86) }
+}
+
 // Qualification libtest must link without granting a private process role.
 // Only the two fixed example mains can return active roles 1/2. Dependencies
 // of those examples compile without cfg(test), so this definition is absent.
