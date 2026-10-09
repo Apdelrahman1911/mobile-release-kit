@@ -16131,12 +16131,12 @@ mod installer {
                     RemovalBindingData{payload_roster_sha256:&different,..binding}).is_err());
                 let post=8;let extra=8+2*post;
                 let storage=installation_record::PAYLOAD_LIMIT-5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
-                let control=16*1024*1024-REMOVAL_LINKED_WORK;
-                assert_eq!(removal_linked_quote_data(24576-extra,post,storage,control),Some((24576,installation_record::PAYLOAD_LIMIT)));
-                assert!(removal_linked_quote_data(24577-extra,post,storage,control).is_none());
-                assert!(removal_linked_quote_data(24576-extra,post,storage+1,control).is_none());
-                assert!(removal_linked_quote_data(24576-extra,post,storage,control+1).is_none());
-                assert!(removal_linked_quote_data(usize::MAX,post,storage,control).is_none());
+                let control_budget=16*1024*1024-REMOVAL_LINKED_WORK;
+                assert_eq!(removal_linked_quote_data(24576-extra,post,storage,control_budget),Some((24576,installation_record::PAYLOAD_LIMIT)));
+                assert!(removal_linked_quote_data(24577-extra,post,storage,control_budget).is_none());
+                assert!(removal_linked_quote_data(24576-extra,post,storage+1,control_budget).is_none());
+                assert!(removal_linked_quote_data(24576-extra,post,storage,control_budget+1).is_none());
+                assert!(removal_linked_quote_data(usize::MAX,post,storage,control_budget).is_none());
                 assert!(removal_linked_quote_data(0,usize::MAX,0,0).is_none());
                 assert!(removal_linked_quote_data(0,0,u64::MAX,0).is_none());
                 assert!(removal_linked_quote_data(0,0,0,u64::MAX).is_none());
