@@ -53,6 +53,7 @@ fn canonical_return_paths_wipe_input_and_refuse_low_order_key() {
     first(&mut failure, Err(Failure::RandomClose));
     assert_eq!(failure, Some(Failure::Seal));
 
+    diagnostic_data_checks();
     framed_build_parent_and_entropy_denial();
 }
 
@@ -80,6 +81,70 @@ const ALICE_PRIVATE: [u8; 32] = [
 #[derive(Clone, Copy)]
 enum Case { Good(usize), Trailing, LowOrder, DeviceControl, DeviceDenied, EntropyDenied }
 struct Capture { status: std::process::ExitStatus, output: Vec<u8>, error: Vec<u8> }
+
+// Closed observations only. Never format bytes, paths, environment, keys or
+// ciphertext, and never interpret a lexical token as an authenticated cause.
+fn diagnostic_case(case: Case) -> &'static str {
+    match case {
+        Case::Good(0) => "good-empty",
+        Case::Good(3) => "good-binary3",
+        Case::Good(protocol::MAX_PLAINTEXT) => "good-max",
+        Case::Good(_) => "invalid-case",
+        Case::Trailing => "trailing",
+        Case::LowOrder => "low-order",
+        Case::DeviceControl => "device-control",
+        Case::DeviceDenied => "device-denied",
+        Case::EntropyDenied => "entropy-denied",
+    }
+}
+fn diagnostic_tokens(error: &[u8]) -> u16 {
+    // Actual successful capture admits at most1024. An unrelated oversized
+    // DATA input remains unclassified without scanning an unbounded slice.
+    if error.len() > 1024 { return 0; }
+    let contains = |needle: &[u8]| error.windows(needle.len()).any(|part| part == needle);
+    let line_prefix = |prefix: &[u8]| error.split(|byte| *byte == b'\n').any(|line| line.starts_with(prefix));
+    let flags = [
+        line_prefix(b"sandbox-exec:"),
+        contains(b"sandbox_apply") || contains(b"sandbox_init"),
+        contains(b"Operation not permitted"),
+        contains(b"Permission denied"),
+        line_prefix(b"dyld:") || line_prefix(b"dyld["),
+        contains(b"Library not loaded:"),
+        contains(b"Symbol not found:"),
+        contains(b"panicked at"),
+        contains(b"fatal runtime error:"),
+        contains(b"memory allocation of"),
+    ];
+    let mut mask = 0u16;
+    for (index, present) in flags.into_iter().enumerate() {
+        if present { mask |= 1u16 << index; }
+    }
+    mask
+}
+fn diagnostic_data_checks() {
+    // Synthetic diagnostic DATA only, not a sandbox/loader/runtime verdict.
+    assert_eq!(diagnostic_tokens(b""), 0);
+    assert_eq!(diagnostic_tokens(b"unknown /private/never-render-this\xff"), 0);
+    assert_eq!(diagnostic_tokens(&[b'x'; 1025]), 0);
+    assert_eq!(diagnostic_tokens(b"sandbox-exec: sandbox_apply: Operation not permitted\n"), 7);
+    assert_eq!(diagnostic_tokens(b"Permission denied\ndyld[1]: Library not loaded: /private/hidden\nSymbol not found: hidden\n"), 120);
+    assert_eq!(diagnostic_tokens(b"thread 'fixed' panicked at /private/hidden\nfatal runtime error: hidden\nmemory allocation of hidden\n"), 896);
+    assert_eq!(diagnostic_tokens(b"prefix sandbox-exec: hidden\nprefix dyld: hidden"), 0);
+    assert_eq!(diagnostic_case(Case::Good(0)), "good-empty");
+    assert_eq!(diagnostic_case(Case::Good(3)), "good-binary3");
+    assert_eq!(diagnostic_case(Case::Good(protocol::MAX_PLAINTEXT)), "good-max");
+    assert_eq!(diagnostic_case(Case::Good(1)), "invalid-case");
+}
+fn report_captured(case: Case, captured: &Capture) {
+    use std::os::unix::process::ExitStatusExt;
+    // Called only after capture_case returned all actual parent pipe closes and
+    // wait. These are not the aborting helper's internal close/wipe receipts.
+    // At most8 lines, each below256 bytes. libtest hides captured output on
+    // success; on failure its existing bounded transcript retains these facts.
+    eprintln!("MRK_SEAL_CHILD_DIAGNOSTIC_V1 case={} code={} signal={} stdoutBytes={} stderrBytes={} tokenMask={:03x} parentPipesAndWait=returned",
+        diagnostic_case(case), captured.status.code().unwrap_or(-1), captured.status.signal().unwrap_or(0),
+        captured.output.len(), captured.error.len(), diagnostic_tokens(&captured.error));
+}
 
 fn pipe_original<T: IntoRawFd>(pipe: T) -> OriginalFile {
     // SAFETY: consume the one ChildStdin/Stdout/Stderr backing. This is the SAME
@@ -260,6 +325,7 @@ fn framed_build_parent_and_entropy_denial() {
     for case in cases {
         let captured = capture_case(case, &current, &helper).expect("actual child IO/close/wait");
         closed_originals += 1;
+        report_captured(case, &captured);
         assert!(captured.error.is_empty(), "no child diagnostic accepted");
         match case {
             Case::Good(size) => {

@@ -63,7 +63,7 @@ HELPER_PINS = {
     'README.md': (7528, '20a97cc2ca92f1d11eb35f8b404e7ea6002db1c1e8b9f2c8f711aed8f772ed09'),
     'abi-check.c': (2489, '27c123f6e433b6608d2989add703cb7602b16d22d06938c552003b7eb1335868'),
     'src/macos.rs': (9898, 'a50d8977991a273ccaf1c50a8d6629361a5b05fcff32aac97121ef165258dc62'),
-    'src/macos_tests.rs': (15612, '8c8b9092e1aa8fbdc4d6ab9e772c2a5c4ed6fcb680d8b51247905ac00c2c7d4b'),
+    'src/macos_tests.rs': (19168, '9a6cc629fa68f177f193e768d42ae8617d8f26e4c3e01f9faa8b5044a5079fa5'),
     'src/main.rs': (1344, '14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310'),
     'src/protocol.rs': (3239, '5441b4fd3d1eae80cb7f8d70ee79341eb8a47123177d8a72e152c6f7109b0c71'),
     'src/protocol_tests.rs': (5602, 'a87b33d4743c1db9e8209baf171dae12a7ac6a8fa017896ef43498e6810be47d'),

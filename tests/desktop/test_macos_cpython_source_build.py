@@ -8499,6 +8499,31 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertIn("Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT)", native_source)
             self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl, Case::DeviceDenied, Case::EntropyDenied", native_source)
             self.assertIn("assert_eq!(closed_originals, 8);", native_source)
+            # Fixed diagnostic SOURCE only; no child/native/panic is executed.
+            captured_at = native_source.index('let captured = capture_case(case, &current, &helper).expect("actual child IO/close/wait");')
+            report_at = native_source.index('report_captured(case, &captured);')
+            refusal_at = native_source.index('assert!(captured.error.is_empty(), "no child diagnostic accepted");')
+            self.assertLess(captured_at, report_at); self.assertLess(report_at, refusal_at)
+            self.assertEqual(native_source.count('report_captured(case, &captured);'), 1)
+            reporter = native_source.split('fn report_captured(case: Case, captured: &Capture) {', 1)[1].split('fn pipe_original<', 1)[0]
+            self.assertEqual(reporter.count('eprintln!('), 1)
+            self.assertIn('MRK_SEAL_CHILD_DIAGNOSTIC_V1 case={} code={} signal={} stdoutBytes={} stderrBytes={} tokenMask={:03x} parentPipesAndWait=returned', reporter)
+            self.assertIn('captured.status.code().unwrap_or(-1)', reporter)
+            self.assertIn('captured.status.signal().unwrap_or(0)', reporter)
+            self.assertIn('captured.output.len(), captured.error.len(), diagnostic_tokens(&captured.error)', reporter)
+            for forbidden in ('from_utf8', 'from_utf8_lossy', 'Debug', '{:?}', 'std::env', 'as_os_str'):
+                self.assertNotIn(forbidden, reporter)
+            classifier = native_source.split('fn diagnostic_tokens(error: &[u8]) -> u16 {', 1)[1].split('fn diagnostic_data_checks()', 1)[0]
+            self.assertIn('if error.len() > 1024 { return 0; }', classifier)
+            for token in ('sandbox-exec:', 'sandbox_apply', 'sandbox_init', 'Operation not permitted', 'Permission denied',
+                          'dyld:', 'dyld[', 'Library not loaded:', 'Symbol not found:', 'panicked at', 'fatal runtime error:', 'memory allocation of'):
+                self.assertIn('b"' + token + '"', classifier)
+            self.assertIn('diagnostic_data_checks();', native_source)
+            # Worst fixed case/i32/length formatting is below the promised bound.
+            longest = ('MRK_SEAL_CHILD_DIAGNOSTIC_V1 case=device-control code=-2147483648 signal=-2147483648 '
+                       'stdoutBytes=49212 stderrBytes=1024 tokenMask=3ff parentPipesAndWait=returned\n')
+            self.assertLessEqual(len(longest.encode('ascii')), 256)
+
             self.assertIn("assert_eq!(captured.status.signal(), Some(6));", native_source)
             self.assertIn("matches!(error.raw_os_error(), Some(1 | 13))", native_source)
             self.assertIn('command.env_clear().env("LANG", "C").env("LC_ALL", "C");', native_source)
