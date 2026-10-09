@@ -177,7 +177,8 @@ fn acquire(inner:&Arc<Inner>,owner:&Arc<Owner>,slots:&Arc<Mutex<crate::installed
     let mut command=Command::new(&selected.program);
     command.current_dir(&selected.cwd).env_clear().env("LC_ALL","C").env("LANG","C")
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(false);
-    crate::runtime::macos_installed_environment(&mut command)?;
+    crate::runtime::macos_installed_environment(&mut command)
+        .map_err(|_|BridgeError::new("io_error","The fixed seal environment was refused."))?;
     let material=owner.setup_material.as_ref().and_then(SetupMaterial::secret).ok_or_else(BridgeError::protocol)?;
     let gate=owner.setup_gate.as_ref().ok_or_else(BridgeError::protocol)?;
     gate.claim_secret(&owner.id,owner.setup_request.as_ref().ok_or_else(BridgeError::protocol)?,material,||{
@@ -222,6 +223,16 @@ pub(in crate::supervisor) fn data_checks(){
     assert!(slots.never_started());assert!(slots.reserve_once().is_err());
     let fresh=crate::installed_runtime::GitHubSealSlots::new();
     let phase=SealPhase::new(Arc::new(Mutex::new(fresh)));assert!(phase.settled_or_never_entered());
+}
+// This second original observes only its own six local events. The containing
+// Supervisor's History-post handshake is not part of this seal select.
+enum SealEvent {
+    Wait(std::io::Result<ExitStatus>),
+    Write(Result<WriteEnd, tokio::task::JoinError>),
+    Out(Result<ReadEnd, tokio::task::JoinError>),
+    Err(Result<ReadEnd, tokio::task::JoinError>),
+    Fault(Option<BridgeError>),
+    Stop,
 }
 // Only drive's actual positive first-original completion calls this function.
 // First Resources fields stay intact; nothing is repurposed for the second.
@@ -276,21 +287,21 @@ pub(in crate::supervisor) async fn run(resources:&mut Resources,inner:&Arc<Inner
         let(waiting,writing,reading,diagnosing)=(phase.waited.is_none(),phase.writer.is_some(),phase.stdout.is_some(),phase.stderr.is_some());
         if !waiting&&!writing&&!reading&&!diagnosing{break}
         let event=tokio::select!{
-            v=wait_original(&mut phase.child),if waiting=>Event::Wait(v),
-            v=join_slot(&mut phase.writer),if writing=>Event::Write(v),
-            v=join_slot(&mut phase.stdout),if reading=>Event::Out(v),
-            v=join_slot(&mut phase.stderr),if diagnosing=>Event::Err(v),
-            v=errors.recv(),if open=>Event::Fault(v),_ =stop.changed(),if !stopped=>Event::Stop,
+            v=wait_original(&mut phase.child),if waiting=>SealEvent::Wait(v),
+            v=join_slot(&mut phase.writer),if writing=>SealEvent::Write(v),
+            v=join_slot(&mut phase.stdout),if reading=>SealEvent::Out(v),
+            v=join_slot(&mut phase.stderr),if diagnosing=>SealEvent::Err(v),
+            v=errors.recv(),if open=>SealEvent::Fault(v),_ =stop.changed(),if !stopped=>SealEvent::Stop,
         };
         match event{
-            Event::Wait(Ok(v))=>{if !v.success(){owner.fail(BridgeError::new("github_sealing_failed","The fixed seal original exited unsuccessfully."));}phase.waited=Some(v);},
-            Event::Wait(Err(_))=>{owner.unknown(inner);return DriverEnd::RetainedUnknown},
-            Event::Write(Ok(v))=>{phase.writer.take();phase.write_end=Some(v);if !v.complete{owner.fail(BridgeError::new("io_error","The fixed seal input did not close."));}},
-            Event::Out(Ok(v))=>{phase.stdout.take();phase.out_end=Some(v);},Event::Err(Ok(v))=>{phase.stderr.take();phase.err_end=Some(v);},
-            Event::Write(Err(_))=>{phase.failed_writer=phase.writer.take();owner.fail(BridgeError::cleanup_unknown());},
-            Event::Out(Err(_))=>{phase.failed_stdout=phase.stdout.take();owner.fail(BridgeError::cleanup_unknown());},
-            Event::Err(Err(_))=>{phase.failed_stderr=phase.stderr.take();owner.fail(BridgeError::cleanup_unknown());},
-            Event::Fault(Some(e))=>owner.fail(e),Event::Fault(None)=>open=false,Event::Stop=>{stopped=true;if !owner.failed(){owner.fail(BridgeError::shutdown());}},
+            SealEvent::Wait(Ok(v))=>{if !v.success(){owner.fail(BridgeError::new("github_sealing_failed","The fixed seal original exited unsuccessfully."));}phase.waited=Some(v);},
+            SealEvent::Wait(Err(_))=>{owner.unknown(inner);return DriverEnd::RetainedUnknown},
+            SealEvent::Write(Ok(v))=>{phase.writer.take();phase.write_end=Some(v);if !v.complete{owner.fail(BridgeError::new("io_error","The fixed seal input did not close."));}},
+            SealEvent::Out(Ok(v))=>{phase.stdout.take();phase.out_end=Some(v);},SealEvent::Err(Ok(v))=>{phase.stderr.take();phase.err_end=Some(v);},
+            SealEvent::Write(Err(_))=>{phase.failed_writer=phase.writer.take();owner.fail(BridgeError::cleanup_unknown());},
+            SealEvent::Out(Err(_))=>{phase.failed_stdout=phase.stdout.take();owner.fail(BridgeError::cleanup_unknown());},
+            SealEvent::Err(Err(_))=>{phase.failed_stderr=phase.stderr.take();owner.fail(BridgeError::cleanup_unknown());},
+            SealEvent::Fault(Some(e))=>owner.fail(e),SealEvent::Fault(None)=>open=false,SealEvent::Stop=>{stopped=true;if !owner.failed(){owner.fail(BridgeError::shutdown());}},
         }
     }
     if phase.failed_writer.is_some()||phase.failed_stdout.is_some()||phase.failed_stderr.is_some()
