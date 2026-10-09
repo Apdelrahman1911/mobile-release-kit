@@ -51,6 +51,8 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private var originalLaunch: OrdinaryLaunch?
     @MainActor private var caseClock: CaseClock?
     @MainActor private var normalQuitObserved = false
+    @MainActor private var removalQuitObserved = false
+    @MainActor private var removalChannel: RemovalChannel?
     @MainActor private var entryGateObservation: GateObservation?
     // Only the persistence case may retain a completed first lifetime and open
     // a second. Active custody is never cleared without retaining its originals.
@@ -365,8 +367,13 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
-    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false) throws {
+    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
+                                      removal: Bool = false) throws {
         try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
+        try require((ProcessInfo.processInfo.environment["MRK_NORMAL_UI_REMOVAL_CHANNEL"] != nil) == removal
+                    && (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))
+                    && !removalQuitObserved && removalChannel == nil,
+                    "removal harness channel is exclusive to its fixed case")
         let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned)
         caseClock = clock
         journeyDeadline = clock.deadline
@@ -375,7 +382,7 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
         _ = try remaining(15)
         guard let clock = caseClock else { throw Refusal.condition("original case clock missing") }
-        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved
+        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved && !removalQuitObserved
                     && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
                     "a new ordinary launch requires empty active custody and no engineering profile")
         let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
@@ -1017,6 +1024,313 @@ final class NormalAppUITests: XCTestCase {
         print("MRK_MACOS_NORMAL_UI=launch-render-cancel-navigation-quit-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
     }
 
+
+    // Two task-owned scheduling hints only. They never authenticate an installer,
+    // peer, consent, exit status, payload, or a future successful close.
+    @MainActor private final class RemovalChannel {
+        private struct Directory {
+            let fd: Int32
+            let parent: Int?
+            let name: String
+            let identity: StatFacts
+        }
+        private let clock: CaseClock
+        private let ordinary: Bool
+        private var directories: [Directory] = []
+        private var pendingDirectory: Int32?
+        private var enumerationFD: Int32?
+        private var leaf: Int32?
+        private var correlation = ""
+        private var markers: [String: StatFacts] = [:]
+        private var entered = false
+        private var closed = false
+        init(clock: CaseClock, ordinary: Bool) { self.clock = clock; self.ordinary = ordinary }
+        private func tick() throws { _ = try clock.remaining(1) }
+        private func need(_ yes: Bool, _ reason: String) throws {
+            guard yes else { throw clock.fail(reason) }
+            try tick()
+        }
+        private func info(_ fd: Int32) throws -> StatFacts {
+            try tick()
+            var value = stat()
+            try need(fstat(fd, &value) == 0 && fcntl(fd, F_GETFD) == FD_CLOEXEC,
+                     "removal channel held stat or descriptor refused")
+            return StatFacts(value)
+        }
+        private func named(_ parent: Int32, _ name: String) throws -> StatFacts {
+            try tick()
+            var value = stat()
+            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,
+                     "removal channel named stat failed")
+            return StatFacts(value)
+        }
+        private func noAuxiliary(_ fd: Int32, _ expected: StatFacts) throws {
+            try tick()
+            guard let section = filesec_init() else { throw clock.fail("removal channel filesec allocation failed") }
+            var failed: Error?
+            do {
+                try tick()
+                var snapshot = stat(), owner: uid_t = 0, group: gid_t = 0, mode: mode_t = 0
+                var present: Int32 = 0
+                try need(fstatx_np(fd, &snapshot, section) == 0 && StatFacts(snapshot) == expected,
+                         "removal channel ACL snapshot changed")
+                try need(filesec_get_property(section, FILESEC_OWNER, &owner) == 0 && owner == expected.uid,
+                         "removal channel ACL owner unavailable")
+                try need(filesec_get_property(section, FILESEC_GROUP, &group) == 0 && group == expected.gid,
+                         "removal channel ACL group unavailable")
+                try need(filesec_get_property(section, FILESEC_MODE, &mode) == 0 && mode == expected.mode,
+                         "removal channel ACL mode unavailable")
+                try need(filesec_query_property(section, FILESEC_ACL, &present) == 0 && present == 0,
+                         "removal channel requires an absent ACL")
+                try need(flistxattr(fd, nil, 0, 0) == 0, "removal channel attributes refused")
+                try need(info(fd) == expected, "removal channel auxiliary POST changed")
+            } catch { failed = error }
+            filesec_free(section) // Void consuming API, including every refusal path.
+            if let failed { throw failed }
+            try tick()
+        }
+        private func pathPost() throws {
+            try need(!closed && !directories.isEmpty && directories.count <= 32,
+                     "removal channel original path missing")
+            for (index, directory) in directories.enumerated() {
+                let actual = try info(directory.fd)
+                try need(directory.identity.sameDirectory(actual), "removal channel path original changed")
+                if let parent = directory.parent {
+                    let current = try named(directories[parent].fd, directory.name)
+                    try need(current.sameDirectory(actual), "removal channel path binding changed")
+                } else {
+                    var current = stat()
+                    try need(lstat("/", &current) == 0 && StatFacts(current).sameDirectory(actual),
+                             "removal channel root original changed")
+                }
+                if index >= directories.count - 2 {
+                    try need(actual.mode == S_IFDIR | 0o700 && actual.uid == getuid()
+                             && actual.gid == getgid() && actual.flags == 0,
+                             "removal channel private directory protection refused")
+                    try noAuxiliary(directory.fd, actual)
+                }
+            }
+        }
+        private func roster() throws -> Set<String> {
+            try pathPost()
+            guard let directory = directories.last else { throw clock.fail("removal channel directory missing") }
+            try need(enumerationFD == nil, "removal channel enumeration already owned")
+            let fd = openat(directory.fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if fd >= 0 { enumerationFD = fd }
+            try need(fd >= 0, "removal channel enumeration open failed")
+            guard let stream = fdopendir(fd) else { throw clock.fail("removal channel fdopendir failed") }
+            enumerationFD = nil // Only closedir owns this original from now on.
+            var names: Set<String> = [], failed: Error?
+            do {
+                var eof = false
+                for _ in 0..<5 { // Two names + dot entries, then EOF; raw entries count.
+                    try tick(); errno = 0
+                    guard let entry = readdir(stream) else {
+                        let code = errno
+                        try need(code == 0, "removal channel readdir failed")
+                        eof = true; break
+                    }
+                    let count = Int(entry.pointee.d_namlen)
+                    try need((1...255).contains(count), "removal channel name length refused")
+                    let bytes = withUnsafeBytes(of: entry.pointee.d_name) { Array($0.prefix(count + 1)) }
+                    try need(bytes.count == count + 1 && bytes[count] == 0, "removal channel name terminator refused")
+                    guard let name = String(bytes: bytes.prefix(count), encoding: .utf8) else {
+                        throw clock.fail("removal channel name encoding refused")
+                    }
+                    if name == "." || name == ".." { continue }
+                    try need((name == "launched" || (ordinary && name == "cancel-observed"))
+                             && names.insert(name).inserted, "removal channel foreign or duplicate marker")
+                }
+                try need(eof, "removal channel roster bound exceeded")
+            } catch { failed = error }
+            let result = closedir(stream) // Consume once even if enumeration failed.
+            if let failed { throw failed }
+            try need(result == 0, "removal channel enumeration close unknown")
+            try pathPost()
+            return names
+        }
+        func open() throws {
+            try need(!entered && !closed && getuid() != 0 && getuid() == geteuid() && getgid() == getegid(),
+                     "removal channel requires one ordinary user admission")
+            entered = true
+            guard let path = ProcessInfo.processInfo.environment["MRK_NORMAL_UI_REMOVAL_CHANNEL"] else {
+                throw clock.fail("removal channel not supplied by its original owner")
+            }
+            let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            try need(path.utf8.count <= 1024 && !path.utf8.contains(0) && parts.first == ""
+                     && (4...32).contains(parts.count) && parts.dropFirst().allSatisfy {
+                         !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= 255
+                     } && parts[parts.count - 2] == "removal-ui-v1", "removal channel canonical path refused")
+            let last = parts[parts.count - 1]
+            try need(last.hasPrefix("r-") && last.utf8.count == 34, "removal channel correlation shape refused")
+            correlation = String(last.dropFirst(2))
+            try need(correlation.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+                     && correlation != String(repeating: "0", count: 32), "removal channel correlation refused")
+            for index in parts.indices {
+                try tick()
+                let fd = index == 0
+                    ? Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                    : openat(directories[index - 1].fd, parts[index], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                if fd >= 0 { pendingDirectory = fd }
+                try need(fd >= 0, "removal channel original directory open failed")
+                let identity = try info(fd)
+                try need(identity.mode & S_IFMT == S_IFDIR, "removal channel path is not a directory")
+                directories.append(Directory(fd: fd, parent: index == 0 ? nil : index - 1,
+                                             name: index == 0 ? "/" : parts[index], identity: identity))
+                pendingDirectory = nil
+            }
+            try need(roster().isEmpty, "removal channel was not exclusively empty")
+        }
+        private func body(_ name: String) -> [UInt8] {
+            Array(("mrk-removal-ui-v1\n" + correlation + "\n" + (ordinary ? "ordinary" : "abrupt") + "\n" + name + "\n").utf8)
+        }
+        private func readBack(_ name: String) throws -> StatFacts {
+            guard let fd = leaf, let directory = directories.last else { throw clock.fail("removal channel leaf custody missing") }
+            let expected = body(name), before = try info(fd)
+            try need(expected.count <= 128 && before.mode == S_IFREG | 0o600 && before.uid == getuid()
+                     && before.gid == getgid() && before.links == 1 && before.flags == 0
+                     && before.bytes == expected.count, "removal channel marker shape refused")
+            try need(named(directory.fd, name) == before, "removal channel marker named binding changed")
+            try noAuxiliary(fd, before)
+            var bytes = [UInt8](repeating: 0, count: 129)
+            let readCount = bytes.withUnsafeMutableBytes { pread(fd, $0.baseAddress, $0.count, 0) }
+            try need(readCount == expected.count && Array(bytes.prefix(expected.count)) == expected,
+                     "removal channel marker body changed")
+            var extra: UInt8 = 0
+            try need(pread(fd, &extra, 1, off_t(expected.count)) == 0 && info(fd) == before
+                     && named(directory.fd, name) == before, "removal channel marker EOF or POST changed")
+            return before
+        }
+        private func closeLeaf() throws {
+            if let fd = leaf {
+                leaf = nil
+                let result = Darwin.close(fd)
+                try need(result == 0, "removal channel marker close unknown")
+            }
+        }
+        func verify() throws {
+            try need(roster() == Set(markers.keys), "removal channel roster changed")
+            guard let directory = directories.last else { throw clock.fail("removal channel directory missing") }
+            for name in markers.keys.sorted() {
+                try need(leaf == nil, "removal channel marker already owned")
+                let fd = openat(directory.fd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                if fd >= 0 { leaf = fd }
+                try need(fd >= 0, "removal channel marker reread failed")
+                try need(readBack(name) == markers[name], "removal channel immutable marker replaced")
+                try closeLeaf()
+            }
+            try pathPost()
+        }
+        func publish(_ name: String) throws {
+            try need((name == "launched" && markers.isEmpty)
+                     || (ordinary && name == "cancel-observed" && Set(markers.keys) == ["launched"]),
+                     "removal channel marker order refused")
+            try verify()
+            guard let directory = directories.last else { throw clock.fail("removal channel directory missing") }
+            let bytes = body(name)
+            try need(leaf == nil && bytes.count <= 128, "removal channel writer admission refused")
+            let fd = openat(directory.fd, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            if fd >= 0 { leaf = fd }
+            try need(fd >= 0, "removal channel exclusive marker creation failed")
+            let count = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+            try need(count == bytes.count, "removal channel complete marker write failed")
+            let identity = try readBack(name)
+            try closeLeaf()
+            markers[name] = identity
+            try verify()
+        }
+        func finish() throws {
+            try need(Set(markers.keys) == (ordinary ? ["launched", "cancel-observed"] : ["launched"]),
+                     "removal channel final sequence incomplete")
+            try verify()
+            try closeOriginals()
+            try tick()
+        }
+        func closeOriginals() throws {
+            if closed { return }
+            closed = true
+            var first: Error?
+            func consume(_ fd: Int32) {
+                if Darwin.close(fd) != 0 && first == nil { first = clock.fail("removal channel consuming close unknown") }
+            }
+            if let fd = leaf { leaf = nil; consume(fd) }
+            if let fd = enumerationFD { enumerationFD = nil; consume(fd) }
+            if let fd = pendingDirectory { pendingDirectory = nil; consume(fd) }
+            for directory in directories.reversed() { consume(directory.fd) }
+            directories.removeAll()
+            if let first { throw first }
+        }
+    }
+
+    @MainActor private func removalSheet(_ window: XCUIElement) throws -> XCUIElement {
+        try require(window.sheets.element(boundBy: 0).waitForExistence(timeout: try remaining(120)),
+                    "authenticated removal sheet did not appear")
+        let sheet = try unique(window.sheets, "removal sheet is ambiguous")
+        _ = try unique(sheet.staticTexts.matching(identifier: "Quit and prepare to remove Mobile Release Kit?"),
+                       "unexpected removal confirmation")
+        try require(sheet.buttons.count == 2, "unexpected removal actions")
+        _ = try unique(sheet.buttons.matching(identifier: "Cancel"), "removal Cancel is not unique")
+        _ = try unique(sheet.buttons.matching(identifier: "Continue and Quit"), "removal Continue is not unique")
+        return sheet
+    }
+
+    @MainActor func testInstalledRemovalCancelThenContinue() throws { try removalJourney(ordinary: true) }
+    @MainActor func testInstalledRemovalContinueBeforeInterruption() throws { try removalJourney(ordinary: false) }
+
+    @MainActor private func removalJourney(ordinary: Bool) throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300, removal: true)
+        guard let clock = caseClock else { throw Refusal.condition("removal case clock missing") }
+        let channel = RemovalChannel(clock: clock, ordinary: ordinary)
+        removalChannel = channel // Retain before fallible path admission.
+        try channel.open()
+        _ = try admittedJourneyApplication(profile: .sameBuild)
+        let app = try launchOrdinaryApplication()
+        try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "removal app not foreground")
+        try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "removal app window unavailable")
+        let window = try unique(app.windows, "removal app window ambiguous")
+        try require(window.isHittable, "removal app window not usable")
+        let rendererQuery = window.webViews
+        try require(rendererQuery.count <= 1, "removal renderer is initially ambiguous")
+        try require(rendererQuery.element(boundBy: 0).waitForExistence(timeout: try remaining(5)),
+                    "removal renderer did not become available")
+        let renderer = try unique(rendererQuery, "removal renderer unavailable or ambiguous")
+        try dashboard(renderer)
+        guard let owner = originalLaunch, let gate = entryGateObservation else { throw clock.fail("removal UI original custody missing") }
+        try owner.healthy(); try gate.probe(busy: true)
+        try channel.publish("launched")
+        if ordinary {
+            let first = try removalSheet(window)
+            try click(first.buttons.matching(identifier: "Cancel"), "genuine removal Cancel unavailable")
+            let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: first)
+            try require(XCTWaiter.wait(for: [dismissed], timeout: try remaining(10)) == .completed,
+                        "removal Cancel did not dismiss the original sheet")
+            try owner.healthy(); try gate.probe(busy: true)
+            try require(app.state == .runningForeground && window.exists, "removal Cancel did not preserve the same app")
+            try click(renderer.buttons.matching(identifier: "Project settings"), "post-removal-Cancel settings unavailable")
+            try require(renderer.staticTexts.matching(identifier: "A little clarity before the next release.")
+                        .element(boundBy: 0).waitForExistence(timeout: try remaining(5)),
+                        "post-removal-Cancel settings navigation did not complete")
+            try click(renderer.buttons.matching(identifier: "Dashboard"), "post-removal-Cancel Dashboard unavailable")
+            try dashboard(renderer)
+            try channel.publish("cancel-observed")
+        }
+        let last = try removalSheet(window)
+        try click(last.buttons.matching(identifier: "Continue and Quit"), "genuine removal Continue unavailable")
+        let end = try clock.end(within: 120)
+        try require(app.wait(for: .notRunning, timeout: try clock.remaining(120, before: end)), "removal did not stop its original app")
+        try owner.observeNormalTermination(until: end) // Same retained original; no menu-Quit or gate-free implication.
+        try require(app.state == .notRunning && !normalQuitObserved && !removalQuitObserved,
+                    "removal terminal origin is not exclusive")
+        try gate.closeOriginal() // Parent may still own M_EX. Do not probe lock-free here.
+        try owner.acceptTerminal()
+        try channel.finish()
+        try owner.acceptTerminal(); _ = try remaining(1)
+        removalQuitObserved = true
+        print("MRK_MACOS_REMOVAL_UI=v1;case=\(ordinary ? "ordinary" : "abrupt");cancelObserved=\(ordinary ? 1 : 0);continueObserved=1;originalTerminated=1;gateClosed=1;gateFree=unqualified;normalQuit=0;channelClosed=1")
+        // Pending until actual original xcodebuild success, returned result and all outer joins.
+    }
 
     // Finite synthetic files only. No existing project, .git, credential, tool
     // input or script is copied from a user. The separate persistence profile
@@ -5411,7 +5725,15 @@ final class NormalAppUITests: XCTestCase {
         var cleanupFailure: Error?
         do {
             try await MainActor.run {
-                if let owner = originalLaunch { try owner.tearDown(normalQuit: normalQuitObserved) }
+                if let owner = originalLaunch {
+                    if removalQuitObserved {
+                        guard !normalQuitObserved && completedPersistenceLifetime == nil else {
+                            throw Refusal.condition("removal teardown has conflicting terminal origins")
+                        }
+                        // Actual removal-origin exit; never relabel it normal UI Quit.
+                        try owner.acceptTerminal()
+                    } else { try owner.tearDown(normalQuit: normalQuitObserved) }
+                }
             }
         } catch { cleanupFailure = error }
         // The completed first original is retained, never stopped again and
@@ -5428,6 +5750,10 @@ final class NormalAppUITests: XCTestCase {
         do { try await MainActor.run { try entryGateObservation?.closeOriginal() } }
         catch { if cleanupFailure == nil { cleanupFailure = error } }
         do { try await MainActor.run { try completedPersistenceLifetime?.gate.closeOriginal() } }
+        catch { if cleanupFailure == nil { cleanupFailure = error } }
+        // The task channel is closed independently even after setup/UI failure.
+        // No marker, directory or possibly live task output is deleted here.
+        do { try await MainActor.run { try removalChannel?.closeOriginals() } }
         catch { if cleanupFailure == nil { cleanupFailure = error } }
         // Independent private consuming close after any partial setup or unknown
         // native operation. This is NOT successful private POST/session disposal.
