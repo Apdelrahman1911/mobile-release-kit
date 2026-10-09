@@ -1518,7 +1518,8 @@ def context_metadata_diagnostic_data(value, phase, failure, calls):
     if (type(value) is not dict or set(value) != keys or type(value["schemaVersion"]) is not int
             or (value["schemaVersion"], value["type"], failure) not in (
                 (1, "mrk-context-xar-metadata-diagnostic-v1", "context-xar-member-metadata"),
-                (2, "mrk-context-xar-required-diagnostic-v2", "context-xar-member-required"))
+                (2, "mrk-context-xar-required-diagnostic-v2", "context-xar-member-required"),
+                (3, "mrk-context-xar-coverage-diagnostic-v3", "context-xar-unaccounted"))
             or value["diagnosticOnly"] is not True
             or phase not in ("context-component-audit", "context-product-audit") or value["phase"] != phase
             or type(value["package"]) is not str or value["package"] not in CONTEXT_PACKAGE_LABELS
@@ -1539,6 +1540,45 @@ def context_metadata_diagnostic_data(value, phase, failure, calls):
         if type(size) is not int or not 28 <= size <= CONTEXT_PACKAGE_LIMIT or not identity(sha, 64):
             return None
     metadata = value["metadata"]
+    if value["schemaVersion"] == 3:
+        # Only arithmetic over the SAME failed heap: no archive names or bytes.
+        keys = {"heapOffset", "heapBytes", "checksumBytes", "intervals", "failureIndex",
+                "unaccountedBytes", "unaccountedZeroBytes"}
+        numeric = keys - {"intervals"}
+        if (type(metadata) is not dict or set(metadata) != keys
+                or any(type(metadata[key]) is not int or not 0 <= metadata[key] <= CONTEXT_PACKAGE_LIMIT
+                       for key in numeric)
+                or value["packageBytes"] != value["parsedArchiveBytes"]
+                or value["packageSha256"] != value["parsedArchiveSha256"]
+                or not 28 < metadata["heapOffset"] <= 28 + 1024 * 1024
+                or metadata["heapOffset"] + metadata["heapBytes"] != value["parsedArchiveBytes"]
+                or metadata["checksumBytes"] not in (20, 32, 64)):
+            return None
+        spans = metadata["intervals"]
+        if (type(spans) is not list or not 1 <= len(spans) <= (6 if position == 2 else 4)
+                or any(type(span) is not list or len(span) != 2
+                       or any(type(number) is not int or not 0 <= number <= metadata["heapBytes"]
+                              for number in span) for span in spans)
+                or spans[0] != [0, metadata["checksumBytes"]]):
+            return None
+        cursor, first_gap = 0, None
+        for index, (low, high) in enumerate(spans):
+            if low < cursor or high <= low:
+                return None
+            if first_gap is None and low > cursor:
+                first_gap = index
+            cursor = high
+        if first_gap is None:
+            if cursor == metadata["heapBytes"]:
+                return None  # A fully accounted archive is not failure evidence.
+            first_gap = len(spans)
+        start = spans[first_gap - 1][1]
+        stop = spans[first_gap][0] if first_gap < len(spans) else metadata["heapBytes"]
+        if (metadata["failureIndex"] != first_gap
+                or metadata["unaccountedBytes"] != stop - start
+                or not 0 <= metadata["unaccountedZeroBytes"] <= metadata["unaccountedBytes"]):
+            return None
+        return value if len(canonical(value)) <= 2048 else None
     if value["schemaVersion"] == 2:
         members = {"PackageInfo", "Scripts", "Bom", "Distribution", CONTEXT_PACKAGES[1], "unknown",
                    *(CONTEXT_PACKAGES[1] + "/" + item for item in ("PackageInfo", "Scripts", "Bom"))}
@@ -1777,11 +1817,30 @@ def context_xar(body, *, product=False, presentation=False):
         intervals.append((offset, offset + length))
         need(len(members) <= (5 if presentation else 4)
              and len(seen_ids) <= (7 if presentation else 5), "context-xar-count")
-    cursor = 0
-    for low, high in sorted(intervals):
-        need(low == cursor, "context-xar-unaccounted")
-        cursor = high
-    need(heap + cursor == len(body), "context-xar-unaccounted")
+    cursor, failure_index = 0, 0
+    ordered = sorted(intervals)
+    try:
+        for failure_index, (low, high) in enumerate(ordered):
+            need(low == cursor, "context-xar-unaccounted")
+            cursor = high
+        failure_index = len(ordered)
+        need(heap + cursor == len(body), "context-xar-unaccounted")
+    except Refused as error:
+        if type(error) is Refused and error.args == ("context-xar-unaccounted",):
+            try:
+                stop = ordered[failure_index][0] if failure_index < len(ordered) else len(body) - heap
+                # Borrow the captured package; never allocate/copy a gap buffer.
+                gap = memoryview(body)[heap + cursor:heap + stop]
+                error._context_metadata = {
+                    "metadata": {"heapOffset": heap, "heapBytes": len(body) - heap,
+                                 "checksumBytes": checksum_size, "intervals": [list(span) for span in ordered],
+                                 "failureIndex": failure_index, "unaccountedBytes": stop - cursor,
+                                 "unaccountedZeroBytes": sum(byte == 0 for byte in gap)},
+                    "parsedArchiveSha256": digest(body), "parsedArchiveBytes": len(body),
+                }
+            except BaseException:
+                pass  # Optional observation cannot replace the SAME refusal.
+        raise
     if not product:
         need(set(members) in ({"PackageInfo", "Scripts"}, {"PackageInfo", "Scripts", "Bom"}),
              "context-component-roster")
@@ -4421,6 +4480,24 @@ class Operation:
                             diagnostic_known = context_metadata_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None
                             if diagnostic_known:
                                 self.artifacts[CONTEXT_METADATA_ARTIFACT] = value
+                    elif admitted and error.args == ("context-xar-unaccounted",):
+                        # The existing pure-refusal decision is independent of
+                        # this optional numeric observation, including failure.
+                        try:
+                            self.artifacts.pop(CONTEXT_METADATA_ARTIFACT, None)
+                            observed = getattr(error, "_context_metadata", None)
+                            if (type(observed) is dict
+                                    and set(observed) == {"metadata", "parsedArchiveSha256", "parsedArchiveBytes"}
+                                    and observed["parsedArchiveSha256"] == digest(body)
+                                    and observed["parsedArchiveBytes"] == len(body)):
+                                value = {"schemaVersion": 3, "type": "mrk-context-xar-coverage-diagnostic-v3",
+                                         "diagnosticOnly": True, "phase": self.phase, "package": package,
+                                         "packageSha256": digest(body), "packageBytes": len(body),
+                                         "buildCallIndex": call_index, **observed}
+                                if context_metadata_diagnostic_data(value, self.phase, error.args[0], self.calls) is not None:
+                                    self.artifacts[CONTEXT_METADATA_ARTIFACT] = value
+                        except BaseException:
+                            pass  # Preserve diagnostic_known and original error.
                     elif (admitted and stage == "package-info" and len(error.args) == 1
                           and error.args[0] in CONTEXT_PACKAGE_INFO_FAILURES):
                         info_body = members["PackageInfo"]

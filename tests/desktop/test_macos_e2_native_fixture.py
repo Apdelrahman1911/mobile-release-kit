@@ -3369,6 +3369,101 @@ class InstallerContextTests(unittest.TestCase):
         completed = fixture.context_distribution().replace(b'version="1">', b'version="1" installKBytes="0" onConclusion="None">')
         completed = completed.replace(b'>context-wrapped.pkg<', b'>#context-wrapped.pkg<')
         fixture.context_product(self.xar({"Distribution": completed, fixture.CONTEXT_PACKAGES[1]: component}), component, members)
+        # The SAME pure coverage guard still refuses holes and suffixes. Its
+        # closed numeric observation distinguishes them without revealing data.
+        product_members = {"Distribution": fixture.context_distribution(), fixture.CONTEXT_PACKAGES[1]: component}
+        clean_product = self.xar(product_members)
+        self.assertEqual(fixture.context_xar(clean_product, product=True), product_members)
+        def coverage_body(kind, gap):
+            if kind == "tail":
+                return clean_product + gap
+            cut = 32 + len(product_members["Distribution"])
+            def move_later_offsets(toc):
+                for data in toc.iter("data"):
+                    offset = data.find("offset")
+                    if int(offset.text) >= cut:
+                        offset.text = str(int(offset.text) + len(gap))
+            moved = self.xar(product_members, mutate=move_later_offsets)
+            heap_at = 28 + struct.unpack_from(">Q", moved, 8)[0]
+            return moved[:heap_at + cut] + gap + moved[heap_at + cut:]
+        coverage_calls = [{"role": "context-product-build", "entered": True, "returned": True, "returncode": 0}]
+        diagnostics = []
+        for kind, gap in (("gap", b"\0\0"), ("gap", b"a\0b"), ("tail", b"\0"), ("tail", b"x\0y")):
+            body = coverage_body(kind, gap)
+            with self.subTest(coverage=kind, bytes=len(gap)), self.assertRaisesRegex(
+                    fixture.Refused, "^context-xar-unaccounted$") as caught:
+                fixture.context_product(body, component, members)
+            observed = caught.exception._context_metadata
+            info = observed["metadata"]
+            self.assertEqual(info["failureIndex"], 2 if kind == "gap" else len(info["intervals"]))
+            self.assertEqual((info["unaccountedBytes"], info["unaccountedZeroBytes"]),
+                             (len(gap), gap.count(b"\0")))
+            self.assertEqual(info["heapOffset"] + info["heapBytes"], len(body))
+            self.assertEqual(info["intervals"][0], [0, 32])
+            diagnostic = {"schemaVersion": 3, "type": "mrk-context-xar-coverage-diagnostic-v3",
+                          "diagnosticOnly": True, "phase": "context-product-audit", "package": "outer-product",
+                          "packageSha256": fixture.digest(body), "packageBytes": len(body), "buildCallIndex": 0,
+                          **observed}
+            self.assertIs(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"],
+                          "context-xar-unaccounted", coverage_calls), diagnostic)
+            self.assertLessEqual(len(fixture.canonical(diagnostic)), 2048)
+            self.assertNotIn("Distribution", fixture.canonical(diagnostic).decode("ascii"))
+            # Inert custody values exercise the production error boundary, not
+            # any filesystem/native operation or claimed original admission.
+            op = object.__new__(fixture.Operation)
+            op.scratch = Path("/inert-context")
+            op.phase, op.calls, op.artifacts = "context-product-audit", coverage_calls, {}
+            entry = {"path": op.scratch / "installer-context" / fixture.CONTEXT_PACKAGES[2],
+                     "kind": "file", "fd": 7, "closed": False,
+                     "identity": (1, 2, 0o100600, 501, 20, 1, len(body), 0, 0)}
+            op.outputs = SimpleNamespace(entries=[entry])
+            with self.assertRaisesRegex(fixture.Refused, "^context-xar-unaccounted$") as original:
+                op.context_audit(entry, body, component=(component, members))
+            self.assertIs(op._context_audit_refusal, original.exception)
+            self.assertEqual(op.artifacts[fixture.CONTEXT_METADATA_ARTIFACT], diagnostic)
+            for refused_diagnostic in (False, True):
+                with patch.object(fixture, "context_metadata_diagnostic_data",
+                                  **({"side_effect": ValueError("inert-diagnostic-failure")} if refused_diagnostic
+                                     else {"return_value": None})):
+                    with self.assertRaisesRegex(fixture.Refused, "^context-xar-unaccounted$") as same:
+                        op.context_audit(entry, body, component=(component, members))
+                self.assertIs(op._context_audit_refusal, same.exception)
+                self.assertNotIn(fixture.CONTEXT_METADATA_ARTIFACT, op.artifacts)
+            diagnostics.append(diagnostic)
+        diagnostic = diagnostics[1]
+        for field, value in (("schemaVersion", True), ("diagnosticOnly", 1), ("buildCallIndex", True),
+                             ("parsedArchiveSha256", "b" * 64), ("parsedArchiveBytes", diagnostic["packageBytes"] + 1),
+                             ("package", "wrapped-component")):
+            malformed = dict(diagnostic, **{field: value})
+            self.assertIsNone(fixture.context_metadata_diagnostic_data(malformed, diagnostic["phase"],
+                              "context-xar-unaccounted", coverage_calls))
+        for change in (
+                lambda info: info.update(rawBytes="never-published"),
+                lambda info: info.update(heapOffset=True),
+                lambda info: info.update(heapBytes=info["heapBytes"] + 1),
+                lambda info: info.update(checksumBytes=31),
+                lambda info: info.update(failureIndex=0),
+                lambda info: info.update(failureIndex=len(info["intervals"])),
+                lambda info: info.update(unaccountedBytes=0),
+                lambda info: info.update(unaccountedZeroBytes=info["unaccountedBytes"] + 1),
+                lambda info: info.update(intervals=tuple(info["intervals"])),
+                lambda info: info.update(intervals=info["intervals"] * 3),
+                lambda info: info["intervals"][0].__setitem__(0, 1),
+                lambda info: info["intervals"][1].__setitem__(0, 31),
+                lambda info: info["intervals"][-1].__setitem__(1, info["heapBytes"] + 1),
+                lambda info: info["intervals"][-1].__setitem__(0, False),
+                lambda info: info["intervals"].reverse()):
+            malformed = copy.deepcopy(diagnostic);change(malformed["metadata"])
+            self.assertIsNone(fixture.context_metadata_diagnostic_data(malformed, diagnostic["phase"],
+                              "context-xar-unaccounted", coverage_calls))
+        for call in (dict(coverage_calls[0], returned=False), dict(coverage_calls[0], returncode=1),
+                     dict(coverage_calls[0], role="context-product-component-build")):
+            self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"],
+                              "context-xar-unaccounted", [call]))
+        self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, diagnostic["phase"], None, coverage_calls))
+        self.assertIsNone(fixture.context_metadata_diagnostic_data(diagnostic, "context-component-audit",
+                          "context-xar-unaccounted", coverage_calls))
+        fixture.context_product(clean_product, component, members)  # No coverage policy change.
 
     def test_record_distinguishes_unopened_context_and_requires_the_same_input_and_output_originals(self):
         expected_output = (1, 2, 0o100600, 501, 20, 1)
