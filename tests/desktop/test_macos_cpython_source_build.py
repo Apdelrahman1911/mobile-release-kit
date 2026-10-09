@@ -8469,6 +8469,21 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 "CONFIG_SITE": "/dev/null", "PYTHONDONTWRITEBYTECODE": "1"})
             source_text = (ROOT / "desktop/tools/macos_github_seal_build.py").read_text()
             self.assertIn('B.need(B.read(build / "src/libsodium/.libs/libsodium.a", 64 * MIB) == archive, "canonical-installed-build-library")', source_text)
+            # Actual pure command constructor is used by the unchanged owner.
+            # No nm/tool/native invocation; ARM retains the original argv.
+            library = Path("/fixed-work/private/prefix/lib/libsodium.a")
+            nm = "/Library/Developer/CommandLineTools/usr/bin/nm"
+            for target, expected in (
+                    ("aarch64-apple-darwin", [nm, "-gU", str(library)]),
+                    ("x86_64-apple-darwin", [nm, "--quiet", "-gU", str(library)])):
+                with self.subTest(nm_target=target):
+                    actual = seal._static_symbol_argv(target, nm, library)
+                    self.assertEqual(actual, expected)
+                    self.assertEqual(actual.count("--quiet"), int(target == "x86_64-apple-darwin"))
+            self.assertIn('symbols = self.run("static-four-symbols", _static_symbol_argv(self.target, self.nm, self.library))', source_text)
+            # Pin the complete existing strict result-validation block: no
+            # stderr filtering, symbol-count weakening or fallback option.
+            self.assertIn('        B.need(symbols.stderr == b"", "static-symbol-query")\n        lines = symbols.stdout.decode("ascii", "strict").splitlines()\n        for name in ("_sodium_init", "_crypto_box_seal", "_sodium_memzero", "_randombytes_close"):\n            B.need(sum(bool(re.fullmatch(r"[0-9a-fA-F]+ [A-Z] " + re.escape(name), line.strip())) for line in lines) == 1,\n                   "canonical-four-symbol-definition")\n', source_text)
             for mode in ("ordinary", "wrong-target", "same-target-replaced", "post-target-changed", "unknown-child", "unknown-data", "other-name"):
                 with self.subTest(mode=mode), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
                     parent = root / "build/src/libsodium/.libs"

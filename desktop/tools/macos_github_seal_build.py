@@ -81,6 +81,11 @@ ROLE_LIMITS = (
     ("canonical-box-test", 10, QUERY_LIMIT), ("helper-release", 120, OUTPUT_LIMIT),
     ("helper-native-test-build", 120, OUTPUT_LIMIT), ("helper-native-test", 10, QUERY_LIMIT),
 )
+def _static_symbol_argv(target, nm, library):
+    """Intel LLVM nm suppresses only empty-member diagnostics; ARM stays exact."""
+    return [nm, *(["--quiet"] if target == "x86_64-apple-darwin" else []), "-gU", str(library)]
+
+
 B = None
 
 
@@ -1039,7 +1044,7 @@ class SealBuild:
         self.run("header-abi", [self.clang, "-arch", self.profile[0], "-isysroot", str(self.sdk),
             "-mmacosx-version-min=26.0", "-I", str(prefix / "include"), "-std=c11", "-fsyntax-only",
             "-Werror=incompatible-function-pointer-types", "-Werror=incompatible-pointer-types", str(self.helper / "abi-check.c")])
-        symbols = self.run("static-four-symbols", [self.nm, "-gU", str(self.library)])
+        symbols = self.run("static-four-symbols", _static_symbol_argv(self.target, self.nm, self.library))
         B.need(symbols.stderr == b"", "static-symbol-query")
         lines = symbols.stdout.decode("ascii", "strict").splitlines()
         for name in ("_sodium_init", "_crypto_box_seal", "_sodium_memzero", "_randombytes_close"):
