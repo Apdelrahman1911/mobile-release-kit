@@ -64,7 +64,7 @@ jobs:
         run: |
           builtin source ./desktop/tools/macos_maintenance_fixture_prepare.sh
 
-      - name: Compile removal recovery and both entry roles through the original owner
+      - name: Compile fixed shipping and nonshipping removal role DATA through the original owner
         id: native
         timeout-minutes: 70
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -73,7 +73,7 @@ jobs:
           umask 077
           ulimit -n 1024
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
-          # Same990s owner: Remover3, Record1, and ordinary Installer1 compiled DATA.
+          # Same990s owner: old5 plus B3/O3/ordinary-emitter1/observer-emitter1 DATA; seven serial graphs.
           # No Installer transaction, live removal, signing, SM, Keychain or app launch.
           exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
             GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \

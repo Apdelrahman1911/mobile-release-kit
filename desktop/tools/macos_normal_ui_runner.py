@@ -21,6 +21,12 @@ import subprocess
 import sys
 import time
 
+# Loaded before any fixture worker starts; no process-global limits are changed.
+if sys.platform == "darwin":
+    import resource as _removal_resource
+else:
+    _removal_resource = None
+
 DEVELOPER = "/Applications/Xcode.app/Contents/Developer"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
@@ -371,7 +377,7 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
@@ -383,7 +389,12 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and Path(result).name == IOS_UNSIGNED_RESULT)),
          "ios-unsigned-fixed-test-selection")
-    need(ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    if removal_case is not None:
+        selected, basename = removal_selection(removal_case)
+        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+             and tuple(methods) == (selected,) and allowance == 300 and Path(result).name == basename,
+             "removal-fixed-test-selection")
+    need(removal_case is not None or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
@@ -397,7 +408,7 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
@@ -409,10 +420,16 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and timeout == 1020
          and Path(result).name == IOS_UNSIGNED_RESULT)), "ios-unsigned-fixed-test-owner")
+    if removal_case is not None:
+        selected, basename = removal_selection(removal_case)
+        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+             and tuple(methods) == (selected,) and allowance == 300 and timeout == 420
+             and Path(result).name == basename, "removal-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
-        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
+        command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
+                   if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
                    if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
                    if android_positive else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
                    if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
@@ -1905,6 +1922,178 @@ def execute_output_data_phase(phase, request, source, file_limit):
     exclusive_output(normal / "output-data.command-admission.json", encoded(facts) + b"\n", 32768)
     phase.clock.check()
     return original
+
+
+# Two fixed real-removal UI routes. Not admitted by the ordinary CLI.
+REMOVAL_METHODS = {
+    "ordinary": "testInstalledRemovalCancelThenContinue",
+    "abrupt": "testInstalledRemovalContinueBeforeInterruption",
+}
+REMOVAL_CHANNEL_ENV = "TEST_RUNNER_MRK_NORMAL_UI_REMOVAL_CHANNEL"
+
+
+def removal_selection(case):
+    need(type(case) is str and case in REMOVAL_METHODS, "removal-fixed-case")
+    return CLASS + REMOVAL_METHODS[case], "removal-" + case + "-test.xcresult"
+
+
+class RemovalPhaseClock(PhaseClock):
+    """UI585 is nested in the existing joint deadline; never a new allowance."""
+    def __init__(self, containing_deadline_ns, *, now=None, started=None):
+        need(type(containing_deadline_ns) is int and containing_deadline_ns > 0,
+             "removal-containing-deadline")
+        super().__init__(585, now=now, started=started)
+        self.containing_deadline_ns = containing_deadline_ns
+        self.deadline = min(self.deadline, containing_deadline_ns)
+        self.check()
+
+
+def removal_ui_result(stdout, summary_body, tests_body, case):
+    method, _ = removal_selection(case)
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1048576
+         and type(summary_body) is bytes and 0 < len(summary_body) <= 262144
+         and type(tests_body) is bytes and 0 < len(tests_body) <= 262144,
+         "removal-ui-result-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    marker = ("MRK_MACOS_REMOVAL_UI=v1;case=" + case + ";cancelObserved="
+              + ("1" if case == "ordinary" else "0")
+              + ";continueObserved=1;originalTerminated=1;gateClosed=1;gateFree=unqualified;normalQuit=0;channelClosed=1")
+    need([line for line in lines if line.startswith("MRK_MACOS_REMOVAL_UI=")] == [marker]
+         and all(tag not in text for tag in ("MRK_MACOS_UI_ORIGINAL=", "MRK_MACOS_UI_FAILURE_CLEANUP=",
+                                            "MRK_MACOS_NORMAL_UI=", "MRK_MACOS_ENTRY_UI=")),
+         "removal-ui-distinct-terminal")
+    selected = "-[MRKNormalAppUITests.NormalAppUITests " + REMOVAL_METHODS[case] + "]"
+    attempts = [line for line in lines if line.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1]),
+         "removal-ui-one-original-attempt")
+    summary = document(summary_body)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(summary.get(key)) is int and summary[key] == count for key, count in counts.items()),
+         "removal-ui-exact-one-pass")
+    roots = document(tests_body).get("testNodes")
+    need(type(roots) is list and 0 < len(roots) <= 16, "removal-ui-tree-root")
+    pending, visited, cases = [(node, (), 0) for node in roots], 0, 0
+    while pending:
+        node, ancestors, depth = pending.pop()
+        visited += 1
+        need(type(node) is dict and visited <= 128 and depth <= 12, "removal-ui-tree-bound")
+        name, kind, children = node.get("name"), node.get("nodeType"), node.get("children", [])
+        need(type(name) is str and type(kind) is str and type(children) is list and len(children) <= 16,
+             "removal-ui-tree-node")
+        if kind == "Test Case":
+            need(TARGET in ancestors and node.get("result") == "Passed" and not children
+                 and name == REMOVAL_METHODS[case] + "()"
+                 and node.get("nodeIdentifier") in {"NormalAppUITests/" + name, method + "()"},
+                 "removal-ui-exact-selected-case")
+            cases += 1
+        else:
+            pending.extend((child, ancestors + (name,), depth + 1) for child in children)
+    need(cases == 1, "removal-ui-tree-one-case")
+    return dict(case=case, testIdentifier=method, testCounts=counts,
+        nativeSummarySha256=sha(summary_body), nativeTestTreeSha256=sha(tests_body),
+        oneOriginalAttemptObserved=True, originalAppTerminated=True, uiGateClosed=True,
+        gateFree="unqualified", normalQuit=False, uiChannelClosed=True, productReady=False)
+
+
+def removal_phase_context(phase, *, case, derived, channel, source, file_limit, target):
+    """Explicit supplied environment; never an os.environ/cwd/loader mutation."""
+    method, result_name = removal_selection(case)
+    need(type(phase) is NormalPhase and type(phase.clock) is RemovalPhaseClock
+         and phase.retain_nonzero is True and not phase.records and target == ARM_TARGET,
+         "removal-own-phase")
+    need(sys.platform == "darwin" and platform.machine() == "arm64"
+         and platform.mac_ver()[0].startswith("26.") and _removal_resource is not None,
+         "removal-native-runtime")
+    need(file_limit == normal_file_limit("test", _removal_resource.getrlimit(_removal_resource.RLIMIT_FSIZE)),
+         "removal-actual-file-limit")
+    need(type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source)
+         and phase.root == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit"), "removal-source-root")
+    need(isinstance(derived, Path) and derived.name == "DerivedData" and derived.parent.name == "normal-ui"
+         and derived.parent.parent.parent == Path("/Users/runner/work/_temp")
+         and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", derived.parent.parent.name), "removal-fixed-work")
+    need(isinstance(channel, Path) and str(channel) == posixpath.normpath(str(channel))
+         and channel.parent == derived.parent.parent / "removal-ui-v1"
+         and re.fullmatch(r"r-[0-9a-f]{32}", channel.name) and channel.name != "r-" + "0" * 32
+         and len(str(channel).encode("utf-8")) <= 1024, "removal-fixed-channel")
+    expected = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner",
+        "LOGNAME": "runner", "TMPDIR": str(derived.parent / "tmp") + "/", "LANG": "en_US.UTF-8",
+        "LC_ALL": "en_US.UTF-8", "TZ": "UTC", "DEVELOPER_DIR": DEVELOPER,
+        "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+        "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source,
+        "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": source, REMOVAL_CHANNEL_ENV: str(channel)}
+    need(type(phase.environment) is dict and phase.environment == expected, "removal-explicit-clean-environment")
+    return method, derived.parent / result_name
+
+
+def execute_removal_ui_phase(phase, *, case, derived, channel, source, file_limit, target=ARM_TARGET):
+    need(type(phase) is NormalPhase and type(phase.clock) is RemovalPhaseClock, "removal-own-phase")
+    try:
+        phase.clock.check()
+        return _execute_removal_ui_phase(phase, case=case, derived=derived, channel=channel,
+            source=source, file_limit=file_limit, target=target)
+    except BaseException:
+        phase.clock.failed = True  # Parsing/close/publication failures latch too, not only failed commands.
+        raise
+
+
+def _execute_removal_ui_phase(phase, *, case, derived, channel, source, file_limit, target=ARM_TARGET):
+    """One worker's returned originals only. The caller still owes its actual join."""
+    method, result = removal_phase_context(phase, case=case, derived=derived, channel=channel,
+        source=source, file_limit=file_limit, target=target)
+    phase.clock.check()
+    before = normal_source_state(phase, source)
+    roster = sha(encoded(before))
+    build_digest = output_data_read_build(phase, derived.parent, source, roster)
+    original, runner = run_admitted_test(phase.call, derived, result, (method,), 300, 420,
+                                         target=target, removal_case=case)
+    if original.returncode != 0:
+        raise NativeQueryFailure(original)  # No query/success receipt after the failed original.
+    result_fd = open_directory(result)
+    primary, bodies = None, []
+    try:
+        result_facts = full9(os.fstat(result_fd))
+        need(result_facts[3:5] == (os.getuid(), os.getgid()) and not result_facts[2] & 0o022
+             and full9(os.stat(result, follow_symlinks=False)) == result_facts, "removal-ui-result-original")
+        for kind, role in (("summary", "normal-ui-summary"), ("tests", "normal-ui-test-tree")):
+            query = phase.call(role, ["/usr/bin/xcrun", "xcresulttool", "get", "test-results", kind,
+                "--path", str(result), "--compact"], 30, 262144)
+            if query.returncode != 0:
+                raise NativeQueryFailure(query)
+            held, named = full9(os.fstat(result_fd)), full9(os.stat(result, follow_symlinks=False))
+            # Generated mutable OUTPUT may change layout after a query, not identity/permissions.
+            need(held == named and held[:5] == result_facts[:5], "removal-ui-result-post")
+            bodies.append(query.stdout)
+    except BaseException as error:
+        primary = error
+    finally:
+        try:
+            os.close(result_fd)
+        except BaseException as error:
+            if primary is None:
+                primary = error
+        try:
+            phase.clock.check()
+        except BaseException as error:
+            if primary is None:
+                primary = error
+    if primary is not None:
+        raise primary
+    observation = removal_ui_result(original.stdout, *bodies, case)
+    need(normal_source_state(phase, source) == before, "removal-ui-source-pre-post")
+    need(file_limit == normal_file_limit("test", _removal_resource.getrlimit(_removal_resource.RLIMIT_FSIZE)),
+         "removal-ui-file-limit-post")
+    facts = dict(schemaVersion=1, scope="installed-removal-ui-originals-only", case=case,
+        resultBundle=result.name, originalCommandRole="one-admitted-ui-test", originalReturncode=0,
+        target=target, sourceCommit=source, sourceRosterSha256=roster, sourcePrePostMatched=True,
+        originalCommandReturned=True, buildReceiptSha256=build_digest, runnerAdmission=runner,
+        observation=observation, commands=phase.records, fileLimitBytes=list(file_limit),
+        phaseClock=phase.clock.before_publication(), containingDeadlineNs=str(phase.clock.containing_deadline_ns),
+        receiptPolicy="exclusive0600-readback-consuming-close", workerJoin="pending-caller-original-join")
+    exclusive_output(result.with_suffix(".runner-admission.json"), encoded(facts) + b"\n", 32768)
+    phase.clock.finish()  # Actual receipt close is within the same nonrenewable phase.
+    return original, facts
 
 
 def execute_normal_phase(phase, request, source, file_limit):

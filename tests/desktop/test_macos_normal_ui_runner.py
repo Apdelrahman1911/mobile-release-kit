@@ -129,7 +129,61 @@ ANDROID_POSITIVE_SWIFT_INVERSE = ((70,
 IOS_UNSIGNED_SWIFT_INVERSE = [(70, 71, '9bac829257dc5bfc3a439aac882d2dd08d941c3f649245b3d7a768774a240fb6', '        init(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (72, 73, '66f825502f9177249fae4721b875432bc67fb64cb82913b6316d1774c5a49dfd', '            guard now.isFinite, now >= 0, (androidPositive ? seconds == 900 : (seconds == 60 || seconds == 300)),\n'), (213, 214, '6cd754f487e73847150b083af7e63e879a8dbac5ad665697097f9ec96855aa0e', '        func healthy() throws {\n'), (216, 218, '6a92da92d5532c709c9f3120362f8254966396700c0466f327c01b0ab76b5dfa', '            _ = try clock.remaining(1)\n'), (367, 368, 'fd8a6b3740680e236e8d1b7230c780d1b2047a08811daf14f32e2a626a9bbca2', '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false) throws {\n'), (369, 370, '3e8ede215cecb56df70dc3f608cc5f1cee333b9789c9dc3c9dad5490f8a90700', '        let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive)\n'), (1057, 1058, 'fe1a506227717451d1ea704c49f67707355cf944c26b23254692342734be093f', '        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild }\n'), (1717, 1815, '8207c234f1e8514a6fc76d5ce60326720330a45af6f3d21a939a9c241306c9fc', ''), (2169, 2172, 'dcf34ab30490e5e6f7018fc3909338186a496fd715c7f6dcc02f3b100cbbb33e', '                             "symlink", "hardlink", "depth", "mode", "input", "wrong-result", "identity", "repeated-start"] {\n'), (2299, 2386, 'b6ebcf146b2dff8f0aad636bf67b3dda1162b9a7dd958e017a298ee8b7610e59', ''), (2511, 2512, '24e72c6479ac7bc1e357f0db0edc814203f1521b12a87159a84c81f83cd3e3b0', ''), (2517, 2518, '206f1b83b020317dd90a1fe16c65d22dc46b4f99d00d66327b63ec35596f83d2', ''), (2719, 2720, 'df6605ab7490f24679c4a978e7c5b13f93f85210ea6444e2e2e9efcfcae013d6', '                let expected = Set(leafPaths.union(expectedDirectories).compactMap { item -> String? in\n'), (2724, 2727, 'c960cb683f36e92409c4c587c97282b29c14f0ae014559e7ee26c650e4b95da0', ''), (2743, 2745, 'b73ca4989daede170caf6b6b1a0998e75ea6ebba25d2f8d1a6fe0156cdd7d1ae', '            let resourceName = androidPositive ? "normal-android-positive-v1" : projectData ? "normal-project-v1" : "normal-persistence-v1"\n'), (2776, 2782, '1107bb850d890130bbb52690bf0a0cb605709f74d8472036002b6a5a015cc10c', ''), (2783, 2784, 'ea2d11d0ac471ad6c10e11edf0f41fed2d107ed6d1e06de7711e25de619a9398', '            let stagePaths: [String: Set<String>] = projectData && !androidPositive ? [\n'), (2787, 2788, '2498cc74fb404e00c579acc48e5cfdd4a0960767e13892af10381bc785c3fbc5', '            let expectedOriginals = androidPositive ? Self.androidPositivePaths : projectData ? Self.originals : Self.persistenceOriginals\n'), (2790, 2791, '1a888d6908be38a47f83ceeb92e6a3bf14a2a1a3aeb4652e02395e1b491f385b', '                && (projectData && !androidPositive ? spec.templateDataSHA256?.count == 64 : spec.templateDataSHA256 == nil),\n'), (2803, 2809, '49b024bd18a645445fbd6b19e3fe2cbad35bf22b7bc08bcde6f5579952779f55', ''), (3149, 3150, '419b3fec90b5f9f9cab66658f88de15a911c551aeb16763ab01e151d74198a49', ''), (3157, 3158, '6849ff7af4e41318c8523669ea36515c7f32c00a1e67b3ef51f7f9e9a490a51e', ''), (3183, 3185, '649cb7eca7a5aa1accb59bfe7e5ae11533ec19478cee237ef8c4c35cb2e98be4', '    // Explicit DATA-only native selection; not an Android-positive application case.\n'), (4951, 5171, 'daf86c7067443724d660940776c521e0d1655f9cc3701f3579faa2c0fbecd1b7', '')]
 
 
+# Progressive Unicode-character coordinates, each independently SHA-bound to
+# the reviewed V2 then V1 removal-only inverse. Historical iOS/Android tables stay exact.
+REMOVAL_UI_SWIFT_INVERSE = ((80622,
+  81151,
+  '769d6f8133da98a9246545d016242bcfe97b677112d9015e9139746eb9eeb633',
+  '            try click(renderer.buttons.matching(identifier: "Project settings"), "post-removal-Cancel '
+  'settings unavailable")\n'
+  '            try click(renderer.buttons.matching(identifier: "Dashboard"), "post-removal-Cancel Dashboard '
+  'unavailable")\n'),
+ (79308,
+  79699,
+  '24df5c9b2cc0d3504c70a04403eeb8493ffdd05dea796849a52ef35618061476',
+  '        let renderer = try unique(window.webViews, "removal renderer unavailable or ambiguous")\n'),
+ (403769,
+  404160,
+  '2c34411fe7d2fa2b70b5dda3868e01e7f4060cd223d19aab495b0d1d7f943f8a',
+  '        // Independent private consuming close after any partial setup or unknown\n'),
+ (402192,
+  402751,
+  '7767c4fd2d151d42c5d0b2ecdbaaacf6fbca0d622b388f52d65eaec4c2957811',
+  '                if let owner = originalLaunch { try owner.tearDown(normalQuit: normalQuitObserved) }\n'),
+ (63333,
+  81939,
+  '5b73f478c9711d94ad91041699c4942556b0b0b1153ffb770432a5408333d1f9',
+  '    // Finite synthetic files only. No existing project, .git, credential, tool\n'),
+ (19944,
+  20064,
+  'a9a620ff5278b840264427dd203fe578639f3bbd8cebcbb195f8c1cfa2ca72b5',
+  '        try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved\n'),
+ (18886,
+  19544,
+  '579a5e4b6046df5507eabaa7cfa730d38f0e3a9e6cd58d1a5b2bd35d4db430b8',
+  '    @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: '
+  'Bool = false) throws {\n'
+  '        try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline '
+  'cannot be reset")\n'),
+ (2557,
+  2725,
+  '4c449e08120eadbecd8936b8ebbe53a5a1b2674fda21f943728e165599946cf7',
+  '    @MainActor private var normalQuitObserved = false\n'))
+
+
+def without_removal_ui_source(source):
+    for start, end, expected, original in REMOVAL_UI_SWIFT_INVERSE:
+        observed = source[start:end]
+        if hashlib.sha256(observed.encode()).hexdigest() != expected:
+            raise AssertionError('removal UI exact SOURCE region differs')
+        source = source[:start] + original + source[end:]
+    if hashlib.sha256(source.encode()).hexdigest() != '03c9285e0ed83a3b2d019cfa75ddd5e309c60dbc48ac162964755122279842b8':
+        raise AssertionError('removal UI inverse changed prior SOURCE')
+    return source
+
+
 def without_ios_unsigned_source(source):
+    source = without_removal_ui_source(source)
     rows = source.splitlines(keepends=True)
     for start, end, expected, original in reversed(IOS_UNSIGNED_SWIFT_INVERSE):
         observed = ''.join(rows[start:end])
@@ -275,6 +329,21 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 self.assertNotIn("project/gradle/verification-metadata.xml", spec["files"])
 
         project = (native / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        # The later unsigned-iOS resource is an exact reviewed successor of
+        # the Android project. Undo only its four SOURCE additions FIRST so
+        # the existing Android inverse and original XML-only hash stay strict.
+        self.assertEqual(hashlib.sha256(project.encode()).hexdigest(),
+                         '18903dd03df852e0d6b8ca8c1f545553c4440468c3b067ead5b92cd76b5c5514')
+        for added, original in (
+            ('\t\tA10000000000000000000018 = {isa = PBXBuildFile; fileRef = A10000000000000000000019; };\n', ''),
+            ('\t\tA10000000000000000000019 = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/normal-ios-unsigned-v1.json"; sourceTree = "<group>"; };\n', ''),
+            (', A10000000000000000000019);', ');'),
+            (', A10000000000000000000018);', ');'),
+        ):
+            self.assertEqual(project.count(added), 1)
+            project = project.replace(added, original, 1)
+        self.assertEqual(hashlib.sha256(project.encode()).hexdigest(),
+                         '3b4f8f2f22ba6540b402b8738f880a9c81bfb216337eed6a7bfdd817896f6469')
         for added in ('\t\tA10000000000000000000016 = {isa = PBXBuildFile; fileRef = A10000000000000000000017; };\n',
                       '\t\tA10000000000000000000017 = {isa = PBXFileReference; lastKnownFileType = text.json; path = "Fixtures/normal-android-positive-v1.json"; sourceTree = "<group>"; };\n'):
             self.assertEqual(project.count(added), 1)
@@ -607,6 +676,13 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         # independently reimplemented archive scanner or a native pass.
         import base64
         current = SWIFT.read_text(encoding="utf-8")
+        removal_before = without_removal_ui_source(current)
+        self.assertEqual((len(removal_before.encode()), hashlib.sha256(removal_before.encode()).hexdigest()),
+                         (385349, '03c9285e0ed83a3b2d019cfa75ddd5e309c60dbc48ac162964755122279842b8'))
+        with self.assertRaisesRegex(AssertionError, 'removal UI exact SOURCE region differs'):
+            without_removal_ui_source(current.replace('MRK_MACOS_REMOVAL_UI=v1;', 'MRK_MACOS_REMOVAL_UI=v2;', 1))
+        with self.assertRaisesRegex(AssertionError, 'removal UI inverse changed prior SOURCE'):
+            without_removal_ui_source(current + '\n')
         self.assertEqual(hashlib.sha256(without_ios_unsigned_source(current).encode()).hexdigest(),
                          "baa5731b9a25910affe6019ace6db58cccb35267a028a7034e70997ed96156eb")
         with self.assertRaises(AssertionError):
@@ -796,6 +872,29 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                     MODULE.run_admitted_test(lambda *_: self.fail("invalid iOS original dispatched"),
                                              normal / "DerivedData", **values)
                 unopened.assert_not_called()
+
+        # Removal remains a separate closed in-process owner, never an ordinary CLI selector.
+        for case in ("ordinary", "abrupt"):
+            method, result_name = MODULE.removal_selection(case)
+            values = dict(methods=(method,), allowance=300, result=normal / result_name, removal_case=case)
+            command = MODULE.xcode_test_arguments(Path("fixed.xctestrun"), **values)
+            self.assertEqual([v for v in command if v.startswith("-only-testing:")], ["-only-testing:" + method])
+            self.assertNotIn(result_name, MODULE.NORMAL_SELECTIONS)
+            for changed in (dict(removal_case=None), dict(removal_case=True), dict(removal_case="unknown"),
+                            dict(target=MODULE.INTEL_TARGET), dict(engineering=True), dict(output_data=True),
+                            dict(android_positive=True), dict(ios_unsigned=True), dict(allowance=60),
+                            dict(methods=(method, method)), dict(result=normal / "test.xcresult")):
+                with self.subTest(removal=case, changed=changed), self.assertRaises(MODULE.Refused):
+                    MODULE.xcode_test_arguments(Path("fixed.xctestrun"), **dict(values, **changed))
+            with patch.object(MODULE, "RunnerProducts") as unopened:
+                for timeout in (True, 419, 421):
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.run_admitted_test(lambda *_: self.fail("invalid removal dispatched"),
+                            normal / "DerivedData", timeout=timeout, **values)
+                unopened.assert_not_called()
+            with self.assertRaises(MODULE.Refused):
+                MODULE.normal_request(["--normal-summary", result_name], temporary)
+
 
     def test_project_batch_is_exactly_two_methods_with_existing_finite_deadlines(self):
         expected = ("testSyntheticProjectLocalEditsAndImages", "testSyntheticProjectPathFields")
@@ -1176,7 +1275,10 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         profile = runtime.split("pub(crate) fn android_source_selection_profile_available(", 1)[1].split(
             "pub(crate) fn evidence_selection_profile_available(", 1)[0]
         self.assertIn("INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && self.project_selection_profile_available()", profile)
-        self.assertIn('#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]\n        { false }', profile)
+        self.assertIn('#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]\n'
+                      '        { INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && self.project_selection_profile_available()\n'
+                      '            && crate::android_build_protocol::Profile::current().is_some_and(crate::android_toolchain_macos_policy::native_catalog_supports) }', profile)
+        self.assertIn('#[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]\n        { false }', profile)
         ui = (ROOT / "desktop/src/components/AndroidBuild.tsx").read_text()
         self.assertIn("const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];", ui)
         self.assertEqual(ui.count("role=\"group\" aria-label={`${help.label} source folder`}"), 1)
@@ -3140,6 +3242,137 @@ class NormalPhaseDataTests(unittest.TestCase):
                     self.assertFalse(any(path.name == "ios-unsigned-archive.facts.json" for path, _, _ in published))
                     self.assertTrue(all(b"private inert diagnostic" not in MODULE.encoded(value) for _, value, _ in published))
 
+    def test_removal_ui_clock_observation_and_finality(self):
+        tick = [0]
+        clock = MODULE.RemovalPhaseClock(500 * 10**9, now=lambda: tick[0])
+        self.assertEqual(clock.deadline, 500 * 10**9)
+        self.assertEqual(MODULE.RemovalPhaseClock(900 * 10**9, now=lambda: 0).deadline, 585 * 10**9)
+        tick[0] = 499 * 10**9
+        with self.assertRaises(MODULE.Refused): clock.allowance(420)
+        tick[0] = 0
+        with self.assertRaises(MODULE.Refused): clock.check()
+        for endpoint in (True, 0, -1, 1.5):
+            with self.assertRaises(MODULE.Refused): MODULE.RemovalPhaseClock(endpoint, now=lambda: 0)
+
+        def output(case):
+            method = MODULE.REMOVAL_METHODS[case]
+            selected = "-[MRKNormalAppUITests.NormalAppUITests " + method + "]"
+            marker = ("MRK_MACOS_REMOVAL_UI=v1;case=" + case + ";cancelObserved="
+                      + ("1" if case == "ordinary" else "0")
+                      + ";continueObserved=1;originalTerminated=1;gateClosed=1;gateFree=unqualified;normalQuit=0;channelClosed=1")
+            stdout = ("Test Case '" + selected + "' started.\n" + marker
+                      + "\nTest Case '" + selected + "' passed (1.0 seconds).\n").encode()
+            summary = MODULE.encoded(dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0, expectedFailures=0))
+            tests = MODULE.encoded(dict(testNodes=[dict(name=MODULE.TARGET, nodeType="Test Suite", children=[
+                dict(name=method + "()", nodeType="Test Case", nodeIdentifier="NormalAppUITests/" + method + "()", result="Passed")])]))
+            return stdout, summary, tests
+
+        for case in ("ordinary", "abrupt"):
+            stdout, summary, tests = output(case)
+            facts = MODULE.removal_ui_result(stdout, summary, tests, case)
+            self.assertIs(facts["normalQuit"], False)
+            self.assertEqual(facts["gateFree"], "unqualified")
+            self.assertIs(facts["productReady"], False)
+            for body in (stdout + stdout, stdout.replace(b"originalTerminated=1", b"originalTerminated=0"),
+                         stdout.replace(b"gateFree=unqualified", b"gateFree=1"),
+                         stdout.replace(b"normalQuit=0", b"normalQuit=1"),
+                         stdout.replace(b"channelClosed=1", b"channelClosed=0"),
+                         stdout + MODULE.ORIGINAL_MARKER.encode(), stdout.replace(b" passed ", b" skipped ")):
+                with self.assertRaises(MODULE.Refused): MODULE.removal_ui_result(body, summary, tests, case)
+            for key in ("totalTestCount", "passedTests", "skippedTests"):
+                bad = json.loads(summary); bad[key] += 1
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.removal_ui_result(stdout, MODULE.encoded(bad), tests, case)
+            with self.assertRaises(MODULE.Refused):
+                MODULE.removal_ui_result(stdout, summary, tests, "abrupt" if case == "ordinary" else "ordinary")
+
+        # Explicit context admission reads only supplied environment and actual (mocked) native facts.
+        derived = Path("/Users/runner/work/_temp/mrk-macos-installed.ABCDef12/normal-ui/DerivedData")
+        channel = derived.parent.parent / ("removal-ui-v1/r-" + "a" * 32)
+        source, limit = "a" * 40, (1024**3,) * 2
+        environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner",
+            "LOGNAME": "runner", "TMPDIR": str(derived.parent / "tmp") + "/", "LANG": "en_US.UTF-8",
+            "LC_ALL": "en_US.UTF-8", "TZ": "UTC", "DEVELOPER_DIR": MODULE.DEVELOPER,
+            "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source,
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": source, MODULE.REMOVAL_CHANNEL_ENV: str(channel)}
+        def make_phase(root, env=None, now=lambda: 0):
+            return MODULE.NormalPhase(SimpleNamespace(), dict(environment if env is None else env), root,
+                MODULE.RemovalPhaseClock(600 * 10**9, now=now), retain_nonzero=True)
+        root = Path("/Users/runner/work/mobile-release-kit/mobile-release-kit")
+        resource = SimpleNamespace(RLIMIT_FSIZE=1, getrlimit=lambda _: limit)
+        with patch.object(MODULE.sys, "platform", "darwin"), patch.object(MODULE.platform, "machine", return_value="arm64"), \
+             patch.object(MODULE.platform, "mac_ver", return_value=("26.6", (), "")), patch.object(MODULE, "_removal_resource", resource):
+            phase = make_phase(root)
+            kwargs = dict(case="ordinary", derived=derived, channel=channel, source=source, file_limit=limit, target=MODULE.ARM_TARGET)
+            self.assertEqual(MODULE.removal_phase_context(phase, **kwargs)[1].name, "removal-ordinary-test.xcresult")
+            for mutation in (dict(channel=channel.parent / ("r-" + "0" * 32)), dict(channel=Path("/foreign/r-" + "a" * 32)),
+                             dict(source="b" * 40), dict(target=MODULE.INTEL_TARGET), dict(file_limit=(-1, -1))):
+                with self.assertRaises(MODULE.Refused): MODULE.removal_phase_context(phase, **dict(kwargs, **mutation))
+            for mutation in (dict(PATH="/foreign"), dict(UNEXPECTED="value"), {MODULE.REMOVAL_CHANNEL_ENV: str(channel) + "/other"}):
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.removal_phase_context(make_phase(root, dict(environment, **mutation)), **kwargs)
+
+        # Actual result/receipt descriptors in disposable files; all native calls remain inert.
+        for fault in (None, "native-nonzero", "query-nonzero", "result-replaced", "source-changed",
+                      "bad-marker", "result-close", "receipt-close", "late-receipt"):
+            with self.subTest(removal_finality=fault), tempfile.TemporaryDirectory(prefix="mrk-removal-ui-data-") as temporary:
+                normal = Path(temporary); derived = normal / "DerivedData"
+                result = normal / "removal-ordinary-test.xcresult"; result.mkdir(mode=0o700)
+                stdout, summary, tests = output("ordinary")
+                if fault == "bad-marker": stdout = stdout.replace(b"gateClosed=1", b"gateClosed=0")
+                original = subprocess.CompletedProcess(["inert-test"], 65 if fault == "native-nonzero" else 0, stdout, b"")
+                tick, result_fd, receipt_fd, closed = [0], [None], [None], []
+                phase = make_phase(normal, now=lambda: tick[0])
+                def query(role, argv, seconds, cap):
+                    if fault == "result-replaced" and role == "normal-ui-summary":
+                        result.rename(normal / "old-result"); result.mkdir(mode=0o700)
+                    return subprocess.CompletedProcess(argv, 66 if fault == "query-nonzero" else 0,
+                        summary if role == "normal-ui-summary" else tests, b"")
+                phase.call = query
+                original_open, original_close = MODULE.os.open, MODULE.os.close
+                def opened(path, flags, *args, **kwargs):
+                    fd = original_open(path, flags, *args, **kwargs)
+                    if str(path).endswith(".runner-admission.json"): receipt_fd[0] = fd
+                    return fd
+                def directory(path):
+                    fd = original_open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                    result_fd[0] = fd; return fd
+                def close(fd):
+                    original_close(fd); closed.append(fd)
+                    if fault == "result-close" and receipt_fd[0] is None and fd == result_fd[0]: raise OSError("synthetic consumed result close")
+                    if receipt_fd[0] is not None and fd == receipt_fd[0]:
+                        if fault == "receipt-close": raise OSError("synthetic consumed receipt close")
+                        if fault == "late-receipt": tick[0] = 585 * 10**9
+                before = {"inert-source": ["fixed"]}
+                post = {} if fault == "source-changed" else before
+                with patch.object(MODULE, "removal_phase_context", return_value=(MODULE.CLASS + MODULE.REMOVAL_METHODS["ordinary"], result)), \
+                     patch.object(MODULE, "normal_source_state", side_effect=[before, post]), \
+                     patch.object(MODULE, "output_data_read_build", return_value="b" * 64), \
+                     patch.object(MODULE, "run_admitted_test", return_value=(original, {"originalClosesCompleted": True})), \
+                     patch.object(MODULE, "open_directory", side_effect=directory), \
+                     patch.object(MODULE, "_removal_resource", resource), \
+                     patch.object(MODULE.os, "open", side_effect=opened), patch.object(MODULE.os, "close", side_effect=close):
+                    kwargs = dict(case="ordinary", derived=derived, channel=channel, source=source, file_limit=limit)
+                    if fault is None:
+                        returned, facts = MODULE.execute_removal_ui_phase(phase, **kwargs)
+                        self.assertIs(returned, original)
+                        self.assertEqual(facts["workerJoin"], "pending-caller-original-join")
+                        self.assertTrue(phase.clock.finalized)
+                    else:
+                        with self.assertRaises((MODULE.Refused, MODULE.NativeQueryFailure, OSError)):
+                            MODULE.execute_removal_ui_phase(phase, **kwargs)
+                        self.assertTrue(phase.clock.failed)
+                    with self.assertRaises(MODULE.Refused): MODULE.execute_removal_ui_phase(phase, **kwargs)
+                if result_fd[0] is not None:
+                    with self.assertRaises(OSError): os.fstat(result_fd[0])
+                receipt = result.with_suffix(".runner-admission.json")
+                if fault not in (None, "receipt-close", "late-receipt"): self.assertFalse(receipt.exists())
+                if fault is None:
+                    self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
+                    self.assertEqual(json.loads(receipt.read_bytes())["observation"]["gateFree"], "unqualified")
+
+
     def test_normal_phase_deadlines_file_limits_source_and_receipt_finality(self):
         for phase, limit in (("build", 32 * 1024**3), ("test", 1024**3), ("summary", 1024**3)):
             self.assertEqual(MODULE.normal_file_limit(phase, (limit, limit)), (limit, limit))
@@ -4111,7 +4344,8 @@ class NormalPhaseDataTests(unittest.TestCase):
         data_method = "testPositiveAndroidOutputCustodyData"
         data_case = "-[MRKNormalAppUITests.NormalAppUITests " + data_method + "]"
         data_namespace = b"MRK_MACOS_ANDROID_OUTPUT_DATA_FAILURE"
-        data_scenarios = ('valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start')
+        data_scenarios = ('valid', 'late-close', 'extra-operation', 'work', 'journal', 'project-cache', 'extra-artifact', 'symlink', 'hardlink', 'depth', 'mode', 'input', 'wrong-result', 'identity', 'repeated-start',
+            'ios-valid', 'ios-work', 'ios-extra-operation', 'ios-foreign-output', 'ios-symlink', 'ios-replacement', 'ios-partial-open', 'ios-late-close', 'ios-input')
         data_reasons = (
             (b'fixture: Android AAB byte bound', 'r001'),
             (b'fixture: Android AAB exact EOF', 'r002'),
@@ -4262,7 +4496,9 @@ class NormalPhaseDataTests(unittest.TestCase):
             "        // A one-case transfer of observation custody", 1)[0]
         closure = swift.split("        private static func facts(", 1)[1].split(
             "        // A one-case transfer of observation custody", 1)[0]
-        closure += swift.split("        func closeOriginals() throws {", 1)[1].split("\n        }", 1)[0]
+        self.assertEqual(swift.count("    private final class LocalFixture {"), 1)
+        local_fixture = swift.split("    private final class LocalFixture {", 1)[1]
+        closure += local_fixture.split("        func closeOriginals() throws {", 1)[1].split("\n        }", 1)[0]
         for literal, _ in data_reasons:
             raw = literal.decode("ascii")
             self.assertTrue(('"' + raw + '"') in closure or ('"' + raw.removeprefix("fixture: ") + '"') in closure, raw)

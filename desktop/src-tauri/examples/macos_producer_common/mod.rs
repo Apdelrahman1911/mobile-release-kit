@@ -22,6 +22,19 @@ impl ReadRole {
 }
 
 pub(super) fn need(value:bool,reason:&'static str)->Result<()> {if value {Ok(())} else {Err(reason)}}
+// Ordinary inputs/package outputs retain their existing at-most-five gate.
+// The only sixth-row entry is a compile-fixed observer input roster; neither
+// helper opens a reader or makes inode DATA an original-handle authority.
+pub(super) fn roster_admission_data(wanted:&[(&str,u64)])->Result<()> {
+    need(!wanted.is_empty()&&wanted.len()<=5,"root-roster-bound")
+}
+#[cfg(feature="macos-remove-observer-producer")]
+pub(super) fn observer_input_roster_data(wanted:&[(&str,u64)])->Result<()> {
+    const NAMES:[&str;6]=["remove-descriptor-input.json","producer.json","producer.sig",
+        "install-inventory.json","mrk-macos-remove","installed-mrk-macos-remove"];
+    need(wanted.len()==NAMES.len()&&wanted.iter().zip(NAMES).all(|((name,ino),expected)|
+        *name==expected&&*ino!=0),"observer-input-roster")
+}
 pub(super) fn hash(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
 pub(super) fn target()->MaintenanceTargetData {
     #[cfg(target_arch="aarch64")] {MaintenanceTargetData::Arm64}
@@ -199,7 +212,13 @@ impl Book {
         ok&&final_ready_data(self.unknown.get(),self.pending.get(),Instant::now()<self.final_end,&states)
     }
     pub(super) fn roster(&mut self,root:usize,wanted:&[(&str,u64)])->Result<()> {
-        need(!wanted.is_empty()&&wanted.len()<=5,"root-roster-bound")?;
+        roster_admission_data(wanted)?;self.roster_exact(root,wanted)
+    }
+    #[cfg(feature="macos-remove-observer-producer")]
+    pub(super) fn roster_observer_inputs(&mut self,root:usize,wanted:&[(&str,u64)])->Result<()> {
+        observer_input_roster_data(wanted)?;self.roster_exact(root,wanted)
+    }
+    fn roster_exact(&mut self,root:usize,wanted:&[(&str,u64)])->Result<()> {
         self.check(root)?;let row=&self.originals[root];let(parent,name)=(row.parent,row.name.clone());
         let reader=self.open(parent,&name,true,true)?;need(self.id(reader)?==self.id(root)?,"roster-original")?;
         let result=(||->Result<()> {
@@ -219,7 +238,7 @@ impl Book {
                     let end=offset.checked_add(11+len).filter(|end|*end<=used).ok_or("root-roster-record")?;
                     let name=std::str::from_utf8(&buffer[offset+11..end]).map_err(|_|"root-roster-name")?;offset=end;
                     if name=="."||name==".." {continue;}
-                    need(kind==nix::libc::DT_REG&&wanted.iter().any(|(value,_)|*value==name)&&found.len()<5
+                    need(kind==nix::libc::DT_REG&&wanted.iter().any(|(value,_)|*value==name)&&found.len()<wanted.len()
                         &&ino!=0&&found.insert(name.to_owned(),ino).is_none(),"root-roster-member")?;
                 }
             }

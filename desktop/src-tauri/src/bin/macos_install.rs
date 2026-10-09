@@ -2,6 +2,16 @@
 //! into the final app/runtime destinations. One original parent admits the
 //! completed package; its exact self-worker owns the existing copy writer.
 //! No Python, app, daemon or general publisher runs as root.
+#[cfg(any(
+    all(feature="macos-remove-observer-producer",any(feature="macos-installed-installer",feature="macos-installed-remover",
+        feature="macos-installed-installer-fixture",feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer")),
+    all(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"),
+    all(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"),
+        any(feature="macos-installed-installer-fixture",feature="macos-installed-installer")),
+    all(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"),
+        not(feature="macos-installed-remover"))
+))]
+compile_error!("removal fixture roles require exclusive remover target and never alternate roots");
 #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn main() { eprintln!("This Installer requires LP64 ARM64 or Intel macOS 26."); std::process::exit(1); }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -73,6 +83,8 @@ mod installer {
         removal_payload_plan:Option<maintenance::RemovalPayloadPlan>,
         removal_observation_control:Option<u64>,removal_observation_reserved:u64,
         removal_archive_scan: Option<maintenance::RemovalArchiveScan>,
+        #[cfg(feature = "macos-installed-removal-observer")]
+        removal_observer_projection: Option<maintenance::RemovalObserverProjection>,
         payload_written: u64, payload_write_calls: u64,
         stage: Option<usize>, stage_name: Option<String>, app: Option<usize>, runtime: Option<usize>,
         runtime_publication: &'static str, app_publication: &'static str, payload_verified: bool,
@@ -192,13 +204,62 @@ mod installer {
     }
     // Exactly four original descriptors, entirely separate from Install's
     // immutable completed books. No new installation, retry, cleanup or clock.
-    struct Export { originals: Vec<Original>, end: Instant, unknown: bool }
+    struct Export { originals: Vec<Original>, end: Instant, unknown: bool,
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fixture_readback:bool,
+    }
     impl Export {
-        fn new(end: Instant) -> Self { Self { originals: Vec::with_capacity(4), end, unknown: false } }
+        fn new(end: Instant) -> Self { Self { originals: Vec::with_capacity(4), end, unknown: false,
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            fixture_readback:false,
+        } }
+        fn original_limit(&self)->usize {
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            if self.fixture_readback {return 5;}
+            4
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn new_fixture(end:Instant)->Self {Self{originals:Vec::with_capacity(5),end,unknown:false,fixture_readback:true}}
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn fixture_write_readback(&mut self,name:&str,bytes:&[u8])->Result<()> {
+            check(self.fixture_readback && self.originals.is_empty(),"removal-fixture-export-once")?;
+            self.write(name,bytes)?;
+            // The original four records are never recycled. This fifth record
+            // is a separately reserved real readonly reader of the sealed leaf.
+            check(self.originals.len()==4 && self.originals[3].state==State::Closed && self.originals[3].fd.is_none(),
+                "removal-fixture-export-writer-close")?;
+            let sealed=self.originals[3].identity.ok_or("removal-fixture-export-identity")?;
+            let n=self.reserve(Some(2),name,Role::Reader)?;
+            self.originals[n].state=State::Acquiring;
+            let opened=fcntl::openat(self.fd(2)?,name,flags(false),Mode::empty());self.adopt(n,opened)?;
+            check(self.observed(n)?==sealed,"removal-fixture-export-reader")?;
+            self.originals[n].identity=Some(sealed);self.correspondence(n,true)?;
+            check(stat::fstat(self.fd(n)?).map_err(|_|"removal-fixture-export-stat")?.st_flags==0,"removal-fixture-export-flags")?;
+            self.protected(n,false,Some(0o444),AclRole::Other)?;
+            native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_|"removal-fixture-export-attributes")?;
+            let mut at=0usize;let mut block=[0u8;4096];
+            loop {
+                self.clock()?;
+                let count=nix::sys::uio::pread(self.fd(n)?,&mut block,at as i64).map_err(|_|"removal-fixture-export-read")?;
+                self.clock()?;if count==0{break;}
+                check(count<=block.len() && at.checked_add(count).is_some_and(|end|end<=bytes.len())
+                    && block[..count]==bytes[at..at+count],"removal-fixture-export-content")?;at+=count;
+            }
+            check(at==bytes.len(),"removal-fixture-export-length")?;self.correspondence(n,true)?;
+            check(stat::fstat(self.fd(n)?).map_err(|_|"removal-fixture-export-stat")?.st_flags==0,"removal-fixture-export-flags")?;
+            check(self.close(n),"removal-fixture-export-reader-close")?;self.clock()?;
+            check(self.named(n)?==sealed,"removal-fixture-export-reader-post")?;
+            check(stat::fstatat(self.fd(2)?,name,AtFlags::AT_SYMLINK_NOFOLLOW)
+                .map_err(|_|"removal-fixture-export-name")?.st_flags==0,"removal-fixture-export-flags")?;
+            for (original,role) in [(0,AclRole::SystemRoot),(1,AclRole::SystemLibrary),(2,AclRole::SystemSupport)] {
+                self.protected(original,true,None,role)?;
+            }
+            Ok(())
+        }
         fn clock(&self) -> Result<()> { check(!self.unknown && Instant::now() < self.end, "export-deadline-or-unknown") }
         fn fd(&self, n: usize) -> Result<&OwnedFd> { self.originals.get(n).and_then(|r| r.fd.as_ref()).ok_or("export-original-missing") }
         fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
-            self.clock()?; check(self.originals.len() < 4, "export-original-bound")?;
+            self.clock()?; check(self.originals.len() < self.original_limit(), "export-original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd:None, state:State::Reserved, role,
                 parent, name:name.into(), identity:None }); Ok(n)
         }
@@ -364,6 +425,8 @@ mod installer {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
+                #[cfg(feature = "macos-installed-removal-observer")]
+                removal_observer_projection:None,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
                 metadata:installation_record::Progress::default(),
                 gate:MaintenanceGate::new(),registration:RegistrationReservation::new(),maintenance:None,
@@ -7892,6 +7955,201 @@ mod installer {
             assert!(failed.phase==RemovalArchivePhase::Refused);assert!(failed.complete_post(Ok(())).is_err());
         }
 
+        // Observer-only DATA from successful existing generation audits. This
+        // object never grants a payload opener, unlink, or native authority.
+        // The caller still requires the complete signed history census and its
+        // exact generation count before using finish(); per-row success alone
+        // cannot establish whole-audit success or an installed outcome.
+        #[cfg(feature = "macos-installed-removal-observer")]
+        pub(super) struct RemovalObserverProjection {
+            releases: [[u8; 255]; 9], release_lengths: [usize; 9],
+            retained: [[u8; 16]; 9], count: usize,
+            files: usize, directories: usize, digest: Sha256,
+            first_path: [u8; 1024], first_len: usize, failed: bool,
+        }
+        #[cfg(feature = "macos-installed-removal-observer")]
+        impl RemovalObserverProjection {
+            fn new_data() -> Self {
+                let mut digest = Sha256::new();
+                digest.update(b"MRK-REMOVE-OBSERVER-SIGNED-GENERATIONS-V1\0");
+                Self { releases: [[0; 255]; 9], release_lengths: [0; 9], retained: [[0; 16]; 9],
+                    count: 0, files: 0, directories: 0, digest,
+                    first_path: [0; 1024], first_len: 0, failed: false }
+            }
+            pub(super) fn begin(book: &mut Install) -> Result<()> {
+                check(book.removal_observer_projection.is_none(), "removal-observer-projection-once")?;
+                // Caller reserves 128KiB before enabling observation. All
+                // retained projection state is inline; no owned heap/FDs.
+                check(std::mem::size_of::<Self>() <= 128 * 1024
+                    && book.removal_control_reserved >= 128 * 1024,
+                    "removal-observer-projection-budget")?;
+                book.removal_observer_projection = Some(Self::new_data()); Ok(())
+            }
+            fn record(&mut self, generation: &GenerationData, index: &installation_record::InventoryIndex<'_>) -> Result<()> {
+                self.record_data(generation.release_data().binding_data(), generation.instance_data(),
+                    generation.retained_invocation_data(), index)
+            }
+            fn record_data(&mut self, binding: mobile_release_desktop::macos_install_maintenance::ReleaseBindingData<'_>,
+                instance: &str, retained: Option<&str>, index: &installation_record::InventoryIndex<'_>) -> Result<()> {
+                check(!self.failed, "removal-observer-projection-failed")?;
+                // Latch before every fallible operation: a partial row may
+                // never be retried or returned as an earlier successful view.
+                self.failed = true;
+                check(self.count < 9 && retained.is_none() == (self.count == 0)
+                    && component(binding.release) && binding.release.len() <= 255,
+                    "removal-observer-projection-order")?;
+                let invocation = match retained { Some(v) => worker::removal_hex_data::<16>(v)?, None => [0; 16] };
+                worker::removal_hex_data::<16>(instance)?;
+                worker::removal_hex_data::<20>(binding.source_commit)?;
+                for value in [binding.protocol_sha256, binding.runtime_manifest_sha256, binding.inventory_sha256,
+                    binding.signing_policy_sha256, binding.package_sha256] { worker::removal_hex_data::<32>(value)?; }
+                check((0..self.count).all(|i| &self.releases[i][..self.release_lengths[i]] != binding.release.as_bytes()
+                    && (retained.is_none() || self.retained[i] != invocation)), "removal-observer-projection-duplicate")?;
+                check(index.files.len() <= installation_record::FILE_LIMIT
+                    && index.directories.len() <= installation_record::FILE_LIMIT
+                    && index.directories.contains("app") && index.directories.contains("runtime"),
+                    "removal-observer-projection-count")?;
+                let files = self.files.checked_add(index.files.len()).ok_or("removal-observer-projection-count")?;
+                let directories = self.directories.checked_add(index.directories.len()).ok_or("removal-observer-projection-count")?;
+                check(files.checked_add(directories).is_some_and(|n| n <= 18 * installation_record::FILE_LIMIT),
+                    "removal-observer-projection-count")?;
+                if self.count == 0 {
+                    let first = Self::first_payload_data(index)?;
+                    check(!first.is_empty() && first.len() <= self.first_path.len(), "removal-observer-projection-first")?;
+                    self.first_path[..first.len()].copy_from_slice(first.as_bytes()); self.first_len = first.len();
+                }
+                // Hash fixed-field, length-delimited signed DATA, not live
+                // identities, presence, guessed effects, or raw output paths.
+                self.digest.update((self.count as u64).to_be_bytes());
+                self.digest.update([u8::from(retained.is_some())]);
+                for value in [binding.profile, binding.package_identifier, binding.bundle_identifier,
+                    binding.package_version, binding.release, binding.source_commit, binding.protocol_sha256,
+                    binding.runtime_manifest_sha256, binding.inventory_sha256, binding.signing_policy_sha256,
+                    binding.package_sha256, instance, retained.unwrap_or("")] {
+                    check(value.len() <= 1024, "removal-observer-projection-field")?;
+                    self.digest.update((value.len() as u64).to_be_bytes()); self.digest.update(value.as_bytes());
+                }
+                self.digest.update((index.files.len() as u64).to_be_bytes());
+                self.digest.update((index.directories.len() as u64).to_be_bytes());
+                self.releases[self.count][..binding.release.len()].copy_from_slice(binding.release.as_bytes());
+                self.release_lengths[self.count] = binding.release.len(); self.retained[self.count] = invocation;
+                self.count += 1; self.files = files; self.directories = directories; self.failed = false; Ok(())
+            }
+            fn first_payload_data<'a>(index: &'a installation_record::InventoryIndex<'_>) -> Result<&'a str> {
+                // Actual executor: current app's sorted postorder children,
+                // with app root kept until last, then current runtime. A
+                // global lexicographic minimum would incorrectly choose a
+                // nonempty directory before its first child was removed.
+                for root in ["app", "runtime"] {
+                    let mut cursor = root;
+                    for depth in 0..=16 {
+                        let first = index.files.keys().chain(index.directories.iter()).map(String::as_str)
+                            .filter(|path| path.rsplit_once('/').is_some_and(|(parent, _)| parent == cursor)).min();
+                        match first {
+                            None if cursor == "app" => break,
+                            None => return Ok(cursor),
+                            Some(path) => {
+                                check(path.len() <= 1024, "removal-observer-projection-first")?;
+                                if index.files.contains_key(path) { return Ok(path); }
+                                check(depth < 16 && index.directories.contains(path), "removal-observer-projection-depth")?;
+                                cursor = path;
+                            }
+                        }
+                    }
+                }
+                Err("removal-observer-projection-first")
+            }
+            pub(super) fn generation_count_data(&self) -> usize { self.count }
+            pub(super) fn finish(&self) -> Result<(usize, usize, [u8; 32], &str)> {
+                check(!self.failed && self.count > 0 && self.count <= 9 && self.first_len > 0
+                    && self.first_len <= self.first_path.len(), "removal-observer-projection-incomplete")?;
+                let mut digest = self.digest.clone(); digest.update((self.count as u64).to_be_bytes());
+                let first = std::str::from_utf8(&self.first_path[..self.first_len]).map_err(|_| "removal-observer-projection-first")?;
+                Ok((self.files, self.directories, digest.finalize().into(), first))
+            }
+        }
+
+        #[cfg(all(test, feature = "macos-installed-removal-observer"))]
+        pub(super) fn removal_observer_projection_data_checks() {
+            use mobile_release_desktop::macos_install_maintenance::ReleaseBindingData;
+            let source = "1".repeat(40); let hash = "2".repeat(64); let instance = "3".repeat(32);
+            macro_rules! binding { ($release:expr) => { ReleaseBindingData { profile: "fixture", package_identifier: "test.mrk",
+                bundle_identifier: "test.mrk", package_version: "1", release: $release, source_commit: &source,
+                protocol_sha256: &hash, runtime_manifest_sha256: &hash, inventory_sha256: &hash,
+                signing_policy_sha256: &hash, package_sha256: &hash } }; }
+            let entries = ["app/A/z", "app/B", "runtime/python3"].map(|path| Entry {
+                path: path.into(), size: 1, sha256: hash.clone(), executable: false });
+            let mut index = installation_record::InventoryIndex {
+                files: entries.iter().map(|entry| (entry.path.clone(), entry)).collect(),
+                directories: ["app", "app/A", "runtime"].into_iter().map(str::to_owned).collect(), payload_bytes: 3 };
+            assert!(std::mem::size_of::<RemovalObserverProjection>() < 128 * 1024);
+            assert_eq!(RemovalObserverProjection::first_payload_data(&index).unwrap(), "app/A/z");
+            index.files.remove("app/A/z");
+            assert_eq!(RemovalObserverProjection::first_payload_data(&index).unwrap(), "app/A");
+            index.directories.remove("app/A");
+            assert_eq!(RemovalObserverProjection::first_payload_data(&index).unwrap(), "app/B");
+            index.files.remove("app/B");
+            assert_eq!(RemovalObserverProjection::first_payload_data(&index).unwrap(), "runtime/python3");
+            index.files.clear();
+            assert_eq!(RemovalObserverProjection::first_payload_data(&index).unwrap(), "runtime");
+            index.files = entries.iter().map(|entry| (entry.path.clone(), entry)).collect();
+            index.directories.insert("app/A".into());
+            let mut first = RemovalObserverProjection::new_data(); assert!(first.finish().is_err());
+            first.record_data(binding!("current"), &instance, None, &index).unwrap();
+            let output = first.finish().unwrap();
+            assert_eq!((output.0, output.1, output.3), (3, 3, "app/A/z"));
+            assert_eq!(first.generation_count_data(), 1);
+            let mut same = RemovalObserverProjection::new_data();
+            same.record_data(binding!("current"), &instance, None, &index).unwrap();
+            assert_eq!(same.finish().unwrap(), first.finish().unwrap());
+            // Expected commitment changes with signed DATA, not a claimed
+            // physical presence flag. No simulated observer result is used.
+            let changed_hash = "4".repeat(64); let mut changed_binding = binding!("current");
+            changed_binding.inventory_sha256 = &changed_hash;
+            let mut changed = RemovalObserverProjection::new_data();
+            changed.record_data(changed_binding, &instance, None, &index).unwrap();
+            assert_ne!(changed.finish().unwrap().2, first.finish().unwrap().2);
+            let ids: Vec<String> = (1..=9).map(|i| format!("{i:032x}")).collect();
+            let releases: Vec<String> = (1..=9).map(|i| format!("retained-{i}")).collect();
+            for i in 0..8 { first.record_data(binding!(&releases[i]), &instance, Some(&ids[i]), &index).unwrap(); }
+            assert_eq!(first.generation_count_data(), 9);
+            assert_eq!((first.finish().unwrap().0, first.finish().unwrap().1), (27, 27));
+            assert!(first.record_data(binding!(&releases[8]), &instance, Some(&ids[8]), &index).is_err());
+            assert!(first.finish().is_err());
+            for bad in 0..6 {
+                let mut value = RemovalObserverProjection::new_data();
+                if bad != 0 { value.record_data(binding!("current"), &instance, None, &index).unwrap(); }
+                let result = match bad {
+                    0 => value.record_data(binding!("retained"), &instance, Some(&ids[0]), &index),
+                    1 => value.record_data(binding!("another-current"), &instance, None, &index),
+                    2 => value.record_data(binding!("current"), &instance, Some(&ids[0]), &index),
+                    3 => value.record_data(binding!("retained"), &instance, Some(&"0".repeat(32)), &index),
+                    4 => value.record_data(binding!("retained"), &"0".repeat(32), Some(&ids[0]), &index),
+                    _ => {
+                        value.record_data(binding!("retained"), &instance, Some(&ids[0]), &index).unwrap();
+                        value.record_data(binding!("another"), &instance, Some(&ids[0]), &index)
+                    }
+                };
+                assert!(result.is_err()); assert!(value.finish().is_err());
+                assert!(value.record_data(binding!("retry"), &instance, Some(&ids[8]), &index).is_err());
+            }
+            let mut forward = RemovalObserverProjection::new_data();
+            let mut reverse = RemovalObserverProjection::new_data();
+            for value in [&mut forward, &mut reverse] { value.record_data(binding!("current"), &instance, None, &index).unwrap(); }
+            for i in [0, 1] { forward.record_data(binding!(&releases[i]), &instance, Some(&ids[i]), &index).unwrap(); }
+            for i in [1, 0] { reverse.record_data(binding!(&releases[i]), &instance, Some(&ids[i]), &index).unwrap(); }
+            assert_ne!(forward.finish().unwrap().2, reverse.finish().unwrap().2);
+            index.directories.remove("runtime");
+            let mut bad = RemovalObserverProjection::new_data();
+            assert!(bad.record_data(binding!("current"), &instance, None, &index).is_err());
+            assert!(bad.finish().is_err());
+            index.directories.insert("runtime".into()); index.files.clear();
+            index.directories.remove("app/A");
+            let mut path = "app".to_owned();
+            for _ in 0..17 { path.push_str("/a"); index.directories.insert(path.clone()); }
+            assert!(RemovalObserverProjection::first_payload_data(&index).is_err());
+        }
+
         // Removal-only plan captured by the SAME fully admitted second walker.
         // Only this module constructs nodes; wire/parser DATA cannot mint it.
         const REMOVAL_PLAN_NODES:usize=2*installation_record::FILE_LIMIT*(mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1);
@@ -8105,7 +8363,7 @@ mod installer {
             current_app:Option<Identity>,complete:bool,
         }
         impl RemovalRemainingPlan {
-            fn new(book:&Install,source:&worker::RemovalResumeSource,base:u64)->Result<Self> {
+            fn new(book:&Install,source:worker::RemovalResumeRead<'_>,base:u64)->Result<Self> {
                 source.authenticated_selection(book)?;
                 let reserved=removal_effective_control_bytes(book)?;
                 check(base>=reserved && base<=16*1024*1024,"removal-resume-plan-budget")?;
@@ -8937,11 +9195,18 @@ mod installer {
         }
         fn audit_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
             allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
-            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None)
+            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,false)
+        }
+        // Only the selected Current-State current+retained loop uses this
+        // entry. Historical prefix/archive audits use the ordinary wrapper;
+        // they still run completely but are not extra selected generations.
+        fn audit_selected_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
+            allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
+            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,true)
         }
         fn audit_generation_mode(book:&mut Install,destination:usize,versions:usize,generation:&GenerationData,
-            allow_missing_app:bool,keep:bool,mut resume:Option<(&worker::RemovalResumeSource,&mut RemovalRemainingPlan)>)
-            ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
+            allow_missing_app:bool,keep:bool,mut resume:Option<(worker::RemovalResumeRead<'_>,&mut RemovalRemainingPlan)>,
+            selected_current_history:bool) ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
             let binding = generation.release_data().binding_data();
             let release = book.open(Some(versions), binding.release, true)?;
             check(book.recorded_directory(release)? == generation.release_directory_data(), "maintenance-release-original")?;
@@ -9034,6 +9299,10 @@ mod installer {
                 book.forward_close(release, "maintenance-retained-release-close")?;
             }
             if let Some((_,plan))=resume{plan.end_generation()?;}else{payload_generation_end(book)?;}
+            if selected_current_history {
+                #[cfg(feature = "macos-installed-removal-observer")]
+                if let Some(projection) = book.removal_observer_projection.as_mut() { projection.record(generation, &index)?; }
+            }
             Ok((app, release, cost, (raw.len() + descriptor.len()) as u64))
         }
         // Strict known-control prelude, still DATA. It may not select a payload
@@ -9090,7 +9359,7 @@ mod installer {
             }
             check(names.len()<=286,"removal-resume-root-count")?;Ok(names)
         }
-        pub(super) fn removal_resume_prelude(book:&mut Install,source:&worker::RemovalResumeSource)
+        pub(super) fn removal_resume_prelude(book:&mut Install,source:worker::RemovalResumeRead<'_>)
             ->Result<(RemovalPendingArchiveCensus,[u8;32])> {
             let selected=source.prelude_selection_data(book)?;
             reserve_removal_snapshot_work(book)?;
@@ -9137,7 +9406,7 @@ mod installer {
             // a restrictive preallocation quote, not new available memory.
             usize::try_from(size).ok()?.checked_mul(8)?.checked_add(2*installation_record::FILE_LIMIT*1280)?.checked_add(256*1024)
         }
-        fn removal_resume_forecast(book:&Install,source:&worker::RemovalResumeSource,history:&History,base:u64)->Result<RemovalResumeForecast> {
+        fn removal_resume_forecast(book:&Install,source:worker::RemovalResumeRead<'_>,history:&History,base:u64)->Result<RemovalResumeForecast> {
             let (scan,post)=source.history_original_costs_data()?;
             let mut out=RemovalResumeForecast {files:0,directories:0,
                 controls:source.genesis_data(book)?.controls_data().len() as u64,prior:source.history_rows_data()? as u64,scan,post};
@@ -9233,7 +9502,7 @@ mod installer {
             reserve_removal_original_storage(book,end)?;
             check(removal_effective_control_bytes(book)?==effective,"removal-resume-original-storage-memory")?;Ok(expected)
         }
-        fn removal_resume_retain_controls(book:&mut Install,source:&worker::RemovalResumeSource,
+        fn removal_resume_retain_controls(book:&mut Install,source:worker::RemovalResumeRead<'_>,
             plan:&mut RemovalRemainingPlan,versions:usize,history:&mut History)->Result<RemovalResumeControls> {
             let root=source.root_original();let generation=history.current.state.current_data();
             let binding=generation.release_data().binding_data();
@@ -9404,7 +9673,7 @@ mod installer {
                 Ok((end,storage))
             }
         }
-        fn removal_resume_compare_capture(book:&Install,source:&worker::RemovalResumeSource)->Result<()> {
+        fn removal_resume_compare_capture(book:&Install,source:worker::RemovalResumeRead<'_>)->Result<()> {
             let capture=book.removal_snapshot_capture.as_ref().ok_or("removal-resume-capture-missing")?;
             check(!capture.failed && !capture.complete && capture.root==source.root_original(),"removal-resume-capture-state")?;
             let expected=source.genesis_data(book)?;
@@ -9426,7 +9695,7 @@ mod installer {
                     "removal-resume-gate-changed")?;held_bytes(book,n,raw)?;
             }capture.memory(0)?;Ok(())
         }
-        pub(super) fn observe_removal_resume(book:&mut Install,source:&worker::RemovalResumeSource,
+        pub(super) fn observe_removal_resume(book:&mut Install,source:worker::RemovalResumeRead<'_>,
             prior:Option<&RemovalResumeFirst>)->Result<RemovalResumeObservation> {
             let selected=source.authenticated_selection(book)?;let root=source.root_original();
             check(book.removal_payload_plan.is_none() && book.removal_snapshot_capture.is_none(),"removal-resume-walk-once")?;
@@ -9459,7 +9728,7 @@ mod installer {
                 let path=format!("versions/{}/{}",binding.release,installation_record::INVENTORY_NAME);
                 plan.transient=removal_resume_inventory_quote_data(source.genesis_control_data(book,&path)?.len_data())
                     .ok_or("removal-resume-inventory-memory")?;plan.memory_with_book(book,0)?;
-                let (_,_,cost,_)=audit_generation_mode(book,root,versions,&generation,false,false,Some((source,&mut plan)))?;
+                let (_,_,cost,_)=audit_generation_mode(book,root,versions,&generation,false,false,Some((source,&mut plan)),true)?;
                 plan.transient=0;plan.memory_with_book(book,0)?;
                 payload=payload.checked_add(cost.bytes).ok_or("removal-resume-storage")?;
                 let (_,bytes)=generation_controls(book,root,&generation,selected,&mut controls_wanted,false)?;
@@ -9898,12 +10167,113 @@ mod installer {
                 book.check_name(self.inner.old_release.ok_or("removal-current-release")?,true)
             }
         }
+        #[cfg(feature="macos-installed-removal-observer")]
+        pub(super) struct RemovalObserverFacts {
+            pub(super) state:[u8;32],pub(super) files:usize,pub(super) directories:usize,
+            pub(super) present_files:usize,pub(super) present_directories:usize,
+            pub(super) commitment:[u8;32],pub(super) app:bool,pub(super) first_absent:bool,pub(super) all_absent:bool,
+            pub(super) archives:serde_json::Value,
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        pub(super) fn removal_observer_archives_data(census:&RemovalArchiveCensus)->Result<serde_json::Value> {
+            use mobile_release_desktop::macos_remove_record::PrefixData;
+            check(census.rows.len()<=64,"removal-observer-archives-bound")?;
+            let mut rows=Vec::with_capacity(census.rows.len());
+            for (index,row) in census.rows.iter().enumerate() {
+                let attempt=row.attempt_data().ok_or("removal-observer-archive-unadmitted")?;
+                check(attempt.first_failure_data().is_none(),"removal-observer-archive-failed")?;
+                let genesis=census.genesis_index_data(index).and_then(|n|census.rows.get(n))
+                    .ok_or("removal-observer-archive-genesis")?;
+                let snapshot=genesis.files()[0].as_ref().ok_or("removal-observer-archive-genesis")?;
+                let prefix=match attempt.prefix_data(){PrefixData::AdmissionRecorded=>1,PrefixData::AppWithdrawn=>2,
+                    PrefixData::PayloadRosterRemoval=>3,PrefixData::PayloadAbsentObserved=>4};
+                check(row.name().strip_prefix(".remove-")==Some(archive_hex_text_data(attempt.root_nonce_data()).as_str()),
+                    "removal-observer-archive-name")?;
+                // Immutable files only: a surviving archived app's later own
+                // deletion may change its directory, not these exact controls.
+                let mut immutable=Sha256::new();immutable.update(b"MRK-REMOVAL-OBSERVER-IMMUTABLE-FILES-V1\0");
+                for (slot,file) in row.files().iter().enumerate() {
+                    immutable.update([slot as u8,u8::from(file.is_some())]);
+                    if let Some(file)=file {
+                        let id=file.identity();immutable.update(file.len().to_le_bytes());immutable.update(file.digest());
+                        immutable.update(file.flags().to_le_bytes());immutable.update(id.dev.to_le_bytes());immutable.update(id.ino.to_le_bytes());
+                        immutable.update(id.mode.to_le_bytes());immutable.update(id.uid.to_le_bytes());immutable.update(id.gid.to_le_bytes());
+                        immutable.update(id.links.to_le_bytes());immutable.update(id.size.to_le_bytes());
+                        immutable.update(id.mtime.to_le_bytes());immutable.update(id.mtime_ns.to_le_bytes());
+                        immutable.update(id.ctime.to_le_bytes());immutable.update(id.ctime_ns.to_le_bytes());
+                    }
+                }
+                rows.push(serde_json::json!({"invocation":archive_hex_text_data(attempt.root_nonce_data()),
+                    "snapshotSha256":row.files()[0].as_ref().map(|f|archive_hex_text_data(f.digest())),
+                    "tipSha256":archive_hex_text_data(attempt.raw_tip_sha256_data()),"prefix":prefix,
+                    "requestId":archive_hex_text_data(attempt.request_id_data()),"rootNonce":archive_hex_text_data(attempt.root_nonce_data()),
+                    "previousTipSha256":attempt.previous_attempt_data().map(|(_,_,sha)|archive_hex_text_data(sha)),
+                    "genesisSnapshotSha256":archive_hex_text_data(snapshot.digest()),
+                    "immutableControlsSha256":archive_hex_text_data(&immutable.finalize())}));
+            }
+            Ok(serde_json::Value::Array(rows))
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        pub(super) fn removal_observer_current_facts(book:&mut Install,observed:&RemovalObserved,
+            target:&worker::RemovalObserverTarget,holder:&mut CompleteGenerationPrefixSource)->Result<RemovalObserverFacts> {
+            observed.post(book)?;target.current_selection(book)?;
+            let history=observed.inner.history.as_ref().ok_or("removal-observer-history")?;
+            let projection=book.removal_observer_projection.as_ref().ok_or("removal-observer-projection")?;
+            let (files,directories,commitment,_)=projection.finish()?;
+            check(projection.generation_count_data()==1+history.current.state.retained_data().count(),"removal-observer-generation-roster")?;
+            let state=Sha256::digest(observed.snapshot_state_bytes()?).into();
+            // Borrow the ONE complete first census for a readonly projection;
+            // no take()/phase reset or snapshot/execution admission is created.
+            let scan=book.removal_archive_scan.take().ok_or("removal-observer-census")?;
+            let result=(|| {
+                check(scan.phase==RemovalArchivePhase::FirstComplete && scan.root==target.root_original()
+                    && scan.first.is_none(),"removal-observer-census-phase")?;
+                let census=scan.current.as_ref().ok_or("removal-observer-census")?;
+                let read=PrefixRead::Removal(worker::RemovalPrefixRead::observed(book,worker::RemovalCurrentRead::Observer(target),
+                    &observed.inner.prepared,observed.inner.old_release.ok_or("removal-observer-release")?)?);
+                let mut source=RehomeRetrySource::CompleteGeneration(holder);source.ready()?;
+                post_removal_archive_references_inner(book,census,Some(&read),&mut source)?;
+                source.ready()?;read.post_source(book)?;
+                let archives=removal_observer_archives_data(census)?;
+                observed.post(book)?;target.current_selection(book)?;
+                Ok(RemovalObserverFacts{state,files,directories,present_files:files,present_directories:directories,
+                    commitment,app:true,first_absent:false,all_absent:false,archives})
+            })();
+            book.removal_archive_scan=Some(scan);result
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        pub(super) fn removal_observer_remaining_facts(book:&Install,source:&worker::RemovalObserverTarget,
+            observed:&RemovalResumeObservation,census:&RemovalArchiveCensus)->Result<RemovalObserverFacts> {
+            source.authenticated_selection(book)?;
+            let plan=&observed.plan;
+            check(plan.complete && plan.active.is_none() && plan.stack.iter().all(Option::is_none),"removal-observer-plan-incomplete")?;
+            let projection=book.removal_observer_projection.as_ref().ok_or("removal-observer-projection")?;
+            let (files,directories,commitment,first)=projection.finish()?;
+            check(projection.generation_count_data()==plan.generations.len() && files as u64==plan.expected_files
+                && directories as u64==plan.expected_directories,"removal-observer-generation-roster")?;
+            let present_files=usize::try_from(plan.present_files).map_err(|_|"removal-observer-count")?;
+            let present_directories=plan.nodes.iter().filter(|n|n.directory&&matches!(n.presence,RemovalRemainingPresence::Present{..})).count();
+            let first_absent=plan.nodes.iter().any(|n|n.generation==0 && matches!(n.presence,RemovalRemainingPresence::Absent{..})
+                && (n.path==first || n.directory&&first.strip_prefix(&n.path).is_some_and(|tail|tail.starts_with('/'))));
+            let all_absent=present_files==0 && present_directories==0
+                && plan.nodes.iter().all(|n|matches!(n.presence,RemovalRemainingPresence::Absent{..}));
+            let state=source.genesis_data(book)?.binding_data()?.digests_data()[3];
+            Ok(RemovalObserverFacts{state,files,directories,present_files,present_directories,commitment,
+                app:plan.current_app.is_some(),first_absent,all_absent,archives:removal_observer_archives_data(census)?})
+        }
         pub(super) fn observe_removal(book: &mut Install, source: &worker::RemovalAdmission,holder:&mut CompleteGenerationPrefixSource) -> Result<RemovalObserved> {
-            let result=observe_removal_with_archives(book,source,holder);
+            let result=observe_removal_with_archives(book,worker::RemovalCurrentRead::Live(source),holder);
             if result.is_err(){if let Some(scan)=book.removal_archive_scan.as_mut(){scan.phase=RemovalArchivePhase::Refused;}}
             result
         }
-        fn observe_removal_with_archives(book:&mut Install,source:&worker::RemovalAdmission,holder:&mut CompleteGenerationPrefixSource)->Result<RemovalObserved> {
+        #[cfg(feature = "macos-installed-removal-observer")]
+        pub(super) fn observe_removal_observer(book:&mut Install,source:&worker::RemovalObserverTarget,
+            holder:&mut CompleteGenerationPrefixSource)->Result<RemovalObserved> {
+            let result=observe_removal_with_archives(book,worker::RemovalCurrentRead::Observer(source),holder);
+            if result.is_err(){if let Some(scan)=book.removal_archive_scan.as_mut(){scan.phase=RemovalArchivePhase::Refused;}}
+            result
+        }
+        fn observe_removal_with_archives(book:&mut Install,source:worker::RemovalCurrentRead<'_>,holder:&mut CompleteGenerationPrefixSource)->Result<RemovalObserved> {
             let selected=source.current_selection(book)?.clone();
             source.reservation_post(book)?;
             source.existing_maintenance_post(book)?;
@@ -9977,7 +10347,7 @@ mod installer {
             // Discard parsed history before calling the complete walker.
             book.removal_control_reserved=worker::removal_reobserve_budget_data(book.removal_control_reserved,state_bytes.capacity())?;
             exclusion.post(book,source)?;
-            let mut observed=observe_admitted_archives(book,prepared,selected,None,None,None,Some(holder),Some(source))?;
+            let mut observed=observe_admitted_archives(book,prepared,selected,None,None,None,Some(holder),Some(worker::RemovalCurrentRead::Live(source)))?;
             check(removal_current_only_data(observed.action,[observed.old_app.is_some(),observed.old_release.is_some()],
                 observed.intent.is_some(),observed.controls.is_some(),observed.history.as_ref().is_some_and(|history|
                     history.current.state.current_data().release_data()==observed.selected.current_data())),"removal-current-only")?;
@@ -10009,7 +10379,7 @@ mod installer {
         }
         fn observe_admitted_archives(book: &mut Install, prepared: PreparedFresh, selected: ReleaseSetData,
             pending_intent: Option<&str>,mut archives:Option<InstallArchiveObservation>,archive_input:Option<&worker::ArchivedInputOriginal<'_>>,
-            mut prefix_holder:Option<&mut CompleteGenerationPrefixSource>,removal_source:Option<&worker::RemovalAdmission>) -> Result<Observed> {
+            mut prefix_holder:Option<&mut CompleteGenerationPrefixSource>,removal_source:Option<worker::RemovalCurrentRead<'_>>) -> Result<Observed> {
             let root = prepared.destination; let versions = prepared.versions;
             let history = match book.named(Some(root), transaction::STATE_NAME) {
                 Err(Errno::ENOENT) => None,
@@ -10027,14 +10397,14 @@ mod installer {
                 root_names.insert(transaction::STATE_NAME.into()); evidence_bytes = history.bytes;
                 let generation = history.current.state.current_data();
                 let same = generation.release_data() == selected.current_data();
-                let (app, release, cost, metadata) = audit_generation(book, root, versions, &generation, same, true)?;
+                let (app, release, cost, metadata) = audit_selected_generation(book, root, versions, &generation, same, true)?;
                 costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
                 let (pair, count) = generation_controls(book,root,&generation,&selected,&mut root_names,same)?;
                 controls = pair; metadata_control = metadata_control.checked_add(count).ok_or("maintenance-control-bound")?;
                 version_names.insert(generation.release_data().binding_data().release.to_owned());
                 if app.is_some() { root_names.insert(paths::APP_NAME.into()); }
                 for generation in history.current.state.retained_data() {
-                    let (_, _, cost, metadata) = audit_generation(book, root, versions, &generation, false, false)?;
+                    let (_, _, cost, metadata) = audit_selected_generation(book, root, versions, &generation, false, false)?;
                     costs.push(cost); metadata_control = metadata_control.checked_add(metadata).ok_or("maintenance-control-bound")?;
                     let (_, count) = generation_controls(book,root,&generation,&selected,&mut root_names,false)?;
                     metadata_control = metadata_control.checked_add(count).ok_or("maintenance-control-bound")?;
@@ -10884,18 +11254,33 @@ mod installer {
             check(now < limit, if work { "worker-work-deadline" } else { "worker-final-deadline" })?;
             Ok(now)
         }
-        pub(super) struct Deadline { start: u64, end: u64, last: Cell<u64>, unknown: Cell<bool> }
+        pub(super) struct Deadline { start: u64, end: u64, last: Cell<u64>, unknown: Cell<bool>,
+            #[cfg(feature="macos-installed-removal-observer")]
+            observer:bool,
+        }
         impl Deadline {
             fn from_entry(start: u64) -> Result<Self> {
                 let end = start.checked_add(TOTAL).ok_or("worker-clock-value")?;
-                let deadline = Self { start, end, last: Cell::new(start), unknown: Cell::new(false) };
+                let deadline = Self { start, end, last: Cell::new(start), unknown: Cell::new(false),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    observer:false,
+                };
                 deadline.check_work()?; Ok(deadline)
             }
             fn inherit(end: u64) -> Result<Self> {
                 let start = end.checked_sub(TOTAL).ok_or("worker-clock-value")?;
                 let now = monotonic()?;
                 time_data(start, end, start, now, true)?;
-                Ok(Self { start, end, last: Cell::new(now), unknown: Cell::new(false) })
+                Ok(Self { start, end, last: Cell::new(now), unknown: Cell::new(false),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    observer:false,
+                })
+            }
+            #[cfg(feature="macos-installed-removal-observer")]
+            fn for_observer(start:u64)->Result<Self> {
+                let end=start.checked_add(55*SECOND).ok_or("removal-observer-clock")?;
+                let value=Self{start,end,last:Cell::new(start),unknown:Cell::new(false),observer:true};
+                value.check_work()?;Ok(value)
             }
             fn observe(&self, work: bool) -> Result<u64> {
                 check(!self.unknown.get(), "worker-clock-unknown")?;
@@ -10908,6 +11293,11 @@ mod installer {
                 }
                 // Expiry never rewrites the last real returned observation.
                 self.last.set(now);
+                #[cfg(feature="macos-installed-removal-observer")]
+                if self.observer {
+                    check(self.start.checked_add(55*SECOND)==Some(self.end),"removal-observer-clock")?;
+                    check(now<if work{self.end-5*SECOND}else{self.end},"removal-observer-deadline")?;return Ok(now);
+                }
                 time_data(self.start, self.end, now, now, work)
             }
             pub(super) fn check_work(&self) -> Result<u64> { self.observe(true) }
@@ -10930,6 +11320,8 @@ mod installer {
             fn poll_ms(&self, work: bool) -> Result<u16> {
                 let now = self.observe(work)?;
                 let end = if work { self.end - SETTLEMENT } else { self.end };
+                #[cfg(feature="macos-installed-removal-observer")]
+                let end=if self.observer && work {self.end-5*SECOND}else{end};
                 Ok(((end - now).div_ceil(1_000_000).min(20)) as u16)
             }
         }
@@ -10941,6 +11333,8 @@ mod installer {
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
+                #[cfg(feature = "macos-installed-removal-observer")]
+                removal_observer_projection:None,
                     payload_written:0,payload_write_calls:0,
                     stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",
                     app_publication:"not-attempted",payload_verified:false,
@@ -13122,7 +13516,7 @@ mod installer {
                         check(std::env::current_exe().ok().as_deref()==Some(Path::new(&source.originals.executed)),"removal-resume-executed-image")?;
                         for n in &source.originals.bootstrap {book.check_name(*n,true)?;}
                         removal_resume_stat(book,source.originals.program,false,Some(0o555))?;
-                        maintenance::held_bytes(book,source.originals.script,include_bytes!("../../../macos-installed-inputs/remove-postinstall"))?;
+                        maintenance::held_bytes(book,source.originals.script,removal_packaged_callback_bytes())?;
                         for (n,raw) in source.originals.installed_pair.iter().zip(&source.originals.installed_raw) {maintenance::held_bytes(book,*n,raw)?;}
                         controls.payload_controls_post(book)?;
                         check(source.existing_maintenance==Some(exclusion.maintenance),"removal-payload-exclusion")?;
@@ -13175,6 +13569,66 @@ mod installer {
             first:Option<(&'static str,mobile_release_desktop::macos_remove_record::FailureKindData)>,
             attempted:bool,remaining_originals:usize,ancestor_flags:Vec<u32>,
             withdrawal_return:Option<std::result::Result<(),Option<i32>>>,
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            fixture_effects:RemovalFixtureEffects,
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        struct RemovalFixtureEffects { returned:u64,app_ordinal:Option<u64> }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        impl RemovalFixtureEffects {
+            fn new()->Self {Self{returned:0,app_ordinal:None}}
+            fn returned(&mut self,is_app:bool,total:usize)->Result<()> {
+                check(self.app_ordinal.is_none(),"removal-fixture-effect-after-app")?;
+                self.returned=self.returned.checked_add(1).filter(|n|*n<=total as u64)
+                    .ok_or("removal-fixture-effect-bound")?;
+                if is_app {self.app_ordinal=Some(self.returned);}Ok(())
+            }
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn removal_fixture_binding_data(input:&completed_package::Input,
+            removal:&mobile_release_desktop::macos_remove_producer::RemovalData)->Result<Value> {
+            let binding=removal.binding_data();
+            check(binding.target==removal_resume_target()
+                && Some(binding.source_commit)==option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),"removal-fixture-binding")?;
+            Ok(json!({"sourceCommit":binding.source_commit,"target":target(),"release":binding.release,
+                "inventorySha256":binding.installed_inventory_sha256,
+                "packageSha256":input.package_sha256_data(),
+                "removeDescriptorSha256":hash(input.descriptor_data()),
+                "removeSignatureSha256":hash(input.signature_data())}))
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn removal_fixture_json_data(value:&Value,limit:usize)->Result<Vec<u8>> {
+            // All producers below have finite fixed fields and bounded rows.
+            // Stop serialization at its own role limit, not a post-hoc large Vec.
+            struct Bounded {bytes:Vec<u8>,limit:usize}
+            impl std::io::Write for Bounded {
+                fn write(&mut self,bytes:&[u8])->std::io::Result<usize> {
+                    if !self.bytes.len().checked_add(bytes.len()).is_some_and(|n|n<self.limit) {
+                        return Err(std::io::Error::other("removal fixture bound"));
+                    }
+                    self.bytes.extend_from_slice(bytes);Ok(bytes.len())
+                }
+                fn flush(&mut self)->std::io::Result<()> {Ok(())}
+            }
+            check(matches!(limit,4096|65536),"removal-fixture-export-bound")?;
+            let mut out=Bounded{bytes:Vec::with_capacity(limit),limit};
+            serde_json::to_writer(&mut out,value).map_err(|_|"removal-fixture-export-json")?;
+            out.bytes.push(b'\n');Ok(out.bytes)
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn removal_fixture_export(book:&Install,name:&str,bytes:&[u8])->Result<()> {
+            check(book.originals.iter().all(|r|r.fd.is_none() && matches!(r.state,State::Closed|State::NoHandle))
+                && !book.unknown,"removal-fixture-export-originals")?;
+            // Sample Instant BEFORE the original monotonic observation. Adding
+            // only its remaining interval cannot renew the original endpoint.
+            let sampled=Instant::now();let deadline=book.shared_deadline()?;
+            let now=deadline.check_total()?;
+            let remaining=deadline.original_endpoint().checked_sub(now).ok_or("removal-fixture-export-deadline")?;
+            let end=sampled.checked_add(Duration::from_nanos(remaining)).ok_or("removal-fixture-export-deadline")?;
+            let mut output=Export::new_fixture(end);
+            let returned=output.fixture_write_readback(name,bytes);
+            let finished=output.finish(returned);
+            let timely=deadline.check_total();finished?;timely.map(|_|())
         }
         pub(super) fn removal_lifecycle_originals_data(used:usize,files:usize,directories:usize,
             controls:usize,control_files:usize,post:usize,linked:bool)->Option<(usize,usize)> {
@@ -13186,6 +13640,8 @@ mod installer {
                 .checked_add(controls.checked_mul(2)?)?.checked_add(post)?.checked_add(64)?;
             let terminal=post.checked_add(controls.checked_mul(2)?)?.checked_add(8)?;
             let future=journal.checked_add(execution)?.checked_add(terminal)?;
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            let future=future.checked_add(5)?;
             Some((future,used.checked_add(future).filter(|end|*end<=24576)?))
         }
         fn removal_lifecycle_workspace_data(nodes:usize)->Option<usize> {
@@ -13197,6 +13653,8 @@ mod installer {
         fn removal_lifecycle_reserve(book:&mut Install,end:usize,nodes:usize,storage:u64,snapshot:u64)->Result<()> {
             check(end>=book.originals.len() && end<=24576,"removal-lifecycle-original-budget")?;
             let working=removal_lifecycle_workspace_data(nodes).ok_or("removal-lifecycle-memory")?;
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            let working=working.checked_add(128*1024).ok_or("removal-fixture-export-memory")?;
             check(removal_payload_allocation_data(maintenance::removal_effective_control_bytes(book)?,working,storage,snapshot),
                 "removal-lifecycle-budget")?;
             let external=book.removal_live_reserved.checked_add(if book.worker_deadline.is_some(){EXTRA_LIVE}else{0})
@@ -13321,7 +13779,9 @@ mod installer {
                 plan:maintenance::RemovalPayloadPlan,binding:maintenance::RemovalHistoryBindingData)->Self {
                 Self {origin,journal,admission,plan,binding,phase:RemovalPayloadPhase::OriginalSource,
                     states:Vec::new(),release_originals:Vec::new(),record:None,pending_record:None,failure_record:None,
-                    first:None,attempted:false,remaining_originals:0,ancestor_flags:Vec::new(),withdrawal_return:None}
+                    first:None,attempted:false,remaining_originals:0,ancestor_flags:Vec::new(),withdrawal_return:None,
+                    #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                    fixture_effects:RemovalFixtureEffects::new()}
             }
             fn root(&self)->usize {self.origin.root()}
             fn archive(&self)->usize {self.admission.archive}
@@ -13677,7 +14137,10 @@ mod installer {
                 book.clock()?;
                 let returned=unistd::unlinkat(book.fd(parent)?,name.as_str(),if directory{unistd::UnlinkatFlags::RemoveDir}else{unistd::UnlinkatFlags::NoRemoveDir});
                 match returned {
-                    Ok(())=>{self.states[index].returned=Some(Ok(()));self.states[index].effect=RemovalNodeEffect::Removed;},
+                    Ok(())=>{self.states[index].returned=Some(Ok(()));self.states[index].effect=RemovalNodeEffect::Removed;
+                        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                        self.fixture_effects.returned(index==current_app,self.plan.nodes.len())?;
+                    },
                     Err(error)=>{self.states[index].returned=Some(Err(error as i32));self.states[index].effect=RemovalNodeEffect::Unknown;
                         book.unknown=true;return Err("removal-payload-unlink-return");}
                 }
@@ -13691,7 +14154,30 @@ mod installer {
                 self.advance_parent(book,parent,before)?;
                 book.forward_close(n,"removal-payload-unlinked-close")?;
                 if directory {book.persist(parent,false)?;}
-                self.external_post(book)
+                self.external_post(book)?;
+                #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                self.fixture_after_effect(book,index,current_app)?;
+                Ok(())
+            }
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            fn fixture_after_effect(&self,book:&Install,index:usize,current_app:usize)->Result<()> {
+                // This is deliberately an abrupt process exit, not a returned
+                // syscall error or a cleanup receipt. The existing conditional
+                // parent fsync above is not a power-loss guarantee for file cuts.
+                if !removal_fixture_cut_candidate_data(matches!(self.journal,RemovalPayloadJournal::Initial(_)),
+                    matches!(self.origin,RemovalPayloadOrigin::Live{..}),self.fixture_effects.returned) {return Ok(());}
+                check(index!=current_app && self.fixture_effects.app_ordinal.is_none()
+                    && self.phase==RemovalPayloadPhase::Removing && self.first.is_none()
+                    && self.pending_record.is_none() && self.journal.files()[3].settled_data()
+                    && self.record.as_ref().is_some_and(|r|r.prefix_data()==mobile_release_desktop::macos_remove_record::PrefixData::PayloadRosterRemoval)
+                    && self.states[index].effect==RemovalNodeEffect::Removed && self.states[index].returned==Some(Ok(()))
+                    && self.states[index].original.is_some_and(|n|book.originals[n].fd.is_none() && book.originals[n].state==State::Closed)
+                    && self.states[current_app].effect==RemovalNodeEffect::Present,"removal-fixture-cut-boundary")?;
+                let app=self.states[current_app].original.ok_or("removal-fixture-cut-app")?;
+                check(book.originals[app].parent==Some(self.genesis_archive()) && book.originals[app].name=="app",
+                    "removal-fixture-cut-app")?;
+                book.check_name(app,true)?;book.clock()?;
+                unsafe {libc::_exit(86)}
             }
             fn final_namespace(&mut self,book:&mut Install)->Result<()> {
                 check((matches!(self.origin,RemovalPayloadOrigin::Resume{..}) && self.withdrawal_return.is_none()
@@ -13915,6 +14401,10 @@ mod installer {
         enum RemovalConservationOrigin<'a> {
             Pending {source:&'a RemovalResumeSource,parts:&'a RemovalGenesisParts},
             Resume(&'a RemovalResumeSource),
+            #[cfg(feature="macos-installed-removal-observer")]
+            Observer(&'a RemovalObserverTarget),
+            #[cfg(feature="macos-installed-removal-observer")]
+            ObserverPending{source:&'a RemovalObserverTarget,parts:&'a RemovalGenesisParts},
             LiveGenesis {source:&'a RemovalAdmission,exclusion:&'a RemovalExclusion,observed:&'a maintenance::RemovalObserved,genesis:&'a RemovalResumeGenesis},
             Live {source:&'a RemovalAdmission,exclusion:&'a RemovalExclusion,
                 observed:&'a maintenance::RemovalObserved,capture:&'a maintenance::RemovalSnapshotCapture},
@@ -13923,6 +14413,8 @@ mod installer {
         impl RemovalConservationRead<'_> {
             pub(super) fn root_original(&self)->usize {match &self.origin {
                 RemovalConservationOrigin::Pending{source,..}|RemovalConservationOrigin::Resume(source)=>source.root_original(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                RemovalConservationOrigin::Observer(source)|RemovalConservationOrigin::ObserverPending{source,..}=>source.root_original(),
                 RemovalConservationOrigin::Live{source,..}|RemovalConservationOrigin::LiveGenesis{source,..}=>source.root_original(),RemovalConservationOrigin::Payload(value)=>value.origin.root(),
             }}
             pub(super) fn post_source(&self,book:&Install)->Result<()> {match &self.origin {
@@ -13932,6 +14424,15 @@ mod installer {
                     maintenance::held_bytes(book,parts.tip_original,&parts.tip_raw)?;book.clock()
                 },
                 RemovalConservationOrigin::Resume(source)=>source.authenticated_selection(book).map(|_|()),
+                #[cfg(feature="macos-installed-removal-observer")]
+                RemovalConservationOrigin::Observer(source)=>source.authenticated_selection(book).map(|_|()),
+                #[cfg(feature="macos-installed-removal-observer")]
+                RemovalConservationOrigin::ObserverPending{source,parts}=>{
+                    source.current_selection(book)?;
+                    check(source.pending_genesis.is_none() && source.genesis.is_none(),"removal-observer-genesis-phase")?;
+                    for n in [parts.archive,parts.snapshot,parts.tip_archive,parts.tip_original] {book.check_name(n,true)?;}
+                    maintenance::held_bytes(book,parts.tip_original,&parts.tip_raw)?;book.clock()
+                },
                 RemovalConservationOrigin::Live{source,exclusion,observed,..}=>{exclusion.post(book,source)?;observed.post(book)},
                 RemovalConservationOrigin::LiveGenesis{source,exclusion,observed,genesis}=>{exclusion.post(book,source)?;observed.post(book)?;genesis.post(book)},
                 RemovalConservationOrigin::Payload(value)=>value.external_post(book),
@@ -13939,6 +14440,8 @@ mod installer {
             pub(super) fn new_selection(&self,book:&Install)->Result<&ReleaseSetData> {
                 self.post_source(book)?;Ok(match &self.origin {
                     RemovalConservationOrigin::Pending{source,..}|RemovalConservationOrigin::Resume(source)=>source.descriptor.release_set_data(),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    RemovalConservationOrigin::Observer(source)|RemovalConservationOrigin::ObserverPending{source,..}=>source.descriptor.release_set_data(),
                     RemovalConservationOrigin::Live{source,..}|RemovalConservationOrigin::LiveGenesis{source,..}=>source.current_selection(book)?,
                     RemovalConservationOrigin::Payload(value)=>match &value.origin {
                         RemovalPayloadOrigin::Live{source,..}=>source.descriptor.as_ref().ok_or("removal-current-descriptor")?.release_set_data(),
@@ -13982,6 +14485,10 @@ mod installer {
                 };
                 match &self.origin {
                     RemovalConservationOrigin::Pending{parts,..}=>from_genesis(&parts.data),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    RemovalConservationOrigin::ObserverPending{parts,..}=>from_genesis(&parts.data),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    RemovalConservationOrigin::Observer(source)=>from_genesis(&source.genesis.as_ref().ok_or("removal-observer-genesis")?.data),
                     RemovalConservationOrigin::Resume(source)=>from_genesis(&source.originals.genesis.as_ref().ok_or("removal-resume-genesis")?.data),
                     RemovalConservationOrigin::Live{capture,..}=>from_census(capture.prior_archives()?),
                     RemovalConservationOrigin::LiveGenesis{genesis,..}=>from_genesis(&genesis.data),
@@ -14021,14 +14528,20 @@ mod installer {
         enum RemovalGenesisRead<'a> {
             Live{source:&'a RemovalAdmission,exclusion:&'a RemovalExclusion},
             Resume(&'a RemovalResumeSource),
+            #[cfg(feature="macos-installed-removal-observer")]
+            Observer(&'a RemovalObserverTarget),
         }
         impl RemovalGenesisRead<'_> {
             fn root(&self)->usize {match self {
                 Self::Live{source,..}=>source.root_original(),Self::Resume(source)=>source.root_original(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(source)=>source.root_original(),
             }}
             fn post(&self,book:&Install)->Result<()> {match self {
                 Self::Live{source,exclusion}=>exclusion.post(book,source),
                 Self::Resume(source)=>source.existing_maintenance_post(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(source)=>source.existing_maintenance_post(book),
             }}
             fn selected(&self,book:&Install)->Result<&ReleaseSetData> {
                 self.post(book)?;match self {
@@ -14036,6 +14549,8 @@ mod installer {
                     // Bootstrap already admitted these exact current originals;
                     // absent-path native signature calls still occur AFTER load.
                     Self::Resume(source)=>Ok(source.descriptor.release_set_data()),
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    Self::Observer(source)=>source.current_selection(book),
                 }
             }
             fn raw4(&self)->Result<[&[u8];4]> {Ok(match self {
@@ -14043,12 +14558,18 @@ mod installer {
                     &source.originals.installed_raw[0],&source.originals.installed_raw[1]],
                 Self::Resume(source)=>[source.originals.input.descriptor_data(),source.originals.input.signature_data(),
                     &source.originals.installed_raw[0],&source.originals.installed_raw[1]],
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(source)=>[source.originals.input.descriptor_data(),source.originals.input.signature_data(),
+                    &source.originals.installed_raw[0],&source.originals.installed_raw[1]],
             })}
             fn epoch(&self,book:&Install,state_sha:[u8;32])->Result<(mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData,
                 [u8;20],[[u8;32];4])> {
                 self.post(book)?;
                 let removal=match self {Self::Live{source,..}=>source.removal.as_ref().ok_or("removal-current-descriptor")?,
-                    Self::Resume(source)=>&source.removal};
+                    Self::Resume(source)=>&source.removal,
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    Self::Observer(source)=>&source.removal,
+                };
                 let current=removal.binding_data();let raw=self.raw4()?;
                 Ok((removal_resume_target(),removal_hex_data::<20>(current.source_commit)?,[
                     Sha256::digest(raw[0]).into(),Sha256::digest(raw[2]).into(),
@@ -14205,7 +14726,7 @@ mod installer {
                 check(std::env::current_exe().ok().as_deref()==Some(Path::new(&self.executed)),"removal-resume-executed-image")?;
                 for n in self.bootstrap.iter().chain(&self.root_chain) {book.check_name(*n,true)?;}
                 removal_resume_stat(book,self.program,false,Some(0o555))?;
-                maintenance::held_bytes(book,self.script,include_bytes!("../../../macos-installed-inputs/remove-postinstall"))?;
+                maintenance::held_bytes(book,self.script,removal_packaged_callback_bytes())?;
                 for (n,raw) in self.installed_pair.iter().zip(&self.installed_raw){maintenance::held_bytes(book,*n,raw)?;}
                 if let Some(genesis)=&self.genesis{genesis.post(book)?;}
                 if let Some(pending)=&self.pending_genesis {pending.parts.post(book,RemovalGenesisRows::Pending(&pending.table))?;}
@@ -14216,6 +14737,28 @@ mod installer {
                 book.absent(self.root,paths::APP_NAME)?;book.check_name(self.root,true)
             }
         }
+        fn removal_packaged_callback_bytes()->&'static [u8] {
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            { REMOVAL_ABRUPT_POSTINSTALL }
+            #[cfg(not(feature="macos-installed-removal-abrupt-fixture"))]
+            { include_bytes!("../../../macos-installed-inputs/remove-postinstall") }
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        const REMOVAL_ABRUPT_POSTINSTALL:&[u8]=br###"#!/bin/sh
+# NONSHIPPING: one fixed original supervisor; no test payload or root override.
+set -eu
+umask 077
+[ "$#" -eq 3 ] || exit 78
+[ "$3" = "/" ] || exit 78
+case "$1" in /*) ;; *) exit 78 ;; esac
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 78 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 78
+exec ./mrk-macos-remove --fixture-supervise "$1"
+"###;
         fn removal_resume_point(book:&Install,originals:&RemovalResumeOriginals,first:&mut Option<&'static str>,
             point:native::install_producer::ProducerCheckpoint)->native::android_service_management::Decision {
             use native::android_service_management::Decision;
@@ -14226,6 +14769,439 @@ mod installer {
             if let Err(error)=originals.post(book){first.get_or_insert(error);
                 return if book.shared_deadline().is_ok_and(Deadline::is_unknown){Decision::Unknown}else{Decision::Stop};}
             Decision::Proceed
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        enum RemovalFixtureInvocation {
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            Supervisor,
+            #[cfg(feature="macos-installed-removal-observer")]
+            Observer {phase:&'static str,target:String,hashes:[String;3]},
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        impl RemovalFixtureInvocation {
+            fn script(&self)->Result<Vec<u8>> {match self {
+                #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                Self::Supervisor=>Ok(REMOVAL_ABRUPT_POSTINSTALL.to_vec()),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer{phase,target,hashes}=>{
+                    check(matches!(*phase,"before"|"after-cancel"|"after-cut"|"terminal")
+                        && removal_fixture_target_path_data(target),"removal-fixture-script-binding")?;
+                    for digest in hashes {removal_hex_data::<32>(digest)?;}
+                    let prefix="#!/bin/sh\n# NONSHIPPING: one fixed readonly observer; no test payload or root override.\nset -eu\numask 077\n[ \"$#\" -eq 3 ] || exit 78\n[ \"$3\" = \"/\" ] || exit 78\ncase \"$1\" in /*) ;; *) exit 78 ;; esac\ncase \"$0\" in\n    ./postinstall) scripts=. ;;\n    /*/postinstall) scripts=${0%/*} ;;\n    *) exit 78 ;;\nesac\ncd -P \"$scripts\" 2>/dev/null || exit 78\n";
+                    let bytes=format!("{prefix}exec ./mrk-macos-remove --fixture-observe-{phase} \"$1\" '{target}' '{}' '{}' '{}'\n",hashes[0],hashes[1],hashes[2]).into_bytes();
+                    check(bytes.len()<=1024,"removal-fixture-script-bound")?;Ok(bytes)
+                },
+            }}
+            fn before_admission(&self,book:&Install)->Result<()> {match self {
+                #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                Self::Supervisor=>removal_fixture_window(book,10),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer{..}=>book.clock(),
+            }}
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        fn removal_fixture_target_path_data(path:&str)->bool {
+            let Some(correlation)=path.strip_prefix("/Volumes/MRK-Removal-").and_then(|s|s.strip_suffix("-target/Remove.pkg")) else{return false;};
+            invocation_valid(correlation)
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        fn removal_fixture_window_data(start:u64,now:u64,seconds:u64)->bool {
+            matches!(seconds,10|100|110) && now>=start
+                && seconds.checked_mul(SECOND).and_then(|n|start.checked_add(n)).is_some_and(|end|now<end)
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        fn removal_fixture_supervisor_argument_data(args:&[String])->Option<&str> {
+            match args { [_,flag,completed] if flag=="--fixture-supervise" && completed.starts_with('/')=>Some(completed),_=>None }
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        fn removal_fixture_cut_candidate_data(initial:bool,live:bool,returned:u64)->bool {initial && live && returned==1}
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        fn removal_fixture_window(book:&Install,seconds:u64)->Result<()> {
+            let deadline=book.shared_deadline()?;let now=deadline.check_total()?;
+            check(removal_fixture_window_data(deadline.start,now,seconds),"removal-fixture-deadline")
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        struct RemovalFixtureOwnOriginals {
+            input:completed_package::Input,bootstrap:Vec<usize>,executed:String,parent_path:String,
+            program:usize,script:usize,program_sha:[u8;32],script_bytes:Vec<u8>,invocation:RemovalFixtureInvocation,
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        impl RemovalFixtureOwnOriginals {
+            fn post(&self,book:&Install)->Result<()> {
+                book.clock()?;
+                check(std::env::current_exe().ok().as_deref()==Some(Path::new(&self.executed)),"removal-fixture-own-image")?;
+                for n in &self.bootstrap {book.check_name(*n,true)?;book.protected(*n,true,None)?;}
+                removal_resume_stat(book,self.program,false,Some(0o555))?;
+                removal_resume_stat(book,self.script,false,Some(0o555))?;
+                maintenance::held_bytes(book,self.script,&self.script_bytes)?;
+                self.input.post(book)
+            }
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn removal_fixture_own_point(book:&Install,originals:&RemovalFixtureOwnOriginals,first:&mut Option<&'static str>,
+            point:native::install_producer::ProducerCheckpoint)->native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody)=producer_phase(point);
+            if phase.is_cleanup(){return producer_cleanup_point(book,point);}
+            if custody.unknown {first.get_or_insert("removal-fixture-own-unknown");return Decision::Unknown;}
+            if first.is_some(){return Decision::Stop;}
+            if let Err(error)=originals.invocation.before_admission(book).and_then(|_|originals.post(book)) {
+                first.get_or_insert(error);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown){Decision::Unknown}else{Decision::Stop};
+            }Decision::Proceed
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        struct RemovalFixtureOwnSource {
+            originals:RemovalFixtureOwnOriginals,
+            program:native::install_producer::RemovalRecoveryProgramVerifier,
+            remove:native::install_producer::RemovalProducerVerifier,
+            removal:mobile_release_desktop::macos_remove_producer::RemovalData,
+            first:Option<&'static str>,verified:bool,
+        }
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        impl RemovalFixtureOwnSource {
+            fn new(book:&mut Install,completed:&str,invocation:RemovalFixtureInvocation)->Result<Self> {
+                use native::install_producer::{RemovalRecoveryProgramVerifier,RemovalProducerVerifier};
+                check(unistd::getuid().is_root() && unistd::geteuid().is_root() && unistd::getgid().as_raw()==0
+                    && unistd::getegid().as_raw()==0 && book.removal_control_reserved==0 && book.removal_live_reserved==0
+                    && !book.registration.entered && !book.gate.entered,"removal-fixture-own-role")?;
+                invocation.before_admission(book)?;native::platform().map_err(|_|"removal-fixture-platform")?;book.clock()?;
+                let budget=RemovalRecoveryProgramVerifier::project_owned_upper_bound()
+                    .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-fixture-own-budget")?;
+                book.removal_control_reserved=budget as u64;
+                // Existing Input/open/owned-root rules are unchanged. Neither
+                // the phase literals nor mounted target P grant code authority.
+                let path=std::env::current_exe().map_err(|_|"removal-fixture-own-image")?;
+                let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-fixture-own-image")?.to_owned();
+                let parent_path=executed.rsplit_once('/').ok_or("removal-fixture-own-image")?.0.to_owned();
+                check(!parent_path.is_empty(),"removal-fixture-own-image")?;
+                let mut bootstrap=Vec::with_capacity(32);
+                let mut parent=book.open(None,"/",true)?;book.protected_as(parent,true,None,AclRole::SystemRoot)?;bootstrap.push(parent);
+                for part in parent_path[1..].split('/') {
+                    parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;
+                    check(bootstrap.len()<32,"removal-fixture-own-path")?;bootstrap.push(parent);
+                }
+                removal_resume_stat(book,parent,true,None)?;
+                check(book.identity(parent)?.gid==0,"removal-fixture-own-group")?;
+                let roster=maintenance::roster_now(book,parent)?;
+                check(roster.keys().map(String::as_str).eq(["mrk-macos-remove","postinstall"]),"removal-fixture-own-roster")?;
+                let program=book.open(Some(parent),"mrk-macos-remove",false)?;removal_resume_stat(book,program,false,Some(0o555))?;
+                let script=book.open(Some(parent),"postinstall",false)?;removal_resume_stat(book,script,false,Some(0o555))?;
+                let script_bytes=invocation.script()?;maintenance::held_bytes(book,script,&script_bytes)?;
+                let program_sha=removal_resume_hash(book,program,SELF_LIMIT)?;
+                let input=completed_package::Input::open_removal(book,completed)?;
+                let removal=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(input.descriptor_data(),removal_resume_target())
+                    .map_err(|_|"removal-fixture-own-descriptor")?;
+                let binding=removal.binding_data();
+                check(Some(binding.source_commit)==option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                    && binding.release==paths::RELEASE && binding.package_sha256==input.package_sha256_data()
+                    && removal_hex_data::<32>(binding.remover_executable_sha256)?==program_sha,"removal-fixture-own-binding")?;
+                check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(32+EXTRA_LIVE).is_some_and(|n|n<=96),
+                    "removal-fixture-own-live")?;
+                let originals=RemovalFixtureOwnOriginals{input,bootstrap,executed,parent_path,program,script,program_sha,script_bytes,invocation};
+                originals.post(book)?;
+                Ok(Self{originals,program:RemovalRecoveryProgramVerifier::new(),remove:RemovalProducerVerifier::new(),removal,first:None,verified:false})
+            }
+            fn inspect(&mut self,book:&Install)->Result<()> {
+                check(!self.verified && !self.program.custody().entered && !self.remove.custody().entered,"removal-fixture-own-once")?;
+                let result={let Self{originals,program,first,..}=self;
+                    let parent=*originals.bootstrap.last().ok_or("removal-fixture-own-parent")?;
+                    program.verify_and_close(book.fd(parent)?.as_fd(),book.fd(originals.program)?.as_fd(),Path::new(&originals.parent_path),
+                        &mut |point|removal_fixture_own_point(book,originals,first,point))};
+                check(result==native::install_producer::RemovalRecoveryProgramResult::ExecutingSourceVerified && self.program.settled(),
+                    self.first.unwrap_or("removal-fixture-own-code"))?;
+                let result={let Self{originals,remove,first,..}=self;
+                    remove.verify_and_close(originals.input.descriptor_data(),originals.input.signature_data(),
+                        &mut |point|removal_fixture_own_point(book,originals,first,point))};
+                check(result==native::install_producer::SignatureResult::SignatureVerified && self.remove.settled(),
+                    self.first.unwrap_or("removal-fixture-own-signature"))?;
+                self.originals.input.content_post(book)?;
+                check(removal_resume_hash(book,self.originals.program,SELF_LIMIT)?==self.originals.program_sha,"removal-fixture-own-hash")?;
+                self.originals.invocation.before_admission(book)?;self.originals.post(book)?;
+                check(self.first.is_none() && self.settled(),"removal-fixture-own-finality")?;self.verified=true;Ok(())
+            }
+            fn post(&self,book:&Install)->Result<()> {
+                check(self.verified && self.first.is_none() && self.settled()
+                    && self.program.custody().operation==native::install_producer::ProducerOperation::RemoveRecoveryProgram
+                    && !self.program.custody().failed && !self.program.custody().unknown
+                    && self.remove.custody().remove_signature_matched,"removal-fixture-own-authority")?;
+                self.originals.post(book)
+            }
+            fn settled(&self)->bool {self.program.settled() && self.remove.settled()}
+            fn pending(&self)->bool {removal_resume_pending_data(&self.program.custody())
+                || removal_resume_pending_data(&self.remove.custody())}
+            fn settle(&mut self,book:&Install)->bool {
+                let mut gate=|point|producer_cleanup_point(book,point);
+                let removed=self.remove.close(&mut gate);let program=self.program.close(&mut gate);
+                removed && program && self.settled()
+            }
+        }
+        #[derive(Clone,Copy)]
+        pub(super) enum RemovalResumeRead<'a> {
+            Resume(&'a RemovalResumeSource),
+            #[cfg(feature="macos-installed-removal-observer")]
+            Observer(&'a RemovalObserverTarget),
+        }
+        impl RemovalResumeRead<'_> {
+            pub(super) fn prelude_selection_data(&self,book:&Install)->Result<&ReleaseSetData> {match self {
+                Self::Resume(v)=>v.prelude_selection_data(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.prelude_selection_data(book),
+            }}
+            pub(super) fn authenticated_selection(&self,book:&Install)->Result<&ReleaseSetData> {match self {
+                Self::Resume(v)=>v.authenticated_selection(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.authenticated_selection(book),
+            }}
+            pub(super) fn root_original(&self)->usize {match self {
+                Self::Resume(v)=>v.root_original(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.root_original(),
+            }}
+            pub(super) fn genesis_data(&self,book:&Install)->Result<&maintenance::RemovalGenesisData> {match self {
+                Self::Resume(v)=>v.genesis_data(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.genesis_data(book),
+            }}
+            pub(super) fn genesis_original(&self,book:&Install)->Result<usize> {match self {
+                Self::Resume(v)=>v.genesis_original(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.genesis_original(book),
+            }}
+            pub(super) fn genesis_archive(&self,book:&Install)->Result<usize> {match self {
+                Self::Resume(v)=>v.genesis_archive(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.genesis_archive(book),
+            }}
+            pub(super) fn genesis_control_data(&self,book:&Install,path:&str)->Result<&maintenance::RemovalControlSpanData> {match self {
+                Self::Resume(v)=>v.genesis_control_data(book,path),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.genesis_control_data(book,path),
+            }}
+            pub(super) fn read_genesis_control(&self,book:&Install,path:&str)->Result<Vec<u8>> {match self {
+                Self::Resume(v)=>v.read_genesis_control(book,path),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.read_genesis_control(book,path),
+            }}
+            pub(super) fn history_rows_data(&self)->Result<usize> {match self {
+                Self::Resume(v)=>v.history_rows_data(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.history_rows_data(),
+            }}
+            pub(super) fn history_original_costs_data(&self)->Result<(u64,u64)> {match self {
+                Self::Resume(v)=>v.history_original_costs_data(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.history_original_costs_data(),
+            }}
+            pub(super) fn history_storage_data(&self)->Result<u64> {match self {
+                Self::Resume(v)=>v.history_storage_data(),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.history_storage_data(),
+            }}
+            pub(super) fn history_matches(&self,book:&Install,other:&maintenance::RemovalArchiveCensus)->Result<()> {match self {
+                Self::Resume(v)=>v.history_matches(book,other),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.history_matches(book,other),
+            }}
+            pub(super) fn final_original_post(&self,book:&mut Install)->Result<()> {match self {
+                Self::Resume(v)=>v.final_original_post(book),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.final_original_post(book),
+            }}
+            pub(super) fn read_current_census(&self,book:&mut Install,wanted:&BTreeSet<String>)->Result<maintenance::RemovalArchiveCensus> {match self {
+                Self::Resume(v)=>v.read_current_census(book,wanted),
+                #[cfg(feature="macos-installed-removal-observer")]
+                Self::Observer(v)=>v.read_current_census(book,wanted),
+            }}
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        struct RemovalObserverOriginals {
+            own:RemovalFixtureOwnSource,input:completed_package::Input,root_chain:[usize;4],code:Option<[usize;15]>,
+            installed_pair:[usize;2],installed_raw:[Vec<u8>;2],phase:&'static str,
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl RemovalObserverOriginals {
+            fn post(&self,book:&Install)->Result<()> {
+                self.own.post(book)?;self.input.post(book)?;
+                for (at,n) in self.root_chain.iter().enumerate() {
+                    book.check_name(*n,true)?;book.protected_as(*n,true,if at==3{Some(0o755)}else{None},
+                        match at{0=>AclRole::SystemRoot,1=>AclRole::SystemLibrary,2=>AclRole::SystemSupport,_=>AclRole::Other})?;
+                }
+                if let Some(code)=self.code {
+                    for at in 4..15 {removal_resume_stat(book,code[at],at<12,Some(0o555))?;}
+                }else{book.absent(self.root_chain[3],paths::APP_NAME)?;}
+                for (n,bytes) in self.installed_pair.iter().zip(&self.installed_raw){maintenance::held_bytes(book,*n,bytes)?;}
+                book.clock()
+            }
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        struct RemovalObserverLiveNative {
+            entry:native::install_producer::CurrentProductVerifier,payload:native::install_producer::CurrentProductVerifier,
+            program:native::install_producer::RemovalProgramVerifier,
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        fn removal_observer_point(book:&Install,originals:&RemovalObserverOriginals,first:&mut Option<&'static str>,
+            point:native::install_producer::ProducerCheckpoint)->native::android_service_management::Decision {
+            use native::android_service_management::Decision;
+            let (phase,custody)=producer_phase(point);
+            if phase.is_cleanup(){return producer_cleanup_point(book,point);}
+            if custody.unknown{first.get_or_insert("removal-observer-native-unknown");return Decision::Unknown;}
+            if first.is_some(){return Decision::Stop;}
+            if let Err(error)=originals.post(book) {first.get_or_insert(error);
+                return if book.shared_deadline().is_ok_and(Deadline::is_unknown){Decision::Unknown}else{Decision::Stop};}
+            Decision::Proceed
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        pub(super) struct RemovalObserverTarget {
+            originals:RemovalObserverOriginals,remove:native::install_producer::RemovalProducerVerifier,
+            installed:native::install_producer::ProducerVerifier,live:Option<RemovalObserverLiveNative>,
+            removal:mobile_release_desktop::macos_remove_producer::RemovalData,
+            descriptor:mobile_release_desktop::macos_install_producer::ProducerData,
+            inspected:bool,first:Option<&'static str>,maintenance:Option<usize>,shared:bool,locked:bool,
+            pending_genesis:Option<RemovalPendingGenesis>,genesis:Option<RemovalResumeGenesis>,
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl RemovalObserverTarget {
+            fn new(book:&mut Install,own:RemovalFixtureOwnSource)->Result<Self> {
+                use native::install_producer::{ProducerVerifier,RemovalProducerVerifier,CurrentProductVerifier,CurrentProductRole,RemovalProgramVerifier};
+                own.post(book)?;
+                let RemovalFixtureInvocation::Observer{phase,target,hashes}=&own.originals.invocation;
+                let (phase,target,hashes)=(*phase,target.clone(),hashes.clone());
+                let current=matches!(phase,"before"|"after-cancel");
+                let shared=phase=="after-cancel";
+                let extra=ProducerVerifier::project_owned_upper_bound()
+                    .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n|if current {n.checked_add(CurrentProductVerifier::project_owned_upper_bound()?.checked_mul(2)?)?
+                        .checked_add(RemovalProgramVerifier::project_owned_upper_bound()?)}else{Some(n)})
+                    .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+1024*1024+std::mem::size_of::<Self>()))
+                    .ok_or("removal-observer-source-budget")?;
+                book.removal_control_reserved=book.removal_control_reserved.checked_add(extra as u64)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-observer-source-budget")?;
+                let input=completed_package::Input::open_removal(book,&target)?;
+                check(input.package_sha256_data()==hashes[0] && hash(input.descriptor_data())==hashes[1]
+                    && hash(input.signature_data())==hashes[2],"removal-observer-target-literal-binding")?;
+                let support=book.support_root()?;let library=book.originals[support].parent.ok_or("removal-observer-root")?;
+                let filesystem=book.originals[library].parent.ok_or("removal-observer-root")?;
+                let root=book.open(Some(support),"MobileReleaseKit",true)?;removal_resume_stat(book,root,true,Some(0o755))?;
+                let root_chain=[filesystem,library,support,root];
+                let code=if current {
+                    let mut code=[0usize;15];code[..4].copy_from_slice(&root_chain);
+                    for (slot,parent,name) in [(4,3,paths::APP_NAME),(5,4,"Contents"),(6,5,"Helpers"),(7,6,"MobileReleaseKitPayload.app"),
+                        (8,7,"Contents"),(9,8,"MacOS"),(10,8,"Helpers"),(11,5,"MacOS"),
+                        (12,11,"mrk-macos-entry"),(13,9,"mobile-release-kit-desktop"),(14,10,"mrk-macos-remove")] {
+                        code[slot]=book.open(Some(code[parent]),name,slot<12)?;
+                        removal_resume_stat(book,code[slot],slot<12,Some(0o555))?;
+                    }Some(code)
+                }else{book.absent(root,paths::APP_NAME)?;None};
+                let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),paths::RELEASE)
+                    .map_err(|_|"removal-observer-control-name")?;
+                let (descriptor_original,raw)=maintenance::metadata_original(book,root,&names.0,mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT)?;
+                let (signature_original,sig)=maintenance::metadata_original(book,root,&names.1,mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?;
+                let removal=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(input.descriptor_data(),removal_resume_target())
+                    .map_err(|_|"removal-observer-remove-data")?;
+                let descriptor=removal.installed_data(&raw).map_err(|_|"removal-observer-installed-data")?;
+                let binding=descriptor.release_set_data().current_data().binding_data();
+                check(removal_source_binding_data(&binding,option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
+                    option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),removal.binding_data().package_sha256,input.package_sha256_data()),
+                    "removal-observer-target-source")?;
+                if let Some(code)=code {check(removal_resume_hash(book,code[14],SELF_LIMIT)?
+                    ==removal_hex_data::<32>(removal.binding_data().remover_executable_sha256)?,"removal-observer-target-program")?;}
+                check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(32+EXTRA_LIVE).is_some_and(|n|n<=96),
+                    "removal-observer-native-live")?;
+                let originals=RemovalObserverOriginals{own,input,root_chain,code,installed_pair:[descriptor_original,signature_original],
+                    installed_raw:[raw,sig],phase};originals.post(book)?;
+                let live=if current{Some(RemovalObserverLiveNative{entry:CurrentProductVerifier::new(CurrentProductRole::EntryApp),
+                    payload:CurrentProductVerifier::new(CurrentProductRole::PayloadApp),program:RemovalProgramVerifier::new()})}else{None};
+                Ok(Self{originals,remove:RemovalProducerVerifier::new(),installed:ProducerVerifier::new(),live,removal,descriptor,
+                    inspected:false,first:None,maintenance:None,shared,locked:false,pending_genesis:None,genesis:None})
+            }
+            fn inspect(&mut self,book:&Install)->Result<()> {
+                use native::install_producer::{SignatureResult,CurrentProductResult,RemovalProgramResult};
+                check(!self.inspected,"removal-observer-inspect-once")?;
+                let removed={let Self{originals,remove,first,..}=self;
+                    remove.verify_and_close(originals.input.descriptor_data(),originals.input.signature_data(),
+                        &mut |point|removal_observer_point(book,originals,first,point))};
+                check(removed==SignatureResult::SignatureVerified && self.remove.settled(),self.first.unwrap_or("removal-observer-remove-signature"))?;
+                let installed={let Self{originals,installed,first,..}=self;
+                    installed.verify_and_close(&originals.installed_raw[0],&originals.installed_raw[1],
+                        &mut |point|removal_observer_point(book,originals,first,point))};
+                check(installed==SignatureResult::SignatureVerified && self.installed.settled(),self.first.unwrap_or("removal-observer-installed-signature"))?;
+                let signer=native::install_producer::source_signer_data().ok_or("removal-observer-signer")?;
+                check(producer_policy_matches_data(self.descriptor.signing_policy_data(),signer.team_data(),signer.leaf_sha1_data(),signer.leaf_sha256_data()),
+                    "removal-observer-signer")?;
+                if let Some(live)=self.live.as_mut() {
+                    let code=self.originals.code.ok_or("removal-observer-current-code")?;
+                    let originals=&self.originals;let first=&mut self.first;
+                    let result=live.entry.verify_and_close(book.fd(code[4])?.as_fd(),book.fd(code[4])?.as_fd(),Path::new(paths::APP),
+                        &mut |point|removal_observer_point(book,originals,first,point));
+                    check(result==CurrentProductResult::PurposeVerified && live.entry.settled(),first.unwrap_or("removal-observer-entry-code"))?;
+                    let result=live.payload.verify_and_close(book.fd(code[4])?.as_fd(),book.fd(code[7])?.as_fd(),Path::new(paths::APP),
+                        &mut |point|removal_observer_point(book,originals,first,point));
+                    check(result==CurrentProductResult::PurposeVerified && live.payload.settled(),first.unwrap_or("removal-observer-payload-code"))?;
+                    let result=live.program.verify_and_close(book.fd(code[10])?.as_fd(),book.fd(code[14])?.as_fd(),Path::new(paths::PAYLOAD_HELPERS),
+                        &mut |point|removal_observer_point(book,originals,first,point));
+                    check(result==RemovalProgramResult::PurposeVerified && live.program.settled(),first.unwrap_or("removal-observer-remove-code"))?;
+                }
+                self.originals.input.content_post(book)?;self.originals.post(book)?;
+                check(self.native_settled() && self.first.is_none(),"removal-observer-native-finality")?;self.inspected=true;Ok(())
+            }
+            fn reserve_existing(&mut self,book:&mut Install)->Result<()> {
+                check(self.inspected && self.native_settled() && !self.locked && self.maintenance.is_none(),"removal-observer-lock-once")?;
+                self.originals.post(book)?;
+                check(book.named(Some(self.root_original()),paths::REGISTRATION_GATE_NAME).is_ok(),"removal-observer-existing-r")?;
+                book.registration_before_maintenance(self.root_original())?;self.reservation_post(book)?;
+                check(!book.gate.entered && book.gate.participant.is_none() && book.gate.parent.is_none(),"removal-observer-m-once")?;
+                book.gate.entered=true;book.gate.parent=Some(self.root_original());book.gate.creation="existing-not-modified";
+                let n=book.open_role(Some(self.root_original()),paths::MAINTENANCE_GATE_NAME,false,Role::GateParticipant)?;
+                self.maintenance=Some(n);book.gate_protected(n)?;maintenance::held_bytes(book,n,paths::MAINTENANCE_GATE_BYTES)?;
+                book.gate.verified=true;book.clock()?;book.gate.lock_attempted=true;
+                #[allow(deprecated)]
+                let returned=fcntl::flock(book.fd(n)?.as_raw_fd(),if self.shared{fcntl::FlockArg::LockSharedNonblock}else{fcntl::FlockArg::LockExclusiveNonblock});
+                returned.map_err(|_|"removal-observer-m-refused")?;
+                self.locked=true;book.gate.exclusive_acquired=!self.shared;book.clock()?;
+                self.existing_maintenance_post(book)
+            }
+            pub(super) fn root_original(&self)->usize {self.originals.root_chain[3]}
+            pub(super) fn installed_bytes(&self)->&[u8] {&self.originals.installed_raw[0]}
+            pub(super) fn installed_signature_bytes(&self)->&[u8] {&self.originals.installed_raw[1]}
+            pub(super) fn installed_pair_data(&self)->[usize;2] {self.originals.installed_pair}
+            pub(super) fn reservation_post(&self,book:&Install)->Result<()> {
+                check(self.inspected && self.native_settled() && self.first.is_none() && book.registration.entered
+                    && book.registration.verified && book.registration.exclusive_acquired && book.registration.lock_attempted
+                    && book.registration.creation=="existing-not-modified" && book.registration.parent==Some(self.root_original())
+                    && !book.registration.closed_under_maintenance && !book.worker_stderr_is_gate,"removal-observer-r-original")?;
+                book.registration_protected(book.registration.participant.ok_or("removal-observer-r-original")?)?;self.originals.post(book)
+            }
+            pub(super) fn existing_maintenance_post(&self,book:&Install)->Result<()> {
+                self.reservation_post(book)?;let n=self.maintenance.ok_or("removal-observer-m-original")?;
+                check(self.locked && book.gate.entered && book.gate.verified && book.gate.lock_attempted
+                    && book.gate.exclusive_acquired==!self.shared && self.shared==(self.originals.phase=="after-cancel")
+                    && book.gate.parent==Some(self.root_original()) && book.gate.participant==Some(n)
+                    && book.gate.creation=="existing-not-modified" && book.gate.writer.is_none(),"removal-observer-m-original")?;
+                book.gate_protected(n)?;maintenance::held_bytes(book,n,paths::MAINTENANCE_GATE_BYTES)?;book.clock()
+            }
+            pub(super) fn current_selection(&self,book:&Install)->Result<&ReleaseSetData> {
+                self.existing_maintenance_post(book)?;Ok(self.descriptor.release_set_data())
+            }
+            fn native_settled(&self)->bool {
+                self.originals.own.settled() && self.remove.settled() && self.installed.settled()
+                    && self.live.as_ref().is_none_or(|v|v.entry.settled()&&v.payload.settled()&&v.program.settled())
+            }
+            fn pending(&self)->bool {
+                self.originals.own.pending() || removal_resume_pending_data(&self.remove.custody())
+                    || removal_resume_pending_data(&self.installed.custody())
+                    || self.live.as_ref().is_some_and(|v|removal_resume_pending_data(&v.entry.custody())
+                        ||removal_resume_pending_data(&v.payload.custody())||removal_resume_pending_data(&v.program.custody()))
+            }
+            fn settle(&mut self,book:&Install)->bool {
+                let mut gate=|point|producer_cleanup_point(book,point);
+                let live=self.live.as_mut().is_none_or(|v|{let a=v.program.close(&mut gate);let b=v.payload.close(&mut gate);
+                    let c=v.entry.close(&mut gate);a&&b&&c});
+                let installed=self.installed.close(&mut gate);let removed=self.remove.close(&mut gate);
+                let own=self.originals.own.settle(book);live&&installed&&removed&&own&&self.native_settled()
+            }
         }
         pub(super) struct RemovalResumeSource {
             originals:RemovalResumeOriginals,
@@ -14268,7 +15244,7 @@ mod installer {
                 let program=book.open(Some(parent),"mrk-macos-remove",false)?;
                 removal_resume_stat(book,program,false,Some(0o555))?;
                 let script=book.open(Some(parent),"postinstall",false)?;removal_resume_stat(book,script,false,Some(0o555))?;
-                maintenance::held_bytes(book,script,include_bytes!("../../../macos-installed-inputs/remove-postinstall"))?;
+                maintenance::held_bytes(book,script,removal_packaged_callback_bytes())?;
                 let program_sha=removal_resume_hash(book,program,64*1024*1024)?;
                 let input=completed_package::Input::open_removal(book,completed)?;
                 let support=book.support_root()?;let root=book.open(Some(support),"MobileReleaseKit",true)?;
@@ -14503,6 +15479,100 @@ mod installer {
             }
             fn pending_native_data(&self)->bool {
                 [self.program.custody(),self.remove.custody(),self.installed.custody()].iter().any(removal_resume_pending_data)
+            }
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl RemovalObserverTarget {
+            pub(super) fn prelude_selection_data(&self,book:&Install)->Result<&ReleaseSetData> {self.current_selection(book)}
+            pub(super) fn authenticated_selection(&self,book:&Install)->Result<&ReleaseSetData> {
+                check(self.genesis.is_some() && self.pending_genesis.is_none()
+                    && matches!(self.originals.phase,"after-cut"|"terminal") && !self.shared,"removal-observer-genesis-required")?;
+                self.current_selection(book)
+            }
+            fn load_observer_genesis(&mut self,book:&mut Install)->Result<()> {
+                check(self.genesis.is_none() && self.pending_genesis.is_none()
+                    && matches!(self.originals.phase,"after-cut"|"terminal") && !self.shared,"removal-observer-genesis-once")?;
+                self.current_selection(book)?;
+                let (table,state)=maintenance::removal_resume_prelude(book,RemovalResumeRead::Observer(self))?;
+                let parts=load_removal_genesis_parts(book,RemovalGenesisRead::Observer(self),RemovalGenesisRows::Pending(&table),state)?;
+                // SAME target P/raw4 equality and signature-admitted source.
+                // Never a completed table before all nested audits return.
+                self.pending_genesis=Some(RemovalPendingGenesis{parts,table});
+                let pending=self.pending_genesis.as_ref().ok_or("removal-observer-genesis")?;
+                pending.parts.post(book,RemovalGenesisRows::Pending(&pending.table))?;
+                check(removal_resume_hash(book,pending.parts.snapshot,maintenance::REMOVAL_SNAPSHOT_LIMIT)?
+                    ==*pending.parts.data.whole_sha256_data(),"removal-observer-genesis-hash")?;
+                self.current_selection(book)?;
+                let RemovalPendingGenesis{parts,table}=self.pending_genesis.take().ok_or("removal-observer-genesis")?;
+                let read=RemovalConservationRead{origin:RemovalConservationOrigin::ObserverPending{source:self,parts:&parts}};
+                let census=maintenance::complete_removal_pending_census(book,table,&read,&parts.data)?;
+                parts.post(book,RemovalGenesisRows::Complete(&census))?;
+                self.genesis=Some(parts.into_complete(census));
+                self.genesis.as_ref().ok_or("removal-observer-genesis")?.content_post(book)?;
+                self.authenticated_selection(book).map(|_|())
+            }
+            pub(super) fn genesis_data(&self,book:&Install)->Result<&maintenance::RemovalGenesisData> {
+                self.authenticated_selection(book)?;
+                self.genesis.as_ref().map(|g|&g.data).ok_or("removal-observer-genesis")
+            }
+            pub(super) fn genesis_original(&self,book:&Install)->Result<usize> {
+                self.authenticated_selection(book)?;
+                self.genesis.as_ref().map(|g|g.snapshot).ok_or("removal-observer-genesis")
+            }
+            pub(super) fn genesis_archive(&self,book:&Install)->Result<usize> {
+                self.authenticated_selection(book)?;
+                self.genesis.as_ref().map(|g|g.archive).ok_or("removal-observer-genesis")
+            }
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl RemovalObserverTarget {
+            pub(super) fn genesis_control_data(&self,book:&Install,path:&str)->Result<&maintenance::RemovalControlSpanData> {
+                // Comparison-only label supplied by the same SOURCE generation
+                // walker. This function never opens an encoded path.
+                RemovalResumeGenesis::span(self.genesis_data(book)?,0,path)
+            }
+            pub(super) fn read_genesis_control(&self,book:&Install,path:&str)->Result<Vec<u8>> {
+                let row=self.genesis_control_data(book,path)?;
+                removal_resume_span(book,self.genesis_original(book)?,row,installation_record::INVENTORY_LIMIT)
+            }
+            pub(super) fn history_rows_data(&self)->Result<usize> {
+                Ok(self.genesis.as_ref().ok_or("removal-observer-genesis-missing")?.census.rows().len())
+            }
+            pub(super) fn history_original_costs_data(&self)->Result<(u64,u64)> {
+                let census=&self.genesis.as_ref().ok_or("removal-observer-genesis-missing")?.census;
+                Ok((maintenance::removal_conservation_scan_originals_data(census)? as u64,
+                    maintenance::removal_conservation_post_originals_data(census)? as u64))
+            }
+            pub(super) fn history_storage_data(&self)->Result<u64> {
+                Ok(self.genesis.as_ref().ok_or("removal-observer-genesis-missing")?.census.storage_bytes())
+            }
+            pub(super) fn history_matches(&self,book:&Install,other:&maintenance::RemovalArchiveCensus)->Result<()> {
+                self.authenticated_selection(book)?;
+                let original=&self.genesis.as_ref().ok_or("removal-observer-genesis-missing")?.census;
+                check(original.rows().len()==other.rows().len() && original.storage_bytes()==other.storage_bytes(),"removal-observer-history-changed")?;
+                for (a,b) in original.rows().iter().zip(other.rows()) {
+                    check(a.name()==b.name() && a.identity()==b.identity() && a.flags()==b.flags() && a.app_data()==b.app_data()
+                        && a.attempt_data()==b.attempt_data()
+                        && maintenance::removal_resume_rehome_matches_data(a.rehome_data(),b.rehome_data()),"removal-observer-history-changed")?;
+                    for (a,b) in a.files().iter().zip(b.files()) {match (a,b) {
+                        (None,None)=>(),(Some(a),Some(b))=>check(a.identity()==b.identity() && a.flags()==b.flags()
+                            && a.len()==b.len() && a.digest()==b.digest() && a.shape_tag_data()==b.shape_tag_data(),"removal-observer-history-changed")?,
+                        _=>return Err("removal-observer-history-changed")}}
+                }Ok(())
+            }
+            pub(super) fn final_original_post(&self,book:&mut Install)->Result<()> {
+                self.authenticated_selection(book)?;
+                let genesis=self.genesis.as_ref().ok_or("removal-observer-genesis-missing")?;
+                // Physical completed-census POST, including nested children;
+                // not the one-use fresh snapshot wrapper. No reset or body copy.
+                let read=RemovalConservationRead{origin:RemovalConservationOrigin::Observer(self)};
+                maintenance::post_removal_conserved_census(book,&genesis.census,&read)?;
+                genesis.content_post(book)?;self.authenticated_selection(book)?;Ok(())
+            }
+            pub(super) fn read_current_census(&self,book:&mut Install,wanted:&BTreeSet<String>)->Result<maintenance::RemovalArchiveCensus> {
+                self.authenticated_selection(book)?;
+                let read=RemovalConservationRead{origin:RemovalConservationOrigin::Observer(self)};
+                maintenance::read_removal_conserved_census(book,self.root_original(),wanted,&read)
             }
         }
         fn removal_resume_pending_data(c:&native::install_producer::ProducerCustody)->bool {
@@ -15873,14 +16943,74 @@ mod installer {
                 check(self.input.private_binding_data(book)?==self.binding,"archived-input-original-binding")?;book.clock()
             }
         }
-        // Borrowed from the already admitted live Source plus the same current
+        // Borrowed readonly dispatch only. Each variant keeps its original
+        // admission and native/lock POST checks; neither grants writer authority.
+        #[derive(Clone, Copy)]
+        pub(super) enum RemovalCurrentRead<'a> {
+            Live(&'a RemovalAdmission),
+            #[cfg(feature = "macos-installed-removal-observer")]
+            Observer(&'a RemovalObserverTarget),
+        }
+        impl<'a> RemovalCurrentRead<'a> {
+            pub(super) fn current_selection(self, book: &Install) -> Result<&'a ReleaseSetData> {
+                match self {
+                    Self::Live(value) => value.current_selection(book),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.current_selection(book),
+                }
+            }
+            pub(super) fn reservation_post(self, book: &Install) -> Result<()> {
+                match self {
+                    Self::Live(value) => value.reservation_post(book),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.reservation_post(book),
+                }
+            }
+            pub(super) fn existing_maintenance_post(self, book: &Install) -> Result<()> {
+                match self {
+                    Self::Live(value) => value.existing_maintenance_post(book),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.existing_maintenance_post(book),
+                }
+            }
+            pub(super) fn root_original(self) -> usize {
+                match self {
+                    Self::Live(value) => value.root_original(),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.root_original(),
+                }
+            }
+            pub(super) fn installed_bytes(self) -> &'a [u8] {
+                match self {
+                    Self::Live(value) => value.installed_bytes(),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.installed_bytes(),
+                }
+            }
+            pub(super) fn installed_signature_bytes(self) -> &'a [u8] {
+                match self {
+                    Self::Live(value) => value.installed_signature_bytes(),
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.installed_signature_bytes(),
+                }
+            }
+            pub(super) fn installed_pair_data(self) -> [usize; 2] {
+                match self {
+                    Self::Live(value) => value.originals.installed_pair,
+                    #[cfg(feature = "macos-installed-removal-observer")]
+                    Self::Observer(value) => value.installed_pair_data(),
+                }
+            }
+        }
+
+        // Borrowed from the already admitted readonly source plus the same current
         // observer's signed inventory and genuine generation parent. This read
         // view neither constructs a new Install input nor grants a write/rehome.
         pub(super) struct RemovalPrefixRead<'a> {
-            source:&'a RemovalAdmission,inventory:&'a Inventory,raw:&'a[u8],release:usize,
+            source:RemovalCurrentRead<'a>,inventory:&'a Inventory,raw:&'a[u8],release:usize,
         }
         impl<'a> RemovalPrefixRead<'a> {
-            pub(super) fn observed(book:&Install,source:&'a RemovalAdmission,prepared:&'a PreparedFresh,release:usize)->Result<Self> {
+            pub(super) fn observed(book:&Install,source:RemovalCurrentRead<'a>,prepared:&'a PreparedFresh,release:usize)->Result<Self> {
                 check(prepared.destination==source.root_original() && prepared.input==source.root_original(),"removal-prefix-current-root")?;
                 let value=Self{source,inventory:&prepared.inventory,raw:&prepared.inventory_bytes,release};
                 value.post_source(book)?;Ok(value)
@@ -15897,12 +17027,12 @@ mod installer {
             }
             pub(super) fn root_original(&self)->usize {self.source.root_original()}
             pub(super) fn prefix_source_originals(&self,book:&Install)->Result<[usize;3]> {
-                self.post_source(book)?;Ok([self.source.originals.installed_pair[0],self.source.originals.installed_pair[1],self.release])
+                self.post_source(book)?;let pair=self.source.installed_pair_data();Ok([pair[0],pair[1],self.release])
             }
             pub(super) fn new_selection(&self,book:&Install)->Result<&ReleaseSetData> {self.post_source(book)?;self.source.current_selection(book)}
             pub(super) fn incoming(&self,book:&Install)->Result<(usize,&Inventory,&[u8])> {self.post_source(book)?;Ok((self.release,self.inventory,self.raw))}
             pub(super) fn incoming_controls(&self,book:&Install)->Result<(&[u8],&[u8])> {
-                self.post_source(book)?;Ok((&self.source.originals.installed_raw[0],&self.source.originals.installed_raw[1]))
+                self.post_source(book)?;Ok((self.source.installed_bytes(),self.source.installed_signature_bytes()))
             }
             pub(super) fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)> {
                 self.post_source(book)?;reinstall_index_quote_data(self.inventory)
@@ -16292,6 +17422,10 @@ mod installer {
             removal_resume:Option<RemovalResumeSource>,removal_resume_ready:Option<RemovalResumeReady>,
             removal_live_ready:Option<RemovalLiveLinkedReady>,removal_absence:Option<RemovalPayloadAbsence>,
             removal_linked_attempt:Option<RemovalLinkedAttempt>,
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            fixture_own:Option<RemovalFixtureOwnSource>,
+            #[cfg(feature="macos-installed-removal-observer")]
+            fixture_observer:Option<RemovalObserverTarget>,
             reinstall_requested:bool,reinstall:Option<ReinstallAdmission>,reinstall_input:Option<MaintenanceRootInput>,
             archive_handoff:Option<ArchivedInstallHandoff>,
             prefix_source:Option<maintenance::CompleteGenerationPrefixSource>,prefix_retained:bool,
@@ -16318,6 +17452,10 @@ mod installer {
                     removal_payload_execution:None,
                     removal_resume:None,removal_resume_ready:None,removal_live_ready:None,removal_absence:None,
                     removal_linked_attempt:None,
+                    #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+                    fixture_own:None,
+                    #[cfg(feature="macos-installed-removal-observer")]
+                    fixture_observer:None,
                     reinstall_requested:false,reinstall:None,reinstall_input:None,archive_handoff:None,
                     prefix_source:Some(maintenance::CompleteGenerationPrefixSource::new()),prefix_retained:false,
                     command_original:None,output_original:None,command_close:false,output_close:false,output_eof:false,output_admitted:false,
@@ -16748,6 +17886,40 @@ mod installer {
                 let receipt=self.removal_payload_execution.as_mut().ok_or("removal-payload-transfer")?.run(&mut self.book)?;
                 self.removal_absence=Some(receipt);self.book.clock()
             }
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            fn fixture_effects_document(&self)->Result<(String,Vec<u8>)> {
+                let owner=self.removal_payload_execution.as_ref().ok_or("removal-fixture-effects-owner")?;
+                let RemovalPayloadOrigin::Resume{source,..}=&owner.origin else{return Err("removal-fixture-effects-resume-only");};
+                check(matches!(owner.journal,RemovalPayloadJournal::Linked{..}) && owner.phase==RemovalPayloadPhase::Absent
+                    && owner.first.is_none() && owner.pending_record.is_none() && owner.failure_record.is_none()
+                    && owner.journal.files()[4].settled_data(),"removal-fixture-effects-final")?;
+                let record=owner.record.as_ref().ok_or("removal-fixture-effects-record")?;
+                check(record.prefix_data()==mobile_release_desktop::macos_remove_record::PrefixData::PayloadAbsentObserved
+                    && record.first_failure_data().is_none(),"removal-fixture-effects-final")?;
+                let (_,_,previous)=record.previous_attempt_data().ok_or("removal-fixture-effects-link")?;
+                check(owner.fixture_effects.returned>0
+                    && owner.fixture_effects.app_ordinal==Some(owner.fixture_effects.returned),"removal-fixture-effects-app-last")?;
+                check(self.book.originals.len().checked_add(5).is_some_and(|end|end<=owner.journal.original_end()),
+                    "removal-fixture-export-original-budget")?;
+                // Same actual phase4/namespace/source POST; this does not yet
+                // assert the upcoming original closes or original child's exit.
+                owner.external_post(&self.book)?;
+                check(self.removal_absence.as_ref().is_some_and(|receipt|receipt.record_sha256==record.digest_data()),
+                    "removal-fixture-effects-observed")?;
+                let mut value=removal_fixture_binding_data(&source.originals.input,&source.removal)?;
+                let name=format!("removal-fixture-effects-v1-{}.json",hash(source.originals.input.descriptor_data()));
+                let map=value.as_object_mut().ok_or("removal-fixture-effects-shape")?;
+                map.extend([
+                    ("schemaVersion".into(),json!(1)),("kind".into(),json!("removal-fixture-effects-v1")),
+                    ("requestId".into(),json!(record.request_id_data())),("rootNonce".into(),json!(record.root_nonce_data())),
+                    ("genesisSnapshotSha256".into(),json!(owner.admission.snapshot_sha256)),
+                    ("previousTipSha256".into(),json!(previous)),("prefix".into(),json!(4)),
+                    ("returnedUnlinks".into(),json!(owner.fixture_effects.returned)),
+                    ("appRootUnlinkOrdinal".into(),json!(owner.fixture_effects.app_ordinal)),
+                    ("transportState".into(),json!("pending-original-child-exit")),
+                ]);
+                Ok((name,removal_fixture_json_data(&value,4096)?))
+            }
             fn removal_finality_data(&self)->bool {
                 let (Some(receipt),Some(owner))=(&self.removal_absence,&self.removal_payload_execution) else {return false;};
                 self.errors.is_empty() && self.parent_book_settled && !self.book.unknown && !self.removal_peer_pending
@@ -16775,14 +17947,14 @@ mod installer {
                 self.removal_resume=Some(RemovalResumeSource::new(&mut self.book,completed)?);
                 let source=self.removal_resume.as_mut().ok_or("removal-resume-source-missing")?;
                 source.inspect_self(&self.book)?;source.reserve_existing(&mut self.book)?;
-                let (census,state)=maintenance::removal_resume_prelude(&mut self.book,source)?;
+                let (census,state)=maintenance::removal_resume_prelude(&mut self.book,RemovalResumeRead::Resume(source))?;
                 source.load_pending_genesis(&mut self.book,census,state)?;source.inspect_pending_genesis(&self.book)?;
                 source.complete_pending_genesis(&mut self.book)?;
-                let first=maintenance::observe_removal_resume(&mut self.book,source,None)?.into_first()?;
+                let first=maintenance::observe_removal_resume(&mut self.book,RemovalResumeRead::Resume(source),None)?.into_first()?;
                 // into_first drops the entire first plan before allocating the
                 // second; retains only fixed fingerprint+count comparison DATA.
                 let exclusion=RemovalResumeExclusion::acquire(&mut self.book,source,&first)?;
-                let mut observed=maintenance::observe_removal_resume(&mut self.book,source,Some(&first))?;
+                let mut observed=maintenance::observe_removal_resume(&mut self.book,RemovalResumeRead::Resume(source),Some(&first))?;
                 check(removal_resume_observation_matches_data(first.fingerprint,observed.fingerprint_data()?),"removal-resume-observation-changed")?;
                 exclusion.post(&self.book,source)?;
                 // All three native cells have known retirement before moving
@@ -16813,6 +17985,24 @@ mod installer {
                 for original in &mut self.book.originals {if let Some(fd)=original.fd.take(){std::mem::forget(fd);original.state=State::KernelExitRetained;}}
                 if let Some(source)=self.removal.take(){std::mem::forget(source);}
                 if let Some(source)=self.removal_live_ready.take(){std::mem::forget(source);}
+                self.parent_book_settled=false;
+            }
+            #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+            fn retain_unresolved_fixture_own(&mut self) {
+                if !self.fixture_own.as_ref().is_some_and(RemovalFixtureOwnSource::pending){return;}
+                self.book.unknown=true;
+                for original in &mut self.book.originals {if let Some(fd)=original.fd.take(){
+                    std::mem::forget(fd);original.state=State::KernelExitRetained;}}
+                if let Some(source)=self.fixture_own.take(){std::mem::forget(source);}
+                self.parent_book_settled=false;
+            }
+            #[cfg(feature="macos-installed-removal-observer")]
+            fn retain_unresolved_observer(&mut self) {
+                if !self.fixture_observer.as_ref().is_some_and(RemovalObserverTarget::pending){return;}
+                self.book.unknown=true;
+                for original in &mut self.book.originals {if let Some(fd)=original.fd.take(){
+                    std::mem::forget(fd);original.state=State::KernelExitRetained;}}
+                if let Some(source)=self.fixture_observer.take(){std::mem::forget(source);}
                 self.parent_book_settled=false;
             }
             fn retain_unresolved_removal_resume(&mut self) {
@@ -17373,6 +18563,12 @@ mod installer {
                 let resume_ready_settled=self.removal_resume_ready.as_mut().is_none_or(|ready|ready.source.settle(&self.book));
                 let reinstall_settled=self.reinstall.as_mut().is_none_or(|source|source.settle(&self.book));
                 let native_settled=producer_settled && removal_settled && payload_settled && live_ready_settled && resume_settled && resume_ready_settled && reinstall_settled;
+                #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+                let native_settled={let own=self.fixture_own.as_mut().is_none_or(|source|source.settle(&self.book));
+                    if !own{self.retain_unresolved_fixture_own();}native_settled && own};
+                #[cfg(feature="macos-installed-removal-observer")]
+                let native_settled={let target=self.fixture_observer.as_mut().is_none_or(|source|source.settle(&self.book));
+                    if !target{self.retain_unresolved_observer();}native_settled&&target};
                 if !reinstall_settled || !producer_settled {self.retain_unresolved_reinstall();}
                 if !resume_settled || !resume_ready_settled {self.retain_unresolved_removal_resume();}
                 if !removal_settled || !live_ready_settled {self.retain_unresolved_removal_source();}
@@ -17401,6 +18597,10 @@ mod installer {
                 // unretired native cell. This guard only leaks our unresolved
                 // allocations/FDs to actual process exit; it performs no IO,
                 // no close/retire, no retry and cannot report success.
+                #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+                self.retain_unresolved_fixture_own();
+                #[cfg(feature="macos-installed-removal-observer")]
+                self.retain_unresolved_observer();
                 self.retain_unresolved_removal_peer();
                 self.retain_unresolved_removal_source();
                 self.retain_unresolved_removal_resume();
@@ -17646,12 +18846,361 @@ mod installer {
             // This is the first original sample, BEFORE arguments or admission.
             let started = match monotonic() { Ok(value) => value, Err(_) => return 1 };
             let args = match entry_arguments_data(std::env::args_os()) { Ok(args) => args, Err(_) => return 1 };
+            #[cfg(feature="macos-installed-removal-observer")]
+            {removal_observer_entry(started,&args)}
+            #[cfg(not(feature="macos-installed-removal-observer"))]
+            {
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            if let Some(completed)=removal_fixture_supervisor_argument_data(&args) {
+                return removal_fixture_supervisor_entry(started,completed);
+            }
             match entry_kind_data(&args) {
                 Ok(EntryKind::PrivateWriter) => dispatch_private(&args), // Inherit, never renew the parent's endpoint.
                 Ok(EntryKind::CompletedPackage) => completed_entry(&args[1],&args[2],started),
                 Ok(kind @ (EntryKind::Removal | EntryKind::RemovalResume)) => removal_entry(started,&args,kind),
                 Err(_) => 1,
             }
+            }
+        }
+        // Parsed DATA only, never child-exit, native observation, or deletion authority.
+        // Caller supplies the genuine admitted seven-field target binding and may
+        // accept this digest only after same original Child0 and reader POST/close.
+        #[cfg(any(feature="macos-installed-removal-abrupt-fixture",feature="macos-installed-removal-observer"))]
+        fn removal_fixture_effects_data(bytes: &[u8], expected: &Value) -> Result<[u8; 32]> {
+            const BINDING: [&str; 7] = ["sourceCommit", "target", "release", "inventorySha256",
+                "packageSha256", "removeDescriptorSha256", "removeSignatureSha256"];
+            object(expected, &BINDING)?;
+            let value = packet(bytes, 4096)?;
+            object(&value, &["schemaVersion", "kind", "sourceCommit", "target", "release", "inventorySha256",
+                "packageSha256", "removeDescriptorSha256", "removeSignatureSha256", "requestId", "rootNonce",
+                "genesisSnapshotSha256", "previousTipSha256", "prefix", "returnedUnlinks", "appRootUnlinkOrdinal",
+                "transportState"])?;
+            for key in BINDING {
+                let wanted = expected[key].as_str().ok_or("removal-fixture-effects-binding")?;
+                check(!wanted.is_empty() && wanted.len() <= 128 && value[key].as_str() == Some(wanted),
+                    "removal-fixture-effects-binding")?;
+            }
+            removal_hex_data::<20>(value["sourceCommit"].as_str().ok_or("removal-fixture-effects-binding")?)?;
+            check(value["target"].as_str() == Some(target()), "removal-fixture-effects-target")?;
+            for key in ["inventorySha256", "packageSha256", "removeDescriptorSha256", "removeSignatureSha256",
+                        "genesisSnapshotSha256", "previousTipSha256"] {
+                removal_hex_data::<32>(value[key].as_str().ok_or("removal-fixture-effects-digest")?)?;
+            }
+            let request = removal_hex_data::<16>(value["requestId"].as_str().ok_or("removal-fixture-effects-request")?)?;
+            let nonce = removal_hex_data::<16>(value["rootNonce"].as_str().ok_or("removal-fixture-effects-request")?)?;
+            check(request != nonce && value["schemaVersion"].as_u64() == Some(1)
+                && value["kind"].as_str() == Some("removal-fixture-effects-v1")
+                && value["prefix"].as_u64() == Some(4)
+                && value["transportState"].as_str() == Some("pending-original-child-exit"),
+                "removal-fixture-effects-shape")?;
+            let count = value["returnedUnlinks"].as_u64().ok_or("removal-fixture-effects-count")?;
+            let bound = u64::try_from(installation_record::FILE_LIMIT).ok()
+                .and_then(|n| n.checked_mul(9)).and_then(|n| n.checked_mul(2))
+                .ok_or("removal-fixture-effects-count")?;
+            check(count > 0 && count <= bound && value["appRootUnlinkOrdinal"].as_u64() == Some(count),
+                "removal-fixture-effects-count")?;
+            Ok(Sha256::digest(bytes).into())
+        }
+
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        struct RemovalFixtureSupervisor {
+            resume:bool,support:usize,support_before:Identity,support_flags:u32,
+            effects_name:String,status_name:String,binding:Value,original_end:usize,
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        impl Parent {
+            fn fixture_supervisor_prepare(&mut self,completed:&str)->Result<RemovalFixtureSupervisor> {
+                check(!self.entered && self.command.is_none() && self.child.is_none(),"removal-fixture-supervisor-once")?;
+                self.entered=true;
+                self.fixture_own=Some(RemovalFixtureOwnSource::new(&mut self.book,completed,RemovalFixtureInvocation::Supervisor)?);
+                self.fixture_own.as_mut().ok_or("removal-fixture-own-missing")?.inspect(&self.book)?;
+                removal_fixture_window(&self.book,10)?;
+                // A separately accounted finite supervisor phase, not a second
+                // lifecycle allowance. Source native cells are already settled.
+                self.book.removal_control_reserved=self.book.removal_control_reserved.checked_add(128*1024)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-fixture-supervisor-memory")?;
+                let original_end=self.book.originals.len().checked_add(64+5).filter(|n|*n<=24576)
+                    .ok_or("removal-fixture-supervisor-original-budget")?;
+                maintenance::reserve_removal_original_storage(&mut self.book,original_end)?;
+                self.book.originals.try_reserve_exact(original_end-self.book.originals.len())
+                    .map_err(|_|"removal-fixture-supervisor-allocation")?;
+                let support=self.book.support_root()?;
+                let root=self.book.open(Some(support),"MobileReleaseKit",true)?;
+                self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;
+                let source=self.fixture_own.as_ref().ok_or("removal-fixture-own-missing")?;
+                let binding=removal_fixture_binding_data(&source.originals.input,&source.removal)?;
+                let descriptor=hash(source.originals.input.descriptor_data());
+                let resume=match self.book.named(Some(root),paths::APP_NAME) {
+                    Err(Errno::ENOENT)=>true,
+                    Ok(stat)=>{check(stat.st_mode==0o040555 && stat.st_uid==0 && stat.st_gid==0,"removal-fixture-current-app")?;false},
+                    Err(_)=>return Err("removal-fixture-current-app"),
+                };
+                let executable=if resume {
+                    self.book.absent(root,paths::APP_NAME)?;source.originals.executed.clone()
+                }else{
+                    let mut parent=root;
+                    for name in [paths::APP_NAME,"Contents","Helpers","MobileReleaseKitPayload.app","Contents","Helpers"] {
+                        parent=self.book.open(Some(parent),name,true)?;removal_resume_stat(&self.book,parent,true,Some(0o555))?;
+                    }
+                    let program=self.book.open(Some(parent),"mrk-macos-remove",false)?;
+                    removal_resume_stat(&self.book,program,false,Some(0o555))?;
+                    check(removal_resume_hash(&self.book,program,SELF_LIMIT)?==source.originals.program_sha,"removal-fixture-installed-program")?;
+                    // The actual child still independently authenticates current
+                    // live app/signatures/R/peer/consent/M; no parent token skips it.
+                    paths::REMOVER_BINARY.to_owned()
+                };
+                let effects_name=format!("removal-fixture-effects-v1-{descriptor}.json");
+                let role=if resume{"resume"}else{"live"};
+                let status_name=format!("removal-fixture-supervisor-v1-{role}-{descriptor}.json");
+                self.book.absent(support,&effects_name)?;self.book.absent(support,&status_name)?;
+                let before=stat::fstat(self.book.fd(support)?).map_err(|_|"removal-fixture-result-parent")?;
+                self.book.check_name(support,true)?;
+                check(self.book.originals.len().checked_add(1+5).is_some_and(|n|n<=original_end)
+                    && self.book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(EXTRA_LIVE+6)
+                        .is_some_and(|n|n<96),"removal-fixture-spawn-budget")?;
+                source.post(&self.book)?;removal_fixture_window(&self.book,10)?;
+                let mut command=Command::new(&executable);
+                if resume {command.arg("--resume");}
+                command.arg(completed).current_dir(&source.originals.parent_path).env_clear()
+                    .env("LANG","C").env("LC_ALL","C").env("TZ","UTC")
+                    .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+                // Retain the original Command before its sole spawn. No pipes,
+                // GO, retry, fallback, PID lookup or unowned process executor.
+                self.command=Some(ManuallyDrop::new(command));
+                removal_fixture_window(&self.book,10)?;
+                match self.command.as_mut().ok_or("removal-fixture-command")?.spawn() {
+                    Ok(child)=>self.child=Some(child),
+                    Err(_)=>{self.wait_unknown=true;return Err("removal-fixture-spawn-unknown");},
+                }
+                // Actual returned Child custody precedes either late/POST veto.
+                removal_fixture_window(&self.book,10)?;
+                self.fixture_own.as_ref().ok_or("removal-fixture-own-missing")?.post(&self.book)?;
+                Ok(RemovalFixtureSupervisor{resume,support,support_before:Identity::of(&before),support_flags:before.st_flags,
+                    effects_name,status_name,binding,original_end})
+            }
+            fn fixture_supervisor_wait(&mut self)->Result<()> {
+                check(self.child.is_some() && !self.wait_unknown,"removal-fixture-child-missing")?;
+                loop {
+                    removal_fixture_window(&self.book,100)?;self.original_wait();
+                    removal_fixture_window(&self.book,100)?;
+                    check(!self.wait_unknown,"removal-fixture-wait-unknown")?;
+                    if self.wait.is_some(){return Ok(());}
+                    // No new owner or endpoint; each actual sleep is bounded by
+                    // the following sample of the same original timeline.
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            fn fixture_supervisor_settle_child(&mut self) {
+                if self.child.is_none() || self.wait.is_some() || self.wait_unknown {return;}
+                if removal_fixture_window(&self.book,110).is_err(){return;}
+                self.terminate_original();
+                while self.wait.is_none() && !self.wait_unknown && removal_fixture_window(&self.book,110).is_ok() {
+                    self.original_wait();
+                    if self.wait.is_none() && !self.wait_unknown {std::thread::sleep(Duration::from_millis(10));}
+                }
+                if self.wait.is_none() {self.note("removal-fixture-child-unjoined");}
+            }
+            fn fixture_supervisor_document(&mut self,state:&RemovalFixtureSupervisor)->Result<(String,Vec<u8>)> {
+                removal_fixture_window(&self.book,110)?;
+                let status=self.wait.as_ref().ok_or("removal-fixture-child-unjoined")?;
+                let expected=if state.resume{0}else{86};
+                check(!self.wait_unknown && !self.termination_attempted && self.child.is_some() && status.code()==Some(expected),
+                    "removal-fixture-child-result")?;
+                self.fixture_own.as_ref().ok_or("removal-fixture-own-missing")?.post(&self.book)?;
+                // This same protected parent was held and the exact leaf was
+                // absent BEFORE spawn. Child0, not a filename or parser result,
+                // is required before opening any resumed effects report.
+                let parent=stat::fstat(self.book.fd(state.support)?).map_err(|_|"removal-fixture-result-parent")?;
+                let row=&self.book.originals[state.support];
+                let named=self.book.named(row.parent,&row.name).map_err(|_|"removal-fixture-result-parent")?;
+                check(removal_parent_change_data(state.support_before,state.support_flags,Identity::of(&parent),parent.st_flags,
+                    // Only the same actual expected Child return was observed
+                    // above. Live may have first-created the fixed request
+                    // sibling; resume may have created its effects sibling.
+                    // This readonly report permits no installed-root change or
+                    // Book alias rebasing and checks the whole read window below.
+                    Identity::of(&named),named.st_flags,true),"removal-fixture-result-parent")?;
+                self.book.protected_as(state.support,true,None,AclRole::SystemSupport)?;
+                let effects=if state.resume {
+                    let (reader,bytes)=maintenance::metadata_original(&mut self.book,state.support,&state.effects_name,4096)?;
+                    let identity=self.book.identity(reader)?;
+                    let digest=removal_fixture_effects_data(&bytes,&state.binding)?;
+                    self.book.check_name(reader,true)?;
+                    self.book.forward_close(reader,"removal-fixture-effects-reader-close")?;
+                    let actual=self.book.named(Some(state.support),&state.effects_name).map_err(|_|"removal-fixture-effects-name")?;
+                    check(Identity::of(&actual)==identity && actual.st_flags==0,"removal-fixture-effects-post")?;
+                    Some(archived_hex_data(&digest))
+                }else{self.book.absent(state.support,&state.effects_name)?;None};
+                let actual=stat::fstat(self.book.fd(state.support)?).map_err(|_|"removal-fixture-result-parent")?;
+                let row=&self.book.originals[state.support];
+                let named=self.book.named(row.parent,&row.name).map_err(|_|"removal-fixture-result-parent")?;
+                check(Identity::of(&actual)==Identity::of(&parent) && Identity::of(&actual)==Identity::of(&named)
+                    && actual.st_flags==parent.st_flags && named.st_flags==actual.st_flags,"removal-fixture-result-parent-post")?;
+                check(self.book.originals.len().checked_add(5).is_some_and(|n|n<=state.original_end),"removal-fixture-status-original-budget")?;
+                removal_fixture_window(&self.book,110)?;
+                let mut value=state.binding.clone();let map=value.as_object_mut().ok_or("removal-fixture-status-shape")?;
+                map.extend([("schemaVersion".into(),json!(1)),("kind".into(),json!("removal-fixture-supervisor-v1")),
+                    ("role".into(),json!(if state.resume{"resume"}else{"live"})),("actualChildReturncode".into(),json!(expected)),
+                    ("originalChildWaitObserved".into(),json!(true)),("effectsSha256".into(),json!(effects)),
+                    ("transportState".into(),json!("pending-original-installer-exit"))]);
+                Ok((state.status_name.clone(),removal_fixture_json_data(&value,4096)?))
+            }
+        }
+        #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+        fn removal_fixture_supervisor_entry(started:u64,completed:&str)->i32 {
+            let mut parent=match Deadline::from_entry(started).and_then(Parent::new){Ok(value)=>value,Err(_)=>return 1};
+            let mut role=None;
+            let returned=(|| {
+                let state=parent.fixture_supervisor_prepare(completed)?;role=Some(state.resume);
+                parent.fixture_supervisor_wait()?;parent.fixture_supervisor_document(&state)
+            })();
+            let output=match returned {Ok(value)=>Some(value),Err(error)=>{parent.note(error);None}};
+            if output.is_none(){parent.fixture_supervisor_settle_child();}
+            let originals=parent.settle_parent_originals();
+            let finality=originals && parent.errors.is_empty() && !parent.wait_unknown && !parent.termination_attempted
+                && parent.wait.is_some() && parent.child.is_some() && parent.command.is_some()
+                && parent.fixture_own.as_ref().is_some_and(|own|own.verified && own.first.is_none() && own.settled())
+                && removal_fixture_window(&parent.book,110).is_ok();
+            if !finality{return 1;}
+            let Some((name,bytes))=output else{return 1;};
+            if removal_fixture_export(&parent.book,&name,&bytes).is_err(){return 1;}
+            if parent.book.shared_deadline().and_then(Deadline::check_total).is_err(){return 1;}
+            // The status still says pending Installer exit. Live cut is an
+            // expected operation FAILURE, never a fake successful removal.
+            if role==Some(true){0}else{1}
+        }
+
+        #[cfg(feature="macos-installed-removal-observer")]
+        fn removal_observer_arguments_data(args:&[String])->Result<(&str,RemovalFixtureInvocation)> {
+            let [_,flag,own,target,package,descriptor,signature]=args else{return Err("removal-observer-argv");};
+            let phase=match flag.as_str(){"--fixture-observe-before"=>"before","--fixture-observe-after-cancel"=>"after-cancel",
+                "--fixture-observe-after-cut"=>"after-cut","--fixture-observe-terminal"=>"terminal",_=>return Err("removal-observer-argv")};
+            check(own.starts_with('/') && removal_fixture_target_path_data(target),"removal-observer-argv")?;
+            for sha in [package,descriptor,signature] {removal_hex_data::<32>(sha)?;}
+            Ok((own,RemovalFixtureInvocation::Observer{phase,target:target.clone(),hashes:[package.clone(),descriptor.clone(),signature.clone()]}))
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        fn removal_observer_identity_data(id:Identity)->Result<Value> {
+            let mtime=i128::from(id.mtime).checked_mul(1_000_000_000).and_then(|v|v.checked_add(i128::from(id.mtime_ns)))
+                .ok_or("removal-observer-identity-time")?;
+            let ctime=i128::from(id.ctime).checked_mul(1_000_000_000).and_then(|v|v.checked_add(i128::from(id.ctime_ns)))
+                .ok_or("removal-observer-identity-time")?;
+            check((0..1_000_000_000).contains(&id.mtime_ns) && (0..1_000_000_000).contains(&id.ctime_ns),"removal-observer-identity-time")?;
+            Ok(json!([id.dev.to_string(),id.ino.to_string(),id.mode.to_string(),id.links.to_string(),id.uid.to_string(),id.gid.to_string(),
+                id.size.to_string(),mtime.to_string(),ctime.to_string()]))
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl RemovalObserverTarget {
+            fn terminal_effects_post(&self,book:&mut Install,facts:&maintenance::RemovalObserverFacts)->Result<()> {
+                use mobile_release_desktop::macos_remove_record::PrefixData;
+                self.authenticated_selection(book)?;
+                let genesis=self.genesis.as_ref().ok_or("removal-observer-genesis")?;
+                let tip=genesis.census.rows().get(genesis.tip_index).and_then(|r|r.attempt_data()).ok_or("removal-observer-tip")?;
+                check(tip.prefix_data()==PrefixData::PayloadAbsentObserved && facts.all_absent,"removal-observer-terminal")?;
+                let name=format!("removal-fixture-effects-v1-{}.json",hash(self.originals.input.descriptor_data()));
+                let support=self.originals.root_chain[2];
+                let Some((_,_,previous))=tip.previous_attempt_data() else{return book.absent(support,&name);};
+                // Linked B report is a separately bounded readonly original.
+                // Its count is from actual returned child effects, never derived
+                // from this observer's missing nodes or inventory expectation.
+                let (reader,bytes)=maintenance::metadata_original(book,support,&name,4096)?;
+                let identity=book.identity(reader)?;
+                let binding=removal_fixture_binding_data(&self.originals.input,&self.removal)?;
+                removal_fixture_effects_data(&bytes,&binding)?;
+                let value=packet(&bytes,4096)?;
+                check(value["requestId"]==archived_hex_data(tip.request_id_data())
+                    && value["rootNonce"]==archived_hex_data(tip.root_nonce_data())
+                    && value["previousTipSha256"]==archived_hex_data(previous)
+                    && value["genesisSnapshotSha256"]==archived_hex_data(genesis.data.whole_sha256_data()),
+                    "removal-observer-effects-chain")?;
+                book.check_name(reader,true)?;book.forward_close(reader,"removal-observer-effects-close")?;
+                let actual=book.named(Some(support),&name).map_err(|_|"removal-observer-effects-name")?;
+                check(Identity::of(&actual)==identity && actual.st_flags==0,"removal-observer-effects-post")?;
+                self.authenticated_selection(book).map(|_|())
+            }
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        impl Parent {
+            fn run_removal_observer(&mut self,completed:&str,invocation:RemovalFixtureInvocation)->Result<(String,Vec<u8>)> {
+                check(!self.entered && self.fixture_own.is_none() && self.fixture_observer.is_none(),"removal-observer-parent-once")?;
+                self.entered=true;
+                self.fixture_own=Some(RemovalFixtureOwnSource::new(&mut self.book,completed,invocation)?);
+                self.fixture_own.as_mut().ok_or("removal-observer-own-missing")?.inspect(&self.book)?;
+                check(self.fixture_own.as_ref().is_some_and(|v|v.verified && v.settled() && !v.pending()),"removal-observer-own-finality")?;
+                let own=self.fixture_own.take().ok_or("removal-observer-own-missing")?;
+                self.fixture_observer=Some(RemovalObserverTarget::new(&mut self.book,own)?);
+                let source=self.fixture_observer.as_mut().ok_or("removal-observer-target-missing")?;
+                source.inspect(&self.book)?;source.reserve_existing(&mut self.book)?;
+                // The fixed9 projection is <=128KiB. JSON rows/body/readback,
+                // aliases and the exclusive output are a separate <=512KiB
+                // debit in the SAME 16MiB control pool, before any allocation.
+                self.book.removal_control_reserved=self.book.removal_control_reserved.checked_add(640*1024)
+                    .filter(|n|*n<=16*1024*1024).ok_or("removal-observer-output-budget")?;
+                let phase=source.originals.phase;
+                maintenance::RemovalObserverProjection::begin(&mut self.book)?;
+                let facts=if matches!(phase,"before"|"after-cancel") {
+                    let observed=maintenance::observe_removal_observer(&mut self.book,source,
+                        self.prefix_source.as_mut().ok_or("removal-observer-prefix-owner")?)?;
+                    maintenance::removal_observer_current_facts(&mut self.book,&observed,source,
+                        self.prefix_source.as_mut().ok_or("removal-observer-prefix-owner")?)?
+                }else{
+                    source.load_observer_genesis(&mut self.book)?;
+                    let observed=maintenance::observe_removal_resume(&mut self.book,RemovalResumeRead::Observer(source),None)?;
+                    let census=&source.genesis.as_ref().ok_or("removal-observer-genesis")?.census;
+                    let facts=maintenance::removal_observer_remaining_facts(&self.book,source,&observed,census)?;
+                    if phase=="after-cut" {
+                        let missing=facts.files.checked_add(facts.directories)
+                            .and_then(|n|n.checked_sub(facts.present_files)).and_then(|n|n.checked_sub(facts.present_directories))
+                            .ok_or("removal-observer-cut-count")?;
+                        let genesis=source.genesis.as_ref().ok_or("removal-observer-genesis")?;
+                        let tip=census.rows().get(genesis.tip_index).and_then(|r|r.attempt_data()).ok_or("removal-observer-tip")?;
+                        check(missing==1 && facts.app && facts.first_absent && !facts.all_absent
+                            && tip.prefix_data()==mobile_release_desktop::macos_remove_record::PrefixData::PayloadRosterRemoval
+                            && tip.previous_attempt_data().is_none(),"removal-observer-cut")?;
+                    }else{
+                        check(phase=="terminal" && !facts.app && facts.first_absent && facts.all_absent,"removal-observer-terminal")?;
+                        source.terminal_effects_post(&mut self.book,&facts)?;
+                    }facts
+                };
+                source.current_selection(&self.book)?;
+                check(self.prefix_source.as_ref().is_some_and(maintenance::CompleteGenerationPrefixSource::unentered_or_settled_data),
+                    "removal-observer-prefix-finality")?;
+                let original_end=self.book.originals.len().checked_add(5).filter(|n|*n<=24576).ok_or("removal-observer-original-budget")?;
+                maintenance::reserve_removal_original_storage(&mut self.book,original_end)?;
+                let root=source.root_original();self.book.check_name(root,true)?;
+                let actual=stat::fstat(self.book.fd(root)?).map_err(|_|"removal-observer-root-stat")?;
+                check(actual.st_flags==0,"removal-observer-root-flags")?;
+                let own=&source.originals.own.originals.input;
+                let name=format!("removal-observer-v1-{}.json",hash(own.descriptor_data()));
+                self.book.absent(source.originals.root_chain[2],&name)?;
+                let value=json!({"schemaVersion":1,"kind":"removal-observer-v1","phase":phase,
+                    "ownPackageSha256":own.package_sha256_data(),"ownDescriptorSha256":hash(own.descriptor_data()),
+                    "ownSignatureSha256":hash(own.signature_data()),"binding":removal_fixture_binding_data(&source.originals.input,&source.removal)?,
+                    "rootIdentity":removal_observer_identity_data(Identity::of(&actual))?,
+                    "installationStateSha256":archived_hex_data(&facts.state),
+                    "installedProducerSha256":hash(source.installed_bytes()),"installedSignatureSha256":hash(source.installed_signature_bytes()),
+                    "payloadCommitmentSha256":archived_hex_data(&facts.commitment),"expectedFiles":facts.files,"expectedDirectories":facts.directories,
+                    "presentFiles":facts.present_files,"presentDirectories":facts.present_directories,"appPresent":facts.app,
+                    "firstEligibleAbsent":facts.first_absent,"allPayloadAbsent":facts.all_absent,
+                    "lockMode":if source.shared{"shared-readonly"}else{"exclusive"},"archives":facts.archives,
+                    "transportState":"pending-original-installer-exit"});
+                let bytes=removal_fixture_json_data(&value,65536)?;
+                source.current_selection(&self.book)?;self.book.clock()?;Ok((name,bytes))
+            }
+        }
+        #[cfg(feature="macos-installed-removal-observer")]
+        fn removal_observer_entry(started:u64,args:&[String])->i32 {
+            let (completed,invocation)=match removal_observer_arguments_data(args){Ok(value)=>value,Err(_)=>return 1};
+            let mut parent=match Deadline::for_observer(started).and_then(Parent::new){Ok(value)=>value,Err(_)=>return 1};
+            let output=match parent.run_removal_observer(completed,invocation){Ok(value)=>Some(value),Err(error)=>{parent.note(error);None}};
+            let originals=parent.settle_parent_originals();
+            if !originals || !parent.errors.is_empty() || parent.book.unknown
+                || !parent.fixture_observer.as_ref().is_some_and(|v|v.inspected && v.first.is_none() && v.native_settled() && v.locked)
+                || !parent.prefix_source.as_ref().is_some_and(maintenance::CompleteGenerationPrefixSource::unentered_or_settled_data)
+                || parent.book.shared_deadline().and_then(Deadline::check_total).is_err(){return 1;}
+            let Some((name,bytes))=output else{return 1;};
+            if removal_fixture_export(&parent.book,&name,&bytes).is_err(){return 1;}
+            if parent.book.shared_deadline().and_then(Deadline::check_total).is_ok(){0}else{1}
         }
         fn removal_entry(started:u64,args:&[String],kind:EntryKind)->i32 {
             // The actual entry already selected the compiled role; these exact
@@ -17670,10 +19219,21 @@ mod installer {
             let returned=if resume {parent.run_removal_resume(completed)} else {parent.run_removal_live(completed)};
             let returned_ok=returned.is_ok();
             if let Err(error)=returned {parent.note(error);}
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            let effects=if returned_ok && resume {
+                match parent.fixture_effects_document(){Ok(value)=>Some(value),Err(error)=>{parent.note(error);None}}
+            }else{None};
             // Always settle after an entered run, including a failed one. The
             // original settlement samples the same deadline AFTER known closes.
             let originals=parent.settle_parent_originals();
-            if returned_ok && originals && parent.errors.is_empty() && parent.removal_finality_data() {0} else {1}
+            let finality=returned_ok && originals && parent.errors.is_empty() && parent.removal_finality_data();
+            #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+            if finality && resume {
+                let Some((name,bytes))=effects else{return 1;};
+                if let Err(error)=removal_fixture_export(&parent.book,&name,&bytes) {parent.note(error);return 1;}
+                return if parent.errors.is_empty() && parent.removal_finality_data(){0}else{1};
+            }
+            if finality {0}else{1}
         }
         // Postinstall must supply ONLY the genuinely qualified completed outer
         // package field. A fixed spelling/UID/mount is not producer authority.
@@ -17899,6 +19459,110 @@ mod installer {
                 retired.unknown=true;assert!(removal_resume_pending_data(&retired));
             }
             fn removal_payload_data_checks() {
+                #[cfg(feature = "macos-installed-removal-observer")]
+                maintenance::removal_observer_projection_data_checks();
+                #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                {
+                    for initial in [false,true] {for live in [false,true] {for returned in [0,1,2,u64::MAX] {
+                        assert_eq!(removal_fixture_cut_candidate_data(initial,live,returned),initial&&live&&returned==1);
+                    }}}
+                    let mut effects=RemovalFixtureEffects::new();
+                    effects.returned(false,3).unwrap();assert_eq!(effects.returned,1);assert_eq!(effects.app_ordinal,None);
+                    effects.returned(false,3).unwrap();effects.returned(true,3).unwrap();
+                    assert_eq!(effects.app_ordinal,Some(3));assert!(effects.returned(false,4).is_err());
+                    let mut overflow=RemovalFixtureEffects{returned:u64::MAX,app_ordinal:None};assert!(overflow.returned(false,usize::MAX).is_err());
+                    for limit in [10,100,110] {
+                        assert!(removal_fixture_window_data(4,4+limit*SECOND-1,limit));
+                        assert!(!removal_fixture_window_data(4,4+limit*SECOND,limit));
+                        assert!(!removal_fixture_window_data(4,3,limit));assert!(!removal_fixture_window_data(u64::MAX-1,u64::MAX,limit));
+                    }
+                    assert!(!removal_fixture_window_data(0,0,120));
+                    let args=vec!["anything".into(),"--fixture-supervise".into(),"/Volumes/P/Remove.pkg".into()];
+                    assert_eq!(removal_fixture_supervisor_argument_data(&args),Some("/Volumes/P/Remove.pkg"));
+                    for n in 0..3 {assert!(removal_fixture_supervisor_argument_data(&args[..n]).is_none());}
+                    let mut extra=args.clone();extra.push("extra".into());assert!(removal_fixture_supervisor_argument_data(&extra).is_none());
+                    let mut wrong=args.clone();wrong[1]="--resume".into();assert!(removal_fixture_supervisor_argument_data(&wrong).is_none());
+                    wrong=args.clone();wrong[2]="relative".into();assert!(removal_fixture_supervisor_argument_data(&wrong).is_none());
+                    assert_eq!(hash(REMOVAL_ABRUPT_POSTINSTALL),"76ee8f8f4bb3655b039cac63606b06881fad071a902d539770931a43170da751");
+                }
+                #[cfg(feature="macos-installed-removal-observer")]
+                {
+                    let path=format!("/Volumes/MRK-Removal-{}-target/Remove.pkg","1".repeat(32));
+                    let mut args=vec!["arbitrary-argv0".into(),"--fixture-observe-before".into(),"/Volumes/O/Remove.pkg".into(),
+                        path.clone(),"2".repeat(64),"3".repeat(64),"4".repeat(64)];
+                    for phase in ["before","after-cancel","after-cut","terminal"] {
+                        args[1]=format!("--fixture-observe-{phase}");
+                        let (_,invocation)=removal_observer_arguments_data(&args).unwrap();
+                        let script=invocation.script().unwrap();assert!(script.len()<=1024);
+                        assert!(std::str::from_utf8(&script).unwrap().ends_with(&format!("--fixture-observe-{phase} \"$1\" '{path}' '{}' '{}' '{}'\n",args[4],args[5],args[6])));
+                    }
+                    for n in 0..7 {assert!(removal_observer_arguments_data(&args[..n]).is_err());}
+                    let mut wrong=args.clone();wrong.push("x".into());assert!(removal_observer_arguments_data(&wrong).is_err());
+                    for flag in ["--resume","--fixture-supervise","--fixture-observe-unknown"] {
+                        let mut wrong=args.clone();wrong[1]=flag.into();assert!(removal_observer_arguments_data(&wrong).is_err());
+                    }
+                    for bad in ["/tmp/Remove.pkg".to_owned(),path.replace("/Volumes/","/Volumes/../Volumes/"),
+                        path.replace(&"1".repeat(32),&"0".repeat(32)),path.replace("-target/","-install/")] {
+                        assert!(!removal_fixture_target_path_data(&bad));
+                    }
+                    let mut wrong=args.clone();wrong[5]="0".repeat(64);assert!(removal_observer_arguments_data(&wrong).is_err());
+                    let id=Identity{dev:1,ino:2,mode:0o40755,links:3,uid:0,gid:0,size:4,mtime:5,mtime_ns:6,ctime:7,ctime_ns:8};
+                    assert_eq!(removal_observer_identity_data(id).unwrap(),json!(["1","2","16877","3","0","0","4","5000000006","7000000008"]));
+                    assert!(removal_observer_identity_data(Identity{mtime_ns:1_000_000_000,..id}).is_err());
+                }
+                // Same grouped payload DATA gate, fixture-only parsing. No native
+                // child/observer/close finality may be inferred from these bytes.
+                #[cfg(feature = "macos-installed-removal-abrupt-fixture")]
+                {
+                    let expected = json!({"sourceCommit":"1".repeat(40), "target":target(), "release":paths::RELEASE,
+                        "inventorySha256":"2".repeat(64), "packageSha256":"3".repeat(64),
+                        "removeDescriptorSha256":"4".repeat(64), "removeSignatureSha256":"5".repeat(64)});
+                    let mut value = expected.clone();
+                    for (key, field) in json!({"schemaVersion":1,"kind":"removal-fixture-effects-v1",
+                        "requestId":"6".repeat(32),"rootNonce":"7".repeat(32),"genesisSnapshotSha256":"8".repeat(64),
+                        "previousTipSha256":"9".repeat(64),"prefix":4,"returnedUnlinks":1,"appRootUnlinkOrdinal":1,
+                        "transportState":"pending-original-child-exit"}).as_object().unwrap() {
+                        value[key] = field.clone();
+                    }
+                    let encode = |v: &Value| serde_json::to_vec(v).unwrap();
+                    let raw = encode(&value);
+                    let digest: [u8; 32] = Sha256::digest(&raw).into();
+                    assert_eq!(removal_fixture_effects_data(&raw, &expected).unwrap(), digest);
+                    let bound = 9 * installation_record::FILE_LIMIT as u64 * 2;
+                    let mut upper = value.clone();
+                    upper["returnedUnlinks"] = json!(bound); upper["appRootUnlinkOrdinal"] = json!(bound);
+                    assert!(removal_fixture_effects_data(&encode(&upper), &expected).is_ok());
+                    for key in value.as_object().unwrap().keys() {
+                        let mut bad = value.clone(); bad.as_object_mut().unwrap().remove(key);
+                        assert!(removal_fixture_effects_data(&encode(&bad), &expected).is_err());
+                    }
+                    for key in expected.as_object().unwrap().keys() {
+                        let mut bad = value.clone(); bad[key] = json!("different");
+                        assert!(removal_fixture_effects_data(&encode(&bad), &expected).is_err());
+                    }
+                    for (key, invalid) in [
+                        ("schemaVersion",json!(true)),("schemaVersion",json!(1.0)),("kind",json!("other")),
+                        ("prefix",json!(3)),("prefix",json!(4.0)),("transportState",json!("complete")),
+                        ("requestId",json!("0".repeat(32))),("rootNonce",json!("6".repeat(32))),
+                        ("rootNonce",json!("F".repeat(32))),("genesisSnapshotSha256",json!("0".repeat(64))),
+                        ("previousTipSha256",json!("a".repeat(63))),("returnedUnlinks",json!(0)),
+                        ("returnedUnlinks",json!(bound+1)),("returnedUnlinks",json!(-1)),
+                        ("returnedUnlinks",json!(1.0)),("returnedUnlinks",json!(true)),
+                        ("appRootUnlinkOrdinal",json!(2)),("appRootUnlinkOrdinal",json!(false)),
+                    ] {
+                        let mut bad = value.clone(); bad[key] = invalid;
+                        assert!(removal_fixture_effects_data(&encode(&bad), &expected).is_err(), "{key}");
+                    }
+                    let mut unknown = value.clone(); unknown["unknown"] = json!(true);
+                    assert!(removal_fixture_effects_data(&encode(&unknown), &expected).is_err());
+                    let mut wrong_expected = expected.clone(); wrong_expected["extra"] = json!(1);
+                    assert!(removal_fixture_effects_data(&raw, &wrong_expected).is_err());
+                    let duplicate = format!("{{\"schemaVersion\":1,{}", std::str::from_utf8(&raw[1..]).unwrap());
+                    assert!(removal_fixture_effects_data(duplicate.as_bytes(), &expected).is_err());
+                    for bad in [&b""[..], &b"{\"x\":NaN}"[..], &vec![b' ';4097][..]] {
+                        assert!(removal_fixture_effects_data(bad, &expected).is_err());
+                    }
+                }
                 use mobile_release_desktop::macos_remove_record::FailureKindData;
                 // Actual production reducers only. These do not execute or
                 // stand in for APFS rename/unlink/close/native qualification.
@@ -17906,6 +19570,8 @@ mod installer {
                 // terminal, not the maximum of three independently fitting cuts.
                 // F=2,D=3,C=4,K=8,P=8: initial 56+93+24; linked 24+93+24.
                 for (linked,expected) in [(false,173usize),(true,141usize)] {
+                    #[cfg(feature="macos-installed-removal-abrupt-fixture")]
+                    let expected=expected+5;
                     assert_eq!(removal_lifecycle_originals_data(0,2,3,4,8,8,linked),Some((expected,expected)));
                     assert_eq!(removal_lifecycle_originals_data(24576-expected,2,3,4,8,8,linked),Some((expected,24576)));
                     assert!(removal_lifecycle_originals_data(24577-expected,2,3,4,8,8,linked).is_none());

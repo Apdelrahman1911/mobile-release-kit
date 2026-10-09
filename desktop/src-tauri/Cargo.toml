@@ -77,6 +77,8 @@ macos-installed-remover = []
 # Private-key signing is isolated to the explicit nonshipping example graph.
 macos-package-producer = ["mrk-macos-installed-native/package-producer-signing"]
 macos-remove-producer = ["mrk-macos-installed-native/package-producer-signing"]
+# NONSHIPPING: the existing fixed emitter only; never an installed executable.
+macos-remove-observer-producer = ["macos-remove-producer"]
 # Separate fixed headless Android registration helper; never unified into UI.
 macos-android-registration-helper = ["mrk-macos-installed-native/android-registration-helper"]
 macos-installed-resident-image = ["macos-android-registration-helper", "mrk-macos-installed-native/resident-image"]
@@ -84,6 +86,9 @@ macos-installed-resident-image = ["macos-android-registration-helper", "mrk-maco
 macos-installed-desktop-image = ["desktop-shell", "custom-protocol", "mrk-macos-installed-native/desktop-image"]
 # Separate fixed eight-case package only; absent from ordinary Installer/app.
 macos-installed-installer-fixture = ["macos-installed-installer"]
+# Independent nonshipping real-root roles; never the alternate-root eight-case fixture.
+macos-installed-removal-abrupt-fixture = ["macos-installed-remover"]
+macos-installed-removal-observer = ["macos-installed-remover"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
 windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
