@@ -1,7 +1,8 @@
 """Fixed, credential-free Darwin build of the canonical sealed-box helper.
 
 This is a separate hosted verification context, not a CPython producer or a
-Desktop capability. All 22 native calls use the existing MRK process owner.
+Desktop capability. Ordinary22 calls and the fixed provider-only3 probes use
+the existing MRK process owner.
 Public output remains provisional until this original entry actually returns.
 """
 from __future__ import annotations
@@ -81,6 +82,89 @@ ROLE_LIMITS = (
     ("canonical-box-test", 10, QUERY_LIMIT), ("helper-release", 120, OUTPUT_LIMIT),
     ("helper-native-test-build", 120, OUTPUT_LIMIT), ("helper-native-test", 10, QUERY_LIMIT),
 )
+# Verification-only public inputs. Never a shipping/provider nomination.
+PROVIDER_REFERENCE = "refs/heads/verify/desktop-macos-history-provider-probe"
+PROVIDER_INPUT_ROOT = "desktop/history-provider-inputs"
+PROVIDER_SOURCE = PROVIDER_INPUT_ROOT + "/source-manifest.json"
+PROVIDER_CROSSBUILD = PROVIDER_INPUT_ROOT + "/crossbuild.json"
+PROVIDER_SOURCE_PIN = (212713, "d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd")
+PROVIDER_CROSSBUILD_PIN = (9544, "4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f")
+PROVIDER_PINS = {
+    "aarch64-apple-darwin": (37471938, "a704813e4e64f8814e5fa21677f7dab51d9b77d045ded75dd11bcdc1a53d5516"),
+    "x86_64-apple-darwin": (39889552, "aca3bcfd4fc35d9bcd800f06fe09f7d6c50ab4d2428f04c4ba081a32bfebbe4e"),
+}
+PROVIDER_NOTICE_PINS = {
+    "aarch64-apple-darwin": (1552072, "3dc7d2cd021d654387e5be71603869a039a3d2adf8b97a6fd0dda4ef3743a44d"),
+    "x86_64-apple-darwin": (1552072, "087592d4d366fcf2c49851571542959bb91607408c6e677ffdc2484fd7293c2e"),
+}
+PROVIDER_ROLES = (("network-denial", 15, QUERY_LIMIT), ("provider-version", 15, QUERY_LIMIT),
+                  ("provider-invalid-controls", 15, QUERY_LIMIT))
+PROVIDER_LOADS = ("/usr/lib/libSystem.B.dylib", "/usr/lib/libresolv.9.dylib",
+    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    "/System/Library/Frameworks/Security.framework/Versions/A/Security")
+PROVIDER_VERSION = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
+    b"https://github.com/cli/cli/releases/tag/v2.88.1-mrk-history.1\n")
+PROVIDER_REFUSAL = b"managed history provider: controls\n"
+
+
+def probe_mode(argv, reference):
+    """No permissive flag/ref fallback; old seal entry remains zero-argument."""
+    need(type(argv) is list and type(reference) is str, "fixed-seal-workflow-context")
+    if argv == [] and reference == REFERENCE:
+        return False
+    need(argv == ["--history-provider-probe"] and reference == PROVIDER_REFERENCE,
+         "fixed-seal-workflow-context")
+    return True
+
+
+def provider_output(role, returncode, stdout, stderr):
+    """Returned DATA only. The caller still proves actual original settlement."""
+    if type(returncode) is not int or type(stdout) is not bytes or type(stderr) is not bytes:
+        return False
+    if role == "provider-version":
+        return returncode == 0 and stdout == PROVIDER_VERSION and stderr == b""
+    if role == "provider-invalid-controls":
+        return returncode == 1 and stdout == b"" and stderr == PROVIDER_REFUSAL
+    return role == "network-denial" and returncode == 0 and stderr == b""
+
+
+def provider_macho_data(prefix, total, target, orchestration):
+    """Same load-table parser over a bounded prefix of a separately hashed file."""
+    need(target in TARGETS and type(prefix) is bytes and 32 <= len(prefix) <= QUERY_LIMIT
+         and type(total) is int and len(prefix) <= total <= 128 * MIB
+         and prefix[:4] == b"\xcf\xfa\xed\xfe", "provider-thin-header")
+    machine, _, _, cpu, subtype = TARGETS[target]
+    header = struct.unpack_from("<8I", prefix)
+    need(header[1:4] == (cpu, subtype, 2) and header[7] == 0
+         and header[5] <= QUERY_LIMIT - 32, "provider-thin-header")
+    need(orchestration.native_slice(prefix, machine) == prefix, "provider-thin-header")
+    rows = orchestration.macho_records(prefix, machine)
+    loads, dyld, builds, signatures = [], [], [], []
+    for row in rows:
+        command, offset, size = row["command"], row["offset"], row["size"]
+        need(command not in {0x6, 0x7, 0xD, 0xF, 0x10, 0x12, 0x13, 0x14, 0x15,
+             0x1C, 0x8000001C, 0x27}, "provider-loader-override")
+        if command == 0x32:
+            need(size == 24 and struct.unpack_from("<4I", prefix, offset + 8)
+                 == (1, 0x000C0000, 0x000C0000, 0), "provider-minimum-sdk")
+            builds.append(command)
+        elif command == 0xE:
+            dyld.append(row["text"])
+        elif command in {0xC, 0x18, 0x80000018, 0x1F, 0x8000001F, 0x20, 0x23, 0x80000023}:
+            need(command == 0xC and row["text"] in PROVIDER_LOADS, "provider-system-load")
+            loads.append(row["text"])
+        elif command == 0x1D:
+            need(size == 16, "provider-signature-command")
+            start, length = struct.unpack_from("<II", prefix, offset + 8)
+            need(start >= 32 + header[5] and length > 0 and start + length == total,
+                 "provider-signature-command")
+            signatures.append(command)
+    need(len(builds) == 1 and dyld == ["/usr/lib/dyld"] and tuple(loads) == PROVIDER_LOADS
+         and len(signatures) == (1 if target == "aarch64-apple-darwin" else 0), "provider-loader-roster")
+    return {"thin": True, "minimumMacOS": "12.0", "sdk": "12.0", "loadDylibs": loads,
+            "GoAdHocSignatureCommand": bool(signatures), "DeveloperIdQualified": False}
+
+
 B = None
 
 
@@ -103,6 +187,27 @@ _DIAGNOSTIC_REASONS = frozenset((
     'bounded-canonical-tar',
     'bounded-original-roster',
     'build-capacity',
+    'provider-thin-header',
+    'provider-loader-override',
+    'provider-minimum-sdk',
+    'provider-system-load',
+    'provider-signature-command',
+    'provider-loader-roster',
+    'provider-input-pin',
+    'provider-input-original',
+    'provider-input-short',
+    'provider-copy-short',
+    'provider-input-post',
+    'provider-copy-original',
+    'provider-copy-post',
+    'provider-parent-post',
+    'provider-parent-original',
+    'provider-input-roster',
+    'provider-record-post',
+    'provider-record-unbound',
+    'provider-record-pin',
+    'provider-output-contract',
+    'provider-evidence-bound',
     'build-input-original-post',
     'builder-already-loaded',
     'builder-source-hash',
@@ -295,6 +400,8 @@ def failure_diagnostic(error):
         observed = build.phase
         allowed = {"admission", "canonical-source-extraction", "source-and-native-final-post"}
         allowed.update(role for role, _, _ in ROLE_LIMITS)
+        if getattr(build, "provider_mode", False):
+            allowed.update(role for role, _, _ in PROVIDER_ROLES)
         phase = observed if type(observed) is str and observed in allowed else "unknown"
         entered, returned = build.entered, build.returned
         if type(entered) is int and type(returned) is int and 0 <= returned <= entered <= 22:
@@ -461,11 +568,18 @@ def absent(path):
     return False
 
 
-def source_snapshot(check):
+def source_snapshot(check, *, provider=False):
     fixed = {WORKFLOW, "desktop/tools/macos_github_seal_build.py", INVENTORY, ARCHIVE,
              "desktop/github-seal-inputs/README.md"}
     fixed.update("desktop/tools/" + name for name in REUSE_PINS)
     fixed.update(HELPER + "/" + name for name in HELPER_PINS)
+    if provider:
+        B.need(type(PROVIDER_CROSSBUILD_PIN) is tuple and len(PROVIDER_CROSSBUILD_PIN) == 2
+               and type(PROVIDER_CROSSBUILD_PIN[0]) is int and 0 < PROVIDER_CROSSBUILD_PIN[0] <= QUERY_LIMIT
+               and type(PROVIDER_CROSSBUILD_PIN[1]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", PROVIDER_CROSSBUILD_PIN[1]), "provider-record-unbound")
+        fixed = {WORKFLOW, "desktop/tools/macos_github_seal_build.py", PROVIDER_SOURCE, PROVIDER_CROSSBUILD}
+        fixed.update("desktop/tools/" + name for name in REUSE_PINS)
     pending = [CHECKOUT / "src/mobile_release"]
     directories = 0
     while pending:
@@ -488,11 +602,16 @@ def source_snapshot(check):
     for name in sorted(fixed):
         check()
         path = CHECKOUT / name
-        body = B.read(path, 2 * MIB)
+        body = B.read(path, QUERY_LIMIT if provider and name == PROVIDER_CROSSBUILD else 2 * MIB)
         rows[name] = {"size": len(body), "sha256": B.digest(body), "identity": B.identity(path.lstat())}
     for name, pin in REUSE_PINS.items():
         row = rows["desktop/tools/" + name]
         B.need((row["size"], row["sha256"]) == pin, "existing-owner-source-pin")
+    if provider:
+        for name, pin in ((PROVIDER_SOURCE, PROVIDER_SOURCE_PIN), (PROVIDER_CROSSBUILD, PROVIDER_CROSSBUILD_PIN)):
+            row = rows[name]
+            B.need((row["size"], row["sha256"]) == pin, "provider-record-pin")
+        return rows
     for name, pin in HELPER_PINS.items():
         row = rows[HELPER + "/" + name]
         B.need((row["size"], row["sha256"]) == pin, "helper-source-pin")
@@ -520,13 +639,17 @@ def limits():
 
 class SealBuild:
     """One fixed recipe around the already established MRK cancellation owner."""
-    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started, python_binding):
+    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started, python_binding, provider=False):
         self.target, self.profile = target, TARGETS[target]
         self.source, self.run_id, self.attempt = source, run, attempt
         self.owner, self.control, self.orchestration, self.probe = owner, control, orchestration, probe
         self.started, self.deadline = started, started + WORK_SECONDS
         self.python_binding = python_binding
-        self.work = WORK_PARENT / f"mrk-github-seal-{target}-{source}-{run}-{attempt}"
+        B.need(type(provider) is bool, "fixed-seal-workflow-context")
+        self.provider_mode, self.provider_ready = provider, False
+        self.role_limits = PROVIDER_ROLES if provider else ROLE_LIMITS
+        prefix = "mrk-history-provider" if provider else "mrk-github-seal"
+        self.work = WORK_PARENT / f"{prefix}-{target}-{source}-{run}-{attempt}"
         self.private, self.public = self.work / "private", self.work / "public"
         self.work_identity = self.private_identity = None
         self.guard, owns = control.cancellation_owner(None, B.BuildRefused, "seal-handler-finality")
@@ -557,6 +680,9 @@ class SealBuild:
         B.remaining(self.deadline + CLEANUP_SECONDS, time.monotonic(), CLEANUP_SECONDS)
 
     def evidence_bytes(self, name, body):
+        if getattr(self, "provider_mode", False):
+            B.need(type(body) is bytes and sum(map(len, self.evidence.values())) + len(body) <= MIB - QUERY_LIMIT,
+                   "provider-evidence-bound")
         return B.Build.evidence_bytes(self, name, body)
 
     def evidence_json(self, name, value):
@@ -749,10 +875,13 @@ class SealBuild:
 
     def run(self, role, argv, *, cwd=None):
         self.check()
-        B.need(self.entered < len(ROLE_LIMITS) and role == ROLE_LIMITS[self.entered][0], "fixed-role-order")
-        _, maximum, output_limit = ROLE_LIMITS[self.entered]
+        roles = self.role_limits
+        B.need(self.entered < len(roles) and role == roles[self.entered][0], "fixed-role-order")
+        _, maximum, output_limit = roles[self.entered]
         selected = [self.sandbox, "-p", B.NETWORK_POLICY, *argv]
         directory = cwd or self.private
+        if self.provider_mode:
+            self.provider_post()
         self.recheck_tools()
         row = {"role": role, "argv": selected, "cwd": str(directory),
                "environmentSha256": B.digest(B.canonical(self.environment)),
@@ -778,8 +907,12 @@ class SealBuild:
                 stdoutSha256=self.evidence_bytes(role + ".stdout", result.stdout),
                 stderrSha256=self.evidence_bytes(role + ".stderr", result.stderr))
             self.recheck_tools()
-            B.need(result.returncode == 0 and b"(ignored)" not in result.stdout + result.stderr,
-                   "original-command-failed")
+            if self.provider_mode:
+                self.provider_post()
+                B.need(provider_output(role, result.returncode, result.stdout, result.stderr), "provider-output-contract")
+            else:
+                B.need(result.returncode == 0 and b"(ignored)" not in result.stdout + result.stderr,
+                       "original-command-failed")
             row["settledWork"] = self.census()
             self.check()
             return result
@@ -817,6 +950,194 @@ class SealBuild:
             B.need(selected and (directory == root / "lib" or any(name.startswith("libstd-") for name in selected)),
                    "rust-runtime-complete-native-selection")
         return total
+
+    def provider_parents_post(self):
+        for path, original in self.provider_parents.items():
+            self.check()
+            info = Path(path).lstat()
+            B.need(stat.S_ISDIR(info.st_mode) and B.custody(info) == original,
+                   "provider-parent-post")
+
+    def provider_stream(self, path, pin, *, original=None, destination=None):
+        # Large input reads remain separate from the existing2MiB SOURCE reader.
+        # At most one64KiB block and one64KiB load table are retained, not the
+        # full executable; the SAME original is checked before/after all bytes.
+        self.check()
+        B.need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int
+               and 0 < pin[0] <= 128 * MIB and type(pin[1]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin[1]), "provider-input-pin")
+        info = path.lstat()
+        identity = B.identity(info)
+        B.need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == pin[0]
+               and (original is None or identity == original), "provider-input-original")
+        self.provider_parents_post()
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        with B.DATA.acquiring(os.open, os.close, path, flags) as fd:
+            B.need(B.identity(os.fstat(fd)) == identity, "provider-input-original")
+            def transfer(output):
+                digest, count, prefix = hashlib.sha256(), 0, b""
+                while count < pin[0]:
+                    self.check()
+                    block = os.read(fd, min(65536, pin[0] - count))
+                    B.need(bool(block), "provider-input-short")
+                    if len(prefix) < QUERY_LIMIT:
+                        prefix += block[:QUERY_LIMIT - len(prefix)]
+                    digest.update(block)
+                    count += len(block)
+                    if output is not None:
+                        cursor = 0
+                        while cursor < len(block):
+                            self.check()
+                            written = os.write(output, block[cursor:])
+                            B.need(type(written) is int and 0 < written <= len(block) - cursor,
+                                   "provider-copy-short")
+                            cursor += written
+                B.need(not os.read(fd, 1) and (count, digest.hexdigest()) == pin,
+                       "provider-input-pin")
+                B.need(B.identity(os.fstat(fd)) == identity and B.identity(path.lstat()) == identity,
+                       "provider-input-post")
+                return prefix
+            if destination is None:
+                prefix = transfer(None)
+            else:
+                # A failed open/close stays in the SAME DATA ledger. No retry,
+                # guessed file adoption, or chmod of the checkout original.
+                with B.DATA.acquiring(os.open, os.close, destination,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600) as output:
+                    made = os.fstat(output)
+                    B.need(stat.S_ISREG(made.st_mode) and made.st_nlink == 1 and made.st_uid == os.getuid(),
+                           "provider-copy-original")
+                    prefix = transfer(output)
+                    os.fchmod(output, 0o555)
+                    after = os.fstat(output)
+                    B.need(B.custody(after)[:2] == B.custody(made)[:2] and B.custody(after)[3:] == B.custody(made)[3:]
+                           and after.st_size == pin[0]
+                           and stat.S_IMODE(after.st_mode) == 0o555 and after.st_nlink == 1
+                           and B.identity(destination.lstat()) == B.identity(after), "provider-copy-post")
+                    self.provider_copy_identity = B.identity(after)
+            self.provider_parents_post()
+        self.check()
+        return identity, prefix
+
+    def provider_notices_post(self):
+        # Fixed descriptive sidecars, never executable/source authority. Preserve
+        # the exact initially observed originals across every subsequent read.
+        B.need(type(self.provider_notice_originals) is dict
+               and set(self.provider_notice_originals) == set(PROVIDER_NOTICE_PINS),
+               "provider-notice-originals")
+        for target, pin in PROVIDER_NOTICE_PINS.items():
+            path = CHECKOUT / PROVIDER_INPUT_ROOT / target / "NOTICES.txt"
+            self.provider_stream(path, pin, original=self.provider_notice_originals[target])
+
+    def provider_input(self):
+        self.provider_parents = {}
+        input_root = CHECKOUT / PROVIDER_INPUT_ROOT
+        path = input_root / self.target / "gh"
+        # All named source ancestors are real directories; no symlink/alias
+        # admission. Public checkout is not a same-UID isolation boundary.
+        for parent in (path.parent, *path.parent.parents):
+            self.check()
+            info = parent.lstat()
+            B.need(stat.S_ISDIR(info.st_mode) and not parent.is_symlink(), "provider-parent-original")
+            self.provider_parents[str(parent)] = B.custody(info)
+        B.need(len(self.provider_parents) <= 128, "provider-parent-original")
+        B.need(names(input_root, 4, self.check) == ["aarch64-apple-darwin", "crossbuild.json",
+               "source-manifest.json", "x86_64-apple-darwin"], "provider-input-roster")
+        for target in PROVIDER_PINS:
+            self.check()
+            directory = input_root / target
+            info = directory.lstat()
+            B.need(stat.S_ISDIR(info.st_mode) and not directory.is_symlink()
+                   and names(directory, 2, self.check) == ["NOTICES.txt", "gh"], "provider-input-roster")
+            B.need((str(directory) not in self.provider_parents and len(self.provider_parents) < 128)
+                   or self.provider_parents.get(str(directory)) == B.custody(info),
+                   "provider-parent-original")
+            self.provider_parents[str(directory)] = B.custody(info)
+        B.need(set(PROVIDER_NOTICE_PINS) == set(PROVIDER_PINS), "provider-notice-roster")
+        self.provider_notice_originals = {}
+        for target, pin in PROVIDER_NOTICE_PINS.items():
+            notice = input_root / target / "NOTICES.txt"
+            identity, _ = self.provider_stream(notice, pin)
+            self.provider_notice_originals[target] = identity
+        B.need(B.custody((self.private / "provider").lstat()) == self.provider_directory_identity,
+               "provider-parent-post")
+        self.provider_original = path
+        self.provider_pin = PROVIDER_PINS[self.target]
+        self.provider_identity, prefix = self.provider_stream(path, self.provider_pin)
+        self.provider_facts = provider_macho_data(prefix, self.provider_pin[0], self.target, self.orchestration)
+        self.provider_binary = self.private / "provider/gh"
+        for parent in (self.provider_binary.parent, self.private, self.work):
+            info = parent.lstat()
+            B.need((str(parent) not in self.provider_parents and len(self.provider_parents) < 128)
+                   or self.provider_parents.get(str(parent)) == B.custody(info),
+                   "provider-parent-original")
+            self.provider_parents[str(parent)] = B.custody(info)
+        B.need(len(self.provider_parents) <= 128, "provider-parent-original")
+        self.provider_stream(path, self.provider_pin, original=self.provider_identity, destination=self.provider_binary)
+        _, copied_prefix = self.provider_stream(self.provider_binary, self.provider_pin,
+                                                original=self.provider_copy_identity)
+        B.need(provider_macho_data(copied_prefix, self.provider_pin[0], self.target, self.orchestration)
+               == self.provider_facts, "provider-copy-post")
+        self.provider_ready = True
+        self.provider_post()
+
+    def provider_post(self):
+        self.provider_parents_post()
+        for path, original in ((self.provider_original, self.provider_identity),
+                               (self.provider_binary, self.provider_copy_identity)):
+            self.provider_stream(path, self.provider_pin, original=original)
+        self.provider_notices_post()
+        for name, pin in ((PROVIDER_SOURCE, PROVIDER_SOURCE_PIN), (PROVIDER_CROSSBUILD, PROVIDER_CROSSBUILD_PIN)):
+            self.check()
+            before = self.source_binding[name]
+            B.need(B.identity((CHECKOUT / name).lstat()) == before["identity"], "provider-record-post")
+            B.read(CHECKOUT / name, pin[0], expected=pin)
+            B.need(B.identity((CHECKOUT / name).lstat()) == before["identity"], "provider-record-post")
+        self.check()
+
+    def prepare_provider(self):
+        self.work_identity = self.mkdir(self.work)
+        self.private_identity = self.mkdir(self.private)
+        for name in ("home", "tmp", "gh-config", "provider"):
+            made = self.mkdir(self.private / name)
+            if name == "provider":
+                self.provider_directory_identity = made
+        self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.private / "home"),
+            "TMPDIR": str(self.private / "tmp") + "/", "GH_CONFIG_DIR": str(self.private / "gh-config"),
+            "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "GH_HOST": "github.com", "NO_COLOR": "1",
+            "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1",
+            "GH_TOKEN": "mrk-history-native-probe-not-a-credential"}
+        self.sandbox = self.protected_tool(Path("/usr/bin/sandbox-exec"), role="sandbox")
+        self.python = self.python_tools()
+        self.provider_input()
+        network = self.run("network-denial", [self.python, "-I", "-S", "-B",
+            str(CHECKOUT / "desktop/tools/macos_cpython_source_probe.py"), "network", self.target])
+        facts = B.probe_result(network.stdout, "network", self.target, self.probe)
+        B.need(network.stderr == b"" and type(facts.get("errno")) is int and facts["errno"] in {1, 13}, "network-denial")
+        self.toolchain.update(nativeHost=facts["nativeHost"], target=self.target,
+            pythonVersion=sys.version, pythonShipped=False, resourceLimits=self.resource_limits)
+        self.run("provider-version", [str(self.provider_binary), "--version"])
+        # gh reads private startup Config/KnownHosts BEFORE the apiRun guard.
+        # The explicit PUBLIC inert token satisfies CheckAuth; no secret token,
+        # user config, successful API client or real network request is tested.
+        self.environment["MRK_HISTORY_PROVIDER_V1"] = "1"
+        self.run("provider-invalid-controls", [str(self.provider_binary), "api", "--hostname", "github.com",
+                                               "--method", "GET", "user"])
+        self.provider_post()
+        self.recheck_tools(full=True)
+        B.need(source_snapshot(self.check, provider=True) == self.source_binding, "verification-source-final-post")
+        self.source_post = True
+        self.evidence_json("provider-inputs.json", {"binary": {"bytes": self.provider_pin[0], "sha256": self.provider_pin[1]},
+            "sourceManifest": PROVIDER_SOURCE_PIN, "crossbuild": PROVIDER_CROSSBUILD_PIN,
+            "facts": self.provider_facts, "embeddedNoticesComplete": True,
+            "noticeContentRuntimeExecuted": False, "notices": PROVIDER_NOTICE_PINS,
+            "copiedIdentity": self.provider_copy_identity, "inputIdentity": self.provider_identity})
+        self.evidence_bytes("crossbuild.json", B.read(CHECKOUT / PROVIDER_CROSSBUILD, QUERY_LIMIT, expected=PROVIDER_CROSSBUILD_PIN))
+        self.evidence_json("toolchain.json", {**self.toolchain, "tools": list(self.tools.values()), "sameUidAdversaryIsolation": False})
+        self.evidence_json("source-binding.json", {"sourceCommit": self.source, "rows": self.source_binding})
+        self.check()
+        B.need(self.entered == self.returned == 3, "fixed-recipe-complete")
+        self.success_ready = True
 
     def prepare(self):
         self.work_identity = self.mkdir(self.work)
@@ -1272,11 +1593,17 @@ class SealBuild:
             self.scratch_retired = True
             return
         B.need(B.custody(self.work.lstat()) == self.work_identity, "original-task-root-changed")
+        if self.provider_mode and self.provider_ready:
+            self.provider_post()
         if self.failure is None and self.success_ready:
-            self.retain_products()
+            if self.provider_mode:
+                self.export = self.work / "export-pending"
+                self.mkdir(self.export)  # Evidence only; never copy provider into public.
+            else:
+                self.retain_products()
         if self.private_identity is not None:
             self.census()  # Enforce our tighter 8192/512MiB before the donor retire.
-            for name in LIBTOOL_ARCHIVES:
+            for name in (() if self.provider_mode else LIBTOOL_ARCHIVES):
                 alias = self.private / "build/src/libsodium/.libs" / name
                 if name in self.libtool_alias_originals:
                     self.libtool_alias(alias, retire=True)
@@ -1296,7 +1623,7 @@ class SealBuild:
         passed = B.public_eligible(failure=self.failure, entered=self.entered, returned=self.returned,
             ledger={"complete": verdict.complete, "fatal": verdict.fatal, "contained": verdict.contained},
             handlers=self.guard.handler_state, scratch_retired=self.scratch_retired, data_finality=B.DATA.known)
-        passed = passed and self.success_ready and self.entered == 22
+        passed = passed and self.success_ready and self.entered == len(self.role_limits)
         report = {"schemaVersion": 1, "kind": "macos-github-seal-build-v1", "sourceCommit": self.source,
             "runId": self.run_id, "runAttempt": self.attempt, "target": self.target,
             "status": "passed" if passed else "failed", "transportState": "pending-original-entry-exit",
@@ -1310,13 +1637,23 @@ class SealBuild:
             "officialSignatureVerified": False, "packagedHelperQualified": False,
             "framedParentRoundTripQualified": False, "nativeTests": self.native if passed else None,
             "evidence": {name: {"bytes": len(body), "sha256": B.digest(body)} for name, body in self.evidence.items()}}
+        if self.provider_mode:
+            report.update(kind="macos-history-provider-probe-v1", packagedProviderQualified=False,
+                authenticatedHistoryQualified=False, embeddedNoticesComplete=True,
+                noticeContentRuntimeExecuted=False, providerNotices=PROVIDER_NOTICE_PINS,
+                providerBinary={"bytes": PROVIDER_PINS[self.target][0], "sha256": PROVIDER_PINS[self.target][1]},
+                crossbuildRecord=PROVIDER_CROSSBUILD_PIN, sourceManifest=PROVIDER_SOURCE_PIN)
+            for name in ("officialArchiveSha256", "officialSignatureVerified", "packagedHelperQualified",
+                         "framedParentRoundTripQualified", "nativeTests"):
+                del report[name]
         body = B.canonical(report)
         B.need(len(body) <= QUERY_LIMIT, "report-bound")
         self.export_rows["report.json"] = B.write(self.export / "report.json", body, 0o444)
         for name, data in self.evidence.items():
             self.final_check()
             self.export_rows["evidence/" + name] = B.write(evidence / name, data, 0o444)
-        B.need(sum(row["size"] for row in self.export_rows.values()) <= PUBLIC_BYTES, "public-export-bound")
+        B.need(sum(row["size"] for row in self.export_rows.values()) <= (MIB if self.provider_mode else PUBLIC_BYTES),
+               "public-export-bound")
         for name, row in self.export_rows.items():
             self.final_check()
             B.read(self.export / name, row["size"], expected=(row["size"], row["sha256"]))
@@ -1339,11 +1676,14 @@ class SealBuild:
                     self.guard.install()
                     self.guard.activate()
                     try:
-                        self.prepare()
-                        self.sources()
-                        self.build_sodium()
-                        self.probes_and_helper()
-                        self.final_sources()
+                        if self.provider_mode:
+                            self.prepare_provider()
+                        else:
+                            self.prepare()
+                            self.sources()
+                            self.build_sodium()
+                            self.probes_and_helper()
+                            self.final_sources()
                     except BaseException as error:
                         self.failure = {"phase": self.phase, "type": type(error).__name__,
                             "reason": str(error) if type(error) is B.BuildRefused else "original-operation-failed"}
@@ -1376,7 +1716,8 @@ def main():
     started = time.monotonic()
     _DIAGNOSTIC_STAGE = "target"
     target = os.environ.get("MRK_SEAL_TARGET", "")
-    need(len(sys.argv) == 1 and target in TARGETS, "fixed-seal-target")
+    provider = probe_mode(sys.argv[1:], os.environ.get("GITHUB_REF", ""))
+    need(target in TARGETS, "fixed-seal-target")
     machine, runner_arch, _, _, _ = TARGETS[target]
     _DIAGNOSTIC_STAGE = "host"
     need(sys.platform == "darwin" and os.uname().machine == machine and platform.mac_ver()[0].startswith("26.")
@@ -1387,10 +1728,11 @@ def main():
     need(re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-seal-run")
     _DIAGNOSTIC_STAGE = "context"
+    reference = PROVIDER_REFERENCE if provider else REFERENCE
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
         "RUNNER_ARCH": runner_arch, "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": REFERENCE, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "seal-build",
-        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + REFERENCE,
+        "GITHUB_REF": reference, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "seal-build",
+        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + reference,
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT), "DEVELOPER_DIR": str(DEVELOPER)}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-seal-workflow-context")
     _DIAGNOSTIC_STAGE = "python-entry"
@@ -1404,7 +1746,7 @@ def main():
     os.umask(0o077)
     check = lambda: B.remaining(started + WORK_SECONDS, time.monotonic(), WORK_SECONDS)
     _DIAGNOSTIC_STAGE = "source-snapshot"
-    before = source_snapshot(check)
+    before = source_snapshot(check, provider=provider)
     tools = CHECKOUT / "desktop/tools"
     _DIAGNOSTIC_STAGE = "macho-load"
     orchestration = B.load_module("_mrk_seal_existing_macho", tools / "macos_cpython_orchestrator.py")
@@ -1421,7 +1763,7 @@ def main():
     _DIAGNOSTIC_STAGE = "build-init"
     build = SealBuild(target=target, source=source, run=run, attempt=attempt, owner=owner,
         control=cancellation, orchestration=orchestration, probe=probe, started=started,
-        python_binding=python_binding)
+        python_binding=python_binding, provider=provider)
     build.resource_limits, build.source_binding = resource_limits, before
     _DIAGNOSTIC_BUILD = build
     _DIAGNOSTIC_STAGE = "build-execute"
@@ -1441,4 +1783,6 @@ if __name__ == "__main__":
         print("Canonical seal build refused; only finalized public evidence is eligible for retention.", file=sys.stderr)
         raise SystemExit(1) from None
     print("Hosted Python executable mode prepared; native build remains unexecuted." if preparing else
+          "History provider probes returned; packaging and authenticated History remain separate."
+          if sys.argv[1:] == ["--history-provider-probe"] else
           "Canonical seal native tests returned; packaging and the framed parent integration remain separate.")

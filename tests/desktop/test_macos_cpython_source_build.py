@@ -7563,6 +7563,61 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 with self.subTest(target=target, prefix=body[:12]), self.assertRaises(PROBE.ProbeRefused):
                     PROBE.macho(body, target)
 
+        # Provider-only Go12 policy uses the existing load-table parser; old
+        # CPython/Seal26 above is unchanged. These are tiny inert headers.
+        seal_name, macho_name = "_mrk_provider_macho_data", "_mrk_provider_load_table_data"
+        self.assertNotIn(seal_name, sys.modules)
+        self.assertNotIn(macho_name, sys.modules)
+        seal = load(seal_name, "macos_github_seal_build.py")
+        parser = load(macho_name, "macos_cpython_orchestrator.py")
+        try:
+            def string_command(command, text):
+                raw = text.encode("ascii") + b"\0"
+                offset = 24 if command == 0xC else 12
+                size = (offset + len(raw) + 7) // 8 * 8
+                return struct.pack("<III", command, size, offset) + b"\0" * (offset - 12) + raw + b"\0" * (size - offset - len(raw))
+            def provider_header(target, *, minimum=12 << 16, loads=None, extra=b"", signed=None):
+                cpu, subtype = seal.TARGETS[target][3:]
+                commands = [struct.pack("<6I", 0x32, 24, 1, minimum, 12 << 16, 0),
+                            string_command(0xE, "/usr/lib/dyld")]
+                commands.extend(string_command(0xC, name) for name in (seal.PROVIDER_LOADS if loads is None else loads))
+                if extra:
+                    commands.append(extra)
+                if signed is None:
+                    signed = target == "aarch64-apple-darwin"
+                if signed:
+                    start = 32 + sum(map(len, commands)) + 16
+                    commands.append(struct.pack("<4I", 0x1D, 16, start, 8))
+                table = b"".join(commands)
+                return struct.pack("<8I", 0xFEEDFACF, cpu, subtype, 2, len(commands), len(table), 0, 0) + table + (b"signature"[:8] if signed else b"")
+            for target in seal.PROVIDER_PINS:
+                body = provider_header(target)
+                got = seal.provider_macho_data(body, len(body), target, parser)
+                self.assertEqual(got["minimumMacOS"], "12.0")
+                self.assertEqual(got["sdk"], "12.0")
+                self.assertEqual(tuple(got["loadDylibs"]), seal.PROVIDER_LOADS)
+                self.assertEqual(got["GoAdHocSignatureCommand"], target == "aarch64-apple-darwin")
+                self.assertIs(got["DeveloperIdQualified"], False)
+                other = next(name for name in seal.PROVIDER_PINS if name != target)
+                bad = [provider_header(other), provider_header(target, minimum=26 << 16),
+                       provider_header(target, loads=seal.PROVIDER_LOADS[:-1]),
+                       provider_header(target, loads=(*seal.PROVIDER_LOADS, seal.PROVIDER_LOADS[0])),
+                       provider_header(target, loads=("@rpath/foreign.dylib", *seal.PROVIDER_LOADS[1:])),
+                       provider_header(target, signed=target != "aarch64-apple-darwin"),
+                       provider_header(target, extra=struct.pack("<IIQ", 0x8000001C, 16, 0)),
+                       b"\xca\xfe\xba\xbe" + body[4:], body[:31]]
+                for changed in bad:
+                    with self.subTest(provider=target, mutated=changed[:16]), self.assertRaises(ValueError):
+                        seal.provider_macho_data(changed, len(changed), target, parser)
+                with self.assertRaises(ValueError):
+                    seal.provider_macho_data(body[:-1], len(body) - 1, target, parser)
+                # Provider12 acceptance is not permission for the old26 role.
+                with self.assertRaises(PROBE.ProbeRefused):
+                    PROBE.macho(body, target)
+        finally:
+            self.assertIs(sys.modules.pop(macho_name), parser)
+            self.assertIs(sys.modules.pop(seal_name), seal)
+
     def test_paired_native_host_and_report_data_do_not_cross_target_or_translation(self):
         # These are scalar observations only: no ctypes/sysctl/process or
         # simulated native receipt is executed or admitted by this DATA test.
@@ -8545,6 +8600,198 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Same fixed owner route, not a second native/process test. The
+            # expected rc1 is accepted only for one exact provider observation.
+            self.assertIs(seal.probe_mode([], seal.REFERENCE), False)
+            self.assertIs(seal.probe_mode(["--history-provider-probe"], seal.PROVIDER_REFERENCE), True)
+            for args, reference in (([], seal.PROVIDER_REFERENCE), (["--history-provider-probe"], seal.REFERENCE),
+                                    (["--history-provider-probe", "extra"], seal.PROVIDER_REFERENCE), ([], "refs/heads/main")):
+                with self.assertRaises(ValueError):
+                    seal.probe_mode(args, reference)
+            self.assertEqual(len(seal.ROLE_LIMITS), 22)
+            self.assertEqual(seal.PROVIDER_ROLES, (("network-denial", 15, 65536),
+                ("provider-version", 15, 65536), ("provider-invalid-controls", 15, 65536)))
+            self.assertEqual((seal.WORK_SECONDS, seal.CLEANUP_SECONDS, seal.WORK_ENTRIES, seal.WORK_BYTES),
+                             (900, 60, 8192, 512 * 1024 * 1024))
+            self.assertTrue(seal.provider_output("provider-version", 0, seal.PROVIDER_VERSION, b""))
+            self.assertTrue(seal.provider_output("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL))
+            for role, code, stdout, stderr in (("provider-version", 1, seal.PROVIDER_VERSION, b""),
+                    ("provider-invalid-controls", 0, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", True, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", -9, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", 1, b"", b"authentication required\n"),
+                    ("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL + b"extra"),
+                    ("provider-invalid-controls", 1, b"unexpected", seal.PROVIDER_REFUSAL),
+                    ("helper-native-test", 1, b"", seal.PROVIDER_REFUSAL)):
+                self.assertFalse(seal.provider_output(role, code, stdout, stderr))
+            # Actual streaming/copy/POST over tiny test-owned inert bytes. A
+            # replaced same-content name is not the retained source original.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                original = root / "input"
+                original.write_bytes(b"inert provider bytes; never launched")
+                pin = (original.stat().st_size, hashlib.sha256(original.read_bytes()).hexdigest())
+                receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                invoke = lambda **kw: seal.SealBuild.provider_stream(receiver, original, pin, **kw)
+                identity, prefix = invoke()
+                self.assertEqual(prefix, original.read_bytes())
+                copy_path = root / "copied"
+                invoke(original=identity, destination=copy_path)
+                self.assertEqual(copy_path.read_bytes(), prefix)
+                self.assertEqual(copy_path.stat().st_mode & 0o777, 0o555)
+                seal.SealBuild.provider_stream(receiver, copy_path, pin, original=receiver.provider_copy_identity)
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"):
+                    seal.SealBuild.provider_stream(receiver, original, (pin[0], "0" * 64))
+                saved = root / "saved"
+                original.rename(saved)
+                original.write_bytes(saved.read_bytes())
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"):
+                    invoke(original=identity)
+                saved.unlink()
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
+            for fault in ("named-post", "close-unknown"):
+                with self.subTest(provider_stream=fault), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    path = root / "input"
+                    path.write_bytes(b"post-bound inert bytes")
+                    pin = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                    receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    real_read, real_close = os.read, os.close
+                    if fault == "named-post":
+                        def changed(fd, size):
+                            value = real_read(fd, size)
+                            if value == b"":
+                                path.rename(root / "retained")
+                                path.write_bytes(b"post-bound inert bytes")
+                            return value
+                        with patch.object(seal.os, "read", changed), self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-post"):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertTrue(BUILD.DATA.known)
+                    else:
+                        def closed_unknown(fd):
+                            real_close(fd)  # Real consuming close; no descriptor leak or retry.
+                            raise OSError("inert close-observation failure")
+                        with patch.object(seal.os, "close", closed_unknown), self.assertRaises(OSError):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertFalse(BUILD.DATA.known)
+                        self.assertEqual(BUILD.DATA._pending, 1)
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Exactly two descriptive sidecars use the actual existing stream
+            # originals; neither byte equality nor a replacement name is custody.
+            for scenario in ("ordinary", "wrong-hash", "replaced", "symlink", "missing", "read-fault", "close-fault"):
+                with self.subTest(provider_notices=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    directory = root / "provider-inputs"
+                    directory.mkdir()
+                    notice_pins, notice_originals = {}, {}
+                    parents = {str(root): BUILD.custody(root.lstat()), str(directory): BUILD.custody(directory.lstat())}
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = directory / target
+                        target_dir.mkdir()
+                        path = target_dir / "NOTICES.txt"
+                        path.write_bytes(b"Complete inert notice bytes; not executable\n")
+                        notice_pins[target] = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                        notice_originals[target] = BUILD.identity(path.stat())
+                        parents[str(target_dir)] = BUILD.custody(target_dir.lstat())
+                    receiver = SimpleNamespace(check=lambda: None, provider_parents=parents,
+                                               provider_notice_originals=notice_originals)
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    receiver.provider_stream = lambda path, pin, **kw: seal.SealBuild.provider_stream(receiver, path, pin, **kw)
+                    invoke = lambda: seal.SealBuild.provider_notices_post(receiver)
+                    target = next(iter(seal.PROVIDER_PINS))
+                    path = directory / target / "NOTICES.txt"
+                    original_identity = notice_originals[target]
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(seal, "PROVIDER_NOTICE_PINS", notice_pins):
+                        if scenario == "ordinary":
+                            invoke()
+                            self.assertEqual(notice_originals[target], original_identity)
+                        elif scenario == "wrong-hash":
+                            notice_pins[target] = (notice_pins[target][0], "0" * 64)
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"): invoke()
+                        elif scenario in {"replaced", "symlink"}:
+                            kept = path.with_name("retained")
+                            path.rename(kept)
+                            if scenario == "replaced": path.write_bytes(kept.read_bytes())
+                            else: path.symlink_to("retained")
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"): invoke()
+                        elif scenario == "missing":
+                            path.unlink()
+                            with self.assertRaises(FileNotFoundError): invoke()
+                        elif scenario == "read-fault":
+                            with patch.object(seal.os, "read", side_effect=OSError("inert read refusal")), self.assertRaises(OSError): invoke()
+                        else:
+                            actual_close = os.close
+                            def notice_close_unknown(fd):
+                                actual_close(fd)
+                                raise OSError("inert consuming close uncertainty")
+                            with patch.object(seal.os, "close", notice_close_unknown), self.assertRaises(OSError): invoke()
+                    self.assertEqual(BUILD.DATA.known, scenario != "close-fault")
+                    self.assertEqual(BUILD.DATA._pending, 1 if scenario == "close-fault" else 0)
+                    self.assertEqual(notice_originals[target], original_identity)
+                    if scenario == "close-fault":
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Real production input roster refuses before the intentionally
+            # unavailable stream port; no dummy binary is admitted or launched.
+            for scenario in ("missing-notice", "unexpected-leaf"):
+                with self.subTest(provider_notice_roster=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    inputs = root / "provider-inputs"
+                    inputs.mkdir()
+                    for fixture_name in ("source-manifest.json", "crossbuild.json"): (inputs / fixture_name).write_bytes(b"inert")
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = inputs / target
+                        target_dir.mkdir()
+                        (target_dir / "gh").write_bytes(b"inert-not-launched")
+                        (target_dir / "NOTICES.txt").write_bytes(b"inert")
+                    target = next(iter(seal.PROVIDER_PINS))
+                    if scenario == "missing-notice": (inputs / target / "NOTICES.txt").unlink()
+                    else: (inputs / target / "unexpected").write_bytes(b"refuse")
+                    receiver = SimpleNamespace(check=lambda: None, target=target)
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
+                        with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
+                        stream.assert_not_called()
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            # Production run loop with an inert returned-value port, never a
+            # subprocess. Wrong role refuses before that port, wrong return
+            # shape cannot increment a successful command observation.
+            for scenario in ("exact", "wrong-role", "wrong-exit", "wrong-output", "wrong-original"):
+                trace = []
+                receiver = SimpleNamespace(provider_mode=True, role_limits=seal.PROVIDER_ROLES, entered=2, returned=2,
+                    sandbox="/fixed/sandbox", private=Path("/fixed/private"), environment={}, commands=[],
+                    check=lambda: None, provider_post=lambda: trace.append("post"), recheck_tools=lambda: None,
+                    evidence_bytes=lambda n, b: hashlib.sha256(b).hexdigest(), census=lambda: {"entries": 0, "bytes": 0},
+                    deadline=time.monotonic() + 60, guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda:
+                        SimpleNamespace(complete=True, fatal=False, contained=True))))
+                def returned(argv, **kwargs):
+                    trace.append("run")
+                    return subprocess.CompletedProcess(argv if scenario != "wrong-original" else [],
+                        0 if scenario == "wrong-exit" else 1, b"", b"wrong" if scenario == "wrong-output" else seal.PROVIDER_REFUSAL)
+                receiver.owner = SimpleNamespace(run_owned=returned)
+                if scenario == "exact":
+                    result = seal.SealBuild.run(receiver, "provider-invalid-controls", ["/fixed/gh", "api"])
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual((receiver.entered, receiver.returned), (3, 3))
+                    self.assertEqual(trace, ["post", "run", "post"])
+                else:
+                    with self.assertRaises(BUILD.BuildRefused):
+                        seal.SealBuild.run(receiver, "provider-version" if scenario == "wrong-role" else "provider-invalid-controls", ["/fixed/gh", "api"])
+                    if scenario == "wrong-role":
+                        self.assertEqual(trace, [])
+                # No parser return is an actual entry/publication grant.
+                self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                    ledger={"complete": False, "fatal": False, "contained": True}, handlers="RESTORED",
+                    scratch_retired=True, data_finality=True))
+            workflow = (ROOT / ".github/workflows/desktop-macos-github-seal.yml").read_text()
+            self.assertIn("      - verify/desktop-macos-github-seal\n      - verify/desktop-macos-history-provider-probe\n", workflow)
+            self.assertEqual(workflow.count("--history-provider-probe\n"), 1)
+            self.assertIn("test \"$GITHUB_REF\" = refs/heads/verify/desktop-macos-github-seal", workflow)
+            self.assertIn("timeout-minutes: 25", workflow)
+            self.assertIn("if-no-files-found: ignore", workflow)
+            self.assertNotIn("workflow_dispatch", workflow)
             # All nine fixed official metadata aliases are ordinary generated
             # work, including eight convenience archives on both Darwin CPUs.
             self.assertEqual(set(seal.LIBTOOL_ARCHIVES), {

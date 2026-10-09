@@ -1,0 +1,354 @@
+{
+  "authenticatedHistoryQualified": false,
+  "buildDate": "2026-10-09",
+  "compileEnvironment": {
+    "CGO_ENABLED": "0",
+    "GO111MODULE": "on",
+    "GOCACHE": "/work/cache",
+    "GOENV": "off",
+    "GOMAXPROCS": "2",
+    "GOMEMLIMIT": "384MiB",
+    "GOMODCACHE": "/deps",
+    "GOOS": "darwin",
+    "GOPATH": "/work/gopath",
+    "GOPROXY": "off",
+    "GOROOT": "/toolchain",
+    "GOSUMDB": "off",
+    "GOTELEMETRY": "off",
+    "GOTMPDIR": "/work/tmp",
+    "GOTOOLCHAIN": "local",
+    "GOVCS": "*:off",
+    "GOWORK": "off",
+    "HOME": "/work",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "PATH": "/toolchain/bin:/usr/bin:/bin",
+    "TMPDIR": "/work/tmp",
+    "TZ": "UTC"
+  },
+  "control": {
+    "bytes": 19294,
+    "sha256": "fa9e7191fff5598431c1a771274b6a217fbc02ca98ec759a7a8bafa6211f2b66"
+  },
+  "dependencyInventorySha256": "b89f11a408a83d5447361c297940da11b9f7b86e7426d4416e4bf0ed7592155b",
+  "developerIdSigned": false,
+  "displayVersion": "2.88.1-mrk-history.1",
+  "embeddedNoticesComplete": true,
+  "finality": {
+    "complete": true,
+    "dependencyPost": true,
+    "productsPublished": true,
+    "sourcePost": true,
+    "toolchainPost": true
+  },
+  "fullResult": {
+    "bytes": 144446,
+    "sha256": "b0163a148c227bc6973790d96cd2171f44c1d204560c8a9378322634e7a3b8fd"
+  },
+  "kind": "mrk-history-provider-crossbuild-v1",
+  "linuxContentTests": {
+    "darwinEmbeddedInventoryExecuted": false,
+    "methods": [
+      "TestContent",
+      "TestContent_tableTests"
+    ],
+    "passed": true,
+    "tableCases": 8
+  },
+  "localReplacement": {
+    "modified": true,
+    "module": "github.com/theupdateframework/go-tuf/v2",
+    "path": "../go-tuf",
+    "version": "v2.4.1"
+  },
+  "machoFacts": {
+    "bytes": 2198,
+    "sha256": "4c151db0062030b40388998ad75781a157c4aad40c5e4c9ff48034be2b9cdc2e"
+  },
+  "namespace": {
+    "joinUnknown": false,
+    "joined": true,
+    "pipesClosed": true,
+    "returnCode": 0,
+    "started": true,
+    "stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stdout": {
+      "bytes": 69126,
+      "sha256": "ebac6f58ce2723de9044b1a637b8a9340315a47afc07d2f6e990036cc32af932"
+    }
+  },
+  "nativeExecuted": false,
+  "notarized": false,
+  "noticeContentRuntimeExecuted": false,
+  "originals": [
+    {
+      "command": [
+        "/toolchain/bin/go",
+        "test",
+        "-mod=readonly",
+        "-p=1",
+        "-count=1",
+        "-vet=off",
+        "-run",
+        "^(TestContent|TestContent_tableTests)$",
+        "-v",
+        "./internal/licenses"
+      ],
+      "goarch": "amd64",
+      "goos": "linux",
+      "joinUnknown": false,
+      "joined": true,
+      "name": "license-content-tests",
+      "pipesClosed": true,
+      "returnCode": 0,
+      "started": true,
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 1265,
+        "sha256": "c29ecde69b7f6de27202ec510cf5e900ba49a519750722ccaa5d19297e3a66ef"
+      }
+    },
+    {
+      "command": [
+        "/toolchain/bin/go",
+        "build",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-p=1",
+        "-ldflags",
+        "-s -w -X github.com/cli/cli/v2/internal/build.Version=2.88.1-mrk-history.1 -X github.com/cli/cli/v2/internal/build.Date=2026-10-09",
+        "-o",
+        "/work/gh-darwin-arm64",
+        "./cmd/gh"
+      ],
+      "goarch": "arm64",
+      "goos": "darwin",
+      "joinUnknown": false,
+      "joined": true,
+      "name": "compile-arm64",
+      "pipesClosed": true,
+      "returnCode": 0,
+      "started": true,
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "command": [
+        "/toolchain/bin/go",
+        "version",
+        "-m",
+        "/work/gh-darwin-arm64"
+      ],
+      "goarch": "arm64",
+      "goos": "darwin",
+      "joinUnknown": false,
+      "joined": true,
+      "name": "build-info-arm64",
+      "pipesClosed": true,
+      "returnCode": 0,
+      "started": true,
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 15522,
+        "sha256": "964a1f69d320598576c66cd488fdde3263d086ce4585ec8bd2d27acd07805a27"
+      }
+    },
+    {
+      "command": [
+        "/toolchain/bin/go",
+        "build",
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false",
+        "-p=1",
+        "-ldflags",
+        "-s -w -X github.com/cli/cli/v2/internal/build.Version=2.88.1-mrk-history.1 -X github.com/cli/cli/v2/internal/build.Date=2026-10-09",
+        "-o",
+        "/work/gh-darwin-amd64",
+        "./cmd/gh"
+      ],
+      "goarch": "amd64",
+      "goos": "darwin",
+      "joinUnknown": false,
+      "joined": true,
+      "name": "compile-amd64",
+      "pipesClosed": true,
+      "returnCode": 0,
+      "started": true,
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "command": [
+        "/toolchain/bin/go",
+        "version",
+        "-m",
+        "/work/gh-darwin-amd64"
+      ],
+      "goarch": "amd64",
+      "goos": "darwin",
+      "joinUnknown": false,
+      "joined": true,
+      "name": "build-info-amd64",
+      "pipesClosed": true,
+      "returnCode": 0,
+      "started": true,
+      "stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "stdout": {
+        "bytes": 15520,
+        "sha256": "cc3137dcf5ad6a9092a525d3ca8eacdcb8899f3256194b67c7f7e190c0731102"
+      }
+    }
+  ],
+  "packagedProviderQualified": false,
+  "products": {
+    "aarch64-apple-darwin": {
+      "buildInfo": {
+        "bytes": 15522,
+        "sha256": "964a1f69d320598576c66cd488fdde3263d086ce4585ec8bd2d27acd07805a27"
+      },
+      "bytes": 37471938,
+      "cpu": 16777228,
+      "goarch": "arm64",
+      "machoCommands": [
+        {
+          "buildVersion": [
+            1,
+            786432,
+            786432,
+            0
+          ],
+          "cmd": "0x32",
+          "size": 24
+        },
+        {
+          "cmd": "0xe",
+          "name": "/usr/lib/dyld",
+          "size": 32
+        },
+        {
+          "cmd": "0xc",
+          "name": "/usr/lib/libSystem.B.dylib",
+          "size": 56
+        },
+        {
+          "cmd": "0xc",
+          "name": "/usr/lib/libresolv.9.dylib",
+          "size": 56
+        },
+        {
+          "cmd": "0xc",
+          "name": "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+          "size": 104
+        },
+        {
+          "cmd": "0xc",
+          "name": "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+          "size": 96
+        },
+        {
+          "cmd": "0x1d",
+          "size": 16
+        }
+      ],
+      "notices": {
+        "bytes": 1552072,
+        "sha256": "3dc7d2cd021d654387e5be71603869a039a3d2adf8b97a6fd0dda4ef3743a44d"
+      },
+      "sha256": "a704813e4e64f8814e5fa21677f7dab51d9b77d045ded75dd11bcdc1a53d5516",
+      "subtype": 0
+    },
+    "x86_64-apple-darwin": {
+      "buildInfo": {
+        "bytes": 15520,
+        "sha256": "cc3137dcf5ad6a9092a525d3ca8eacdcb8899f3256194b67c7f7e190c0731102"
+      },
+      "bytes": 39889552,
+      "cpu": 16777223,
+      "goarch": "amd64",
+      "machoCommands": [
+        {
+          "buildVersion": [
+            1,
+            786432,
+            786432,
+            0
+          ],
+          "cmd": "0x32",
+          "size": 24
+        },
+        {
+          "cmd": "0xe",
+          "name": "/usr/lib/dyld",
+          "size": 32
+        },
+        {
+          "cmd": "0xc",
+          "name": "/usr/lib/libSystem.B.dylib",
+          "size": 56
+        },
+        {
+          "cmd": "0xc",
+          "name": "/usr/lib/libresolv.9.dylib",
+          "size": 56
+        },
+        {
+          "cmd": "0xc",
+          "name": "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+          "size": 104
+        },
+        {
+          "cmd": "0xc",
+          "name": "/System/Library/Frameworks/Security.framework/Versions/A/Security",
+          "size": 96
+        }
+      ],
+      "notices": {
+        "bytes": 1552072,
+        "sha256": "087592d4d366fcf2c49851571542959bb91607408c6e677ffdc2484fd7293c2e"
+      },
+      "sha256": "aca3bcfd4fc35d9bcd800f06fe09f7d6c50ab4d2428f04c4ba081a32bfebbe4e",
+      "subtype": 3
+    }
+  },
+  "scope": "verification-only native loader/version/control-refusal input; not shipping qualification",
+  "sourceManifest": {
+    "bytes": 212713,
+    "fileBytes": 24177947,
+    "files": 1918,
+    "inventorySha256": "8b255198a701d0cc48a53ec76c226231689d5ab2c528ce8599b694da8434914d",
+    "sha256": "d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd"
+  },
+  "toolchain": {
+    "archiveBytes": 66791587,
+    "archiveSha256": "031f088e5d955bab8657ede27ad4e3bc5b7c1ba281f05f245bcc304f327c987a",
+    "archiveUrl": "https://dl.google.com/go/go1.26.1.linux-amd64.tar.gz",
+    "inventorySha256": "ed83e96ad8c3327bb6056086809e97f07a3419690a5b601b04f552126b8d824e",
+    "version": "go1.26.1"
+  }
+}
