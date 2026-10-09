@@ -354,7 +354,102 @@ GITHUB_REFUSAL_WORKFLOW_INVERSE = ((4363,
   '                                    else ("saved-version-recovery-test", "saved-version-recovery-summary"))'))
 
 
+# Closed progressive UTF8-byte inverse; historical assertions retain their exact original source.
+RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
+  60,
+  '5021b1db991227ff34a62cd91b75377e330b451af458a7c186a3c1c99a94a5da',
+  'saved-version-recovery|workflow-refusal) [['),
+ (296549,
+  106,
+  'c15797119e4c5c4d40061259978c01d0fe5eea5d56a60119abae694cdd8995aa',
+  'Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI'),
+ (296706,
+  312,
+  'fef86b009d1000d8d15b5cd6f6188e746b414b43e1d2d6e8903e4ce7dd19f4e0',
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && "
+  "steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == "
+  "'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')\n"),
+ (300102,
+  321,
+  '3c6c8b1e45aa11c123fdedd499e7e628c7de06b6adc4acc7a4f594c5ed7f371b',
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && "
+  "steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == "
+  "'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')\n"),
+ (336112,
+  748,
+  '4835fe322b6fedaac2ee6dbe0e531981bc2a4edd6534c9ee905e46882f1f85f9',
+  "        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == "
+  "'success' && steps.normal_persistence_ui_result.outcome == 'success' && "
+  "steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == "
+  "'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == "
+  "'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal') && "
+  "steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == "
+  "'success' && steps.evidence.outcome == 'success'\n"),
+ (297419,
+  376,
+  '05cb73facc88c77c7edab74ade310ff76ed02bc811b5871a58989b615fae7de4',
+  '            workflow-refusal) singleton=workflow-refusal; '
+  'singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'
+  '          # Finite per-file logical size only; not RAM, total disk, service limits or finality.\n'),
+ (300942,
+  369,
+  '8541a9c29269af604b8a23e4799bdd619790d9e8696286e6e4b8d6e7cb0b630f',
+  '            workflow-refusal) singleton=workflow-refusal; '
+  'singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'
+  '          # Each summary has its own finite one-GiB file limit and original owner phase.\n'),
+ (302920,
+  392,
+  '5c769c7f77ed5691579d1080b404493224c4d2d537efd681f86a4976680fa28b',
+  '              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal"))\n'
+  '              return (scope, "testSyntheticProjectSavedVersionRecovery" if scope == '
+  '"saved-version-recovery"\n'
+  '                      else "testSyntheticProjectManagedWorkflowRefusal")'),
+ (311714,
+  1472,
+  '16fab05e49ad7a17c1c53c91e03336e45bb818972eb5028559f708c689c5e22c',
+  '              if scope == "workflow-refusal":\n'
+  '                  need(runner.get("managedWorkflowRefusalMarkerObserved") is True\n'
+  '                       and "savedVersionRecovery" not in runner and runtime_digest is None)'),
+ (323763,
+  1054,
+  'afbe17f96cacd20de62251b3c52fd8a7688dda934edd56ff6d2d0e54f5dd1e7e',
+  '            {0}/normal-ui/workflow-refusal-test-file-limit.status\n'
+  '            {0}/normal-ui/workflow-refusal-test.status\n'
+  '            {0}/normal-ui/workflow-refusal-test.runner-admission.json\n'
+  '            {0}/normal-ui/workflow-refusal-test.failure-diagnostics.json\n'
+  '            {0}/normal-ui/workflow-refusal-summary.status\n'
+  '            {0}/normal-ui/workflow-refusal-summary.command-admission.json\n'
+  '            {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json\n'
+  '            {0}/normal-ui/workflow-refusal-result.json\n'),
+ (341056,
+  101,
+  '6386ee92ac46e7842c6bb28401376d32771724d3393456d53daad8e3b7d7bf13',
+  'if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal"):'),
+ (341330,
+  104,
+  '900e8a281f11cd3bddc346a58e380328531165c5ed02394c620a2bbff46dd0b8',
+  '                  "workflow-refusal": "workflow-refusal"}[scope]'))
+
+def without_release_evidence_workflow(source):
+    if '"savedReleaseEvidenceUI": "passed"' not in source:
+        if 'release-evidence) singleton=' in source: raise AssertionError("partial release_evidence_workflow source")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(RELEASE_EVIDENCE_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("release_evidence_workflow exact source region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != '80998a0d9633a7a3bae47407ecb06f2d2b748ebb0e96fa068c7bfc42149a7626':
+        raise AssertionError("release_evidence_workflow predecessor source differs")
+    return value.decode()
+
 def without_github_refusal_workflow(source):
+    source = without_release_evidence_workflow(source)
     marker = "      - name: Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI\n"
     if marker not in source:
         if "singleton_method=" in source or "singleton_case_data" in source:
@@ -1552,6 +1647,23 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
 
     def test_normal_diagnostics_workflow_has_one_bounded_original_result(self):
         raw = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        ids, blocks = steps(raw)
+        selected = blocks['normal_saved_version_recovery_ui_test']
+        result = blocks['normal_saved_version_recovery_ui_result']
+        self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'", selected)
+        self.assertIn('singleton_method=testSyntheticProjectSavedReleaseEvidence', selected)
+        self.assertIn('"savedReleaseEvidenceMarkerObserved") is True', result)
+        self.assertIn('"scope": "ordinary-ui-observed-original-saved-release-evidence-documents-only"', result)
+        self.assertIn('"fullUIQualified": False', result)
+        for flag in ('artifactBytesVerified', 'signingAuthenticated', 'githubAuthenticityEstablished', 'storeStateEstablished', 'releaseReadinessEstablished', 'recoverySafetyEstablished'):
+            self.assertIn('"' + flag + '": False', result)
+        for name in ('test-file-limit.status', 'test.status', 'test.runner-admission.json', 'test.failure-diagnostics.json',
+                     'summary.status', 'summary.command-admission.json', 'summary.failure-diagnostics.json', 'result.json'):
+            self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 1)
+        self.assertIn('"release-evidence": "release-evidence"', raw.split("      - name: Remove only this completed preview build's disposable compiler outputs", 1)[1])
+        for token in ('"savedReleaseEvidenceMarkerObserved") is True', '"releasePromotionObserved": False', 'release-evidence) singleton=release-evidence;'):
+            with self.assertRaises(AssertionError): without_release_evidence_workflow(raw.replace(token, token + '-changed', 1))
+        raw = without_release_evidence_workflow(raw)
         ids, blocks = steps(raw)
         self.assertEqual(ids.count('normal_saved_version_recovery_ui_test'), 1)
         self.assertEqual(ids.count('normal_saved_version_recovery_ui_result'), 1)

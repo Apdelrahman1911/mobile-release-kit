@@ -171,7 +171,47 @@ REMOVAL_UI_SWIFT_INVERSE = ((80622,
   '    @MainActor private var normalQuitObserved = false\n'))
 
 
+# Closed progressive UTF8-byte inverse; historical assertions retain their exact original source.
+RELEASE_EVIDENCE_SOURCE_INVERSE = ((84244,
+  74,
+  'ca802d395d94fe8f4e95d598eae6af302f685430f6c2a44c58e0bcacf5636fce',
+  'workflowRefusal, savedVersionRecovery, androidSignedBuild'),
+ (86055,
+  15900,
+  '120e7e450ed499d1fb7ee976fced3d494494ebd3e18773d4185372d111305568',
+  '        // Extra selection-only DATA belongs only to the ordinary project-field case.\n'),
+ (105714,
+  117,
+  '741bed4c8e5237ce18636d45d36f26e761efcec66d164a23673db0e0bbc0cc51',
+  '        var projectPath: String { rootPath + "/project" }'),
+ (226077,
+  1322,
+  '386213f3bb5a42ed262cbc368ea1141492188759ffffd0e7510b04c748780e92',
+  '            if profile == .projectFields {\n                try Self.need(Set(originals.keys)'),
+ (237724,
+  344,
+  'afa3317976c40008d856a0ad4dbbf1be3ace0186118641a599b32a1b213f3c07',
+  '            if profile == .workflowRefusal {\n                try Self.need(current.count'),
+ (341352,
+  10403,
+  'b7e0e6930ae4301d528d0525a63344f16ca195b00691e3adb743621dc4bb100c',
+  '    @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {\n'))
+
+def without_release_evidence_source(source):
+    if 'static let releaseEvidenceDocuments:' not in source:
+        if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(RELEASE_EVIDENCE_SOURCE_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("release_evidence_source exact source region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != 'da621652977a2f09a32f670fe5ddefc0d135d1753b4fdfce792995872076dae8':
+        raise AssertionError("release_evidence_source predecessor source differs")
+    return value.decode()
+
 def without_removal_ui_source(source):
+    source = without_release_evidence_source(source)
     for start, end, expected, original in REMOVAL_UI_SWIFT_INVERSE:
         observed = source[start:end]
         if hashlib.sha256(observed.encode()).hexdigest() != expected:
@@ -675,7 +715,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         # local group verifies SOURCE and exact historical inverses, not an
         # independently reimplemented archive scanner or a native pass.
         import base64
-        current = SWIFT.read_text(encoding="utf-8")
+        current = without_release_evidence_source(SWIFT.read_text(encoding="utf-8"))
         removal_before = without_removal_ui_source(current)
         self.assertEqual((len(removal_before.encode()), hashlib.sha256(removal_before.encode()).hexdigest()),
                          (385349, '03c9285e0ed83a3b2d019cfa75ddd5e309c60dbc48ac162964755122279842b8'))
@@ -829,7 +869,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         selected = MODULE.CLASS + "testSyntheticProjectUnsignedIOSArchive"
         self.assertEqual(MODULE.IOS_UNSIGNED_METHOD, "testSyntheticProjectUnsignedIOSArchive")
         self.assertNotIn(MODULE.IOS_UNSIGNED_RESULT, MODULE.NORMAL_SELECTIONS)
-        self.assertEqual(len(MODULE.NORMAL_SELECTIONS), 7)
+        self.assertEqual(len(MODULE.NORMAL_SELECTIONS), 8)
         for target, machine in ((MODULE.ARM_TARGET, "arm64"), (MODULE.INTEL_TARGET, "x86_64")):
             request = MODULE.normal_request(["--target", target, "--normal-ios-unsigned-archive-test"], temporary)
             self.assertEqual(request, dict(phase="test", derived=normal / "DerivedData",
@@ -981,7 +1021,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                                           "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
         }
         result_name = "workflow-refusal-test.xcresult"
-        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name not in (result_name, "saved-version-recovery-test.xcresult")}, old)
+        self.assertEqual({name: value for name, value in MODULE.NORMAL_SELECTIONS.items() if name not in (result_name, "saved-version-recovery-test.xcresult", "release-evidence-test.xcresult")}, old)
         self.assertEqual(MODULE.NORMAL_SELECTIONS[result_name],
                          (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420))
         arguments = normal_arguments(result_name)
@@ -1041,6 +1081,22 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                       body.replace(b'"settled"', b'"unknown"', 1), body.replace(b'"1.2.3"', b'"2.3.4"'), body[:-1]):
             with self.assertRaises(MODULE.Refused): MODULE.saved_version_producer_frames(wrong)
 
+        # A separate saved-document singleton; never changes ordinary-seven or recovery.
+        result_name = "release-evidence-test.xcresult"
+        self.assertEqual(MODULE.NORMAL_SELECTIONS[result_name], (("testSyntheticProjectSavedReleaseEvidence",), 300, 420))
+        self.assertEqual(MODULE.SUMMARY_STEMS[result_name], "release-evidence-summary")
+        args = normal_arguments(result_name)
+        request = MODULE.normal_request(args, str(Path(args[12]).parent / "tmp") + "/")
+        self.assertEqual((request["methods"], request["allowance"], request["timeout"], request["phaseSeconds"]),
+                         ((MODULE.CLASS + "testSyntheticProjectSavedReleaseEvidence",), 300, 420, 585))
+        summary = MODULE.normal_request(["--normal-summary", result_name], str(Path(args[12]).parent / "tmp") + "/")
+        self.assertEqual((summary["timeout"], summary["phaseSeconds"]), (30, 90))
+        for changed in (args + ["-retry-tests-on-failure"], args + [args[15]],
+                        [v.replace("SavedReleaseEvidence", "ManagedWorkflowRefusal") for v in args],
+                        [v.replace("release-evidence-test", "saved-checks-test") for v in args],
+                        ["900" if v == "300" else v for v in args]):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_cli_arguments(changed)
+
     def test_workflow_refusal_output_requires_one_original_exact_final_case_and_scope(self):
         output = normal_workflow_refusal_output()
         self.assertIs(MODULE.normal_workflow_refusal_markers(output), True)
@@ -1072,6 +1128,23 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         with self.assertRaises(MODULE.Refused):
             MODULE.normal_workflow_refusal_markers(normal_project_output())
         self.assertIs(MODULE.normal_project_markers(normal_project_output()), True)
+
+        case = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedReleaseEvidence]"
+        marker = 'MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=ordinary-picker-candidate-documents-only-shared-guidance-stage-retained-replacement-cancel-stale-release-inputs-empty-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable;remoteRelease=not-attempted'
+        output = ("\n".join(("Test Case '" + case + "' started.", MODULE.ORIGINAL_MARKER, marker,
+                             "Test Case '" + case + "' passed (1.000 seconds).", ""))).encode()
+        self.assertIs(MODULE.normal_release_evidence_markers(output), True)
+        rows = output.splitlines(keepends=True)
+        for bad in (b"", output[:-1], output + output, b"x" * (1024 * 1024 + 1),
+                    output.replace(b"passed (", b"failed ("), output.replace(b"SavedReleaseEvidence", b"ManagedWorkflowRefusal"),
+                    output.replace(b"documents-only", b"store-authenticated"),
+                    output + b"MRK_MACOS_UI_FAILURE_CLEANUP=normalRequested=true\n",
+                    rows[0] + rows[2] + rows[1] + rows[3], normal_workflow_refusal_output()):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_release_evidence_markers(bad)
+        for row in rows:
+            for bad in (output + row, output.replace(row, b"", 1)):
+                with self.assertRaises(MODULE.Refused): MODULE.normal_release_evidence_markers(bad)
+        with self.assertRaises(MODULE.Refused): MODULE.normal_workflow_refusal_markers(output)
 
     def test_workflow_refusal_marker_gate_is_only_new_selection_original_zero(self):
         clock = SimpleNamespace(before_publication=lambda: {}, check=lambda: None)
@@ -1108,6 +1181,33 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 else:
                     self.assertNotIn("managedWorkflowRefusalMarkerObserved", receipt)
                     parse.assert_not_called()
+
+        case = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedReleaseEvidence]"
+        marker = 'MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=ordinary-picker-candidate-documents-only-shared-guidance-stage-retained-replacement-cancel-stale-release-inputs-empty-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable;remoteRelease=not-attempted'
+        output = ("\n".join(("Test Case '" + case + "' started.", MODULE.ORIGINAL_MARKER, marker,
+                             "Test Case '" + case + "' passed (1.000 seconds).", ""))).encode()
+        for name, status, body in (("release-evidence-test.xcresult", 0, output),
+                                   ("release-evidence-test.xcresult", 0, b"missing markers"),
+                                   ("release-evidence-test.xcresult", 65, b"failure"),
+                                   ("workflow-refusal-test.xcresult", 0, normal_workflow_refusal_output())):
+            args = normal_arguments(name)
+            request = MODULE.normal_request(args, str(Path(args[12]).parent / "tmp") + "/")
+            original = subprocess.CompletedProcess([], status, body, b"")
+            with patch.object(MODULE, "normal_source_state", return_value={"inert": "source"}), \
+                 patch.object(MODULE, "run_admitted_test", return_value=(original, {})), \
+                 patch.object(MODULE, "exclusive_output") as publish, \
+                 patch.object(MODULE, "normal_release_evidence_markers", wraps=MODULE.normal_release_evidence_markers) as parser:
+                if name == "release-evidence-test.xcresult" and status == 0 and body != output:
+                    with self.assertRaises(MODULE.Refused): MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2)
+                    parser.assert_called_once_with(body); publish.assert_not_called()
+                    continue
+                self.assertIs(MODULE.execute_normal_phase(phase, request, "a" * 40, (1024**3,) * 2), original)
+                receipt = json.loads(publish.call_args.args[1])
+                if name == "release-evidence-test.xcresult" and status == 0:
+                    self.assertIs(receipt["savedReleaseEvidenceMarkerObserved"], True)
+                    parser.assert_called_once_with(body)
+                else:
+                    self.assertNotIn("savedReleaseEvidenceMarkerObserved", receipt); parser.assert_not_called()
 
     def test_workflow_refusal_source_derives_originals_before_creation_and_never_applies(self):
         source = without_positive_android_source(SWIFT.read_text())
@@ -1159,6 +1259,53 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertLess(after_quit.index("try fixture.assertUnchanged()"), after_quit.index("try fixture.closeOriginals()"))
         failures = source.split("private static let workflowFailures = [", 1)[1].split("\n    ]", 1)[0]
         self.assertIn('"Local workflow bundle refused"', failures)  # Never remove it globally.
+
+        import base64
+        current = SWIFT.read_text()
+        rows = current.split("static let releaseEvidenceDocuments: [(String, String, Int, String)] = [", 1)[1].split("\n        ]", 1)[0]
+        additions = re.findall(r'\("([^"]+)", "([A-Za-z0-9+/=]+)", ([0-9]+), "([0-9a-f]{64})"\)', rows)
+        expected = {
+            "evidence/candidate-manifest.json": "candidate-valid.json",
+            "evidence/candidate-receipt.json": "receipt-candidate-valid.json",
+            "evidence/operation/candidate-operation-intent.json": "intent-candidate-valid.json",
+        }
+        self.assertEqual(len(additions), 3); self.assertEqual({r[0] for r in additions}, set(expected))
+        total = 0
+        for path, encoded, size, digest in additions:
+            observed = base64.b64decode(encoded, validate=True)
+            actual = (ROOT / "tests/fixtures" / expected[path]).read_bytes()
+            self.assertEqual(observed, actual)
+            self.assertEqual((len(observed), hashlib.sha256(observed).hexdigest()), (int(size), digest))
+            self.assertLessEqual(len(observed), 4096); total += len(observed)
+        self.assertEqual(total, 11366)
+        prepare = current.split("func prepare(_ profile: Profile = .projectEdits) throws {", 1)[1].split("func admitDefaultVault()", 1)[0]
+        for token in ("originals.count == 16", "Self.ancestors(Set(originals.keys)).count == 12", "== 12740",
+                      "current.count == 16 && directories.count == 12 && anchors.count == 3", "descriptors.count == 15"):
+            self.assertIn(token, prepare)
+        self.assertLess(prepare.index("if profile == .releaseEvidence"), prepare.index('let slash = try adoptDirectory(open("/",'))
+        journey = current.split("@MainActor func testSyntheticProjectSavedReleaseEvidence() throws {", 1)[1].split("@MainActor func testSyntheticProjectManagedWorkflowRefusal()", 1)[0]
+        for token in ("try beginCase(seconds: 300)", "try launchForJourney()", "try fixture.prepare(.releaseEvidence)",
+                      'title: "Choose a release evidence folder"', "fixture.evidencePath", 'try nativeOpen(sheet)',
+                      '"Documents agree"', '"Documents only"', '"com.example.reader"', '"evidence · Candidate"', 'guidance)',
+                      '"External testing · reuse candidate"', '"Android · Google Play"', '!prepare.isEnabled',
+                      '!inspect.isEnabled', 'input.value as? String == ""', 'try click(sheet.buttons.matching(identifier: "Cancel")',
+                      'Original operation cancelled and settled. No new result was accepted.', 'try staleDocuments()',
+                      'Previous guidance · stale · evidence', 'All six assurance flags remain false.'):
+            self.assertIn(token, journey)
+        self.assertEqual(journey.count('try press(renderer, "Inspect documents"'), 1)
+        for forbidden in ('try press(renderer, "Prepare', 'try press(renderer, "Dispatch', 'fixture.accept(', 'controller.', 'evaluateJavaScript', 'Confirm unchanged'):
+            self.assertNotIn(forbidden, journey)
+        self.assertEqual(journey.count('try press(renderer, "Choose evidence folder"'), 2)
+        final = journey.split('try stage("evidence-readback-and-quit") {', 1)[1]
+        order = ['try fixture.assertUnchanged()', 'let sheet = try quitSheet(app, window)',
+                 'try click(sheet.buttons.matching(identifier: "Quit"),', 'try completeNormalQuit(app)',
+                 'try fixture.closeOriginals()', 'ownedFixture = nil', 'try acceptFinalScenario()', 'print("MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=']
+        self.assertEqual([final.index(t) for t in order], sorted(final.index(t) for t in order))
+        self.assertLess(final.index('try completeNormalQuit(app)'), final.rindex('try fixture.assertUnchanged()'))
+        self.assertEqual(hashlib.sha256(without_release_evidence_source(current).encode()).hexdigest(),
+                         "da621652977a2f09a32f670fe5ddefc0d135d1753b4fdfce792995872076dae8")
+        for token in ('"Documents agree"', 'releaseEvidenceDocuments:', 'try fixture.prepare(.releaseEvidence)', 'descriptors.count == 15'):
+            with self.assertRaises(AssertionError): without_release_evidence_source(current.replace(token, token + "changed", 1))
 
     def test_project_field_fixture_and_normal_workflow_keep_draft_only_scope(self):
         source = without_positive_android_source(SWIFT.read_text())

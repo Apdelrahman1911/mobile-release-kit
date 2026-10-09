@@ -2,7 +2,7 @@
 """Fixed generated Mac UI-runner admission; no application launch or repair here.
 
 Import is inert. The diagnostic uses its existing original-command owner; the
-normal workflow CLI admits fixed build/summary phases and seven exact test selections.
+normal workflow CLI admits fixed build/summary phases and eight exact test selections.
 Only XCTest/NSWorkspace in the reviewed Swift source may request the outer app.
 """
 from __future__ import annotations
@@ -52,6 +52,7 @@ NORMAL_SELECTIONS = {
     "saved-checks-test.xcresult": (("testSyntheticProjectSavedOfflineChecks",
                                   "testSyntheticProjectEmptyBuildInputInspection"), 300, 720),
     "workflow-refusal-test.xcresult": (("testSyntheticProjectManagedWorkflowRefusal",), 300, 420),
+    "release-evidence-test.xcresult": (("testSyntheticProjectSavedReleaseEvidence",), 300, 420),
     "saved-version-recovery-test.xcresult": (("testSyntheticProjectSavedVersionRecovery",), 300, 420),
 }
 ORIGINAL_MARKER = ("MRK_MACOS_UI_ORIGINAL=outerRequest=1;completion=1;body=1;handoff=1;"
@@ -535,6 +536,28 @@ def normal_workflow_refusal_markers(stdout):
     return True
 
 
+def normal_release_evidence_markers(stdout):
+    """One closed returned-output check; not independent native or shipping proof."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1024 * 1024
+         and stdout.endswith(b"\n"), "normal-release-evidence-output-bound")
+    text = stdout.decode("utf-8", "strict")
+    lines = text.splitlines()
+    marker = 'MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=ordinary-picker-candidate-documents-only-shared-guidance-stage-retained-replacement-cancel-stale-release-inputs-empty-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable;remoteRelease=not-attempted'
+    need(lines.count(ORIGINAL_MARKER) == lines.count(marker) == 1
+         and sum(line.startswith("MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and sum(line.startswith("MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=") for line in lines) == 1
+         and "MRK_MACOS_UI_FAILURE_CLEANUP=" not in text, "normal-release-evidence-terminal-markers")
+    selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticProjectSavedReleaseEvidence]"
+    attempts = [line for line in lines if line.startswith("Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == "Test Case '" + selected + "' started."
+         and re.fullmatch(r"Test Case '" + re.escape(selected)
+                          + r"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1]) is not None,
+         "normal-release-evidence-exact-attempt-and-pass")
+    need(lines.index(attempts[0]) < lines.index(ORIGINAL_MARKER) < lines.index(marker) < lines.index(attempts[1]),
+         "normal-release-evidence-original-terminal-order")
+    return True
+
+
 def normal_cli_arguments(arguments, *, target=ARM_TARGET):
     machine, _ = normal_target_data(target)
     need(len(arguments) in (25, 26) and arguments[0] == "test-without-building", "normal-fixed-command")
@@ -610,6 +633,7 @@ SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-s
     "persistence-test.xcresult": "persistence-summary", "diagnostics-test.xcresult": "diagnostics-summary",
     "saved-checks-test.xcresult": "saved-checks-summary",
     "workflow-refusal-test.xcresult": "workflow-refusal-summary",
+    "release-evidence-test.xcresult": "release-evidence-summary",
     "saved-version-recovery-test.xcresult": "saved-version-recovery-summary",
     IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary"}
 TOOLCHAIN_QUERIES = (
@@ -2161,6 +2185,8 @@ def execute_normal_phase(phase, request, source, file_limit):
             facts["androidToolSourceBrowseMarkerObserved"] = project_markers
         if original.returncode == 0 and result.name == "workflow-refusal-test.xcresult":
             facts["managedWorkflowRefusalMarkerObserved"] = normal_workflow_refusal_markers(original.stdout)
+        if original.returncode == 0 and result.name == "release-evidence-test.xcresult":
+            facts["savedReleaseEvidenceMarkerObserved"] = normal_release_evidence_markers(original.stdout)
         receipt = result.with_suffix(".runner-admission.json")
     need(normal_source_state(phase, source) == before, "normal-ui-source-pre-post")
     facts.update(target=target, sourceCommit=source, sourceRosterSha256=sha(encoded(before)), sourcePrePostMatched=True,

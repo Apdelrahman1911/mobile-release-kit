@@ -8742,7 +8742,7 @@ def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> b
 
 
 def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
-    require(reason in {"original-unavailable", "capture-unavailable", "cargo-json-unavailable",
+    require(reason in {"original-unavailable", "capture-unavailable", "cargo-json-unavailable", "cargo-short-unavailable",
                        "no-error-records", "source-unavailable", "deadline-unavailable", "output-bound"},
             "Unknown SourceSlots diagnostic state")
     return {"state": "unavailable", "reason": reason,
@@ -8855,16 +8855,83 @@ def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> l
         raise CheckFailure("Malformed bounded Cargo diagnostics") from None
 
 
+def source_slots_short_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> list[dict]:
+    """B-only short errors, never success or an inferred Cargo terminal record."""
+    require(type(raw) is bytes and len(raw) <= 2 * 1024 * 1024
+            and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
+            "SourceSlots short diagnostic captures exceed their fixed bounds")
+    packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
+                ("mrk-macos-installed-native", "0.1.0", "desktop/native/macos-installed-native"))
+    errors, paths, line_count, primary_count = [], set(), 0, 0
+    for body in (raw, stderr):
+        require(not body or body.endswith(b"\n"), "Partial SourceSlots short diagnostic line")
+        start = 0
+        while start < len(body):
+            end = body.find(b"\n", start)
+            require(0 <= end - start <= 8192, "SourceSlots short diagnostic line exceeds its bound")
+            line = body[start:end]
+            start = end + 1
+            line_count += 1
+            require(line_count <= 4096, "Too many SourceSlots short diagnostic lines")
+            located = re.match(rb"([^:\r\n]{1,4096}):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}): error(?:\[(E[0-9]{4})\])?:", line)
+            plain = re.match(rb"error(?:\[(E[0-9]{4})\])?:", line)
+            if located is None and plain is None:
+                require(not line.startswith(b"error") and b": error" not in line,
+                        "Malformed SourceSlots short error prefix")
+                continue  # Warnings/progress remain in the admitted original, not this optional projection.
+            match = located if located is not None else plain
+            require(all(32 <= byte <= 126 for byte in match[0]), "Non-ASCII SourceSlots short error prefix")
+            code_bytes = located[4] if located is not None else plain[1]
+            code = code_bytes.decode("ascii") if code_bytes is not None else None
+            row = {"category": "compiler-error" if code is not None else "compiler-error-without-code",
+                   "code": code, "package": "unknown", "spans": [], "unboundSpans": 0}
+            if located is not None:
+                primary_count += 1
+                require(primary_count <= 32, "Too many SourceSlots short primary spans")
+                number, column = int(located[2]), int(located[3])
+                require(number <= 1048576 and column <= 1048576, "SourceSlots short location exceeds its bound")
+                name = located[1].decode("ascii")
+                relative = name[len(source) + 1:] if name.startswith(source + "/") else name
+                parts = relative.split("/")
+                package = next((item for item in packages if relative.startswith(item[2] + "/")), None)
+                if (package is not None and len(relative) <= 512 and relative.endswith(".rs")
+                        and all(part not in {"", ".", ".."} and re.fullmatch(r"[A-Za-z0-9._+-]+", part) is not None for part in parts)):
+                    row["package"] = package[0]
+                    paths.add(relative)
+                    require(len(paths) <= 8, "Too many SourceSlots short SOURCE paths")
+                    row["spans"].append({"path": relative, "line": number, "column": column})
+                else:
+                    row["unboundSpans"] = 1  # No guessed package for a relative src/ path or foreign original.
+            elif code is None:
+                if re.match(rb"error: linking with `[^`\r\n]{1,256}` failed: ", line):
+                    row["category"] = "linker-error"
+                prefix = b"error: failed to run custom build command for `"
+                if line.startswith(prefix):
+                    row["category"] = "build-script-failure"
+                    row["package"] = next((item[0] for item in packages
+                        if line.startswith(prefix + (item[0] + " v" + item[1] + " (").encode("ascii"))
+                        or line == prefix + (item[0] + " v" + item[1] + "`").encode("ascii")), "unknown")
+            errors.append(row)
+            require(len(errors) <= 16, "Too many SourceSlots short error records")
+    return errors
+
+
 def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, code: int, *, timeout_for) -> dict:
     """A failed original's optional explanation, never a success/cleanup gate."""
     try:
         timeout_for(15)
     except Exception:
         return source_slots_diagnostic_unavailable(code, "deadline-unavailable")
+    short = False
     try:
-        errors = source_slots_diagnostic_records(raw, stderr, context["source"])
+        short = source_slots_is_removal(context)
+        if short:
+            require(type(code) is int and 0 < code <= 255, "Short diagnostics require a returned nonzero original")
+            errors = source_slots_short_diagnostic_records(raw, stderr, context["source"])
+        else:
+            errors = source_slots_diagnostic_records(raw, stderr, context["source"])
     except Exception:
-        return source_slots_diagnostic_unavailable(code, "cargo-json-unavailable")
+        return source_slots_diagnostic_unavailable(code, "cargo-short-unavailable" if short else "cargo-json-unavailable")
     if not errors:
         return source_slots_diagnostic_unavailable(code, "no-error-records")
     try:
@@ -8970,9 +9037,13 @@ def phase_source_slots(name: str, context: dict) -> None:
             test_args = (["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
                           *SOURCE_SLOTS_REMOVAL_TESTS] if removal
                          else [SOURCE_SLOTS_TEST, "--", "--exact", "--test-threads=1"])
-            commands = (("headless-test-compile-only", [cargo, "test", *common, "--message-format=json,json-diagnostic-short", "--no-run"],
+            # JSON short changes only rendered, not the full compiler-message payload.
+            # B needs no artifact JSON: preserve all diagnostics in bounded short text.
+            compile_format = ["--message-format=short", "--color", "never"] if removal else ["--message-format=json,json-diagnostic-short"]
+            test_format = ["--message-format=short", "--color", "never"] if removal else []
+            commands = (("headless-test-compile-only", [cargo, "test", *common, *compile_format, "--no-run"],
                          root / "target/source-slots-compile.stdout", root / "target/source-slots-compile.stderr", 600),
-                        ("mac-source-slots-data-test", [cargo, "test", *common, *test_args],
+                        ("mac-source-slots-data-test", [cargo, "test", *common, *test_format, *test_args],
                          root / "target/source-slots-test.stdout", root / "target/source-slots-test.stderr", 150))
         result = None
         for check, argv, output_path, stderr_path, cap in commands:

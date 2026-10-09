@@ -117,7 +117,7 @@ jobs:
           fi
           case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
             ordinary-seven) ;;
-            saved-version-recovery|workflow-refusal) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            saved-version-recovery|workflow-refusal|release-evidence) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
             *) exit 1 ;;
           esac
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
@@ -3934,9 +3934,9 @@ jobs:
           print("Two ordinary saved-check journeys observed complete negative offline findings and genuine Idle; mutation recovery, readiness and independent all-worker finality remain unproved.")
           PY_SAVED_CHECKS_RESULT
 
-      - name: Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI
+      - name: Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI
         id: normal_saved_version_recovery_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence')
         timeout-minutes: 11
         shell: bash
         env:
@@ -3948,6 +3948,7 @@ jobs:
           case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
             saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;
             workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;
+            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;
             *) exit 1 ;;
           esac
           # Finite per-file logical size only; not RAM, total disk, service limits or finality.
@@ -3986,7 +3987,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind only the selected singleton to original XCTest and the same ordinary preview package
         id: normal_saved_version_recovery_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3998,6 +3999,7 @@ jobs:
           case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
             saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;
             workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;
+            release-evidence) singleton=release-evidence; singleton_method=testSyntheticProjectSavedReleaseEvidence ;;
             *) exit 1 ;;
           esac
           # Each summary has its own finite one-GiB file limit and original owner phase.
@@ -4024,9 +4026,10 @@ jobs:
           def need(value):
               if not value: raise ValueError("original selected singleton binding refused")
           def singleton_selection(scope):
-              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal"))
-              return (scope, "testSyntheticProjectSavedVersionRecovery" if scope == "saved-version-recovery"
-                      else "testSyntheticProjectManagedWorkflowRefusal")
+              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal", "release-evidence"))
+              return (scope, {"saved-version-recovery": "testSyntheticProjectSavedVersionRecovery",
+                  "workflow-refusal": "testSyntheticProjectManagedWorkflowRefusal",
+                  "release-evidence": "testSyntheticProjectSavedReleaseEvidence"}[scope])
           selected_scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
           stem, method = singleton_selection(selected_scope)
           def read(name, limit):
@@ -4124,6 +4127,20 @@ jobs:
           need(all(type(summary.get(k)) is int and summary[k] == v for k, v in counts.items()))
           def singleton_case_data(scope, runner, preview, expected_inputs, runtime_digest):
               singleton_selection(scope)
+              if scope == "release-evidence":
+                  need(runner.get("savedReleaseEvidenceMarkerObserved") is True
+                       and "managedWorkflowRefusalMarkerObserved" not in runner
+                       and "savedVersionRecovery" not in runner and runtime_digest is None)
+                  return {"scope": "ordinary-ui-observed-original-saved-release-evidence-documents-only",
+                      "savedReleaseEvidenceUI": "passed", "nativeEvidencePickerObserved": True,
+                      "candidateDocumentsAgreeObserved": True, "sharedCandidateGuidanceObserved": True,
+                      "stageChangeRetainsCandidateObserved": True, "replacementCancelStaleObserved": True,
+                      "releaseInputsUnpopulatedObserved": True, "fixtureOriginalsPreserved": True,
+                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,
+                      "artifactBytesVerified": False, "signingAuthenticated": False,
+                      "githubAuthenticityEstablished": False, "storeStateEstablished": False,
+                      "releaseReadinessEstablished": False, "recoverySafetyEstablished": False}
+              need("savedReleaseEvidenceMarkerObserved" not in runner)
               if scope == "workflow-refusal":
                   need(runner.get("managedWorkflowRefusalMarkerObserved") is True
                        and "savedVersionRecovery" not in runner and runtime_digest is None)
@@ -4277,6 +4294,14 @@ jobs:
             {0}/normal-ui/workflow-refusal-summary.command-admission.json
             {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json
             {0}/normal-ui/workflow-refusal-result.json
+            {0}/normal-ui/release-evidence-test-file-limit.status
+            {0}/normal-ui/release-evidence-test.status
+            {0}/normal-ui/release-evidence-test.runner-admission.json
+            {0}/normal-ui/release-evidence-test.failure-diagnostics.json
+            {0}/normal-ui/release-evidence-summary.status
+            {0}/normal-ui/release-evidence-summary.command-admission.json
+            {0}/normal-ui/release-evidence-summary.failure-diagnostics.json
+            {0}/normal-ui/release-evidence-result.json
             {0}/normal-ui/build.status
             {0}/normal-ui/test.status
             {0}/normal-ui/test.runner-admission.json
@@ -4533,7 +4558,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -4567,10 +4592,10 @@ jobs:
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
           scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
-          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal"):
+          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal", "release-evidence"):
               raise ValueError("task cleanup SOURCE scope refused")
           stem = {"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",
-                  "workflow-refusal": "workflow-refusal"}[scope]
+                  "workflow-refusal": "workflow-refusal", "release-evidence": "release-evidence"}[scope]
           test_stem, summary_stem = stem + "-test", stem + "-summary"
           # The skipped cohort supplies no finality or cleanup authority.
           saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")

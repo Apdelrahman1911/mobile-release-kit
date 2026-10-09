@@ -1246,8 +1246,11 @@ class ShellCompileContractTests(unittest.TestCase):
                 common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--features", "macos-installed-removal-abrupt-fixture",
                           "--target", "x86_64-apple-darwin", "--manifest-path", b["source"] + "/desktop/src-tauri/Cargo.toml",
                           "--target-dir", b["root"] + "/target", "--bin", "mrk-macos-remove"]
-                tail = (["--message-format=json,json-diagnostic-short", "--no-run"] if kw["check"] == "headless-test-compile-only"
+                tail = ["--message-format=short", "--color", "never"] + (["--no-run"] if kw["check"] == "headless-test-compile-only"
                         else ["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *INTEL_REMOVAL_CASES])
+                self.assertNotIn("--message-format=json,json-diagnostic-short", argv)
+                self.assertNotIn("RUSTFLAGS", kw["env"])
+                self.assertNotIn("CARGO_ENCODED_RUSTFLAGS", kw["env"])
                 self.assertEqual(argv, ["/Users/runner/.rustup/toolchains/stable-x86_64-apple-darwin/bin/cargo", "test", *common, *tail])
                 self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
                 self.assertEqual(kw["env"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], b["sourceSha"])
@@ -2301,12 +2304,71 @@ class ShellCompileContractTests(unittest.TestCase):
             helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"), helper.source_slots_identity(original.info), retain=True)
         self.assertEqual(original.closes, [77])
 
+        # B short output keeps warnings/errors in original captures but exports no text tails.
+        short_warning = ("warning: " + private + "\n").encode()
+        short_error = (source + "/" + app + "/src/lib.rs:19:7: error[E0433]: " + private + "\n").encode()
+        b_context = intel_removal_context()
+        short_records = helper.source_slots_short_diagnostic_records(short_warning, short_error, source)
+        self.assertEqual(short_records, [{"category": "compiler-error", "code": "E0433", "package": "mobile-release-kit-desktop",
+            "spans": [{"path": app + "/src/lib.rs", "line": 19, "column": 7}], "unboundSpans": 0}])
+        self.assertNotIn(private, json.dumps(short_records))
+        self.assertEqual(helper.source_slots_short_diagnostic_records(b"", short_error, source), short_records)
+        self.assertEqual(helper.source_slots_short_diagnostic_records(short_warning, b"", source), [])
+        for path in ("src/lib.rs", "../src/lib.rs", "/foreign/private.rs", source + "-other/" + app + "/src/lib.rs",
+                     app + "/src/../lib.rs", app + "/src//lib.rs", app + "/src/./lib.rs", "desktop/src-tauri-other/src/lib.rs"):
+            with self.subTest(short_unbound=path):
+                rows = helper.source_slots_short_diagnostic_records(b"", (path + ":19:7: error[E0433]: " + private + "\n").encode(), source)
+                self.assertEqual(rows[0]["spans"], [])
+                self.assertEqual(rows[0]["unboundSpans"], 1)
+                self.assertNotIn(path, json.dumps(rows))
+        for path, package in ((app + "/src/lib.rs", "mobile-release-kit-desktop"),
+                              (source + "/" + native + "/src/lib.rs", "mrk-macos-installed-native")):
+            rows = helper.source_slots_short_diagnostic_records(b"", (path + ":1048576:1048576: error: body\n").encode(), source)
+            self.assertEqual(rows[0]["package"], package)
+            self.assertEqual(rows[0]["spans"][0]["line"], 1048576)
+        rows = helper.source_slots_short_diagnostic_records(b"", (
+            "error[E0308]: " + private + "\nerror: linking with `cc` failed: " + private + "\n"
+            "error: failed to run custom build command for `mrk-macos-installed-native v0.1.0`\n").encode(), source)
+        self.assertEqual([row["category"] for row in rows], ["compiler-error", "linker-error", "build-script-failure"])
+        self.assertEqual(rows[-1]["package"], "mrk-macos-installed-native")
+        malformed_short = [short_error[:-1], short_error.replace(b"error[E0433]", b"error[E04333]"),
+            short_error.replace(b":19:7:", b":0:7:"), short_error.replace(b":19:7:", b":1048577:7:"),
+            short_error.replace(b":19:7:", b":19:1048577:"), short_error.replace(b"/src/lib.rs", b"/src/\xff.rs"),
+            b"x" * 8193 + b"\n", b"\n" * 4097, b"error[E0433]: body\n" * 17]
+        malformed_short.append(b"".join((app + "/src/" + str(i) + ".rs:1:1: error[E0433]: body\n").encode() for i in range(9)))
+        for body in malformed_short:
+            with self.subTest(short_refusal=len(body)), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_short_diagnostic_records(body, b"", source)
+        self.assertEqual(len(helper.source_slots_short_diagnostic_records(b"error[E0433]: body\n" * 16, b"", source)), 16)
+        # Exact byte/count bounds use finite lines, not an artificially oversized single line.
+        for limit, is_stderr in ((2 * 1024 * 1024, False), (1024 * 1024, True)):
+            padded = (b"w" * 8191 + b"\n") * (limit // 8192)
+            args = (b"", padded) if is_stderr else (padded, b"")
+            self.assertEqual(helper.source_slots_short_diagnostic_records(*args, source), [])
+            args = (b"", padded + b"\n") if is_stderr else (padded + b"\n", b"")
+            with self.assertRaises(helper.CheckFailure): helper.source_slots_short_diagnostic_records(*args, source)
+        self.assertEqual(helper.source_slots_short_diagnostic_records(b"x" * 8192 + b"\n", b"", source), [])
+        self.assertEqual(helper.source_slots_short_diagnostic_records(b"\n" * 4096, b"", source), [])
+        with patch.object(helper, "source_unchanged"), patch.object(helper, "run", return_value=metadata):
+            self.assertEqual(helper.source_slots_compiler_diagnostic(b_context, short_warning, short_error, 101,
+                timeout_for=lambda cap: cap), diagnostic)
+        with patch.object(helper, "source_unchanged", side_effect=AssertionError("no source IO")), \
+                patch.object(helper, "run", side_effect=AssertionError("no command")):
+            for code in (0, True, -1, 256, None):
+                value = helper.source_slots_compiler_diagnostic(b_context, short_warning, short_error, code, timeout_for=lambda cap: cap)
+                self.assertEqual(value["reason"], "cargo-short-unavailable")
+                self.assertEqual(value["state"], "unavailable")
+            self.assertEqual(helper.source_slots_compiler_diagnostic(b_context, short_warning, b"", 101,
+                timeout_for=lambda cap: cap)["reason"], "no-error-records")
+
         # The actual run() manufactures the private returned-original witness.
         # Only subprocess.run is doubled. No fake success/unknown witness may
         # unlock capture parsing, and later faults cannot replace that error.
         actual_run = helper.run
-        for fault in (None, "signal", "timeout", "start", "unknown", "witness-bool", "flush", "writer-post", "close",
-                      "read", "source", "metadata", "deadline", "late-metadata", "malformed", "publication"):
+        for short, fault in ((short, fault) for short in (False, True) for fault in (
+                None, "signal", "timeout", "start", "unknown", "witness-bool", "flush", "writer-post", "close",
+                "read", "source", "metadata", "deadline", "late-metadata", "malformed", "publication")):
+            selected_bound = b_context if short else bound
             events, captures, streams, publications, originals, raised, reads, clock, source_checks = [], {}, [], [], [], [], [], [100.0], []
             BasePath, writer, _ = source_slots_paths(events, captures)
             class FailureCapture(io.StringIO):
@@ -2331,12 +2393,13 @@ class ShellCompileContractTests(unittest.TestCase):
             def subprocess_original(argv, **kw):
                 originals.append((list(map(str, argv)), dict(kw)))
                 if argv[0] == "/fixed/cargo":
-                    self.assertIn("--message-format=json,json-diagnostic-short", argv)
+                    self.assertIn("--message-format=short" if short else "--message-format=json,json-diagnostic-short", argv)
+                    if short: self.assertEqual(argv[-4:], ["--message-format=short", "--color", "never", "--no-run"])
                     self.assertEqual(argv[-1], "--no-run")
                     self.assertEqual(kw["timeout"], 600)
                     self.assertTrue(kw["check"])
-                    kw["stdout"].write((b"partial" if fault == "malformed" else simple_raw).decode())
-                    kw["stderr"].write(private)
+                    kw["stdout"].write((b"partial" if fault == "malformed" else (short_warning if short else simple_raw)).decode())
+                    kw["stderr"].write(short_error.decode() if short else private)
                     if fault == "deadline": clock[0] = 970.0
                     if fault == "timeout": raise helper.subprocess.TimeoutExpired(argv, 600)
                     if fault == "start": raise OSError("inert startup")
@@ -2380,14 +2443,15 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertEqual(path.name, "source-slots-failure.json")
                 if fault == "publication": raise OSError("inert publication")
                 publications.append(deepcopy(value))
-            with self.subTest(returned_original_fault=fault), contextlib.redirect_stdout(io.StringIO()), \
+            with self.subTest(short=short, returned_original_fault=fault), contextlib.redirect_stdout(io.StringIO()), \
                     patch.object(helper, "Path", FailurePath), patch.object(helper, "tools", return_value=("/fixed/cargo", None)), \
                     patch.object(helper, "source_unchanged", side_effect=source_post), patch.object(helper, "source_slots_source_guard"), \
+                    patch.object(helper, "source_slots_build_inputs", return_value=intel_removal_build()), \
                     patch.object(helper.subprocess, "run", side_effect=subprocess_original), patch.object(helper, "run", side_effect=observe_run), \
                     patch.object(helper, "source_slots_writer", side_effect=writer_post), patch.object(helper, "source_slots_read", side_effect=read_returned), \
                     patch.object(helper, "write_json", side_effect=failure_publication), patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]), \
                     patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True), self.assertRaises(helper.CheckFailure) as failure:
-                helper.phase_source_slots("compile", bound)
+                helper.phase_source_slots("compile", selected_bound)
             self.assertEqual(len(raised), 1)
             self.assertIs(failure.exception, raised[0])
             self.assertEqual(type(failure.exception), helper.CheckFailure)

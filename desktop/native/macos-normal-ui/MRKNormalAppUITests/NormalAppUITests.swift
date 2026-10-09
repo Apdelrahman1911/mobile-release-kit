@@ -1369,7 +1369,7 @@ final class NormalAppUITests: XCTestCase {
         }
     }
     private final class LocalFixture {
-        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, androidSignedBuild, iosUnsignedArchive }
+        enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, releaseEvidence, androidSignedBuild, iosUnsignedArchive }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
         static let config = "project/release/mobile-release.json"
         static let version = "project/release/version.properties"
@@ -1395,6 +1395,13 @@ final class NormalAppUITests: XCTestCase {
             }
             return result
         }
+        // Public saved-document DATA only. No referenced artifact is materialized.
+        // Decoding/pin/census checks precede all task-owned fixture creation.
+        static let releaseEvidenceDocuments: [(String, String, Int, String)] = [
+            ("evidence/candidate-manifest.json", "ewogICJzY2hlbWFWZXJzaW9uIjogMiwKICAidG9vbGluZyI6IHsKICAgICJ2ZXJzaW9uIjogIjAuMi4wIiwKICAgICJjb21taXQiOiAiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIKICB9LAogICJyZXBvc2l0b3J5IjogewogICAgImZ1bGxOYW1lIjogImV4YW1wbGUvbW9iaWxlLWFwcCIsCiAgICAiaWQiOiAiMTAwMDAwMDAwIgogIH0sCiAgInNvdXJjZSI6IHsKICAgICJjb21taXQiOiAiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsCiAgICAidHJlZSI6ICIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIiwKICAgICJyZWYiOiAicmVmcy9oZWFkcy9tYWluIgogIH0sCiAgImNvbmZpZ3VyYXRpb24iOiB7CiAgICAicGF0aCI6ICJyZWxlYXNlL21vYmlsZS1yZWxlYXNlLmpzb24iLAogICAgInNoYTI1NiI6ICI0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0IiwKICAgICJtZXRhZGF0YVNoYTI1NiI6ICI1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1IgogIH0sCiAgInZlcnNpb24iOiB7CiAgICAibWFya2V0aW5nIjogIjEuMi4zIiwKICAgICJidWlsZCI6IDQyCiAgfSwKICAicGxhdGZvcm1zIjogewogICAgImFuZHJvaWQiOiB7CiAgICAgICJhcHBsaWNhdGlvbklkIjogImNvbS5leGFtcGxlLnJlYWRlciIKICAgIH0KICB9LAogICJhcnRpZmFjdHMiOiBbCiAgICB7CiAgICAgICJsb2dpY2FsTmFtZSI6ICJhbmRyb2lkLWFhYiIsCiAgICAgICJwbGF0Zm9ybSI6ICJhbmRyb2lkIiwKICAgICAgImtpbmQiOiAiYWFiIiwKICAgICAgImZpbGVOYW1lIjogInJlYWRlci0xLjIuMy00Mi5hYWIiLAogICAgICAic2l6ZSI6IDEyMzQ1Njc4LAogICAgICAic2hhMjU2IjogIjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYiLAogICAgICAiYXJjaGl0ZWN0dXJlcyI6IFsKICAgICAgICAiYXJtNjQtdjhhIiwKICAgICAgICAieDg2XzY0IgogICAgICBdCiAgICB9LAogICAgewogICAgICAibG9naWNhbE5hbWUiOiAic3RvcmUtbWV0YWRhdGEiLAogICAgICAicGxhdGZvcm0iOiAic2hhcmVkIiwKICAgICAgImtpbmQiOiAibWV0YWRhdGEiLAogICAgICAiZmlsZU5hbWUiOiAic3RvcmUtbWV0YWRhdGEtMS4yLjMtNDIuemlwIiwKICAgICAgInNpemUiOiAzNDU2NywKICAgICAgInNoYTI1NiI6ICI1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1IiwKICAgICAgImFyY2hpdGVjdHVyZXMiOiBbXQogICAgfSwKICAgIHsKICAgICAgImxvZ2ljYWxOYW1lIjogInZhbGlkYXRpb24tcmVwb3J0IiwKICAgICAgInBsYXRmb3JtIjogInNoYXJlZCIsCiAgICAgICJraW5kIjogInZhbGlkYXRpb24tcmVwb3J0IiwKICAgICAgImZpbGVOYW1lIjogInZhbGlkYXRpb24tcmVwb3J0LTEuMi4zLTQyLmpzb24iLAogICAgICAic2l6ZSI6IDIzNDUsCiAgICAgICJzaGEyNTYiOiAiNzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NyIsCiAgICAgICJhcmNoaXRlY3R1cmVzIjogW10KICAgIH0KICBdLAogICJzaWduaW5nIjogWwogICAgewogICAgICAicGxhdGZvcm0iOiAiYW5kcm9pZCIsCiAgICAgICJraW5kIjogImFuZHJvaWQtdXBsb2FkIiwKICAgICAgImNlcnRpZmljYXRlU2hhMjU2IjogImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiCiAgICB9CiAgXSwKICAic3RvcmVSZWNlaXB0cyI6IFsKICAgIHsKICAgICAgInByb3ZpZGVyIjogImdvb2dsZS1wbGF5IiwKICAgICAgImFwcGxpY2F0aW9uSWQiOiAiY29tLmV4YW1wbGUucmVhZGVyIiwKICAgICAgInN0b3JlQnVpbGRJZCI6ICI0MiIsCiAgICAgICJtYXJrZXRpbmdWZXJzaW9uIjogIjEuMi4zIiwKICAgICAgImJ1aWxkIjogNDIsCiAgICAgICJjaGFubmVsIjogImludGVybmFsIiwKICAgICAgInN0YXRlIjogImF2YWlsYWJsZS10by10ZXN0ZXJzIiwKICAgICAgIm9ic2VydmVkQXQiOiAiMjAyNi0wMS0wMVQwMDowMDowMFoiCiAgICB9CiAgXSwKICAiY3JlYXRlZEF0IjogIjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwKICAiZG9jdW1lbnRUeXBlIjogImNhbmRpZGF0ZS1tYW5pZmVzdCIsCiAgIm9wZXJhdGlvbkludGVudFNoYTI1NiI6ICIyNGI5ODI5YzdlZTU4ZjU3OWVjODJmMTZjYzQ2OWQ1YjI3NjQxMDU0YmFlY2U1ODFiZWM1ODhjYjM3MGY4YjI5IiwKICAiYXV0aG9yaXplZEJ5IjogewogICAgIndvcmtmbG93IjogIk1vYmlsZSBjYW5kaWRhdGUiLAogICAgImNhbGxlclBhdGgiOiAiLmdpdGh1Yi93b3JrZmxvd3MvbW9iaWxlLWNhbmRpZGF0ZS55bWwiLAogICAgInJldXNhYmxlUmVwb3NpdG9yeSI6ICJleGFtcGxlL21vYmlsZS1yZWxlYXNlLWtpdCIsCiAgICAicmV1c2FibGVQYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL3JldXNhYmxlLWNhbmRpZGF0ZS55bWwiLAogICAgInJldXNhYmxlQ29tbWl0IjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLAogICAgInJ1bklkIjogIjEwMDAwMDAwMDAiLAogICAgImF0dGVtcHQiOiAxLAogICAgImhlYWRTaGEiOiAiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsCiAgICAicmVmIjogInJlZnMvaGVhZHMvbWFpbiIsCiAgICAiZXZlbnQiOiAid29ya2Zsb3dfZGlzcGF0Y2giCiAgfSwKICAiZXhlY3V0ZWRCeSI6IHsKICAgICJ3b3JrZmxvdyI6ICJNb2JpbGUgY2FuZGlkYXRlIiwKICAgICJjYWxsZXJQYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL21vYmlsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZVJlcG9zaXRvcnkiOiAiZXhhbXBsZS9tb2JpbGUtcmVsZWFzZS1raXQiLAogICAgInJldXNhYmxlUGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9yZXVzYWJsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZUNvbW1pdCI6ICIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwKICAgICJydW5JZCI6ICIxMDAwMDAwMDAwIiwKICAgICJhdHRlbXB0IjogMSwKICAgICJoZWFkU2hhIjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLAogICAgInJlZiI6ICJyZWZzL2hlYWRzL21haW4iLAogICAgImV2ZW50IjogIndvcmtmbG93X2Rpc3BhdGNoIgogIH0sCiAgInByb2R1Y2VkQnkiOiB7CiAgICAid29ya2Zsb3ciOiAiTW9iaWxlIGNhbmRpZGF0ZSIsCiAgICAiY2FsbGVyUGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9tb2JpbGUtY2FuZGlkYXRlLnltbCIsCiAgICAicmV1c2FibGVSZXBvc2l0b3J5IjogImV4YW1wbGUvbW9iaWxlLXJlbGVhc2Uta2l0IiwKICAgICJyZXVzYWJsZVBhdGgiOiAiLmdpdGh1Yi93b3JrZmxvd3MvcmV1c2FibGUtY2FuZGlkYXRlLnltbCIsCiAgICAicmV1c2FibGVDb21taXQiOiAiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsCiAgICAicnVuSWQiOiAiMTAwMDAwMDAwMCIsCiAgICAiYXR0ZW1wdCI6IDEsCiAgICAiaGVhZFNoYSI6ICIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwKICAgICJyZWYiOiAicmVmcy9oZWFkcy9tYWluIiwKICAgICJldmVudCI6ICJ3b3JrZmxvd19kaXNwYXRjaCIKICB9LAogICJpbnRlZ3JpdHkiOiB7CiAgICAiYWxnb3JpdGhtIjogInNoYTI1NiIsCiAgICAic2hhMjU2IjogIjE3N2I1ZjNlOTJiM2IwMmI5OTQ4OWJiNmU3YTZhYWNhMTgzYjE2YzM3MTIxODcxNWY3OTg3MmUxNTk3ZThjMTYiCiAgfQp9Cg==", 3907, "285685846ac73e215aacc77436884e42f3e973a105dc5e40f1add0a020f2e06d"),
+            ("evidence/candidate-receipt.json", "ewogICJzY2hlbWFWZXJzaW9uIjogMywKICAic3RhZ2UiOiAiY2FuZGlkYXRlIiwKICAiY2FuZGlkYXRlTWFuaWZlc3RTaGEyNTYiOiAiMTc3YjVmM2U5MmIzYjAyYjk5NDg5YmI2ZTdhNmFhY2ExODNiMTZjMzcxMjE4NzE1Zjc5ODcyZTE1OTdlOGMxNiIsCiAgInRvb2xpbmciOiB7CiAgICAidmVyc2lvbiI6ICIwLjIuMCIsCiAgICAiY29tbWl0IjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiCiAgfSwKICAicmVwb3NpdG9yeSI6IHsKICAgICJmdWxsTmFtZSI6ICJleGFtcGxlL21vYmlsZS1hcHAiLAogICAgImlkIjogIjEwMDAwMDAwMCIKICB9LAogICJzb3VyY2UiOiB7CiAgICAiY29tbWl0IjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLAogICAgInRyZWUiOiAiMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMyIKICB9LAogICJwbGF0Zm9ybSI6ICJhbmRyb2lkIiwKICAicHJvdmlkZXIiOiAiZ29vZ2xlLXBsYXkiLAogICJhcHBsaWNhdGlvbklkIjogImNvbS5leGFtcGxlLnJlYWRlciIsCiAgInZlcnNpb24iOiB7CiAgICAibWFya2V0aW5nIjogIjEuMi4zIiwKICAgICJidWlsZCI6IDQyCiAgfSwKICAic3RvcmVCdWlsZElkIjogIjQyIiwKICAib3BlcmF0aW9uIjogInVwbG9hZGVkIiwKICAiZGVzdGluYXRpb24iOiB7CiAgICAiY2hhbm5lbCI6ICJpbnRlcm5hbCIsCiAgICAicmVsZWFzZVN0YXR1cyI6ICJjb21wbGV0ZWQiCiAgfSwKICAicmVhZGJhY2siOiB7CiAgICAic3RhdGUiOiAiYXZhaWxhYmxlLXRvLXRlc3RlcnMiLAogICAgIm9ic2VydmVkQXQiOiAiMjAyNi0wMS0wMVQwMDowMDowMFoiCiAgfSwKICAiY3JlYXRlZEF0IjogIjIwMjYtMDEtMDFUMDA6MDA6MDBaIiwKICAib3V0Y29tZSI6ICJtdXRhdGVkIiwKICAic3RvcmVTdGF0ZSI6IHsKICAgICJjYW5vbmljYWxpemF0aW9uIjogIm1yay1wbGF5LXRyYWNrLXN0YXRlLXYyIiwKICAgICJtb2RlIjogIm11dGF0aW9uIiwKICAgICJtdXRhdGlvbkVkaXRJZCI6ICJtdXRhdGlvbi1lZGl0IiwKICAgICJyZWFkYmFja0VkaXRJZCI6ICJyZWFkYmFjay1lZGl0IiwKICAgICJkZXN0aW5hdGlvbkJlZm9yZVNoYTI1NiI6ICJhZGEwMTEzNDliNzUwNTI2ZTFkNGE3YWMxNzkxMzM4NGQxNGZlYTljMGQ2N2YyYzQ5ZTRkZGI3YWQ4MDE0NzVkIiwKICAgICJkZXN0aW5hdGlvbkV4cGVjdGVkU2hhMjU2IjogIjBjMmFlNGE3MDUxMGViOWUxZGIxMWY5MjJjOTgzYmRkNWZiMjgxMTZiNDZiNjAyNjE0ZGIwMTdkZDM2MWY4NWQiLAogICAgImRlc3RpbmF0aW9uQ29tbWl0dGVkU2hhMjU2IjogIjBjMmFlNGE3MDUxMGViOWUxZGIxMWY5MjJjOTgzYmRkNWZiMjgxMTZiNDZiNjAyNjE0ZGIwMTdkZDM2MWY4NWQiLAogICAgInVucmVsYXRlZEJlZm9yZVNoYTI1NiI6ICJkMjlkZjRjMzkxMDg0ODk4YzllMTIzNTg0OWYxMTE0ZWQ5YjE3NGEzMzVhNzIyOTlhODBmYTdkMWEyODIyYTM2IiwKICAgICJ1bnJlbGF0ZWRDb21taXR0ZWRTaGEyNTYiOiAiZDI5ZGY0YzM5MTA4NDg5OGM5ZTEyMzU4NDlmMTExNGVkOWIxNzRhMzM1YTcyMjk5YTgwZmE3ZDFhMjgyMmEzNiIsCiAgICAidGFyZ2V0UmVsZWFzZVNoYTI1NiI6ICI2ZjJhZDQ3Njg4YmQxY2VlMTljMzkyOTQ4OWYzODQwMDk1ZGVkOGYzNzNmYTBjZjJhN2E4YTNiMjg2Y2NiMGNmIgogIH0sCiAgImRvY3VtZW50VHlwZSI6ICJzdG9yZS1yZWNlaXB0IiwKICAib3BlcmF0aW9uSW50ZW50U2hhMjU2IjogIjI0Yjk4MjljN2VlNThmNTc5ZWM4MmYxNmNjNDY5ZDViMjc2NDEwNTRiYWVjZTU4MWJlYzU4OGNiMzcwZjhiMjkiLAogICJhdXRob3JpemVkQnkiOiB7CiAgICAid29ya2Zsb3ciOiAiTW9iaWxlIGNhbmRpZGF0ZSIsCiAgICAiY2FsbGVyUGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9tb2JpbGUtY2FuZGlkYXRlLnltbCIsCiAgICAicmV1c2FibGVSZXBvc2l0b3J5IjogImV4YW1wbGUvbW9iaWxlLXJlbGVhc2Uta2l0IiwKICAgICJyZXVzYWJsZVBhdGgiOiAiLmdpdGh1Yi93b3JrZmxvd3MvcmV1c2FibGUtY2FuZGlkYXRlLnltbCIsCiAgICAicmV1c2FibGVDb21taXQiOiAiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsCiAgICAicnVuSWQiOiAiMTAwMDAwMDAwMCIsCiAgICAiYXR0ZW1wdCI6IDEsCiAgICAiaGVhZFNoYSI6ICIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyIiwKICAgICJyZWYiOiAicmVmcy9oZWFkcy9tYWluIiwKICAgICJldmVudCI6ICJ3b3JrZmxvd19kaXNwYXRjaCIKICB9LAogICJleGVjdXRlZEJ5IjogewogICAgIndvcmtmbG93IjogIk1vYmlsZSBjYW5kaWRhdGUiLAogICAgImNhbGxlclBhdGgiOiAiLmdpdGh1Yi93b3JrZmxvd3MvbW9iaWxlLWNhbmRpZGF0ZS55bWwiLAogICAgInJldXNhYmxlUmVwb3NpdG9yeSI6ICJleGFtcGxlL21vYmlsZS1yZWxlYXNlLWtpdCIsCiAgICAicmV1c2FibGVQYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL3JldXNhYmxlLWNhbmRpZGF0ZS55bWwiLAogICAgInJldXNhYmxlQ29tbWl0IjogIjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLAogICAgInJ1bklkIjogIjEwMDAwMDAwMDAiLAogICAgImF0dGVtcHQiOiAxLAogICAgImhlYWRTaGEiOiAiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsCiAgICAicmVmIjogInJlZnMvaGVhZHMvbWFpbiIsCiAgICAiZXZlbnQiOiAid29ya2Zsb3dfZGlzcGF0Y2giCiAgfSwKICAicHJvZHVjZWRCeSI6IHsKICAgICJ3b3JrZmxvdyI6ICJNb2JpbGUgY2FuZGlkYXRlIiwKICAgICJjYWxsZXJQYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL21vYmlsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZVJlcG9zaXRvcnkiOiAiZXhhbXBsZS9tb2JpbGUtcmVsZWFzZS1raXQiLAogICAgInJldXNhYmxlUGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9yZXVzYWJsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZUNvbW1pdCI6ICIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwKICAgICJydW5JZCI6ICIxMDAwMDAwMDAwIiwKICAgICJhdHRlbXB0IjogMSwKICAgICJoZWFkU2hhIjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLAogICAgInJlZiI6ICJyZWZzL2hlYWRzL21haW4iLAogICAgImV2ZW50IjogIndvcmtmbG93X2Rpc3BhdGNoIgogIH0sCiAgImludGVncml0eSI6IHsKICAgICJhbGdvcml0aG0iOiAic2hhMjU2IiwKICAgICJzaGEyNTYiOiAiMjYzM2MyYTQ0OTY3YjZjYzY5MDBmM2Y4ODgzMWQzODNiMGI1YjFmNDNkMDg3NmQ2ZjhiN2I0ZmNkZGE1MzAxOCIKICB9Cn0K", 3363, "375d5b895b62b62842338acff9c8ed9cfafe9a618eb51439d9ebc042d401e183"),
+            ("evidence/operation/candidate-operation-intent.json", "ewogICJkb2N1bWVudFR5cGUiOiAic3RvcmUtb3BlcmF0aW9uLWludGVudCIsCiAgInNjaGVtYVZlcnNpb24iOiAxLAogICJzdGFnZSI6ICJjYW5kaWRhdGUiLAogICJwbGF0Zm9ybSI6ICJhbmRyb2lkIiwKICAidG9vbGluZyI6IHsKICAgICJ2ZXJzaW9uIjogIjAuMi4wIiwKICAgICJjb21taXQiOiAiMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIKICB9LAogICJyZXBvc2l0b3J5IjogewogICAgImZ1bGxOYW1lIjogImV4YW1wbGUvbW9iaWxlLWFwcCIsCiAgICAiaWQiOiAiMTAwMDAwMDAwIgogIH0sCiAgImNhbmRpZGF0ZVNvdXJjZSI6IHsKICAgICJjb21taXQiOiAiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsCiAgICAidHJlZSI6ICIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIiwKICAgICJyZWYiOiAicmVmcy9oZWFkcy9tYWluIgogIH0sCiAgIm9wZXJhdGlvblNvdXJjZSI6IHsKICAgICJjb21taXQiOiAiMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMiIsCiAgICAidHJlZSI6ICIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzIiwKICAgICJyZWYiOiAicmVmcy9oZWFkcy9tYWluIgogIH0sCiAgImF1dGhvcml6ZWRCeSI6IHsKICAgICJ3b3JrZmxvdyI6ICJNb2JpbGUgY2FuZGlkYXRlIiwKICAgICJjYWxsZXJQYXRoIjogIi5naXRodWIvd29ya2Zsb3dzL21vYmlsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZVJlcG9zaXRvcnkiOiAiZXhhbXBsZS9tb2JpbGUtcmVsZWFzZS1raXQiLAogICAgInJldXNhYmxlUGF0aCI6ICIuZ2l0aHViL3dvcmtmbG93cy9yZXVzYWJsZS1jYW5kaWRhdGUueW1sIiwKICAgICJyZXVzYWJsZUNvbW1pdCI6ICIxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExIiwKICAgICJydW5JZCI6ICIxMDAwMDAwMDAwIiwKICAgICJhdHRlbXB0IjogMSwKICAgICJoZWFkU2hhIjogIjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLAogICAgInJlZiI6ICJyZWZzL2hlYWRzL21haW4iLAogICAgImV2ZW50IjogIndvcmtmbG93X2Rpc3BhdGNoIgogIH0sCiAgImNvbmZpcm1hdGlvbiI6ICJjYW5kaWRhdGU6YW5kcm9pZDoxLjIuMzo0MiIsCiAgImFwcGxpY2F0aW9uIjogewogICAgImlkIjogImNvbS5leGFtcGxlLnJlYWRlciIKICB9LAogICJ2ZXJzaW9uIjogewogICAgIm1hcmtldGluZyI6ICIxLjIuMyIsCiAgICAiYnVpbGQiOiA0MgogIH0sCiAgImRlc3RpbmF0aW9uIjogewogICAgImNoYW5uZWwiOiAiaW50ZXJuYWwiLAogICAgInJlbGVhc2VTdGF0dXMiOiAiY29tcGxldGVkIgogIH0sCiAgImNvbmZpZ3VyYXRpb24iOiB7CiAgICAicGF0aCI6ICJyZWxlYXNlL21vYmlsZS1yZWxlYXNlLmpzb24iLAogICAgInNoYTI1NiI6ICI0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0IiwKICAgICJtZXRhZGF0YVNoYTI1NiI6ICI1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1IgogIH0sCiAgImFydGlmYWN0cyI6IFsKICAgIHsKICAgICAgImxvZ2ljYWxOYW1lIjogImFuZHJvaWQtYWFiIiwKICAgICAgInBsYXRmb3JtIjogImFuZHJvaWQiLAogICAgICAia2luZCI6ICJhYWIiLAogICAgICAiZmlsZU5hbWUiOiAicmVhZGVyLTEuMi4zLTQyLmFhYiIsCiAgICAgICJzaXplIjogMTIzNDU2NzgsCiAgICAgICJzaGEyNTYiOiAiNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NiIsCiAgICAgICJhcmNoaXRlY3R1cmVzIjogWwogICAgICAgICJhcm02NC12OGEiLAogICAgICAgICJ4ODZfNjQiCiAgICAgIF0KICAgIH0sCiAgICB7CiAgICAgICJsb2dpY2FsTmFtZSI6ICJzdG9yZS1tZXRhZGF0YSIsCiAgICAgICJwbGF0Zm9ybSI6ICJzaGFyZWQiLAogICAgICAia2luZCI6ICJtZXRhZGF0YSIsCiAgICAgICJmaWxlTmFtZSI6ICJzdG9yZS1tZXRhZGF0YS0xLjIuMy00Mi56aXAiLAogICAgICAic2l6ZSI6IDM0NTY3LAogICAgICAic2hhMjU2IjogIjU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTU1NTUiLAogICAgICAiYXJjaGl0ZWN0dXJlcyI6IFtdCiAgICB9LAogICAgewogICAgICAibG9naWNhbE5hbWUiOiAidmFsaWRhdGlvbi1yZXBvcnQiLAogICAgICAicGxhdGZvcm0iOiAic2hhcmVkIiwKICAgICAgImtpbmQiOiAidmFsaWRhdGlvbi1yZXBvcnQiLAogICAgICAiZmlsZU5hbWUiOiAidmFsaWRhdGlvbi1yZXBvcnQtMS4yLjMtNDIuanNvbiIsCiAgICAgICJzaXplIjogMjM0NSwKICAgICAgInNoYTI1NiI6ICI3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3IiwKICAgICAgImFyY2hpdGVjdHVyZXMiOiBbXQogICAgfQogIF0sCiAgInNpZ25pbmciOiBbCiAgICB7CiAgICAgICJwbGF0Zm9ybSI6ICJhbmRyb2lkIiwKICAgICAgImtpbmQiOiAiYW5kcm9pZC11cGxvYWQiLAogICAgICAiY2VydGlmaWNhdGVTaGEyNTYiOiAiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIKICAgIH0KICBdLAogICJwcmVkZWNlc3NvcnMiOiB7fSwKICAic3RvcmVQcmVjb25kaXRpb24iOiB7CiAgICAic2NoZW1hVmVyc2lvbiI6IDEsCiAgICAiZG9jdW1lbnRUeXBlIjogInN0b3JlLXByZWNvbmRpdGlvbiIsCiAgICAib3BlcmF0aW9uIjogImFuZHJvaWRfaW50ZXJuYWxfdXBsb2FkIiwKICAgICJwbGF0Zm9ybSI6ICJhbmRyb2lkIiwKICAgICJhcHBJZGVudGl0eSI6ICJjb20uZXhhbXBsZS5yZWFkZXIiLAogICAgIm1hcmtldGluZ1ZlcnNpb24iOiAiMS4yLjMiLAogICAgImJ1aWxkTnVtYmVyIjogNDIsCiAgICAib2JzZXJ2ZWRBdCI6ICIyMDI2LTAxLTAxVDAwOjAwOjAwWiIsCiAgICAic25hcHNob3QiOiB7CiAgICAgICJjYW5vbmljYWxpemF0aW9uIjogIm1yay1wbGF5LW9wZXJhdGlvbi12MSIsCiAgICAgICJkZXN0aW5hdGlvblRyYWNrIjogImludGVybmFsIiwKICAgICAgImRlc3RpbmF0aW9uU3RhdGUiOiB7CiAgICAgICAgImNhbm9uaWNhbGl6YXRpb24iOiAibXJrLXBsYXktdHJhY2stc3RhdGUtdjIiLAogICAgICAgICJ0cmFjayI6ICJpbnRlcm5hbCIsCiAgICAgICAgInJlbGVhc2VzIjogW10KICAgICAgfSwKICAgICAgInNvdXJjZVRyYWNrIjogbnVsbCwKICAgICAgInNvdXJjZVN0YXRlIjogbnVsbCwKICAgICAgImJ1bmRsZXMiOiBbXSwKICAgICAgInRhcmdldFByZXNlbnQiOiBmYWxzZSwKICAgICAgInRhcmdldFJlbGVhc2UiOiB7CiAgICAgICAgIm5hbWUiOiAiMS4yLjMiLAogICAgICAgICJzdGF0dXMiOiAiY29tcGxldGVkIiwKICAgICAgICAidmVyc2lvbkNvZGVzIjogWwogICAgICAgICAgIjQyIgogICAgICAgIF0KICAgICAgfSwKICAgICAgImRlc3RpbmF0aW9uVGFyZ2V0U3RhdGUiOiB7CiAgICAgICAgImNhbm9uaWNhbGl6YXRpb24iOiAibXJrLXBsYXktdHJhY2stc3RhdGUtdjIiLAogICAgICAgICJ0cmFjayI6ICJpbnRlcm5hbCIsCiAgICAgICAgInJlbGVhc2VzIjogWwogICAgICAgICAgewogICAgICAgICAgICAibmFtZSI6ICIxLjIuMyIsCiAgICAgICAgICAgICJzdGF0dXMiOiAiY29tcGxldGVkIiwKICAgICAgICAgICAgInZlcnNpb25Db2RlcyI6IFsKICAgICAgICAgICAgICAiNDIiCiAgICAgICAgICAgIF0KICAgICAgICAgIH0KICAgICAgICBdCiAgICAgIH0sCiAgICAgICJzb3VyY2VBbGxvd2VkU3RhdGVzIjogW10KICAgIH0KICB9LAogICJwcml2YXRlU3RhdGVDb21taXRtZW50cyI6IHt9LAogICJjcmVhdGVkQXQiOiAiMjAyNi0wMS0wMVQwMDowMDowMFoiLAogICJpbnRlZ3JpdHkiOiB7CiAgICAiYWxnb3JpdGhtIjogInNoYTI1NiIsCiAgICAic2hhMjU2IjogIjI0Yjk4MjljN2VlNThmNTc5ZWM4MmYxNmNjNDY5ZDViMjc2NDEwNTRiYWVjZTU4MWJlYzU4OGNiMzcwZjhiMjkiCiAgfQp9Cg==", 4096, "e56ad77ee3cb4b1d3e12d1a6f5be8f7d0e90497934d1ebbd5bd9312b53362e42")
+        ]
         // Extra selection-only DATA belongs only to the ordinary project-field case.
         // The same originals/current/ancestor inventory owns and verifies every leaf.
         static let projectFieldAdditions: [String: Data] = [
@@ -1447,6 +1454,7 @@ final class NormalAppUITests: XCTestCase {
         private var deletedProfile = false
         private(set) var rootPath = ""
         var projectPath: String { rootPath + "/project" }
+        var evidencePath: String { rootPath + "/evidence" }
         var sourcesPath: String { rootPath + "/sources" }
 
         private static func need(_ value: Bool, _ reason: String) throws {
@@ -3128,6 +3136,22 @@ final class NormalAppUITests: XCTestCase {
                     "Android public input census differs")
                 androidPositiveProfile = true
             }
+            if profile == .releaseEvidence {
+                try Self.need(originals.count == 13 && Self.releaseEvidenceDocuments.count == 3,
+                              "saved-evidence original project/document census differs")
+                for (path, encoded, size, digest) in Self.releaseEvidenceDocuments {
+                    guard let bytes = Data(base64Encoded: encoded) else { throw Refusal.condition("fixture: fixed evidence DATA encoding") }
+                    try Self.need(originals[path] == nil && bytes.count == size && size <= 4096
+                        && SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() == digest,
+                        "saved-evidence exact public bytes differ")
+                    originals[path] = bytes
+                }
+                // 12 held directory originals +3 anchors, one transient reader:
+                // at most16 fixture FDs; the app's original gate is separate.
+                try Self.need(originals.count == 16 && Self.ancestors(Set(originals.keys)).count == 12
+                    && originals.values.reduce(0, { $0 + $1.count }) == 12740,
+                    "saved-evidence fixed16-leaf/12-directory DATA census differs")
+            }
             if profile == .projectFields {
                 try Self.need(Set(originals.keys).isDisjoint(with: Self.projectFieldAdditions.keys),
                               "fixed project-field DATA collides with an original")
@@ -3268,6 +3292,10 @@ final class NormalAppUITests: XCTestCase {
             if profile == .projectFields {
                 try Self.need(current.count == 22 && directories.count == 143 && anchors.count == 3
                     && descriptors.count == 146, "created Android source fixture census differs")
+            }
+            if profile == .releaseEvidence {
+                try Self.need(current.count == 16 && directories.count == 12 && anchors.count == 3
+                    && descriptors.count == 15, "created saved-evidence original census differs")
             }
             if profile == .workflowRefusal {
                 try Self.need(current.count == 15 && directories.count == 10 && anchors.count == 3
@@ -4701,6 +4729,126 @@ final class NormalAppUITests: XCTestCase {
         }
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI=original-core-interrupt86-fresh-ui-inspect-close-reinspect-confirm-rollback-reload;interruptedGuiSave=not-observed;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    @MainActor func testSyntheticProjectSavedReleaseEvidence() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("evidence-launch") { launched = try launchForJourney() }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("ordinary launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("evidence-fixture") { try fixture.prepare(.releaseEvidence) }
+        let guidance = "Only candidate evidence was supplied. Later stages and recovery remain undetermined; these saved documents do not approve another operation."
+        let warning = "Saved documents only, not live Store status or retry approval."
+        let failures = ["No current evidence result was accepted", "Some documents are missing", "A document needs attention", "The documents do not agree",
+                        "Evidence observation or cleanup is unconfirmed. Preserve the original folder; do not treat it as a successful observation."]
+        @MainActor func currentDocuments() throws {
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Documents agree"), in: renderer, failures: failures)
+            _ = try unique(renderer.staticTexts.matching(identifier: "Documents only"), "documents-only label missing or ambiguous")
+            _ = try unique(renderer.staticTexts.matching(identifier: "com.example.reader"), "declared candidate identity differs")
+            _ = try unique(renderer.staticTexts.matching(identifier: "evidence · Candidate"), "selected evidence folder and stage differ")
+            _ = try unique(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", guidance)), "candidate-only guidance differs")
+            _ = try unique(renderer.staticTexts.matching(identifier: warning), "saved documents warning missing")
+            try require(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "unchanged by evidence selection")).count == 1,
+                        "source-project separation was not displayed")
+        }
+        @MainActor func staleDocuments() throws {
+            _ = try waitElement(controls(renderer, [.disclosureTriangle, .button], label: "Previous observation · stale · evidence", prefix: true), in: renderer)
+            try require(renderer.staticTexts.matching(identifier: "Documents agree").count == 0,
+                        "a previous observation is still presented as a current document result")
+        }
+        @MainActor func releaseSeparation() throws {
+            for label in ["Candidate evidence producer run ID", "Original artifact source commit", "Original marketing version", "Original build number"] {
+                let input = try field(renderer, label)
+                try require(input.value as? String == "", "saved evidence populated a protected-release input")
+            }
+            let prepare = try unique(renderer.buttons.matching(identifier: "Prepare release review · read GitHub only"), "release Prepare missing or ambiguous")
+            try require(!prepare.isEnabled, "saved evidence enabled disconnected release preparation")
+            try require(renderer.buttons.matching(identifier: "Dispatch this protected release request once").count == 0
+                && named(renderer, "Exact protected release review").count == 0,
+                "saved evidence acquired a prepared review or dispatch authority")
+        }
+        try stage("evidence-project-open") {
+            try press(renderer, "Open project folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get project ready.")), in: renderer,
+                                failures: ["Static observation unavailable", "Only a partial static observation is available"])
+            _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "source project path differs")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        try stage("evidence-real-picker") {
+            try press(renderer, "Artifacts", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "No current document observation"), in: renderer)
+            let selected = try waitElement(controls(renderer, [.popUpButton, .comboBox], label: "Evidence stage", prefix: true), in: renderer)
+            try require(selected.value as? String == "Candidate", "initial evidence stage is not candidate")
+            try press(renderer, "Choose evidence folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
+            try goToFolder(sheet, path: fixture.evidencePath); try nativeOpen(sheet)
+            _ = try waitElement(renderer.buttons.matching(identifier: "Inspect documents"), in: renderer, enabled: true, failures: failures)
+            try require(renderer.staticTexts.matching(identifier: "Documents agree").count == 0,
+                        "choosing a folder synthesized an observation")
+            try fixture.assertUnchanged()
+        }
+        try stage("evidence-original-observation") {
+            try press(renderer, "Inspect documents", renderer: renderer, failures: failures) // Exactly one observation request.
+            try currentDocuments()
+            try expand(renderer, prefix: "Document status and technical details", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "No artifact bytes, signing, GitHub authenticity, Store state, release readiness or recovery safety are established here. All six assurance flags remain false."), in: renderer)
+            for path in ["candidate-receipt.json", "candidate-manifest.json", "operation/candidate-operation-intent.json"] {
+                try require(renderer.staticTexts.matching(identifier: path).count >= 1, "an expected saved document is absent from the observation")
+            }
+            try fixture.assertUnchanged()
+        }
+        try stage("evidence-shared-navigation") {
+            try press(renderer, "Releases", renderer: renderer); try currentDocuments()
+            try select(renderer, label: "Release step", value: "External testing · reuse candidate", renderer: renderer)
+            try select(renderer, label: "Release platform", value: "Android · Google Play", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Promote the original candidate to the configured external testing track without rebuilding it.")), in: renderer)
+            try releaseSeparation() // No Prepare, consent or Dispatch click.
+            try press(renderer, "Artifacts", renderer: renderer); try currentDocuments()
+            try press(renderer, "Recovery", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", guidance)), in: renderer)
+            _ = try unique(renderer.staticTexts.matching(identifier: warning), "shared recovery warning differs")
+            try require(renderer.staticTexts.matching(identifier: "No current saved-document guidance. Project recovery remains unassessed.").count == 0,
+                        "navigation discarded the actual shared candidate observation")
+            try fixture.assertUnchanged()
+        }
+        try stage("evidence-stage-and-cancel") {
+            try press(renderer, "Releases", renderer: renderer)
+            try select(renderer, label: "Evidence stage", value: "External testing", renderer: renderer)
+            try currentDocuments() // Stage choice alone does not stale the existing result.
+            let inspect = try unique(renderer.buttons.matching(identifier: "Inspect documents"), "Inspect control missing")
+            try require(!inspect.isEnabled, "a new evidence stage reused the prior selection")
+            try press(renderer, "Choose evidence folder", renderer: renderer)
+            let sheet = try nativeSheet(window, title: "Choose a release evidence folder")
+            try click(sheet.buttons.matching(identifier: "Cancel"), "replacement evidence Cancel unavailable")
+            try waitGone(sheet)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Original operation cancelled and settled. No new result was accepted."), in: renderer, failures: failures)
+            try staleDocuments(); try releaseSeparation()
+            try press(renderer, "Artifacts", renderer: renderer); try staleDocuments()
+            try press(renderer, "Recovery", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "No current saved-document guidance. Project recovery remains unassessed."), in: renderer)
+            _ = try waitElement(controls(renderer, [.disclosureTriangle, .button], label: "Previous guidance · stale · evidence", prefix: true), in: renderer)
+            try fixture.assertUnchanged()
+        }
+        try stage("evidence-readback-and-quit") {
+            try press(renderer, "Dashboard", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: fixture.projectPath), in: renderer)
+            try fixture.assertUnchanged()
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "saved-evidence normal Quit unavailable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try fixture.closeOriginals()
+            ownedFixture = nil
+        }
+        try acceptFinalScenario()
+        print("MRK_MACOS_NORMAL_RELEASE_EVIDENCE_UI=ordinary-picker-candidate-documents-only-shared-guidance-stage-retained-replacement-cancel-stale-release-inputs-empty-originals-preserved;cleanExitStatus=unavailable;allWorkerFinality=unavailable;remoteRelease=not-attempted")
     }
 
     @MainActor func testSyntheticProjectManagedWorkflowRefusal() throws {
