@@ -170,26 +170,28 @@ INTEGRATION_SOURCES = (
     'desktop/native/macos-installed-native/src/install_producer.m',
     'desktop/native/macos-installed-native/src/install_producer.h',
 )
-# Two fixed originals: linked-admission Parent2 plus linked-crash Record1 DATA; no live removal.
+# Three fixed originals: Remover Parent3, linked Record1, and ordinary Installer1 DATA; no live removal.
 PARENT_ARGUMENT = "--qualify-removal-parent-data"
-PARENT_ROLES = ("removal-parent-rust-tests", "removal-record-rust-tests")
+PARENT_ROLES = ("removal-parent-rust-tests", "removal-record-rust-tests", "removal-installer-rust-tests")
 PARENT_RUST_TESTS = (
     "installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality",
     "installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources",
+    "installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",
 )
 RECORD_RUST_TESTS = ("macos_remove_record::tests::fresh_removal_and_reinstall_table_never_upgrades_old_failure",)
+PARENT_INSTALLER_RUST_TESTS = ("installer::worker::tests::same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow",)
 # Four fixed changed DATA originals only; previous route contracts are untouched.
 CHANGES_ARGUMENT = "--qualify-removal-changes-data"
 CHANGES_ROLES = ('removal-changes-parent-rust-tests', 'removal-changes-app-rust-tests', 'removal-changes-native-rust-tests', 'removal-changes-emitter-rust-tests')
 CHANGES_RUST_TESTS = (('installer::worker::tests::private_frames_require_fixed_binding_shapes_bounds_and_no_future_finality', 'installer::worker::tests::original_join_requires_eof_closes_matching_return_and_timely_sources'), ('asset_session::macos_removal::tests::fixed_ingress_and_private_completion_never_replace_originals', 'asset_session::macos_maintenance::tests::new_work_closure_is_not_stop_and_preserves_lock_and_quit_routes', 'asset_session::installation_memory::known::tests::fixed_session_partition_and_overflow_refuse_without_credit', 'edit_owner::installed_configuration_data_tests::installed_configuration_owner_contract_is_inert', 'installed_runtime::installation_observation::installation_roster_uses_fixed_app_name_and_global_inventory_bound', 'macos_remove_record::tests::removal_record_closed_schema_and_bindings_are_data_only', 'macos_remove_record::tests::removal_prefix_failure_and_new_attempt_never_rewrite_history'), ('removal_coordinator::tests::cutoff_preserves_same_original_not_equal_data_and_fixed_endpoints',), ('emitter::tests::fixed_remove_inputs_rosters_and_original_finality_refuse_install_or_partial_routes',))
 CHANGES_SOURCES = ('desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs', 'desktop/native/macos-installed-native/src/lib.rs', 'desktop/native/macos-installed-native/src/android_registration.rs', 'desktop/native/macos-installed-native/src/android_maintenance_client.rs', 'desktop/native/macos-installed-native/src/vault_helper_control.m', 'desktop/native/macos-installed-native/src/vault_helper_wire.rs', 'desktop/native/macos-installed-native/src/removal_coordinator.rs', 'desktop/native/macos-installed-native/src/removal_coordinator.h', 'desktop/native/macos-installed-native/src/removal_coordinator.m', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/src-tauri/src/lib.rs', 'desktop/src-tauri/src/installed_runtime_macos.rs', 'desktop/src-tauri/src/installation_observation_macos.rs', 'desktop/src-tauri/src/edit_owner.rs', 'desktop/src-tauri/src/saved_command_owner.rs', 'desktop/src-tauri/src/saved_command_android_registration.rs', 'desktop/src-tauri/src/saved_command_android_registration_client.rs', 'desktop/src-tauri/src/saved_command_android_service_setup.rs', 'desktop/src-tauri/src/saved_command_android_maintenance.rs', 'desktop/src-tauri/src/macos_install_record.rs', 'desktop/src-tauri/src/macos_remove_protocol.rs', 'desktop/src-tauri/src/bin/macos_install.rs', 'desktop/src-tauri/src/macos_install_transaction.rs', 'desktop/src-tauri/src/macos_install_producer.rs', 'desktop/src-tauri/src/macos_remove_producer.rs', 'desktop/native/macos-installed-native/src/install_producer.rs', 'desktop/native/macos-installed-native/src/install_producer.m', 'desktop/native/macos-installed-native/src/install_producer.h', 'desktop/src-tauri/src/asset_session.rs', 'desktop/src-tauri/src/asset_session_macos_maintenance.rs', 'desktop/src-tauri/src/asset_session_installation_memory.rs', 'desktop/src-tauri/src/shell.rs', 'desktop/src-tauri/src/asset_session_macos_removal.rs', 'desktop/src-tauri/examples/macos_remove_producer.rs', 'desktop/src-tauri/examples/macos_producer_common/mod.rs', 'desktop/src-tauri/src/android_build_owner.rs', 'desktop/src-tauri/src/macos_remove_record.rs')
-# Both Parent2/Record1 originals bind the same current40 compiled SOURCE rows.
+# All Remover3/Record1/Installer1 originals bind the same current40 compiled SOURCE rows.
 PARENT_SOURCES = CHANGES_SOURCES + ('desktop/src-tauri/src/macos_install_maintenance.rs',)
 # Two fixed recovery DATA originals. Historical changed11 and all older routes stay closed.
 RECOVERY_ARGUMENT = "--qualify-removal-recovery-data"
 RECOVERY_ROLES = ('removal-recovery-parent-rust-tests', 'removal-recovery-native-rust-tests')
 RECOVERY_NATIVE_RUST_TESTS = ('install_producer::tests::report_decoder_binds_slots_error_outputs_and_consuming_returns', 'install_producer::tests::signature_result_requires_same_owner_finality_and_late_gate_refuses', 'install_producer::tests::unknown_native_or_gate_custody_never_releases_or_publishes_success', 'removal_coordinator::peer::tests::peer_binding_and_actual_verifier_roles_are_closed_data')
-RECOVERY_RUST_TESTS = (PARENT_RUST_TESTS, RECOVERY_NATIVE_RUST_TESTS)
+RECOVERY_RUST_TESTS = (CHANGES_RUST_TESTS[0], RECOVERY_NATIVE_RUST_TESTS)
 RECOVERY_SOURCES = CHANGES_SOURCES
 LAYOUT_SOURCE = NATIVE + "/src/e2_service_status_observer.m"
 REGISTRATION_ARGUMENT = "--qualify-registration-reservation"
@@ -692,7 +694,7 @@ def installer_worker_diagnostic_result(stdout, stderr, rows, *, removal_role=Non
                               INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
         if removal_role in PARENT_ROLES:
-            selected_names = (PARENT_RUST_TESTS, RECORD_RUST_TESTS)[PARENT_ROLES.index(removal_role)]
+            selected_names = (PARENT_RUST_TESTS, RECORD_RUST_TESTS, PARENT_INSTALLER_RUST_TESTS)[PARENT_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-parent-data-diagnostic-v1"
         if removal_role in CHANGES_ROLES:
             selected_names = CHANGES_RUST_TESTS[CHANGES_ROLES.index(removal_role)]
@@ -787,7 +789,7 @@ def installer_worker_diagnostic_data(value, call, rows, *, removal_role=None):
                               INTEGRATION_PARENT_RUST_TESTS)[INTEGRATION_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-integration-data-diagnostic-v1"
         if removal_role in PARENT_ROLES:
-            selected_names = (PARENT_RUST_TESTS, RECORD_RUST_TESTS)[PARENT_ROLES.index(removal_role)]
+            selected_names = (PARENT_RUST_TESTS, RECORD_RUST_TESTS, PARENT_INSTALLER_RUST_TESTS)[PARENT_ROLES.index(removal_role)]
             selected_type = "mrk-macos-removal-parent-data-diagnostic-v1"
         if removal_role in CHANGES_ROLES:
             selected_names = CHANGES_RUST_TESTS[CHANGES_ROLES.index(removal_role)]
@@ -2956,7 +2958,7 @@ def removal_integration_data_result(result, source, rows):
 def parent_rust_test_record():
     return {"schemaVersion": 1, "type": "mrk-macos-removal-parent-rust-tests-v1", "target": TARGET,
             "cargoProfile": "test", "tests": list(PARENT_RUST_TESTS),
-            "passed": 2, "failed": 0, "ignored": 0, "measured": 0}
+            "passed": 3, "failed": 0, "ignored": 0, "measured": 0}
 
 
 def parent_rust_tests_result(stdout):
@@ -2975,8 +2977,19 @@ def record_rust_tests_result(stdout):
     return record_rust_test_record()
 
 
+def installer_rust_test_record():
+    return {"schemaVersion": 1, "type": "mrk-macos-removal-installer-rust-tests-v1", "target": TARGET,
+            "cargoProfile": "test", "tests": list(PARENT_INSTALLER_RUST_TESTS),
+            "passed": 1, "failed": 0, "ignored": 0, "measured": 0}
+
+
+def installer_rust_tests_result(stdout):
+    _rust_test_output(stdout, PARENT_INSTALLER_RUST_TESTS, "removal-installer-rust-test")
+    return installer_rust_test_record()
+
+
 def removal_parent_data_result(result, source, rows):
-    """Only this returned two-original Parent/Record DATA scope; never removal or installer authority."""
+    """Only this returned three-original Parent/Record/Installer DATA scope; never transaction authority."""
     need(type(result) is dict and identity(source, 40) and result.get("source") == source
          and result.get("workflowSource") == source and result.get("workflow") == WORKFLOW
          and result.get("outcome") == "passed" and result.get("passed") is True
@@ -2996,15 +3009,16 @@ def removal_parent_data_result(result, source, rows):
     artifacts = result.get("artifacts")
     need(type(artifacts) is dict and set(artifacts) == {"removal-parent-data"}, "removal-artifacts")
     data = artifacts["removal-parent-data"]
-    need(type(data) is dict and set(data) == {"clock", "parentRustTests", "recordRustTests", "sourceHashes"}, "removal-record")
+    need(type(data) is dict and set(data) == {"clock", "parentRustTests", "recordRustTests", "installerRustTests", "sourceHashes"}, "removal-record")
     registration_clock_data(data["clock"])
     _rust_tests_data(data["parentRustTests"], parent_rust_test_record(), "installer-worker-rust-test")
     _rust_tests_data(data["recordRustTests"], record_rust_test_record(), "removal-record-rust-test")
+    _rust_tests_data(data["installerRustTests"], installer_rust_test_record(), "removal-installer-rust-test")
     need(type(data["sourceHashes"]) is dict and set(data["sourceHashes"]) == set(PARENT_SOURCES)
          and all(identity(data["sourceHashes"][name], 64) and data["sourceHashes"][name] == rows[name]["sha256"]
                  for name in PARENT_SOURCES), "removal-source-binding")
     calls = result.get("originalCalls")
-    need(type(calls) is list and len(calls) == 2 and all(type(call) is dict for call in calls)
+    need(type(calls) is list and len(calls) == 3 and all(type(call) is dict for call in calls)
          and [call.get("role") for call in calls] == list(PARENT_ROLES), "removal-call-roster")
     for call in calls:
         need(set(call) == {"role", "entered", "returned", "workTimeoutSeconds", "outputLimitBytes", "returncode", "stdoutSha256", "stderrSha256"}
@@ -3015,6 +3029,7 @@ def removal_parent_data_result(result, source, rows):
              and identity(call["stdoutSha256"], 64) and identity(call["stderrSha256"], 64), "removal-call-finality")
     return {"scope": "removal-parent-record-compiled-data-only", "clock": data["clock"],
             "parentRustTests": data["parentRustTests"], "recordRustTests": data["recordRustTests"],
+            "installerRustTests": data["installerRustTests"],
             "sourceHashes": data["sourceHashes"], "originalCalls": calls,
             "liveRemovalQualified": False, "installerTransactionQualified": False,
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
@@ -3022,10 +3037,10 @@ def removal_parent_data_result(result, source, rows):
 
 def changes_rust_test_record(role):
     need(type(role) is str and role in CHANGES_ROLES, "removal-changes-role")
-    if role == CHANGES_ROLES[0]:
-        return parent_rust_test_record()
     names = CHANGES_RUST_TESTS[CHANGES_ROLES.index(role)]
-    return {"schemaVersion": 1, "type": "mrk-macos-" + role + "-v1", "target": TARGET,
+    # Historical parent2 keeps its exact record; active Parent3 does not widen this route.
+    kind = "mrk-macos-removal-parent-rust-tests-v1" if role == CHANGES_ROLES[0] else "mrk-macos-" + role + "-v1"
+    return {"schemaVersion": 1, "type": kind, "target": TARGET,
             "cargoProfile": "test", "tests": list(names),
             "passed": len(names), "failed": 0, "ignored": 0, "measured": 0}
 
@@ -3084,10 +3099,10 @@ def removal_changes_data_result(result, source, rows):
 
 def recovery_rust_test_record(role):
     need(type(role) is str and role in RECOVERY_ROLES, "removal-recovery-role")
-    if role == RECOVERY_ROLES[0]:
-        return parent_rust_test_record()
     names = RECOVERY_RUST_TESTS[RECOVERY_ROLES.index(role)]
-    return {"schemaVersion": 1, "type": "mrk-macos-" + role + "-v1", "target": TARGET,
+    # Historical parent2 keeps its exact record; active Parent3 does not widen this route.
+    kind = "mrk-macos-removal-parent-rust-tests-v1" if role == RECOVERY_ROLES[0] else "mrk-macos-" + role + "-v1"
+    return {"schemaVersion": 1, "type": kind, "target": TARGET,
             "cargoProfile": "test", "tests": list(names),
             "passed": len(names), "failed": 0, "ignored": 0, "measured": 0}
 
@@ -5706,7 +5721,7 @@ class Operation:
         if parent_only:
             data.pop("nativeRustTests")
             data.pop("appRustTests")
-            data["parentRustTests"] = data["recordRustTests"] = None
+            data["parentRustTests"] = data["recordRustTests"] = data["installerRustTests"] = None
         if changes:
             data["parentRustTests"] = data["emitterRustTests"] = None
         if recovery:
@@ -5742,6 +5757,9 @@ class Operation:
                      PARENT_RUST_TESTS, parent_rust_tests_result, "parentRustTests"),
                     (PARENT_ROLES[1], INSTALLER, ("--lib",),
                      RECORD_RUST_TESTS, record_rust_tests_result, "recordRustTests"),
+                    (PARENT_ROLES[2], INSTALLER,
+                     ("--features", "macos-installed-installer", "--bin", "mrk-macos-install"),
+                     PARENT_INSTALLER_RUST_TESTS, installer_rust_tests_result, "installerRustTests"),
                 )
             if changes:
                 batches = (
@@ -5757,7 +5775,7 @@ class Operation:
             if recovery:
                 batches = (
                     (RECOVERY_ROLES[0], INSTALLER, ("--features", "macos-installed-remover", "--bin", "mrk-macos-remove"),
-                     PARENT_RUST_TESTS, lambda raw: recovery_rust_tests_result(raw, RECOVERY_ROLES[0]), "parentRustTests"),
+                     RECOVERY_RUST_TESTS[0], lambda raw: recovery_rust_tests_result(raw, RECOVERY_ROLES[0]), "parentRustTests"),
                     (RECOVERY_ROLES[1], NATIVE, ("--features", "package-producer-signing", "--lib"),
                      RECOVERY_NATIVE_RUST_TESTS, lambda raw: recovery_rust_tests_result(raw, RECOVERY_ROLES[1]), "nativeRustTests"),
                 )
