@@ -92,28 +92,43 @@ class AndroidSignedMaterialTests(unittest.TestCase):
         canonical = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
         version = bound.saved.version_raw
         compare = lambda value: {"bytes": len(value), "sha256": hashlib.sha256(value).hexdigest()}
-        for changed in (False, True):
-            request = protocol.signed_request_data()
-            request["context"]["artifactValidation"]["uploadCertificateSha256"] = data["android"]["uploadCertificateSha256"]
-            request["context"].update(savedConfig=compare(raw), savedVersion={
-                **compare(version), "source": bound.saved.configuration.source,
-                "name": bound.release.name, "build": bound.release.build})
-            request["native"]["signingContext"] = compare(canonical)
-            if changed: request["native"]["signingContext"]["sha256"] = "0" * 64
-            request = wire.parse_request(protocol.encoded(request))
-            self.assertNotEqual(request.context["savedConfig"], request.native["signingContext"])
-            with original(request) as operation, patch.object(operation, "checkpoint"), \
-                 patch.object(operation.files, "read_input", side_effect=(raw, version)), \
-                 patch.object(operation, "check_inputs"), patch.object(operation.source, "receive_material") as received:
-                if changed:
-                    with self.assertRaises(AndroidBuildError) as failure: operation.bind_inputs()
-                    self.assertEqual(failure.exception.reason, "stale-intent")
-                    self.assertEqual(operation.source.first_failure, 100)
-                else:
-                    result = operation.bind_inputs()
-                    self.assertEqual(result.config.data["metadata"]["root"], "release/Café 日本語")
-                    self.assertEqual(result.saved.configuration.raw, raw)
-                received.assert_not_called()
+        for native, toolchain, opposite in (
+            ("macos-arm64", wire.MAC_TOOLCHAIN_PROFILE, wire.MAC_X64_TOOLCHAIN_PROFILE),
+            ("macos-x86_64", wire.MAC_X64_TOOLCHAIN_PROFILE, wire.MAC_TOOLCHAIN_PROFILE),
+        ):
+            for changed in (False, True):
+                request = protocol.signed_request_data()
+                request["native"]["profile"] = native
+                request["native"]["toolchain"]["profile"] = toolchain
+                request["context"]["artifactValidation"]["uploadCertificateSha256"] = data["android"]["uploadCertificateSha256"]
+                request["context"].update(savedConfig=compare(raw), savedVersion={
+                    **compare(version), "source": bound.saved.configuration.source,
+                    "name": bound.release.name, "build": bound.release.build})
+                request["native"]["signingContext"] = compare(canonical)
+                if changed: request["native"]["signingContext"]["sha256"] = "0" * 64
+                request = wire.parse_request(protocol.encoded(request))
+                self.assertNotEqual(request.context["savedConfig"], request.native["signingContext"])
+                with original(request) as operation, patch.object(operation, "checkpoint"), \
+                     patch.object(operation.files, "read_input", side_effect=(raw, version)), \
+                     patch.object(operation, "check_inputs"), patch.object(operation.source, "receive_material") as received:
+                    if changed:
+                        with self.assertRaises(AndroidBuildError) as failure: operation.bind_inputs()
+                        self.assertEqual(failure.exception.reason, "stale-intent")
+                        self.assertEqual(operation.source.first_failure, 100)
+                    else:
+                        result = operation.bind_inputs()
+                        self.assertEqual(result.config.data["metadata"]["root"], "release/Café 日本語")
+                        self.assertEqual(result.saved.configuration.raw, raw)
+                    received.assert_not_called()
+            for field, value in (("profile", "macos-unknown"), ("profile", "linux-gnu-x86_64"),
+                                 ("toolchain", opposite), ("toolchain", "android-registered-macos-unknown-v1")):
+                bad = protocol.signed_request_data()
+                bad["native"]["profile"] = native
+                bad["native"]["toolchain"]["profile"] = toolchain
+                if field == "toolchain": bad["native"]["toolchain"]["profile"] = value
+                else: bad["native"]["profile"] = value
+                with self.subTest(native=native, field=field, value=value), self.assertRaises(wire.ProtocolError):
+                    wire.parse_request(protocol.encoded(bad))
 
     def test_private_frame_is_incremental_and_extra_bytes_are_stop_not_a_second_request(self):
         for extra in (b"", b"extra"):

@@ -1519,7 +1519,7 @@ export class AndroidBuildController {
     if (project.snapshotPending) return 'Wait for the current saved-configuration refresh to settle.';
     if (project.versionPending) return 'Wait for the original saved-version read to settle; an earlier result cannot stand in.';
     return project.inputIssue ?? (this.state.buildMode === 'signed' ? (this.state.catalogStatus?.selected ? this.state.signing.issue :
-      'Local upload-key signing requires the separately admitted Apple-silicon Mac tool owner; Linux and Windows signing are not qualified by this action.') : null) ?? (this.artifactValidation() === null ?
+      'Local upload-key signing requires the separately admitted Apple-silicon or Intel Mac tool owner; Linux and Windows signing are not qualified by this action.') : null) ?? (this.artifactValidation() === null ?
       'Save android.uploadCertificateSha256, then refresh the saved configuration and version before reviewing upload-signature inspection.' : null) ?? this.context.otherOperationReason();
   }
   prepareReason = (): string | null => this.commonReason() ?? androidBuildOwnerReason(this.state) ??
@@ -1713,7 +1713,7 @@ export const androidBuildCancelHelp: HelpContent = {
 };
 
 export const androidBuildLocalSigningHelp: HelpContent = {
-  label: 'Sign locally with your upload key', requiredness: 'conditional', requiredWhen: 'Only when you explicitly choose local signing on the separately admitted Apple-silicon Mac owner.',
+  label: 'Sign locally with your upload key', requiredness: 'conditional', requiredWhen: 'Only when you explicitly choose local signing on the separately admitted Apple-silicon or Intel Mac owner.',
   what: 'Builds the saved app without passing signing passwords to Gradle, then signs a private AAB copy with your selected upload key and verifies the final signature and public fingerprint. It never uploads or changes a Store.',
   why: 'The existing upload key identifies who may upload new versions of your app. A file-format check alone does not verify passwords or the private key; the owned signing operation does that.',
   where: 'Get the existing .jks/.keystore, store password, key alias and key password from your signing-key owner or the secure backup made when that key was created. These are not your Google account password. Find the public upload-certificate SHA-256 in Play Console → App integrity → Upload key certificate.',

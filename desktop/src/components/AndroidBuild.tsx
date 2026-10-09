@@ -141,7 +141,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       <label className="offline-ack"><input type="checkbox" checked={state.buildMode === 'signed'}
         onChange={(event) => controller.setBuildMode(event.target.checked ? 'signed' : 'unsigned')} />
         <span>Sign locally with my upload key</span></label>
-      <p className="save-note">Optional and off by default. Signs a private copy, never the project’s AAB. Requires current keystore assignments and the separately admitted Apple-silicon Mac owner; no Store upload occurs. {onHelp && <HelpButton content={androidBuildLocalSigningHelp} onHelp={onHelp} />}</p>
+      <p className="save-note">Optional and off by default. Signs a private copy, never the project’s AAB. Requires current keystore assignments and the separately admitted Apple-silicon or Intel Mac owner; no Store upload occurs. {onHelp && <HelpButton content={androidBuildLocalSigningHelp} onHelp={onHelp} />}</p>
       {state.buildMode === 'signed' && <>
         {state.signing.issue ? <p className="review-caution">{state.signing.issue}</p> : <p>Current inputs are assigned. Passwords, private-key use and certificate policy will be checked during the owned run; file-format assessment alone is not signing verification.</p>}
         <div className="button-row">

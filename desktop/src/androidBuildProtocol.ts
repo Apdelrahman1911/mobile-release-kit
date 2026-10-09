@@ -17,6 +17,7 @@ export const ANDROID_BUILD_SIGNED_CONSENT = 'saved-android-local-sign-v1';
 export const ANDROID_BUILD_SCOPE = 'local-post-build-artifact-observation';
 export const ANDROID_BUILD_TOOLCHAIN_PROFILE = 'android-local-linux-gnu-x86_64-v1';
 export const ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE = 'android-registered-macos-arm64-v1';
+export const ANDROID_BUILD_MAC_X64_TOOLCHAIN_PROFILE = 'android-registered-macos-x86_64-v1';
 export const ANDROID_BUILD_COUNTER_MAX = 0xffff_fffe;
 export const ANDROID_BUILD_IPC_LIMIT = 8192;
 export const ANDROID_BUILD_STATUS_LIMIT = 65536;
@@ -301,7 +302,8 @@ function macToolchainSelection(value: unknown): boolean {
 }
 function result(value: unknown): value is AndroidBuildResult {
   if (!record(value)) return false;
-  const mac = value.toolchainProfile === ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE, signed = Object.hasOwn(value, 'signing');
+  const mac = value.toolchainProfile === ANDROID_BUILD_MAC_TOOLCHAIN_PROFILE || value.toolchainProfile === ANDROID_BUILD_MAC_X64_TOOLCHAIN_PROFILE,
+    signed = Object.hasOwn(value, 'signing');
   if (signed && (!mac || value.signing !== 'local-upload-key')) return false;
   if (!keys(value, ['schemaVersion', 'scope', 'usedConfig', 'usedVersion', 'selection', 'toolchainProfile', 'command', 'findings', 'summary',
       'artifacts', 'assurances', 'limitations', 'artifactValidation', ...(mac ? ['toolchainSelection'] : []), ...(signed ? ['signing'] : [])]) ||

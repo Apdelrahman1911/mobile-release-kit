@@ -135,7 +135,7 @@ and never implicitly start this build.
 ### Optional local upload-key signing (preparation source, not qualified)
 
 **Sign locally with your upload key** is a separate, default-off choice for the
-separately admitted Apple-silicon Mac tool owner. It does not enable Linux or
+separately admitted Apple-silicon or Intel Mac tool owner. It does not enable Linux or
 Windows signing or bypass missing runtime, tool, helper or credential gates.
 Real native verification and implementation acceptance remain required.
 
