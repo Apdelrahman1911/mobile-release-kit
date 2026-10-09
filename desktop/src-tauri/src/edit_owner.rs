@@ -4176,6 +4176,7 @@ fn macos_inspection_return_data_check() -> bool {
         InstalledEditSlots::MetadataText(MetadataTextRuntimeSlots::new()),
         InstalledEditSlots::ReleaseVersion(ReleaseVersionRuntimeSlots::new()),
         InstalledEditSlots::MetadataImages(MetadataImagesRuntimeSlots::new()),
+        InstalledEditSlots::ProjectInitialization(ProjectInitializationRuntimeSlots::new()),
     ];
     for mut slots in originals {
         let domain = slots.domain(); let before = Instant::now(); let mut reports = Vec::new();
@@ -4190,6 +4191,7 @@ fn macos_inspection_return_data_check() -> bool {
             InstalledEditSlots::MetadataText(book) => book.never_started(),
             InstalledEditSlots::ReleaseVersion(book) => book.never_started(),
             InstalledEditSlots::MetadataImages(book) => book.never_started(),
+            InstalledEditSlots::ProjectInitialization(book) => book.never_started(),
         };
         if result.is_ok() || !native_free
             || !reports.iter().any(|row| matches!(row, Some((AdmissionFailure::Stopped, at))

@@ -47,6 +47,29 @@ project Gradle wrapper. iOS native work requires macOS/Xcode locally or on a
 protected hosted macOS runner. The desktop does not make these SDK requirements
 disappear. No complete installer or clean-machine qualification is claimed here.
 
+## Initialize a project on macOS
+
+The new initialization flow is implemented and independently source-reviewed;
+installed Mac verification is still pending. Use the Dashboard initialization
+controls after selecting a project and preparing its configuration draft. Supply
+the toolkit repository and an immutable commit pin, then review all proposed
+configuration, workflow, ignore-file and metadata changes before confirming Apply.
+The core owns the layout and performs one transaction; the UI does not run CLI
+commands or independently save each file.
+
+Existing metadata is preserved. Existing configuration and workflow files must
+already match the proposed bytes or the whole plan is refused; initialization is
+not an overwrite or workflow-upgrade tool. Only required ignore-file additions
+are appended while preserving the existing content and file mode. A changed
+original invalidates the reviewed plan instead of overwriting the later edit.
+
+After success, refresh the actual saved configuration. The in-memory draft is
+not silently promoted to a saved baseline or discarded. Interrupted initialization
+can be inspected and recovered using the original journal's complete descriptor;
+unknown, incomplete or unrelated journals remain attention-required rather than
+being guessed or automatically removed. Cancellation is not proof that files
+were unchanged: wait for the original outcome and recovery guidance.
+
 ## Foundation capabilities
 
 This table describes implemented surfaces, not a grant to execute them. The
@@ -62,6 +85,7 @@ stay in memory until a separately reviewed and confirmed native Save.
 | Static snapshot | Bounded recognized text-file hints and configuration observations on supported POSIX filesystems | An atomic snapshot, Git source authority, successful build, signing or Store state |
 | Saved release version | Explicit Dashboard read of the saved configuration's version file, using the same parser and version/build policy as core builds | A version from an unsaved draft, Git commit proof, artifact comparison, full preflight or release readiness |
 | Configuration | Guided in-memory drafts with core-owned schema/policy validation and contextual help | Saving a file, checking path existence, approving an app identity or release readiness |
+| Project initialization implementation (Mac native acceptance separate) | One core transaction previews configuration, ignore-file additions, four pinned workflow callers and the metadata skeleton; preserves exact existing files and supports descriptor-bound interrupted-transaction recovery | Installed Mac qualification, overwrite/pin upgrades, remote GitHub administration or release readiness |
 | Configuration save implementation (native acceptance separate) | Existing separate native owner, fixed Linux and normal Mac installed profiles, exact two-file preview/apply contract, guided confirmation and original-outcome handling | General packaged/native qualification, project initialization, other edit domains, or Windows file transactions |
 | GitHub setup proposal | Guided toolkit pin inputs, core-generated read-only workflow previews, contextual help and environment/credential-name checklist | GitHub login/contact, repository observation, compatibility verification, file writes, secret provisioning or workflow dispatch |
 | Local workflow Apply implementation (native acceptance separate) | Normal Mac and fixed Linux selection for the existing four-caller review, complete text, separate confirmation and one-use Apply through the original shared edit owner; create absent or preserve exact bytes | Configuration Save, overwrite/pin upgrades, remote setup, Windows workflow writes, or completed installed qualification |
