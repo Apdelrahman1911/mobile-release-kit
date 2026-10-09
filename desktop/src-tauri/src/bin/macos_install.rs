@@ -8466,6 +8466,7 @@ mod installer {
             Ok((Identity::of(&actual),actual.st_flags))
         }
         impl RemovalSnapshotCapture {
+            pub(super) fn failed_data(&self)->bool {self.failed}
             pub(super) fn begin(book:&mut Install,root:usize)->Result<()> {
                 check(book.removal_snapshot_capture.is_none(),"removal-snapshot-once")?;
                 reserve_removal_snapshot_work(book)?;
@@ -14679,7 +14680,7 @@ mod installer {
             fn post(&self,book:&Install)->Result<()> {match self {
                 Self::Live(v)=>{
                     v.exclusion.post(book,&v.source)?;v.observed.post(book)?;v.genesis.post(book)?;
-                    check(v.plan.complete && !v.capture.failed && !v.capture.complete,"removal-live-linked-observation")?;
+                    check(v.plan.complete && !v.capture.failed_data() && !v.capture.complete,"removal-live-linked-observation")?;
                     book.absent(v.genesis.archive,"app")?;book.clock()
                 },Self::Resume(v)=>v.post(book),
             }}
