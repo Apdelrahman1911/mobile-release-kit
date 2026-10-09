@@ -8530,6 +8530,64 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Real private files and symlinked DIRECTORY spellings exercise
+            # original identity and the production tool admission/POST. These
+            # tiny executable-mode text fixtures are NEVER executed as tools.
+            for mode in ("same-spelling", "directory-alias", "wrong-file", "not-executable",
+                         "before-admission-change", "after-admission-change", "content-change"):
+                with self.subTest(python_entry=mode), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    actual = root / "actual"
+                    actual.mkdir()
+                    binary = actual / "python"
+                    binary.write_bytes(b"inert fixed interpreter fixture")
+                    binary.chmod(0o700 if mode != "not-executable" else 0o600)
+                    alias = root / "alias"
+                    alias.symlink_to("actual", target_is_directory=True)
+                    other = root / "other"
+                    other.mkdir()
+                    replacement = other / "python"
+                    replacement.write_bytes(binary.read_bytes())
+                    replacement.chmod(0o700)
+                    chosen = str(binary if mode == "same-spelling" else alias / "python")
+                    reported = str(replacement if mode == "wrong-file" else binary)
+                    if mode in {"wrong-file", "not-executable"}:
+                        with self.assertRaisesRegex(ValueError, "actual-setup-python-entry"):
+                            seal.python_entry_binding(chosen, reported)
+                        continue
+                    binding = seal.python_entry_binding(chosen, reported)
+                    self.assertEqual(binding[1], str(binary.resolve(strict=True)))
+                    self.assertEqual(binding[2], BUILD.identity(binary.lstat()))
+                    receiver = SimpleNamespace(python_binding=binding, tools={}, tool_parents={},
+                                               runtime_rosters={}, check=lambda: None)
+                    receiver.protected_tool = lambda path, **kw: seal.SealBuild.protected_tool(receiver, path, **kw)
+                    if mode == "before-admission-change":
+                        alias.unlink()
+                        alias.symlink_to("other", target_is_directory=True)
+                        with self.assertRaisesRegex(ValueError, "actual-setup-python-entry"):
+                            seal.SealBuild.python_tools(receiver)
+                        self.assertEqual(receiver.tools, {})
+                        continue
+                    self.assertEqual(seal.SealBuild.python_tools(receiver), chosen)
+                    self.assertEqual(set(receiver.tools), {chosen, reported})
+                    self.assertEqual(receiver.tools[chosen]["sha256"], hashlib.sha256(binary.read_bytes()).hexdigest())
+                    seal.SealBuild.recheck_tools(receiver, full=True)
+                    if mode == "after-admission-change":
+                        alias.unlink()
+                        alias.symlink_to("other", target_is_directory=True)
+                    elif mode == "content-change":
+                        binary.write_bytes(b"different interpreter bytes")
+                    if mode in {"after-admission-change", "content-change"}:
+                        expected_reason = ("original-tool-parent-changed" if mode == "after-admission-change"
+                                           else "original-tool-changed")
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^" + expected_reason + "$"):
+                            seal.SealBuild.recheck_tools(receiver, full=True)
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            for invalid in (None, "", "relative/python", "/a/../python", "/" + "a" * 4096,
+                            "/" + "a/" * 128 + "python", "/python\0bad"):
+                with self.subTest(invalid_python_entry=repr(invalid)):
+                    with self.assertRaisesRegex(ValueError, "actual-setup-python-entry"):
+                        seal.python_entry_binding(invalid, "/not-read")
             # SOURCE/host facts below are inert DATA to enter only the actual
             # early main guards. No builder bootstrap, file IO or native runs.
             with patch.object(seal.os, "environ", {
@@ -8555,6 +8613,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                  patch.object(seal.os, "geteuid", return_value=65534), \
                  patch.object(seal.os, "getgid", return_value=65534), \
                  patch.object(seal.os, "getegid", return_value=65534), \
+                 patch.object(seal, "python_entry_binding", side_effect=lambda selected, reported:
+                     seal.need(selected == reported, "actual-setup-python-entry")), \
                  patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")) as bootstrap:
                 cases = (("MRK_SEAL_TARGET", "bad", "target", "fixed-seal-target"),
                          ("GITHUB_SHA", "0" * 40, "run", "fixed-seal-run"),

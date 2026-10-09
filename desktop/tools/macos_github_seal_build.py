@@ -140,6 +140,33 @@ def need(value, reason):
         raise ValueError(reason)
 
 
+def python_entry_binding(selected, reported):
+    """Named action entry and CPython report must designate ONE actual file.
+
+    setup-python publishes bin/python; CPython's macOS launcher may clean its
+    directory spelling. This accepts aliases, never a different launcher or
+    interpreter. The same named routes are admitted/read/POSTed by the owner.
+    """
+    for value in (selected, reported):
+        need(type(value) is str and 0 < len(value.encode("utf-8")) <= 4096
+             and value.startswith("/") and "\0" not in value
+             and len(value.split("/")) <= 128
+             and all(part not in {".", ".."} for part in value.split("/")),
+             "actual-setup-python-entry")
+    paths = (Path(selected), Path(reported))
+    resolved = tuple(path.resolve(strict=True) for path in paths)
+    need(resolved[0] == resolved[1], "actual-setup-python-entry")
+    original = resolved[0].lstat()
+    need(stat.S_ISREG(original.st_mode) and original.st_mode & 0o111,
+         "actual-setup-python-entry")
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    fixed = identity(original)
+    need(all(identity(path.stat()) == fixed for path in paths)
+         and identity(resolved[0].lstat()) == fixed, "actual-setup-python-entry")
+    return ((selected, reported), str(resolved[0]), fixed)
+
+
 def bootstrap_builder():
     """The one pre-owner SOURCE read; a lost/failed close ends this entry."""
     global B
@@ -258,11 +285,12 @@ def limits():
 
 class SealBuild:
     """One fixed recipe around the already established MRK cancellation owner."""
-    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started):
+    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started, python_binding):
         self.target, self.profile = target, TARGETS[target]
         self.source, self.run_id, self.attempt = source, run, attempt
         self.owner, self.control, self.orchestration, self.probe = owner, control, orchestration, probe
         self.started, self.deadline = started, started + WORK_SECONDS
+        self.python_binding = python_binding
         self.work = WORK_PARENT / f"mrk-github-seal-{target}-{source}-{run}-{attempt}"
         self.private, self.public = self.work / "private", self.work / "public"
         self.work_identity = self.private_identity = None
@@ -348,6 +376,24 @@ class SealBuild:
         self.tools[str(path)] = row
         self.check()
         return str(path)
+
+    def python_tools(self):
+        # Retain both exact named routes, with the same original/tool ledger.
+        # Reads are sequential: no additional simultaneously live descriptor
+        # or second retained binary body; the existing tool/parent caps apply.
+        paths, resolved, original = self.python_binding
+        B.need(python_entry_binding(*paths) == self.python_binding, "actual-setup-python-entry")
+        for path in paths:
+            self.protected_tool(Path(path), role="python", system=False)
+            row = self.tools[path]
+            B.need(row["path"] == resolved and tuple(row["identity"]) == original,
+                   "actual-setup-python-entry")
+        first, second = (self.tools[path] for path in paths)
+        B.need(all(first[key] == second[key] for key in ("path", "identity", "size", "sha256"))
+               and python_entry_binding(*paths) == self.python_binding, "actual-setup-python-entry")
+        # This is the checked action-provided spelling, not an unchecked
+        # canonical replacement. Existing recheck_tools covers both aliases.
+        return paths[0]
 
     def recheck_tools(self, *, full=False):
         for path, facts in self.tool_parents.items():
@@ -529,7 +575,7 @@ class SealBuild:
         self.shell = self.protected_tool(Path("/bin/sh"), role="shell")
         self.make = self.protected_tool(Path("/usr/bin/make"), role="make")
         self.sysctl = self.protected_tool(Path("/usr/sbin/sysctl"), role="sysctl")
-        self.python = self.protected_tool(Path(sys.executable), role="python", system=False)
+        self.python = self.python_tools()
         rust = Path("/Users/runner/.rustup/toolchains") / ("stable-" + self.target)
         B.need(rust.resolve(strict=True) == rust, "direct-rust-root")
         self.rustc = self.protected_tool(rust / "bin/rustc", role="rustc", system=False)
@@ -1085,7 +1131,7 @@ def main():
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT), "DEVELOPER_DIR": str(DEVELOPER)}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-seal-workflow-context")
     _DIAGNOSTIC_STAGE = "python-entry"
-    need(os.environ.get("MRK_SEAL_PYTHON") == sys.executable, "actual-setup-python-entry")
+    python_binding = python_entry_binding(os.environ.get("MRK_SEAL_PYTHON"), sys.executable)
     _DIAGNOSTIC_STAGE = "bootstrap"
     bootstrap_builder()
     _DIAGNOSTIC_STAGE = "detached"
@@ -1111,7 +1157,8 @@ def main():
     from mobile_release import cancellation
     _DIAGNOSTIC_STAGE = "build-init"
     build = SealBuild(target=target, source=source, run=run, attempt=attempt, owner=owner,
-        control=cancellation, orchestration=orchestration, probe=probe, started=started)
+        control=cancellation, orchestration=orchestration, probe=probe, started=started,
+        python_binding=python_binding)
     build.resource_limits, build.source_binding = resource_limits, before
     _DIAGNOSTIC_BUILD = build
     _DIAGNOSTIC_STAGE = "build-execute"
