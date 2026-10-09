@@ -1,0 +1,95 @@
+name: Canonical Mac sealed-box helper
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-github-seal
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-github-seal-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASH_ENV: ''
+  ENV: ''
+  DEVELOPER_DIR: /Library/Developer/CommandLineTools
+
+jobs:
+  seal-build:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-github-seal'
+    name: canonical seal (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      MRK_SEAL_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Exact detached public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Prepare the ordinary engineering Python interpreter
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+          check-latest: false
+
+      - name: Admit unchanged checkout
+        id: sourcepre
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git symbolic-ref -q HEAD || true)" = ''
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Fixed canonical static build and native tests
+        id: build
+        timeout-minutes: 18
+        shell: bash
+        env:
+          MRK_SEAL_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          # One actual child entry; it owns all 22 native originals under one
+          # 900s work / 60s cleanup endpoint. No full UI or Python producer job.
+          "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py
+
+      - name: Verify source after the original entry returned
+        id: sourcepost
+        if: always() && steps.sourcepre.outcome == 'success' && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git symbolic-ref -q HEAD || true)" = ''
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Retain only finalized public output
+        if: always() && steps.sourcepost.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canonical-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /Users/runner/work/_temp/mrk-github-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/public/
+          # Unknown custody produces no public directory, never guessed cleanup
+          # or a successful receipt. A failed original job remains failed even
+          # when its separately settled diagnostic evidence exists.
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 7

@@ -8446,5 +8446,93 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertEqual(BUILD.digest((root / "supplier.tar").read_bytes()), result["sha256"])
             self.assertEqual(list(BUILD.tree_rows(supplier, maximum=1024, max_files=3).values()), rows)
 
+    def test_canonical_seal_generated_alias_is_exact_and_never_source_authority(self):
+        # Only a tiny generated-work alias is exercised. No source archive,
+        # compiler, crypto, native child or complete build owner is entered.
+        name = "_mrk_canonical_seal_alias_contract"
+        self.assertNotIn(name, sys.modules)
+        seal = load(name, "macos_github_seal_build.py")
+        try:
+            seal.B = BUILD
+            for mode in ("ordinary", "wrong-target", "same-target-replaced", "post-target-changed", "unknown-child", "unknown-data", "other-name"):
+                with self.subTest(mode=mode), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    parent = root / "build/src/libsodium/.libs"
+                    parent.mkdir(parents=True)
+                    target = parent.parent / "libsodium.la"
+                    target.write_bytes(b"actual generated metadata; not linker authority")
+                    path = parent / "libsodium.la"
+                    path.symlink_to("wrong.la" if mode == "wrong-target" else "../libsodium.la")
+                    verdict = SimpleNamespace(complete=True, fatal=False, contained=True)
+                    receiver = SimpleNamespace(private=root, check=lambda: None, libtool_alias_original=None,
+                        guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)),
+                        cleaning=False, inflight=False)
+                    invoke = lambda chosen=path, retire=False: seal.SealBuild.libtool_alias(receiver, chosen, retire=retire)
+                    if mode == "wrong-target":
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-pre"):
+                            invoke()
+                        self.assertIsNone(receiver.libtool_alias_original)
+                    elif mode == "other-name":
+                        other = parent / "foreign.la"
+                        other.symlink_to("../libsodium.la")
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "unexpected-generated-alias"):
+                            invoke(other)
+                        self.assertTrue(other.is_symlink())
+                    elif mode == "post-target-changed":
+                        original = os.readlink
+                        calls = []
+                        def changed(*args, **kwargs):
+                            actual = original(*args, **kwargs)
+                            calls.append(actual)
+                            return actual if len(calls) == 1 else "different.la"
+                        with patch.object(seal.os, "readlink", changed):
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-post"):
+                                invoke()
+                        self.assertEqual(calls, ["../libsodium.la", "../libsodium.la"])
+                        self.assertIsNone(receiver.libtool_alias_original)
+                    else:
+                        invoke()
+                        self.assertIsNotNone(receiver.libtool_alias_original)
+                        if mode == "same-target-replaced":
+                            old = parent / "saved-original.la"
+                            path.rename(old)
+                            path.symlink_to("../libsodium.la")
+                            self.assertNotEqual(path.lstat().st_ino, old.lstat().st_ino)
+                            receiver.cleaning = True
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-changed"):
+                                invoke(retire=True)
+                            self.assertTrue(old.is_symlink())
+                        elif mode == "unknown-child":
+                            receiver.cleaning = True
+                            verdict.complete = False
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-unsettled"):
+                                invoke(retire=True)
+                        elif mode == "unknown-data":
+                            receiver.cleaning = True
+                            BUILD.DATA.unknown()
+                            # Refuse the actual prior unknown before acquiring
+                            # a new parent original or touching the alias.
+                            with patch.object(seal.os, "open", side_effect=AssertionError("unexpected acquisition")) as opened:
+                                with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-unsettled"):
+                                    invoke(retire=True)
+                                opened.assert_not_called()
+                            self.assertFalse(BUILD.DATA.known)
+                        else:
+                            # A returned name is not permission to remove it
+                            # until this SAME caller has actual settlement.
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-unsettled"):
+                                invoke(retire=True)
+                            self.assertTrue(path.is_symlink())
+                            receiver.cleaning = True
+                            invoke(retire=True)
+                            self.assertFalse(path.exists() or path.is_symlink())
+                    if mode != "ordinary":
+                        self.assertTrue(path.is_symlink())
+                    self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
+                    self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
+                    self.assertEqual(BUILD.DATA._pending, 0)
+        finally:
+            self.assertIs(sys.modules.pop(name), seal)
+
+
 if __name__ == "__main__":
     unittest.main()
