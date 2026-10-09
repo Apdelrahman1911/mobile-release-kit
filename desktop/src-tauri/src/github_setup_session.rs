@@ -112,8 +112,9 @@ impl State {
             self.revoke_consent(); self.view.reason = wire::Reason::ConsentExpired;
         }
     }
-    pub(crate) fn start(&mut self, active: Active) {
-        let before = self.snapshot(); self.revoke_consent(); self.view.observed = None;
+    pub(crate) fn start(&mut self, active: Active, before: wire::Status) {
+        // The actual snapshot is retained and capacity-checked before admission.
+        self.revoke_consent(); self.view.observed = None;
         self.view.operation = Some(wire::Operation { id: active.ticket.operation_id().into(), kind: active.request.kind,
             phase: wire::Phase::Running, reason: wire::Reason::None, effect: wire::Effect::NotStarted,
             write_claimed: None, write_acknowledged: None });
@@ -180,10 +181,20 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
     let target=wire::Target { project_binding:"a".repeat(64),repository:"owner/repository".into(),account_id:"1".into(),
         repository_id:"2".into(),selection:wire::Selection::ActionsEnabled { enabled:true } };
     let before=wire::Policy::Actions { enabled:false,allowed_actions:wire::AllowedActions::All,sha_pinning_required:true };
-    let prepared=wire::Prepared {after:before.changed(target.selection).unwrap(),target,before,observed_at:"2026-10-09T00:00:00Z".into(),
-        confirmation:"Change actions_enabled for owner/repository? Review the exact before and after values. Enabling Actions can allow configured workflows to run; write tokens or review approvals grant additional privileges. GitHub does not provide an atomic compare-and-set here: another administrator can change settings after this review. This does not configure secrets, change local workflows, or qualify a release.".into()};
+    let prepared=wire::Prepared::Repository(wire::RepositoryPrepared {after:before.changed(target.selection.clone()).unwrap(),target,before,observed_at:"2026-10-09T00:00:00Z".into(),
+        confirmation:"Change actions_enabled for owner/repository? Review the exact before and after values. Enabling Actions can allow configured workflows to run; write tokens or review approvals grant additional privileges. GitHub does not provide an atomic compare-and-set here: another administrator can change settings after this review. This does not configure secrets, change local workflows, or qualify a release.".into()});
     assert!(prepared.valid());
-    let expiry_prepared=prepared.clone();
+    // The same actual expiry/one-use checks also retain the new non-Copy
+    // environment variant. It is never given to a runtime or registered root.
+    let mut expiry_target=prepared.target().clone();
+    expiry_target.selection=wire::Selection::Environment(wire::EnvironmentSelection {mode:wire::EnvironmentMode::Configure,
+        stage:wire::EnvironmentStage::Candidate,wait_timer_minutes:10,prevent_self_review:None,reviewer_login:None,branches:None});
+    let old_policy=wire::EnvironmentPolicy {wait_timer_minutes:0,protected_branches:false,required_reviewers:None};
+    let expiry_observed=wire::EnvironmentFacts {name:"mobile-candidate".into(),id:Some("3".into()),policy:Some(old_policy)};
+    let expiry_prepared=wire::Prepared::Environment(wire::EnvironmentPrepared {target:expiry_target,before:expiry_observed.clone(),
+        after:wire::EnvironmentPolicy {wait_timer_minutes:10,protected_branches:false,required_reviewers:None},reviewer:None,
+        observed_at:"2026-10-09T00:00:00Z".into(),confirmation:wire::ENVIRONMENT_CONFIRMATION.into()});
+    assert!(expiry_prepared.valid());
     state.consent=Some(Consent {id:"a".repeat(32),prepared,end:now+std::time::Duration::from_secs(10),
         session_id:"session-1".into(),project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-correlation-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
@@ -202,6 +213,11 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
         project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-expiry-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
         edit_stamp:expiry_stamp});
+    state.view.observed=Some(wire::Observation::Environment(expiry_observed));
+    let actual_private=state.consent.as_ref().unwrap();
+    let private_bytes=actual_private.id.capacity()+actual_private.prepared.retained_heap_bytes().unwrap()
+        +actual_private.session_id.capacity()+actual_private.project_id.capacity()+actual_private.root.path.capacity();
+    assert_eq!(state.retained_heap_bytes_if_quiescent(),Some(state.view.retained_heap_bytes().unwrap()+private_bytes));
     state.expire_consent(now);assert!(state.consent.as_ref().is_some_and(|v|v.end==end));
     state.expire_consent(end);assert!(state.consent.is_none() && state.view.consent.is_none());
     assert_eq!(state.view.reason,wire::Reason::ConsentExpired);

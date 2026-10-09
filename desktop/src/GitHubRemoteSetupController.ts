@@ -2,7 +2,7 @@
 // retry, local workflow write or renderer-created consent is used here.
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
-import { GITHUB_REMOTE_SETUP_HELP, githubRemoteSetupError, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from './GitHubRemoteSetupProtocol.ts';
+import { GITHUB_REMOTE_SETUP_HELP, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from './GitHubRemoteSetupProtocol.ts';
 import type { GitHubRemoteSetupApi, GitHubRemoteSetupConsent, GitHubRemoteSetupReason, GitHubRemoteSetupSelection,
   GitHubRemoteSetupStatus, GitHubRemoteSetupView } from './GitHubRemoteSetupTypes.ts';
 type Port = GitHubRemoteSetupApi & { mode: 'native' | 'preview' | 'unavailable' };
@@ -125,7 +125,7 @@ export class GitHubRemoteSetupController {
     if (!p.sent || s.revision <= p.revision || s.sessionId !== p.context.sessionId || !op || op.kind !== p.kind ||
         op.id === p.previousId || p.operationId !== null && op.id !== p.operationId) return false;
     if (s.consent && (p.kind !== 'prepare' || !inContext(s.consent, p.context, p.selection))) return false;
-    if (p.kind === 'apply' && op.effect === 'readback-confirmed' && (!p.reviewed || !same(s.observed, p.reviewed.prepared.after))) return false;
+    if (p.kind === 'apply' && op.effect === 'readback-confirmed' && (!p.reviewed || !githubRemoteSetupObservationMatches(p.reviewed.prepared, s.observed))) return false;
     return true;
   }
   private correlate(o: Observer, seen: GitHubRemoteSetupStatus): void {

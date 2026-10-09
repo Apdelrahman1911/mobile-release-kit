@@ -891,6 +891,29 @@ final class NormalAppUITests: XCTestCase {
             "This native document supports reviewing selected artifact bytes. Actual originals and runtime are rechecked before inspection.",
             "The required bundled runtime is not qualified for this document. Missing optional verification tools are a separate unavailable check."
         ]))
+        // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.
+        // Counts never choose acceptance; 5 means more than four, not exact five.
+        let artifactDiagnosticTexts = [
+            "This native document supports reviewing selected artifact bytes. Actual originals and runtime are rechecked before inspection.",
+            "The required bundled runtime is not qualified for this document. Missing optional verification tools are a separate unavailable check.",
+            "An original native operation is retained. Finish or cancel that original operation before new work.",
+            "The native application is stopping. No new inspection can start.",
+            "Original cleanup is unknown. Retain the owner and status; conflicting work remains disabled.",
+            "The original native document was lost. A replacement cannot adopt its operation.",
+            "Artifact inspection is unavailable on this host. No fallback runner is selected.",
+            "Waiting for original native status.",
+            "No new artifact outcome confirmed"
+        ]
+        for property in ["label", "title", "value"] {
+            var counts: [String] = []
+            for text in artifactDiagnosticTexts {
+                _ = try remaining(1) // Same owners/clock; never observe after latched failure.
+                let count = renderer.staticTexts.matching(NSPredicate(format: "%K == %@", property, text)).count
+                counts.append(String(min(count, 5)))
+            }
+            print("MRK_MACOS_ENGINEERING_ARTIFACT_QUERY=v1;property=\(property);type=staticText;counts=\(counts.joined(separator: ","));sample=pre-wait;nonAtomic=1")
+        }
+        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.
         _ = try waitElement(artifactAvailability, in: renderer,
                             failures: ["No new artifact outcome confirmed"])
         try require(renderer.staticTexts.matching(identifier: "No new artifact outcome confirmed").count == 0,

@@ -560,6 +560,31 @@ class GitHubConnectionTransportTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     transport._ResponseBody(io.BytesIO(setup_raw()), selected, _role=role)
 
+        # Environment writes use the actual bounded200 JSON reader, never the
+        # empty204 adapter;422 carries no raw error detail under this role only.
+        env_role = transport._ResponseRole.SETUP_ENVIRONMENT_WRITE
+        for framing in ("length", "eof", "chunked"):
+            payload = b'{"id":71}'
+            encoded = (f"{len(payload):x}\r\n".encode() + payload + b"\r\n0\r\n\r\n") if framing == "chunked" else payload
+            raw = _wire(encoded, framing=framing)
+            result, selected, source = parse_setup(raw, env_role)
+            self.assertEqual(result.observation, {"status": 200, "body": {"id": 71}, "failure": "none"})
+            self.assertEqual(selected.body_bytes, len(b'{"id":71}'))
+            self.assertEqual(source.read(), b"")
+        row, _, _ = parse_setup(setup_raw(), env_role)
+        self.assertEqual(row.control["reason"], "response-invalid")
+        row, _, source = parse_setup(setup_raw(422, body=_SENTINEL.encode()), env_role)
+        self.assertEqual(row.observation, {"status": 422, "body": None, "failure": "none"})
+        self.assertEqual(source.read(), _SENTINEL.encode())
+        for old_role in roles:
+            row, _, _ = parse_setup(setup_raw(422), old_role)
+            self.assertEqual(row.control["reason"], "response-invalid")
+        row, selected, _ = parse_setup(_wire(b'{"id":71}'), env_role, transport.MAX_BODY_TOTAL - 1)
+        self.assertEqual(row.control["reason"], "response-limit")
+        for ordinary in (transport._ExchangeProfile.STANDARD, transport._ExchangeProfile.RELEASE_PREPARE):
+            with self.assertRaises(ValueError):
+                transport._ResponseBody(io.BytesIO(_wire()), transport._Budget(100.0, monotonic=lambda: 100.0, _profile=ordinary), _role=env_role)
+
     def test_initial_metadata_is_bounded_during_reads_and_never_loops_informationals(self):
         for status in (100, 101, 199):
             prefix = f"HTTP/1.1 {status} Inert\r\n".encode()
@@ -759,6 +784,21 @@ class GitHubConnectionTransportTests(unittest.TestCase):
                 self.assertEqual(row.control["reason"], "network-unavailable" if mode == "late" else "response-invalid")
             self.assertEqual(selected.end, 110.0)
 
+        # New role clips actual payload and EOF reads to the same old endpoint.
+        now = [100.0]
+        env_wire = _wire(b'{"id":71}', framing="eof")
+        class EnvironmentLate(io.BytesIO):
+            def read1(self, amount=-1):
+                block = super().read1(amount)
+                if self.tell() == len(env_wire):
+                    now[0] = 110.0
+                return block
+        selected = transport._Budget(100.0, monotonic=lambda: now[0], _profile=transport._ExchangeProfile.SETUP)
+        response = transport._ResponseBody(EnvironmentLate(env_wire), selected, _role=transport._ResponseRole.SETUP_ENVIRONMENT_WRITE)
+        result = transport._response_result(response, selected)
+        self.assertEqual(result.control["reason"], "network-unavailable")
+        self.assertEqual(selected.end, 110.0)
+
     def test_pure_schedule_does_not_enter_live_factory_or_trust_reader(self):
         original_factory, original_ca = transport._make_live_reader, transport._fixed_ca
         before = {name: sys.modules.get(name) for name in ("http.client", "ssl", "_ssl")}
@@ -828,3 +868,58 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             transport._make_live_exchange(_SENTINEL, started=100.0, runtime_dir="/inert/runtime",
                                           api_version="2022-11-28", _profile=P.SETUP)
+
+        env_selection = {"kind": "environment_protection", "mode": "configure", "stage": "production",
+                         "waitTimerMinutes": 43200, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        env_target = setup.EnvironmentTarget.parse({**target.value(), "selection": env_selection})
+        policy_value = {"waitTimerMinutes": 0, "protectedBranches": True, "requiredReviewers": {
+            "preventSelfReview": False, "reviewers": [{"type": "Team", "id": str(2**63 - 1 - i)} for i in range(6)]}}
+        facts = setup.EnvironmentFacts.parse({"name": "mobile-production", "id": "71", "policy": policy_value})
+        env_prepared = setup.EnvironmentPrepared.parse(setup.EnvironmentPrepared(env_target, facts, None, _TIME).value())
+        env_action = setup.EnvironmentAction("apply", env_target, env_prepared)
+        calls.clear(); factories.clear()
+        with patch.object(transport, "_make_live_exchange", side_effect=factory):
+            reader = setup._make_live_reader(env_action, _SENTINEL, started=100.0, runtime_dir="/inert/runtime")
+            for step in ("account", "repository-before", "environment-before", "custom-before", "write",
+                         "environment-after", "custom-after", "repository-after"):
+                reader.read(step)
+        self.assertEqual(len(factories), 1)
+        self.assertEqual([row[3] for row in calls], [R.STANDARD, R.STANDARD, R.SETUP_ENVIRONMENT_READ,
+            R.SETUP_ENVIRONMENT_CUSTOM_READ, R.SETUP_ENVIRONMENT_WRITE, R.SETUP_ENVIRONMENT_READ,
+            R.SETUP_ENVIRONMENT_CUSTOM_READ, R.STANDARD])
+        self.assertEqual(json.loads(calls[4][2]), env_prepared.after.put_value())
+        self.assertEqual(len(json.loads(calls[4][2])["reviewers"]), 6)
+        for role, method, path in (
+            (R.SETUP_ENVIRONMENT_READ, "GET", "/repos/owner/app/environments/mobile-production"),
+            (R.SETUP_ENVIRONMENT_LIST, "GET", "/repos/owner/app/environments?per_page=100&page=1"),
+            (R.SETUP_ENVIRONMENT_CUSTOM_READ, "GET", "/repos/owner/app/environments/mobile-production/deployment_protection_rules"),
+            (R.SETUP_ENVIRONMENT_REVIEWER_READ, "GET", "/repos/owner/app/collaborators/Alice/permission"),
+            (R.SETUP_ENVIRONMENT_WRITE, "PUT", "/repos/owner/app/environments/mobile-production")):
+            transport._request_limits(P.SETUP, role, method, path)
+            for wrong in (P.STANDARD, P.RELEASE_PREPARE):
+                with self.assertRaises(ValueError):
+                    transport._request_limits(wrong, role, method, path)
+            for wrong_method, wrong_path in (("DELETE", path), ("POST", path), (method, path + "?arbitrary=1"),
+                                            (method, path.replace("mobile-production", "other")),
+                                            (method, path.replace("Alice", "../Alice"))):
+                if wrong_method == method and wrong_path == path:
+                    continue
+                with self.assertRaises(ValueError):
+                    transport._request_limits(P.SETUP, role, wrong_method, wrong_path)
+            with self.assertRaises(ValueError):
+                transport._request_limits(P.SETUP, R.STANDARD, method, path)
+            if method == "GET":
+                transport._setup_body(P.SETUP, role, None)
+                with self.assertRaises(ValueError):
+                    transport._setup_body(P.SETUP, role, b"{}")
+        body = env_prepared.after.put_value()
+        transport._setup_body(P.SETUP, R.SETUP_ENVIRONMENT_WRITE, _json(body))
+        for changed in ({**body, "can_admins_bypass": False}, {**body, "wait_timer": True},
+                        {**body, "prevent_self_review": 1}, {**body, "reviewers": body["reviewers"] * 2},
+                        {**body, "reviewers": [{"type": "Team", "id": str(2**63 - 1)}]},
+                        {**body, "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}):
+            with self.assertRaises(ValueError):
+                transport._setup_body(P.SETUP, R.SETUP_ENVIRONMENT_WRITE, _json(changed))
+        for old_role in (R.SETUP_ACTIONS_WRITE, R.SETUP_WORKFLOW_WRITE):
+            with self.assertRaises(ValueError):
+                transport._setup_body(P.SETUP, old_role, _json(body))

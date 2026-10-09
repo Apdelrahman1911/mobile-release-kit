@@ -12,7 +12,7 @@ import { GitHubSetupController, githubSetupStartReason, githubSnapshotFromInputs
 import { GITHUB_WORKFLOWS, githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupHelp, parseGitHubSetupResult } from '../src/githubSetupProtocol.ts';
 import { previewApi } from '../src/preview.ts';
 import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from '../src/GitHubRemoteSetupController.ts';
-import { githubRemoteSetupConfirmation, githubRemoteSetupError, githubRemoteSetupRequestFits, parseGitHubRemoteSetupStatus } from '../src/GitHubRemoteSetupProtocol.ts';
+import { GITHUB_REMOTE_SETUP_ENVIRONMENT_CONFIRMATION, GITHUB_REMOTE_SETUP_ENVIRONMENTS, githubRemoteSetupConfirmation, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupRequestFits, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from '../src/GitHubRemoteSetupProtocol.ts';
 
 
 const repository = 'inert/toolkit';
@@ -763,6 +763,20 @@ function rsReview(revision = 3, selected = rsSelection()) {
   return { ...rsOp('prepare', 'settled', revision, { writeClaimed: false, writeAcknowledged: false }), observed: structuredClone(before),
     consent: { id: 'a'.repeat(32), expiresAt: rsExpiry, prepared: { target: { projectBinding: 'b'.repeat(64), repository: 'owner/app', accountId: '11', repositoryId: '22', selection: selected }, before, after, observedAt: rsTime, confirmation: githubRemoteSetupConfirmation(selected.kind, 'owner/app') } } };
 }
+function rsEnvironmentSelection(mode = 'configure', stage = 'candidate') {
+  return { kind: 'environment_protection', mode, stage, waitTimerMinutes: 17,
+    preventSelfReview: mode === 'create' ? true : null, reviewerLogin: mode === 'create' ? 'Example-User' : null, branches: mode === 'create' ? 'protected' : null };
+}
+function rsEnvironmentReview(selected = rsEnvironmentSelection()) {
+  const original = { waitTimerMinutes: 0, protectedBranches: true, requiredReviewers: { preventSelfReview: false,
+    reviewers: ['Team', 'User'].flatMap((type) => ['9223372036854775805', '9223372036854775806', '9223372036854775807'].map((id) => ({ type, id }))) } };
+  const before = { name: GITHUB_REMOTE_SETUP_ENVIRONMENTS[selected.stage], id: selected.mode === 'create' ? null : '33', policy: selected.mode === 'create' ? null : original };
+  const reviewer = selected.mode === 'create' ? { id: '44', login: 'example-user', permission: 'read' } : null;
+  const after = selected.mode === 'create' ? { waitTimerMinutes: selected.waitTimerMinutes, protectedBranches: selected.branches === 'protected', requiredReviewers: { preventSelfReview: true, reviewers: [{ type: 'User', id: reviewer.id }] } } :
+    { ...original, waitTimerMinutes: selected.waitTimerMinutes, requiredReviewers: { ...original.requiredReviewers, preventSelfReview: selected.preventSelfReview ?? original.requiredReviewers.preventSelfReview } };
+  const result = rsReview(); result.observed = structuredClone(before); result.consent.prepared = { ...result.consent.prepared, target: { ...result.consent.prepared.target, selection: selected }, before, after, reviewer,
+    observedAt: rsTime, confirmation: GITHUB_REMOTE_SETUP_ENVIRONMENT_CONFIRMATION }; return result;
+}
 function rsConnection() { return { mode: 'native', context: { documentId: 'doc', projectId: 'project', projectGeneration: 1, repository: 'owner/app' }, status: { revision: 12,
   session: { id: 'session-a', projectId: 'project', targetRepository: 'owner/app', state: 'connected' }, account: { state: 'observed', value: { id: '11' } },
   repository: { state: 'observed', value: { id: '22', fullName: 'owner/app' } } }, busy: null, uncertain: false, blocked: false, retirementPending: false }; }
@@ -807,6 +821,45 @@ test('remote setup closed policy and consent preserve untouched fields and disti
   const error = githubRemoteSetupError({ code: 'github_remote_setup_refused_forbidden', message: 'PRIVATE' });
   assert.equal(error.admission, 'not-admitted'); assert.equal(error.message.includes('PRIVATE'), false);
   assert.equal(githubRemoteSetupError({ code: 'anything', admission: 'not-admitted' }).admission, 'unknown');
+  // Actual normalized environment wire; six preserved User/Team identities remain
+  // exact strings, while create resolves one explicit user without trusting login.
+  for (const mode of ['configure', 'create']) for (const stage of ['candidate', 'external-testing', 'production']) {
+    const selected = rsEnvironmentSelection(mode, stage), good = rsEnvironmentReview(selected);
+    assert.ok(githubRemoteSetupSelection(selected)); assert.ok(parseGitHubRemoteSetupStatus(good));
+    assert.equal(good.consent.prepared.confirmation, githubRemoteSetupConfirmation('environment_protection', 'owner/app'));
+    for (const mutate of [(v) => { v.consent.prepared.extra = false; }, (v) => { delete v.consent.prepared.reviewer; },
+      (v) => { v.consent.prepared.target.accountId = '9223372036854775808'; }, (v) => { v.consent.prepared.before.name = 'custom'; },
+      (v) => { v.consent.prepared.after.waitTimerMinutes = true; }, (v) => { v.consent.prepared.after.waitTimerMinutes = 43201; },
+      (v) => { v.consent.prepared.after.requiredReviewers.reviewers[0].id = 44; }, (v) => { v.consent.prepared.confirmation += ' atomic'; },
+      (v) => { v.observed = v.consent.prepared.after; }, (v) => { v.consent.prepared.before = Object.values(v.consent.prepared.before); }]) {
+      const bad = structuredClone(good); mutate(bad); assert.equal(parseGitHubRemoteSetupStatus(bad), null);
+    }
+    const p = good.consent.prepared, observed = { name: p.before.name, id: mode === 'create' ? '55' : p.before.id, policy: structuredClone(p.after) };
+    const success = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed };
+    assert.ok(parseGitHubRemoteSetupStatus(success)); assert.equal(githubRemoteSetupObservationMatches(p, observed), true);
+    assert.equal(githubRemoteSetupObservationMatches(p, p.after), false); assert.equal(githubRemoteSetupObservationMatches(p, { ...observed, name: 'mobile-other' }), false);
+    assert.equal(githubRemoteSetupObservationMatches(p, { ...observed, id: null, policy: null }), false);
+    if (mode === 'configure') assert.equal(githubRemoteSetupObservationMatches(p, { ...observed, id: '99' }), false);
+    assert.equal(githubRemoteSetupObservationMatches(rsReview().consent.prepared, observed), false);
+  }
+  const absentSuccess = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed: rsEnvironmentReview(rsEnvironmentSelection('create')).observed };
+  assert.equal(parseGitHubRemoteSetupStatus(absentSuccess), null);
+  const configured = rsEnvironmentReview();
+  for (const mutate of [(p) => { p.after.protectedBranches = false; }, (p) => { p.after.requiredReviewers.reviewers.pop(); },
+    (p) => { p.before.policy.requiredReviewers.reviewers.reverse(); }, (p) => { p.after.requiredReviewers.reviewers.push(p.after.requiredReviewers.reviewers[0]); },
+    (p) => { p.after.requiredReviewers.reviewers[0].id = '9223372036854775808'; }, (p) => { p.after.requiredReviewers.preventSelfReview = true; },
+    (p) => { p.reviewer = { id: '44', login: 'example', permission: 'read' }; }, (p) => { p.target.selection.waitTimerMinutes = 0; p.after.waitTimerMinutes = 0; }]) {
+    const bad = structuredClone(configured); mutate(bad.consent.prepared); assert.equal(parseGitHubRemoteSetupStatus(bad), null);
+  }
+  const noRule = rsEnvironmentReview(); noRule.consent.prepared.before.policy.requiredReviewers = null; noRule.consent.prepared.after.requiredReviewers = null; noRule.observed = structuredClone(noRule.consent.prepared.before);
+  assert.ok(parseGitHubRemoteSetupStatus(noRule)); noRule.consent.prepared.target.selection.preventSelfReview = true; assert.equal(parseGitHubRemoteSetupStatus(noRule), null);
+  for (const field of ['waitTimerMinutes', 'preventSelfReview', 'reviewerLogin', 'branches']) {
+    const selected = rsEnvironmentSelection('create'); delete selected[field]; assert.equal(githubRemoteSetupSelection(selected), false);
+  }
+  for (const patch of [{ reviewerLogin: '' }, { reviewerLogin: '@user' }, { reviewerLogin: 'user\n' }, { reviewerLogin: 'usér' }, { reviewerLogin: 'two--hyphens' }, { reviewerLogin: 'u'.repeat(40) }, { branches: null }, { preventSelfReview: false }, { waitTimerMinutes: 1.5 }, { waitTimerMinutes: -1 }, { waitTimerMinutes: '17' }]) assert.equal(githubRemoteSetupSelection({ ...rsEnvironmentSelection('create'), ...patch }), false);
+  for (const minutes of [0, 43200]) assert.ok(githubRemoteSetupSelection({ ...rsEnvironmentSelection('create'), waitTimerMinutes: minutes }));
+  for (const permission of ['triage', 'maintain', 'none']) { const bad = rsEnvironmentReview(rsEnvironmentSelection('create')); bad.consent.prepared.reviewer.permission = permission; assert.equal(parseGitHubRemoteSetupStatus(bad), null); }
+  const mismatch = rsEnvironmentReview(rsEnvironmentSelection('create')); mismatch.consent.prepared.reviewer.login = 'another-user'; assert.equal(parseGitHubRemoteSetupStatus(mismatch), null);
 });
 
 test('remote setup original controller consumes explicit review and retires stale or uncertain originals without retries', async () => {
@@ -849,6 +902,27 @@ test('remote setup original controller consumes explicit review and retires stal
   assert.equal(denied.state.pending, false); assert.equal(denied.state.uncertain, false); assert.equal(denied.count('prepare'), 1); denied.controller.dispose();
   // Same revision data changes are never a new authoritative Status.
   const contradictory = await rsAttached(); contradictory.emit({ ...rsIdle(), reason: 'busy' }); assert.equal(contradictory.state.uncertain, true); contradictory.controller.dispose();
+  for (const mode of ['configure', 'create']) {
+    const env = await rsAttached(), selected = rsEnvironmentSelection(mode), reviewed = rsEnvironmentReview(selected);
+    env.controller.setSelection(selected); env.controller.prepare(); assert.deepEqual(env.last('prepare').args.selection, selected);
+    env.reply('prepare', reviewed); await rsFlush(); assert.ok(env.controller.currentConsent());
+    env.controller.apply(); assert.equal(env.count('apply'), 0); env.controller.setConfirmed(true); env.controller.apply(); env.controller.apply(); assert.equal(env.count('apply'), 1);
+    const p = reviewed.consent.prepared, settled = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }),
+      observed: { name: p.before.name, id: mode === 'create' ? '55' : p.before.id, policy: p.after } };
+    env.reply('apply', settled); await rsFlush(); assert.equal(env.state.pending, false); assert.equal(env.state.uncertain, false);
+    assert.equal(env.controller.currentConsent(), null); assert.equal(env.count('apply'), 1); env.controller.dispose();
+  }
+  // Invalid/incomplete local input clears the last valid selection and grant.
+  const invalidEdit = await rsAttached(); invalidEdit.controller.setSelection(rsEnvironmentSelection()); invalidEdit.controller.prepare(); invalidEdit.reply('prepare', rsEnvironmentReview()); await rsFlush();
+  invalidEdit.controller.setConfirmed(true); invalidEdit.controller.setSelection(null); assert.equal(invalidEdit.controller.currentConsent(), null); assert.equal(invalidEdit.count('discard'), 1);
+  invalidEdit.controller.apply(); assert.equal(invalidEdit.count('apply'), 0); invalidEdit.controller.dispose();
+  const lateEnvironment = await rsAttached(); lateEnvironment.controller.setSelection(rsEnvironmentSelection('create')); lateEnvironment.controller.prepare();
+  lateEnvironment.controller.setSelection(rsEnvironmentSelection('create', 'production')); lateEnvironment.reply('prepare', rsEnvironmentReview(rsEnvironmentSelection('create'))); await rsFlush();
+  assert.equal(lateEnvironment.controller.currentConsent(), null); assert.equal(lateEnvironment.count('discard'), 1); lateEnvironment.controller.dispose();
+  const wrongIdentity = await rsAttached(); wrongIdentity.controller.setSelection(rsEnvironmentSelection()); wrongIdentity.controller.prepare(); wrongIdentity.reply('prepare', rsEnvironmentReview()); await rsFlush();
+  wrongIdentity.controller.setConfirmed(true); wrongIdentity.controller.apply(); wrongIdentity.reply('apply', { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }),
+    observed: { name: 'mobile-candidate', id: '999', policy: rsEnvironmentReview().consent.prepared.after } }); await rsFlush();
+  assert.equal(wrongIdentity.state.pending, true); assert.equal(wrongIdentity.state.uncertain, true); wrongIdentity.controller.apply(); assert.equal(wrongIdentity.count('apply'), 1); wrongIdentity.controller.dispose();
 });
 
 test('remote setup bridge admits only five fixed commands and preview never synthesizes remote results', async () => {
@@ -864,4 +938,11 @@ test('remote setup bridge admits only five fixed commands and preview never synt
   let received = 'untouched'; await api.subscribeGitHubRemoteSetup((s) => { received = s; }); event({ ...rsIdle(), url: 'PRIVATE' }); assert.equal(received, null);
   for (const method of ['githubRemoteSetupStatus', 'githubRemoteSetupPrepare', 'githubRemoteSetupApply', 'githubRemoteSetupDiscard', 'githubRemoteSetupCancel', 'subscribeGitHubRemoteSetup']) await assert.rejects(previewApi[method]({}), (e) => e.reason === 'runtime-unavailable');
   const unavailable = createNativeApi('unavailable', async () => { throw new Error('must not invoke'); }); await assert.rejects(unavailable.githubRemoteSetupStatus(), (e) => e.admission === 'not-admitted');
+  const count = calls.length;
+  for (const mode of ['configure', 'create']) { const args = { ...prepareArgs, selection: rsEnvironmentSelection(mode) }; await api.githubRemoteSetupPrepare(args); assert.deepEqual(calls.at(-1), ['github_remote_setup_prepare', args]); }
+  for (const selected of [{ ...rsEnvironmentSelection('configure'), reviewerLogin: 'hidden' }, { ...rsEnvironmentSelection('configure'), branches: 'all' },
+    { ...rsEnvironmentSelection('create'), branches: null }, { ...rsEnvironmentSelection('create'), reviewerLogin: '' }, { ...rsEnvironmentSelection(), kind: 'environment_delete' }]) {
+    await assert.rejects(api.githubRemoteSetupPrepare({ ...prepareArgs, selection: selected }), (e) => e.admission === 'not-admitted');
+  }
+  assert.equal(calls.length, count + 2); // No new command, endpoint or token transport.
 });

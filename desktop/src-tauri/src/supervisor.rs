@@ -361,6 +361,16 @@ impl GitHubSetupTicket {
     pub(crate) fn operation_id(&self) -> &str { &self.owner.id }
     pub(crate) fn stop(&self) { self.owner.fail(BridgeError::new("cancelled", "The local repository-setting operation was stopped; this does not undo a remote change.")); }
     pub(crate) fn receipt(&self) -> GitHubSetupReceipt { lock(&self.receipt).clone() }
+    // Read the SAME original allocations, not the smaller capacity of its
+    // returned Clone. No mutation, serialization, new owner or second receipt.
+    pub(crate) fn retained_setup_heap_bytes(&self) -> Option<usize> {
+        let request = self.owner.setup_request.as_ref()?.retained_heap_bytes()?;
+        match &*lock(&self.receipt) {
+            GitHubSetupReceipt::Settled { outcome: Ok(reply), .. } => request.checked_add(reply.retained_heap_bytes()?),
+            GitHubSetupReceipt::Settled { outcome: Err(_), .. } => Some(request),
+            GitHubSetupReceipt::Pending | GitHubSetupReceipt::RetainedUnknown => None,
+        }
+    }
     pub(crate) fn go_claimed(&self) -> bool { self.owner.preflight_go_claimed.load(Ordering::SeqCst) }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

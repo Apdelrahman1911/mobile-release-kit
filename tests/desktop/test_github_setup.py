@@ -395,6 +395,87 @@ class GitHubSetupTests(unittest.TestCase):
                     self.assertNotEqual(row["reason"], "none")
                     self.assertIsNone(row["prepared"])
 
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        remote.environment_custom_rules_empty(empty_custom)
+        self.assertEqual(prepared.after.reviewers, facts.policy.reviewers)
+        self.assertTrue(prepared.after.protected_branches)
+        self.assertEqual(prepared.after.wait_timer, 30)
+        self.assertTrue(prepared.after.prevent_self_review)
+        self.assertIn("no atomic compare-and-set", prepared.value()["confirmation"])
+        self.assertIn("Administrator bypass is not observed", prepared.value()["confirmation"])
+        put = prepared.after.put_value()
+        self.assertEqual(set(put), {"wait_timer", "prevent_self_review", "reviewers", "deployment_branch_policy"})
+        self.assertEqual(put["reviewers"], [{"type": "Team", "id": 92}, {"type": "User", "id": 91}])
+        reordered = copy.deepcopy(body)
+        reordered["protection_rules"].reverse()
+        reordered["protection_rules"][1]["reviewers"].reverse()
+        self.assertEqual(remote.EnvironmentFacts.upstream(reordered, facts.name), facts)
+        # Known rule absence in the complete array is distinct from a malformed present rule.
+        no_rules = {**body, "protection_rules": [], "deployment_branch_policy": None}
+        unprotected = remote.EnvironmentFacts.upstream(no_rules, facts.name)
+        self.assertEqual(unprotected.policy.put_value(), {"wait_timer": 0, "prevent_self_review": False,
+                                                         "reviewers": None, "deployment_branch_policy": None})
+        timer_only_target = remote.EnvironmentTarget.parse({**target_value,
+            "selection": {**selection, "preventSelfReview": None}})
+        timer_only = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(timer_only_target, unprotected, None, now).value())
+        self.assertIsNone(timer_only.after.prevent_self_review)
+        self.assertEqual(timer_only.after.reviewers, ())
+        # Six existing reviewers are preserved, including exact signed64 boundary IDs.
+        six = copy.deepcopy(body)
+        six["protection_rules"][1]["reviewers"] = [
+            {"type": "Team", "reviewer": {"id": 2**63 - 1 - index}} for index in range(6)]
+        maximal = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(target,
+            remote.EnvironmentFacts.upstream(six, facts.name), None, now).value())
+        self.assertEqual(len(maximal.after.put_value()["reviewers"]), 6)
+        self.assertLessEqual(len(remote._canonical(maximal.after.value())), remote.ENVIRONMENT_POLICY_BYTES)
+        self.assertLessEqual(len(remote._canonical(maximal.before.value())), remote.ENVIRONMENT_FACTS_BYTES)
+        self.assertLessEqual(len(remote._canonical(maximal.value())), remote.ENVIRONMENT_PREPARED_BYTES)
+        # The future ENVIRONMENT_WRITE role must admit exactly this 43-node body;
+        # existing32-node roles remain unchanged and are intentionally insufficient.
+        from mobile_release._desktop_github_engine import _check_values
+        _check_values(maximal.after.put_value(), nodes=64, depth=3)
+        with self.assertRaises(ValueError):
+            _check_values(maximal.after.put_value(), nodes=32, depth=3)
+        for stage, name in remote._ENVIRONMENT_NAMES:
+            for branches in ("all", "protected"):
+                create = remote.EnvironmentTarget.parse({**target_value, "selection": {
+                    **selection, "mode": "create", "stage": stage, "reviewerLogin": "Alice", "branches": branches}})
+                absent = remote.EnvironmentFacts.absent({"total_count": 0, "environments": []}, name)
+                for base_permission in ("read", "write", "admin"):
+                    reviewer = remote.EnvironmentReviewer.upstream({**permission, "permission": base_permission}, "alice")
+                    created = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(create, absent, reviewer, now).value())
+                    self.assertEqual(created.after.reviewers, (("User", "91"),))
+                    self.assertTrue(created.after.prevent_self_review)
+                    self.assertEqual(created.after.protected_branches, branches == "protected")
+                    self.assertEqual(created.before.value(), {"name": name, "id": None, "policy": None})
+                    created.check_fresh(absent, reviewer)
+        untouched = copy.deepcopy(body)
+        remote.EnvironmentFacts.upstream(body, facts.name)
+        self.assertEqual(body, untouched)
+
     def test_snapshot_nested_shapes_and_no_authority_fields_are_closed(self):
         record = {"id": "preflight", "state": "present", "byteLength": 1, "sha256": "a" * 64}
         bad = [[], {}, {"workflows": {}}, {"workflows": [], "revision": "not-authority"},
@@ -508,6 +589,124 @@ class GitHubSetupTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     remote.encode_result(initial, {**result, field: bad})
 
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        bad_bodies = []
+        for field in body:
+            bad = copy.deepcopy(body)
+            del bad[field]
+            bad_bodies.append(bad)
+        for kind in ("unknown", "custom", "required_reviewers", "wait_timer", "branch_policy"):
+            bad = copy.deepcopy(body)
+            bad["protection_rules"] = [dict(body["protection_rules"][0], type=kind)]
+            if kind in {"wait_timer", "branch_policy"}:
+                bad["protection_rules"].append(copy.deepcopy(bad["protection_rules"][0]))
+            bad_bodies.append(bad)
+        for original_rule in body["protection_rules"]:
+            duplicate = [copy.deepcopy(original_rule), copy.deepcopy(original_rule)]
+            if original_rule["type"] != "branch_policy":
+                duplicate.append(copy.deepcopy(body["protection_rules"][2]))
+            bad_bodies.append({**body, "protection_rules": duplicate})
+        for rule_index, field in ((0, "wait_timer"), (1, "prevent_self_review"), (1, "reviewers")):
+            bad = copy.deepcopy(body)
+            del bad["protection_rules"][rule_index][field]
+            bad_bodies.append(bad)
+        for field, values in (("wait_timer", (True, -1, 43201, 1.0)), ("prevent_self_review", (0, 1, None))):
+            for value in values:
+                bad = copy.deepcopy(body)
+                bad["protection_rules"][0 if field == "wait_timer" else 1][field] = value
+                bad_bodies.append(bad)
+        for value in ([], None, body["protection_rules"][1]["reviewers"] * 4,
+                      [body["protection_rules"][1]["reviewers"][0]] * 2):
+            bad = copy.deepcopy(body)
+            bad["protection_rules"][1]["reviewers"] = value
+            bad_bodies.append(bad)
+        for branch in ({"protected_branches": False, "custom_branch_policies": True},
+                       {"protected_branches": 1, "custom_branch_policies": 0}, {}, None):
+            bad_bodies.append({**body, "deployment_branch_policy": branch})
+        bad_bodies.extend(({**body, "can_admins_bypass": False}, {**body, "id": True},
+                           {**body, "id": 2**63}, {**body, "name": "other"}))
+        for bad in bad_bodies:
+            with self.subTest(environment=bad), self.assertRaises(ValueError):
+                remote.EnvironmentFacts.upstream(bad, facts.name)
+        for bad in ({}, {"total_count": False, "custom_deployment_protection_rules": []},
+                    {"total_count": 1, "custom_deployment_protection_rules": []},
+                    {"total_count": 0, "custom_deployment_protection_rules": [{}]},
+                    {**empty_custom, "next_page": None}):
+            with self.assertRaises(ValueError):
+                remote.environment_custom_rules_empty(bad)
+        for bad in ({}, {"total_count": True, "environments": []}, {"total_count": 1, "environments": []},
+                    {"total_count": 101, "environments": [{"id": index + 1, "name": "e" + str(index)} for index in range(101)]},
+                    {"total_count": 2, "environments": [{"id": 1, "name": "Other"}, {"id": 2, "name": "other"}]},
+                    {"total_count": 2, "environments": [{"id": 1, "name": "one"}, {"id": 1, "name": "two"}]},
+                    {"total_count": 1, "environments": [{"id": 71, "name": "MOBILE-CANDIDATE"}]}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentFacts.absent(bad, facts.name)
+        complete = {"total_count": 100, "environments": [{"id": i + 1, "name": "other-" + str(i)} for i in range(100)]}
+        self.assertIsNone(remote.EnvironmentFacts.absent(complete, facts.name).identity)
+        for bad in ({**permission, "permission": "none"}, {**permission, "permission": "triage"},
+                    {**permission, "permission": "maintain"}, {**permission, "permission": True},
+                    {**permission, "user": None}, {**permission, "user": {**permission["user"], "type": "Bot"}},
+                    {**permission, "user": {**permission["user"], "id": True}},
+                    {**permission, "user": {**permission["user"], "login": "Mallory"}}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentReviewer.upstream(bad, "Alice")
+        for field, bad_value in (("waitTimerMinutes", True), ("preventSelfReview", 1), ("stage", "other"),
+                                 ("branches", "all"), ("reviewerLogin", "Alice"), ("mode", "delete")):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentSelection.parse({**selection, field: bad_value})
+        for login in ("../x", "a/b", "-a", "a-", "a--b", "a" * 40, "a\n", "é"):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentSelection.parse({**selection, "mode": "create", "branches": "all", "reviewerLogin": login})
+        for field, bad_value in (("waitTimerMinutes", True), ("protectedBranches", 1)):
+            bad = prepared.value()
+            bad["after"][field] = bad_value
+            with self.assertRaises(ValueError):
+                remote.EnvironmentPrepared.parse(bad)
+        bad = prepared.value()
+        bad["after"]["requiredReviewers"]["preventSelfReview"] = 1
+        with self.assertRaises(ValueError):
+            remote.EnvironmentPrepared.parse(bad)
+        for field in ("target", "before", "after", "reviewer", "observedAt", "confirmation"):
+            bad = prepared.value()
+            del bad[field]
+            with self.assertRaises(ValueError):
+                remote.EnvironmentPrepared.parse(bad)
+        for bad in ({"name": facts.name, "id": None, "policy": facts.policy.value()},
+                    {"name": facts.name, "id": "71", "policy": None}):
+            with self.assertRaises(ValueError):
+                remote.EnvironmentFacts.parse(bad)
+        unsupported = remote.EnvironmentFacts.upstream({**body, "protection_rules": [], "deployment_branch_policy": None}, facts.name)
+        with self.assertRaises(ValueError):
+            remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(target, unsupported, None, now).value())
+        no_change_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "waitTimerMinutes": 10, "preventSelfReview": None}})
+        with self.assertRaises(remote.Refused) as caught:
+            remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(no_change_target, facts, None, now).value())
+        self.assertEqual(caught.exception.reason, "no-change")
+
     def test_request_keys_pin_errors_and_future_action_names_reject_without_reads(self):
         bad = []
         for key in params():
@@ -571,6 +770,199 @@ class GitHubSetupTests(unittest.TestCase):
         with patch.object(remote, "_make_live_reader", side_effect=AssertionError("pure codec entered transport")):
             remote.parse_initial(raw)
             remote.parse_go(encode(go), request)
+
+        # Fixed inert environment responses: no credential, transport or operation.
+        from mobile_release import github_setup_remote as remote
+        now = "2026-10-09T12:00:00Z"
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+                     "waitTimerMinutes": 30, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        target_value = {"projectBinding": "a" * 64, "repository": "owner/repo", "accountId": "1",
+                        "repositoryId": "2", "selection": selection}
+        body = {"id": 71, "node_id": "environment-node", "name": "mobile-candidate",
+                "url": "https://api.github.com/repos/owner/repo/environments/mobile-candidate",
+                "html_url": "https://github.com/owner/repo/deployments", "created_at": now, "updated_at": now,
+                "protection_rules": [
+                    {"id": 1, "node_id": "wait-node", "type": "wait_timer", "wait_timer": 10},
+                    {"id": 2, "node_id": "review-node", "type": "required_reviewers", "prevent_self_review": False,
+                     "reviewers": [{"type": "User", "reviewer": {"id": 91, "type": "User", "login": "Alice"}},
+                                   {"type": "Team", "reviewer": {"id": 92, "name": "Release"}}]},
+                    {"id": 3, "node_id": "branch-node", "type": "branch_policy"}],
+                "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}
+        target = remote.EnvironmentTarget.parse(target_value)
+        facts = remote.EnvironmentFacts.upstream(body, target.selection.name)
+        prepared = remote.EnvironmentPrepared(target, facts, None, now)
+        prepared = remote.EnvironmentPrepared.parse(prepared.value())
+        empty_custom = {"total_count": 0, "custom_deployment_protection_rules": []}
+        permission = {"permission": "read", "role_name": "triage",
+                      "user": {"id": 91, "login": "Alice", "type": "User"}}
+        create_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "mode": "create", "reviewerLogin": "Alice", "branches": "protected"}})
+        absent = remote.EnvironmentFacts.absent({"total_count": 0, "environments": []}, facts.name)
+        reviewer = remote.EnvironmentReviewer.upstream(permission, "Alice")
+        creation = remote.EnvironmentPrepared.parse(remote.EnvironmentPrepared(create_target, absent, reviewer, now).value())
+        with patch.object(remote, "_make_live_reader", side_effect=AssertionError("environment DATA entered live transport")):
+            for plan in (prepared, creation):
+                for action_kind in ("prepare", "apply"):
+                    action = remote.EnvironmentAction.parse({"kind": action_kind, "target": plan.target.value(),
+                        "prepared": None if action_kind == "prepare" else plan.value()})
+                    schedule = remote.EnvironmentSchedule(action)
+                    is_create = plan.target.selection.mode == "create"
+                    expected = ["account", "repository-before"] + (
+                        ["absence-before", "reviewer-before"] if is_create else ["environment-before", "custom-before"])
+                    if action_kind == "apply":
+                        expected += ["write", "environment-after", "custom-after"]
+                    expected += ["repository-after"]
+                    with self.assertRaises(ValueError):
+                        schedule.claim("write")
+                    self.assertEqual(schedule.steps, [])
+                    with self.assertRaises(ValueError):
+                        schedule.claim("account", "https://untrusted.invalid/")
+                    requests = [schedule.claim(step) for step in expected]
+                    self.assertEqual(schedule.steps, expected)
+                    self.assertEqual(len(requests), 5 if action_kind == "prepare" else 8)
+                    self.assertEqual(sum(request.method == "PUT" for request in requests), int(action_kind == "apply"))
+                    self.assertEqual(requests[0].path, "/user")
+                    self.assertEqual(requests[1].path, "/repos/owner/repo")
+                    self.assertEqual(requests[-1].path, "/repos/owner/repo")
+                    prefix = "/repos/owner/repo/environments/mobile-candidate"
+                    self.assertEqual(requests[2].path, "/repos/owner/repo/environments?per_page=100&page=1" if is_create else prefix)
+                    self.assertEqual(requests[3].path, "/repos/owner/repo/collaborators/Alice/permission" if is_create else prefix + "/deployment_protection_rules")
+                    if action_kind == "apply":
+                        self.assertEqual(requests[4].path, prefix)
+                        self.assertEqual(json.loads(requests[4].body), plan.after.put_value())
+                        self.assertEqual(requests[5].path, prefix)
+                        self.assertEqual(requests[6].path, prefix + "/deployment_protection_rules")
+                    for step in ("account", "write", "repository-after", "retry"):
+                        with self.assertRaises(ValueError):
+                            schedule.claim(step)
+                    # Old Action/Schedule never admit this new DATA variant.
+                    with self.assertRaises(ValueError):
+                        remote.Action.parse(action.value())
+                    with self.assertRaises(ValueError):
+                        remote.Schedule(action)
+        self.assertEqual(remote.MAX_REQUESTS, 6)
+        self.assertEqual(remote.KINDS, {"actions_enabled", "workflow_token_policy"})
+        prepared.check_fresh(facts, None)
+        after = remote.EnvironmentFacts.parse({"name": facts.name, "id": facts.identity, "policy": prepared.after.value()})
+        prepared.check_readback(after, after)
+        creation_after = remote.EnvironmentFacts.parse({"name": facts.name, "id": "72", "policy": creation.after.value()})
+        creation.check_readback(creation_after, creation_after)
+        for changed in (absent, remote.EnvironmentFacts.parse({**facts.value(), "id": "72"}), after):
+            with self.assertRaises(ValueError):
+                prepared.check_fresh(changed, None)
+        with self.assertRaises(ValueError):
+            creation.check_fresh(facts, reviewer)
+        for changed in (remote.EnvironmentReviewer("92", "Alice", "read"),
+                        remote.EnvironmentReviewer("91", "Alice", "write"),
+                        remote.EnvironmentReviewer("91", "Bob", "read"), None):
+            with self.assertRaises(ValueError):
+                creation.check_fresh(absent, changed)
+        recreated = remote.EnvironmentFacts.parse({**after.value(), "id": "72"})
+        for ack, post in ((after, facts), (after, absent), (after, recreated), (recreated, recreated)):
+            with self.assertRaises(ValueError):
+                prepared.check_readback(ack, post)
+        # No finality or write-success flag is manufactured by these DATA comparisons.
+        self.assertIsNone(prepared.check_readback(after, after))
+        self.assertFalse(hasattr(remote.EnvironmentSchedule, "execute"))
+
+        # Same real EnvironmentSchedule and execute_environment, with inert
+        # returned observations. Every claimed exchange can fail independently.
+        from mobile_release._github_connection_transport import ReadResult, ReadFailure, _control
+        repo = {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
+        def env_body(plan, identity):
+            desired = plan.after
+            rules = [{"id": 1, "node_id": "wait", "type": "wait_timer", "wait_timer": desired.wait_timer}]
+            if desired.prevent_self_review is not None:
+                rules.append({"id": 2, "node_id": "review", "type": "required_reviewers",
+                    "prevent_self_review": desired.prevent_self_review,
+                    "reviewers": [{"type": kind, "reviewer": {"id": int(number), **({"type": "User"} if kind == "User" else {})}}
+                                  for kind, number in desired.reviewers]})
+            if desired.protected_branches:
+                rules.append({"id": 3, "node_id": "branch", "type": "branch_policy"})
+            return {**body, "id": identity, "name": plan.target.selection.name, "protection_rules": rules,
+                    "deployment_branch_policy": desired.put_value()["deployment_branch_policy"]}
+        class EnvironmentReader:
+            def __init__(self, action, rows, fault=None, failure=None):
+                self.cursor = remote.EnvironmentSchedule(action)
+                self.rows, self.fault, self.failure = rows, fault, failure
+            def read(self, step, reference=None):
+                self.cursor.claim(step, reference)
+                if step == self.fault:
+                    if self.failure is None:
+                        raise ReadFailure("network-unavailable")
+                    return self.failure
+                return ReadResult({"status": 200, "body": self.rows[step], "failure": "none"}, _control())
+        for plan in (prepared, creation):
+            is_create = plan.target.selection.mode == "create"
+            rows = {"account": {"id": 1, "login": "owner"}, "repository-before": repo, "repository-after": repo,
+                    "environment-before": body, "custom-before": empty_custom,
+                    "absence-before": {"total_count": 0, "environments": []}, "reviewer-before": permission,
+                    "write": env_body(plan, 72 if is_create else 71),
+                    "environment-after": env_body(plan, 72 if is_create else 71), "custom-after": empty_custom}
+            for action_kind in ("prepare", "apply"):
+                action = remote.EnvironmentAction.parse({"kind": action_kind, "target": plan.target.value(),
+                    "prepared": plan.value() if action_kind == "apply" else None})
+                initial = remote.parse_initial(remote._canonical({"protocol": remote.PROTOCOL, "id": "setup",
+                                                                  "action": action.value()}) + b"\n")
+                reader = EnvironmentReader(action, rows)
+                result = remote.execute_environment(action, reader, observed_at=now)
+                steps = reader.cursor.steps
+                self.assertEqual((result["reason"], result["effect"], len(steps)),
+                                 ("none", "readback-confirmed" if action_kind == "apply" else "not-started",
+                                  8 if action_kind == "apply" else 5))
+                self.assertEqual(result["writeClaimed"], action_kind == "apply")
+                self.assertEqual(result["writeAcknowledged"], action_kind == "apply")
+                self.assertEqual(json.loads(remote.encode_result(initial, result))["result"], result)
+                for fault in steps:
+                    cut = EnvironmentReader(action, rows, fault)
+                    failed = remote.execute_environment(action, cut, observed_at=now)
+                    write_claimed = "write" in cut.cursor.steps
+                    self.assertEqual(failed["effect"], "unknown" if write_claimed else "not-started")
+                    self.assertEqual(failed["writeAcknowledged"], write_claimed and fault != "write")
+                    self.assertIsNone(failed["prepared"])
+                    self.assertIsNone(failed["observed"])
+                    self.assertEqual(len(cut.cursor.steps), steps.index(fault) + 1)
+                    remote.encode_result(initial, failed)
+                if action_kind == "apply":
+                    for status in (204, 409, 422, 401, 403, 404, 500):
+                        failed = remote.execute_environment(action, EnvironmentReader(action, rows, "write",
+                            ReadResult({"status": status, "body": None, "failure": "none"}, _control())), observed_at=now)
+                        self.assertEqual(failed["effect"], "unknown")
+                        self.assertFalse(failed["writeAcknowledged"])
+                        self.assertEqual(failed["reason"], {422: "policy-unsupported", 401: "unauthorized", 403: "forbidden",
+                            404: "not-found-or-inaccessible", 500: "network-unavailable"}.get(status, "response-invalid"))
+                        remote.encode_result(initial, failed)
+                    mutations = [("custom-after", {"total_count": 1, "custom_deployment_protection_rules": [{}]}),
+                        ("environment-after", {**rows["environment-after"], "id": 73}),
+                        ("repository-after", {**repo, "id": 9}), ("write", {**rows["write"], "protection_rules": []})]
+                    mutations += ([("absence-before", {"total_count": 1, "environments": [{"id": 71, "name": facts.name}]}),
+                                   ("reviewer-before", {**permission, "user": {**permission["user"], "id": 92}})] if is_create else
+                                  [("custom-before", {"total_count": 1, "custom_deployment_protection_rules": [{}]}),
+                                   ("environment-before", {**body, "id": 73})])
+                    for step, changed in mutations:
+                        cut = EnvironmentReader(action, {**rows, step: changed})
+                        failed = remote.execute_environment(action, cut, observed_at=now)
+                        self.assertNotEqual(failed["reason"], "none")
+                        self.assertEqual(failed["effect"], "unknown" if "write" in cut.cursor.steps else "not-started")
+                        self.assertIsNone(failed["observed"])
+                        remote.encode_result(initial, failed)
+                    for key, altered in (("observed", facts.value()), ("writeClaimed", False), ("writeAcknowledged", False),
+                                         ("effect", "not-started"), ("reason", "cancelled")):
+                        with self.assertRaises(ValueError):
+                            remote.encode_result(initial, {**result, key: altered})
+        # Configure no-change still performs the final identity observation and
+        # creates neither consent nor an invented write opportunity.
+        same_target = remote.EnvironmentTarget.parse({**target_value, "selection": {
+            **selection, "waitTimerMinutes": 10, "preventSelfReview": None}})
+        same = remote.EnvironmentAction("prepare", same_target)
+        same_rows = {"account": {"id": 1, "login": "owner"}, "repository-before": repo, "repository-after": repo,
+                     "environment-before": body, "custom-before": empty_custom}
+        same_reader = EnvironmentReader(same, same_rows)
+        same_result = remote.execute_environment(same, same_reader, observed_at=now)
+        self.assertEqual((same_result["reason"], len(same_reader.cursor.steps)), ("no-change", 5))
+        initial = remote.parse_initial(remote._canonical({"protocol": remote.PROTOCOL, "id": "setup", "action": same.value()}) + b"\n")
+        remote.encode_result(initial, same_result)
+        self.assertIsNone(same_result["prepared"])
 
     def test_python_only_complex_oversized_and_invalid_unicode_inputs_reject(self):
         deep = 0

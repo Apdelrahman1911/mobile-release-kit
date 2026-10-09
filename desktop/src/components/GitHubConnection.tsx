@@ -120,10 +120,10 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
       </div>
       <p className="save-note">Busy rejects new Connect/Refresh, not retained Status or exact-session Disconnect. A lost reply is not permission to retry. Disconnect requests local retirement, not remote revocation, native settlement or credential erasure.</p>
     </section>
-    <section className="card" aria-label="Remote GitHub setup unavailable">
-      <SectionHeading title="Environments and secrets — not available yet" description="Local workflow Apply does not push files or grant remote authority."><Icon name="lock" size={22} /></SectionHeading>
+    <section className="card" aria-label="Remote setup limits and permissions">
+      <SectionHeading title="Secrets and variables — not available yet" description="Local workflow Apply does not push files or grant remote authority."><Icon name="lock" size={22} /></SectionHeading>
       <p>For repository-setting previews, GitHub requires repository Administration (read). Applying a reviewed change requires Administration (write) for that repository. A successful connection does not prove these permissions. Keep the token limited to the intended repository and permissions. Existing connection read permissions still apply; this is not a request to grant every permission.</p>
-      <p>Connecting checks your account and repository without changing them. Repository settings below require a separate preview and confirmation. Connecting alone never changes settings or starts a workflow. The separate nonpublishing preflight panel has its own native qualification, exact caller review and one-use consent. Secrets, variables, environments and protections are not remotely configured here; the administrator checklist and release readiness remain unverified.</p>
+      <p>Connecting checks your account and repository without changing them. Repository settings below require a separate preview and confirmation. Connecting alone never changes settings or starts a workflow. The separate nonpublishing preflight panel has its own native qualification, exact caller review and one-use consent. The separate settings panel can review only its fixed environment fields with explicit confirmation. Secrets and variables are not remotely configured here; administrator bypass, complete environment protection and release readiness remain unverified.</p>
     </section>
   </>;
 }

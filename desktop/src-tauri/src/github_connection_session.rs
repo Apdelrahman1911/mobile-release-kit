@@ -1297,16 +1297,33 @@ impl ConnectionState {
         let private = self.private.as_ref().filter(|v| v.retirement.is_none() && v.token.is_some() && now < v.clock.end)
             .ok_or_else(|| s::refused(p::Reason::Expired))?;
         let (session_id, project_id, generation) = (private.id.clone(), private.project_id.clone(), private.generation);
-        // Check the complete bounded request BEFORE original admission. Prepare
-        // adds only fixed policy scalars and the bounded fixed confirmation text.
+        // Complete future wire shape and environment-only typed retention are
+        // checked before this original. Existing repository settings keep their
+        // old limits. Reserve the source capacities before making either clone,
+        // then measure both actual clones before handing one to Supervisor.
         if !p::future_status_fits(&request, &session_id) { return Err(s::refused(p::Reason::InvalidInput)); }
         p::encode_initial("github-setup-18446744073709551615", &request).map_err(|_| s::refused(p::Reason::InvalidInput))?;
-        let ticket = supervisor.start_github_setup(request.clone(), gate).map_err(|error|
+        let environment = matches!(&request.target.selection, p::Selection::Environment(_));
+        let context_bytes = session_id.capacity().checked_add(project_id.capacity())
+            .and_then(|v| v.checked_add(root.path.capacity())).and_then(|v| v.checked_add(consent_id.capacity()))
+            .and_then(|v| v.checked_add(512)); // fixed operation/session display clone headroom
+        let current_bytes = self.setup.retained_heap_bytes_if_quiescent();
+        if environment && !p::environment_retention_fits(&[current_bytes, self.setup.view.retained_heap_bytes(),
+            request.retained_heap_bytes(), request.retained_heap_bytes(), context_bytes]) {
+            return Err(s::refused(p::Reason::ResponseLimit));
+        }
+        let setup_before = self.setup.snapshot();
+        let worker_request = request.clone();
+        if environment && !p::environment_retention_fits(&[current_bytes, setup_before.retained_heap_bytes(),
+            request.retained_heap_bytes(), worker_request.retained_heap_bytes(), context_bytes]) {
+            return Err(s::refused(p::Reason::ResponseLimit));
+        }
+        let ticket = supervisor.start_github_setup(worker_request, gate).map_err(|error|
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
         let other = self.release.snapshot(); self.release.revoke_consent(); self.release.finish(other);
-        self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end });
+        self.setup.start(s::Active { ticket, request, session_id, project_id, generation, root, edit_stamp, consent_id, consent_end }, setup_before);
         let before = self.status.clone(); self.capability(now, Reason::None); self.finish(before);
         Ok(self.setup.snapshot())
     }
@@ -1324,12 +1341,12 @@ impl ConnectionState {
         edit: &crate::edit_owner::SavedEditGuard<'_>, gate: crate::asset_session::GitHubSetupGoGate,
         supervisor: &Supervisor, now: Instant) -> Result<crate::github_setup_protocol::Status, BridgeError> {
         use crate::{github_setup_protocol as p, github_setup_session as s};
-        let selection = self.setup.consent.as_ref().map(|v| v.prepared.target.selection)
+        let selection = self.setup.consent.as_ref().map(|v| v.prepared.target().selection.clone())
             .ok_or_else(|| s::refused(p::Reason::ConsentExpired))?;
         let (project_id, target) = self.setup_context(&args.session_id, args.expected_revision, generation, binding, selection, now)?;
         if !args.confirm || !self.setup.consent.as_ref().is_some_and(|v| v.id == args.consent_id
             && v.session_id == args.session_id && v.project_id == project_id && v.generation == generation && v.root == root
-            && v.prepared.target == target && v.prepared.valid() && now < v.end && edit.matches(&v.edit_stamp)) {
+            && v.prepared.target() == &target && v.prepared.valid() && now < v.end && edit.matches(&v.edit_stamp)) {
             return Err(s::refused(p::Reason::ConsentExpired));
         }
         let before = self.setup.snapshot();
@@ -1389,6 +1406,16 @@ impl ConnectionState {
         let claimed = active.ticket.go_claimed(); let kind = active.request.kind;
         let mut effect = if kind == p::Kind::Apply && claimed { p::Effect::Unknown } else { p::Effect::NotStarted };
         let mut reason = result.as_ref().map_or_else(s::outcome_reason, |v| v.result.reason);
+        let environment = matches!(&active.request.target.selection, p::Selection::Environment(_));
+        let original_bytes = if environment { active.ticket.retained_setup_heap_bytes() } else { Some(0) };
+        let context_bytes = active.session_id.capacity().checked_add(active.project_id.capacity())
+            .and_then(|v| v.checked_add(active.root.path.capacity())).and_then(|v| v.checked_add(active.consent_id.capacity()))
+            .and_then(|v| v.checked_add(512));
+        if environment && result.as_ref().is_ok_and(|reply| !p::environment_retention_fits(&[
+            self.setup.view.retained_heap_bytes(), active.request.retained_heap_bytes(), original_bytes,
+            reply.retained_heap_bytes(), context_bytes])) {
+            reason = p::Reason::ResponseLimit;
+        }
         if let Ok(reply) = &result { if !self.apply_control(&reply.result.control, settled_at) { reason = p::Reason::ResponseInvalid; } }
         if reason == p::Reason::Expired { reason = p::Reason::NetworkUnavailable; }
         if self.private.as_ref().is_some_and(|v| now >= v.clock.end && v.retirement.is_none()) { self.retire_inner(Reason::Expired, false); }
@@ -1408,7 +1435,18 @@ impl ConnectionState {
                 effect = outcome.effect; self.setup.view.observed = outcome.observed;
                 if let Some(op) = &mut self.setup.view.operation { op.write_claimed = Some(outcome.write_claimed); op.write_acknowledged = Some(outcome.write_acknowledged); }
                 if let Some(prepared) = outcome.prepared {
+                    // Include both real consent copies, the current observation,
+                    // and the still-retained original before publishing consent.
+                    let retained = self.setup.view.retained_heap_bytes();
+                    let copies_fit = |public: Option<usize>| !environment || p::environment_retention_fits(&[
+                        retained, prepared.retained_heap_bytes(), public, original_bytes,
+                        active.request.retained_heap_bytes(), context_bytes]);
+                    let clone_allowed = copies_fit(prepared.retained_heap_bytes());
+                    let public_prepared = if clone_allowed { Some(prepared.clone()) } else { None };
                     let publication = (|| -> Result<(Instant, String), BridgeError> {
+                        if !public_prepared.as_ref().is_some_and(|v| copies_fit(v.retained_heap_bytes())) {
+                            return Err(s::refused(p::Reason::ResponseLimit));
+                        }
                         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
                             && v.generation == active.generation && v.retirement.is_none()).ok_or_else(BridgeError::protocol)?;
                         let end = settled_at.checked_add(Duration::from_secs(120)).ok_or_else(BridgeError::protocol)?.min(private.clock.end);
@@ -1416,13 +1454,14 @@ impl ConnectionState {
                         let wall = private.clock.wall.checked_add(end.duration_since(private.clock.admitted)).ok_or_else(BridgeError::protocol)?;
                         Ok((end, display_utc(wall).ok_or_else(BridgeError::protocol)?))
                     })();
-                    match publication {
-                        Ok((end, expires_at)) => {
-                            self.setup.view.consent = Some(p::ConsentView { id: active.consent_id.clone(), expires_at, prepared: prepared.clone() });
+                    match (publication, public_prepared) {
+                        (Ok((end, expires_at)), Some(public_prepared)) => {
+                            self.setup.view.consent = Some(p::ConsentView { id: active.consent_id.clone(), expires_at, prepared: public_prepared });
                             self.setup.consent = Some(s::Consent { id: active.consent_id, prepared, end, session_id: active.session_id,
                                 project_id: active.project_id, generation: active.generation, root: active.root, edit_stamp: active.edit_stamp });
                         },
-                        Err(_) => { reason = p::Reason::ConsentExpired; self.setup.revoke_consent(); },
+                        (Err(error), _) => { reason = if error.code == "github_remote_setup_refused_response_limit" { p::Reason::ResponseLimit } else { p::Reason::ConsentExpired }; self.setup.revoke_consent(); },
+                        (Ok(_), None) => { reason = p::Reason::ResponseLimit; self.setup.revoke_consent(); },
                     }
                 }
             }

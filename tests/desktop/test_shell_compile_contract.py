@@ -252,6 +252,39 @@ def artifact_receipt(phase):
     return value
 
 
+ENVIRONMENT_CASES = ("supervisor::macos_github_actions_original_data_contract",)
+
+
+def environment_setup_environment():
+    return {**source_slots_environment(), "GITHUB_EVENT_NAME": "workflow_dispatch", "MRK_EXPECTED_SHA": "1" * 40,
+            "MRK_SOURCE_SLOTS_SELECTION": "environment-setup1"}
+
+
+def environment_setup_context():
+    return {**source_slots_context(), **helper.compile_workflow_binding(environment_setup_environment(), helper.SOURCE_SLOTS_SCOPE),
+            "sourceSlots": {"target": "x86_64-apple-darwin", "features": ["development-runtime"],
+                            "testTarget": "lib", "tests": list(ENVIRONMENT_CASES)}}
+
+
+def environment_setup_result():
+    return {"tests": list(ENVIRONMENT_CASES), "running": 1, "passed": 1, "failed": 0,
+            "ignored": 0, "measured": 0, "filtered": 7}
+
+
+def environment_setup_stdout():
+    return ("\nrunning 1 test\n" + "".join("test " + name + " ... ok\n" for name in ENVIRONMENT_CASES)
+            + "\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.03s\n\n").encode()
+
+
+def environment_setup_receipt(phase):
+    value = source_slots_receipt(phase)
+    value.update(scope="desktop-macos-environment-setup-data-v1", sourceSlots=environment_setup_context()["sourceSlots"],
+                 sourceSlotsSelection="environment-setup1")
+    if phase == "compile":
+        value["testResult"] = environment_setup_result()
+    return value
+
+
 def source_slots_paths(events, captures):
     MemoryPath, _ = memory_paths(events)
     class Capture(io.StringIO):
@@ -826,7 +859,7 @@ class ShellCompileContractTests(unittest.TestCase):
                       {**c, "workflowRef": intel_removal_context()["workflowRef"]}):
             with self.assertRaises(helper.CheckFailure):
                 helper.source_slots_is_removal(wrong)
-        self.assertIn("options: [allocation1, project-initialization4, artifact-setup10]", workflow)
+        self.assertIn("options: [allocation1, project-initialization4, artifact-setup10, environment-setup1]", workflow)
         self.assertIn("MRK_SOURCE_SLOTS_SELECTION: ${{ inputs.selection || 'allocation1' }}", workflow)
         self.assertIn('[[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]', workflow)
         events = []
@@ -879,7 +912,7 @@ class ShellCompileContractTests(unittest.TestCase):
                       {**artifact_bound, "workflowRef": intel_removal_context()["workflowRef"]}):
             with self.assertRaises(helper.CheckFailure):
                 helper.source_slots_is_removal(wrong)
-        self.assertIn("options: [allocation1, project-initialization4, artifact-setup10]", workflow)
+        self.assertIn("options: [allocation1, project-initialization4, artifact-setup10, environment-setup1]", workflow)
         self.assertIn("MRK_SOURCE_SLOTS_SELECTION: ${{ inputs.selection || 'allocation1' }}", workflow)
         self.assertIn('[[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" == refs/heads/verify/desktop-macos-intel-source-slots ]]', workflow)
         events = []
@@ -903,6 +936,60 @@ class ShellCompileContractTests(unittest.TestCase):
             for key, value in (("tests", list(reversed(ARTIFACT_CASES))), ("testTarget", "bin"),
                                ("features", ["desktop-shell"]), ("target", "aarch64-apple-darwin")):
                 loaded = deepcopy(artifact_bound); loaded["sourceSlots"][key] = value
+                with self.assertRaises(helper.CheckFailure):
+                    helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+
+        # Environment uses the SAME original workflow/owner with one actual dispatch-only
+        # tuple. A stale task cannot switch between C and the legacy default.
+        environment_setup_env, environment_setup_bound = environment_setup_environment(), environment_setup_context()
+        with self.assertRaises(helper.CheckFailure):
+            helper.compile_workflow_binding({**environment_setup_env, "MRK_SOURCE_SLOTS_SELECTION": "environment-setup2"}, helper.SOURCE_SLOTS_SCOPE)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_is_environment_setup({**environment_setup_bound, "sourceSlotsSelection": "environment-setup2"})
+        self.assertEqual(helper.SOURCE_SLOTS_ENVIRONMENT_TESTS, ENVIRONMENT_CASES)
+        self.assertEqual(tuple(sorted(ENVIRONMENT_CASES)), ENVIRONMENT_CASES)
+        self.assertEqual(helper.source_slots_selection(environment_setup=True), environment_setup_bound["sourceSlots"])
+        self.assertFalse(helper.source_slots_is_removal(environment_setup_bound)); self.assertTrue(helper.source_slots_is_environment_setup(environment_setup_bound))
+        self.assertFalse(helper.source_slots_is_initialization(environment_setup_bound))
+        self.assertFalse(helper.source_slots_is_artifact(environment_setup_bound))
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_selection(initialization=True, environment_setup=True)
+        for value in (None, 0, 1, [], {}, "allocation1", "environment-setup1"):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_selection(environment_setup=value)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_selection(True, environment_setup=True)
+        for key, value in (("MRK_SOURCE_SLOTS_SELECTION", "foreign"), ("MRK_SOURCE_SLOTS_SELECTION", None),
+                           ("GITHUB_EVENT_NAME", "push"), ("GITHUB_REF", helper.SOURCE_SLOTS_REMOVAL_REF),
+                           ("MRK_EXPECTED_SHA", "2" * 40), ("GITHUB_WORKFLOW_SHA", "2" * 40)):
+            with self.assertRaises(helper.CheckFailure):
+                helper.compile_workflow_binding({**environment_setup_env, key: value}, helper.SOURCE_SLOTS_SCOPE)
+        for wrong in ({**environment_setup_bound, "sourceSlotsSelection": None}, {**environment_setup_bound, "sourceSlotsBuild": intel_removal_build()},
+                      {**environment_setup_bound, "sourceSlots": source_slots_context()["sourceSlots"]},
+                      {**environment_setup_bound, "workflowRef": intel_removal_context()["workflowRef"]}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_is_removal(wrong)
+        events = []
+        MemoryPath, _ = memory_paths(events)
+        loaded = deepcopy(environment_setup_bound)
+        with patch.dict(helper.os.environ, {**environment_setup_env, "MRK_DESKTOP_CI_ROOT": environment_setup_bound["root"]}, clear=True),\
+                patch.object(helper, "Path", MemoryPath), patch.object(helper, "ordinary"),\
+                patch.object(helper, "hash_file", return_value=environment_setup_bound["workflowSha256"]),\
+                patch.object(helper, "read_bounded_json", side_effect=lambda *args: deepcopy(loaded)),\
+                patch.object(helper, "source_slots_source_guard"):
+            self.assertEqual(helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE), environment_setup_bound)
+            loaded = initialization_context()
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            loaded = source_slots_context()
+            with self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            loaded = deepcopy(environment_setup_bound)
+            with patch.dict(helper.os.environ, {"MRK_SOURCE_SLOTS_SELECTION": "allocation1"}), self.assertRaises(helper.CheckFailure):
+                helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
+            for key, value in (("tests", list(ARTIFACT_CASES)), ("testTarget", "bin"),
+                               ("features", ["desktop-shell"]), ("target", "aarch64-apple-darwin")):
+                loaded = deepcopy(environment_setup_bound); loaded["sourceSlots"][key] = value
                 with self.assertRaises(helper.CheckFailure):
                     helper.load_context("macos", helper.SOURCE_SLOTS_SCOPE)
 
@@ -1560,6 +1647,36 @@ class ShellCompileContractTests(unittest.TestCase):
         for artifact_bad_result in (source_slots_result(), intel_removal_result(), initialization_result(), None):
             with patch.object(helper, "write_json", side_effect=AssertionError("no false publication")), self.assertRaises(helper.CheckFailure):
                 helper.phase_receipt(artifact_bound, "compile", list(helper.SOURCE_SLOTS_CHECKS["compile"]), source_slots_result=artifact_bad_result)
+
+        # Environment's exact one-case receipt cannot borrow old DATA1/4/10.
+        env_bound=environment_setup_context(); positive=environment_setup_stdout()
+        self.assertEqual(helper.SOURCE_SLOTS_ENVIRONMENT_TESTS, ENVIRONMENT_CASES)
+        self.assertEqual(helper.source_slots_environment_test_result(positive),environment_setup_result())
+        for bad in (b"",b"\xff",positive.decode(),b"x"*(1024*1024+1),source_slots_stdout(),intel_removal_stdout(),
+                    initialization_stdout(),artifact_stdout(),positive+positive,positive+b"extra\n",
+                    positive.replace(b"running 1 test",b"running 0 tests"),positive.replace(b"1 passed",b"0 passed"),
+                    positive.replace(b"0 failed",b"1 failed"),positive.replace(b"0 ignored",b"1 ignored"),
+                    positive.replace(b"... ok",b"... ignored"),positive.replace(b"7 filtered",b"65536 filtered"),
+                    positive.replace(ENVIRONMENT_CASES[0].encode(),helper.SOURCE_SLOTS_TEST.encode())):
+            with self.assertRaises(helper.CheckFailure):helper.source_slots_environment_test_result(bad)
+        for key,value in (("passed",True),("running",0),("ignored",1),("filtered",False),
+                          ("tests",list(ARTIFACT_CASES)),("tests",tuple(ENVIRONMENT_CASES))):
+            with self.assertRaises(helper.CheckFailure):helper.validate_source_slots_environment_result({**environment_setup_result(),key:value})
+        for phase in ("acquire","compile"):
+            expected=environment_setup_receipt(phase);published=[]
+            self.assertEqual(helper.validate_compile_receipt(expected,env_bound,phase),expected)
+            for other in (source_slots_context(),intel_removal_context(),initialization_context(),artifact_context()):
+                with self.assertRaises(helper.CheckFailure):helper.validate_compile_receipt(expected,other,phase)
+            for key,value in (("scope",helper.SOURCE_SLOTS_EVIDENCE),("sourceSlotsSelection","artifact-setup10"),
+                              ("sourceSlots",artifact_context()["sourceSlots"]),("node",helper.NODE),("attempt","100")):
+                with self.assertRaises(helper.CheckFailure):helper.validate_compile_receipt({**expected,key:value},env_bound,phase)
+            with patch.object(helper,"write_json",side_effect=lambda path,value:published.append((str(path),deepcopy(value)))):
+                helper.phase_receipt(env_bound,phase,[row["check"] for row in expected["checks"]],node=None,
+                                     source_slots_result=environment_setup_result() if phase=="compile" else None)
+            self.assertEqual(published,[(env_bound["root"]+"/"+phase+"-checks.json",expected)])
+        for bad in (source_slots_result(),intel_removal_result(),initialization_result(),artifact_result(),None):
+            with patch.object(helper,"write_json",side_effect=AssertionError("no false publication")),self.assertRaises(helper.CheckFailure):
+                helper.phase_receipt(env_bound,"compile",list(helper.SOURCE_SLOTS_CHECKS["compile"]),source_slots_result=bad)
 
     def test_compile_cleanup_never_adopts_native_or_unexpected_outputs(self):
         names = set(helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES + helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES)
@@ -2546,6 +2663,132 @@ class ShellCompileContractTests(unittest.TestCase):
                 # empty except for the mandatory actual libtest stdout.
                 self.assertEqual(captures[artifact_bound["root"] + "/target/source-slots-compile.stdout"], b"")
                 self.assertEqual(captures[artifact_bound["root"] + "/target/source-slots-test.stderr"], b"")
+
+        # Original success is insufficient without the exact one-test stdout,
+        # source POST and the unchanged aggregate endpoint. Both raw streams
+        # remain private, exclusive and consuming-closed even on failure.
+        environment_setup_bound = environment_setup_context()
+        expected_order = ["rust-version-target", "mac-cargo-version", "headless-test-compile-only", "mac-source-slots-data-test"]
+        for fault in (None, "compile-nonzero", "test-nonzero", "zero-tests", "ignored", "readback", "source-post",
+                      "late-test", "reversed-test", "late-receipt", "publication-failure", "expired-before-tools"):
+            events, captures, calls, publications, clock = [], {}, [], [], [100.0]
+            SlotsPath, writer, read = source_slots_paths(events, captures)
+            source_calls = []
+            def source_original(*args, **kw):
+                source_calls.append("source")
+                if fault == "source-post" and len(source_calls) == 2:
+                    raise helper.CheckFailure("source original changed")
+            def original(argv, **kw):
+                calls.append((list(map(str, argv)), {**kw, "env": dict(kw["env"])}))
+                if kw["check"] == "rust-version-target":
+                    return "release: 1.98.0\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\nhost: x86_64-apple-darwin"
+                if kw["check"] == "mac-cargo-version":
+                    return "cargo 1.98.0 (abcdef123 2026-09-01)"
+                if kw["check"] == "headless-test-compile-only":
+                    if fault in ("compile-nonzero", "publication-failure"):
+                        raise helper.CheckFailure("original compile nonzero")
+                elif kw["check"] == "mac-source-slots-data-test":
+                    body = environment_setup_stdout()
+                    if fault == "zero-tests":
+                        environment_setup_before_zero = body
+                        body = body.replace(b"running 1 test", b"running 0 tests").replace(b"1 passed", b"0 passed")
+                        self.assertNotEqual(body, environment_setup_before_zero)
+                    if fault == "ignored":
+                        body = body.replace(b"0 ignored", b"1 ignored")
+                    kw["output"].write(body.decode())
+                    if fault == "test-nonzero":
+                        raise helper.CheckFailure("original test nonzero")
+                    if fault == "late-test":
+                        clock[0] = 970.0
+                    if fault == "reversed-test":
+                        clock[0] = 99.0
+                return ""
+            def read_original(path, expected):
+                if fault == "readback":
+                    raise helper.CheckFailure("output original changed")
+                return read(path, expected)
+            def publication(path, value):
+                if fault == "publication-failure":
+                    raise OSError("inert publication failure")
+                publications.append((str(path), deepcopy(value)))
+                if fault == "late-receipt" and path.name == "compile-checks.json":
+                    clock[0] = 970.0
+            observed_clock = []
+            def clock_original():
+                observed_clock.append(clock[0])
+                return 970.0 if fault == "expired-before-tools" and len(observed_clock) > 1 else clock[0]
+            with self.subTest(environment_setup_fault=fault), patch.object(helper, "Path", SlotsPath), \
+                    patch.object(helper, "ordinary"), patch.object(helper, "source_unchanged", side_effect=source_original), \
+                    patch.object(helper, "source_slots_source_guard"), patch.object(helper, "run", side_effect=original), \
+                    patch.object(helper, "source_slots_writer", side_effect=writer), patch.object(helper, "source_slots_read", side_effect=read_original), \
+                    patch.object(helper, "write_json", side_effect=publication), patch.object(helper.time, "monotonic", side_effect=clock_original), \
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-not-forwarded"}, clear=True):
+                if fault is None:
+                    helper.phase_source_slots("compile", environment_setup_bound)
+                else:
+                    with self.assertRaises(helper.CheckFailure):
+                        helper.phase_source_slots("compile", environment_setup_bound)
+            checks = [kw["check"] for _, kw in calls]
+            if fault == "expired-before-tools":
+                self.assertFalse(checks)
+            elif fault in ("compile-nonzero", "publication-failure", "readback"):
+                self.assertEqual(checks, expected_order[:-1])
+            else:
+                self.assertEqual(checks, expected_order)
+            commands = [(argv, kw) for argv, kw in calls if "output" in kw]
+            for argv, kw in commands:
+                self.assertIn("--locked", argv); self.assertIn("--offline", argv)
+                self.assertEqual(argv[argv.index("--jobs") + 1], "1")
+                self.assertIn("--no-default-features", argv)
+                self.assertEqual(argv[argv.index("--features") + 1], "development-runtime")
+                self.assertEqual(argv[argv.index("--target") + 1], "x86_64-apple-darwin")
+                self.assertEqual(argv[argv.index("--manifest-path") + 1], environment_setup_bound["source"] + "/desktop/src-tauri/Cargo.toml")
+                self.assertEqual(argv[argv.index("--target-dir") + 1], environment_setup_bound["root"] + "/target")
+                self.assertIn("--lib", argv)
+                self.assertFalse(any(value in argv for value in ("--ignored", "--release", "registration-helper", "desktop-shell")))
+                self.assertEqual(kw["env"]["RUSTUP_AUTO_INSTALL"], "0")
+                self.assertEqual(kw["env"]["GITHUB_SHA"], environment_setup_bound["sourceSha"])
+                self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", kw["env"])
+                self.assertTrue(kw["output"].closed and kw["diagnostics"].closed)
+                self.assertEqual(kw["timeout"], 600 if kw["check"] == "headless-test-compile-only" else 150)
+                if kw["check"] == "headless-test-compile-only":
+                    self.assertEqual(argv[-2:], ["--message-format=json,json-diagnostic-short", "--no-run"])
+                else:
+                    self.assertNotIn("--message-format=json", argv)
+                    self.assertNotIn("--message-format=json,json-diagnostic-short", argv)
+                    self.assertNotIn("--no-run", argv)
+                    self.assertEqual(argv[argv.index("--"):], ["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never", *ENVIRONMENT_CASES])
+            passed = [value for path, value in publications if path.endswith("/compile-checks.json")]
+            failures = [value for path, value in publications if path.endswith("/source-slots-failure.json")]
+            self.assertEqual(passed, [environment_setup_receipt("compile")] if fault in (None, "late-receipt") else [])
+            self.assertEqual(len(failures), 0 if fault in (None, "publication-failure") else 1)
+            for failure in failures:
+                expected_fields = {"schemaVersion", "scope", "phase", "status", "lastFixedStage",
+                    "sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt"}
+                if failure["lastFixedStage"] == "headless-test-compile-only":
+                    expected_fields.add("compilerDiagnostic")
+                    self.assertEqual(failure["compilerDiagnostic"], {"state": "unavailable", "reason": "original-unavailable",
+                                     "returnCode": None, "errors": [], "sources": []})
+                if failure["lastFixedStage"] in {"headless-test-compile-only", "mac-source-slots-data-test"}:
+                    expected_fields.add("originalCommandReturnCode")
+                    self.assertEqual(failure["originalCommandReturnCode"], None if fault in {
+                        "compile-nonzero", "test-nonzero"} else 0)
+                expected_fields.update(("sourceSlots", "sourceSlotsSelection"))
+                self.assertEqual(failure["scope"], "desktop-macos-environment-setup-data-v1")
+                self.assertEqual(failure["sourceSlots"], environment_setup_bound["sourceSlots"])
+                self.assertEqual(failure["sourceSlotsSelection"], "environment-setup1")
+                self.assertEqual(set(failure), expected_fields)
+                self.assertEqual(failure["status"], "failed-or-unknown")
+                self.assertLessEqual(len(json.dumps(failure).encode()), 16384)
+                self.assertNotIn("synthetic-not-forwarded", json.dumps(failure))
+            if fault is None:
+                self.assertEqual(len(source_calls), 2)
+                self.assertTrue(all(event[2] == ("x",) for event in events if event[0] == "open"))
+                self.assertEqual(len([event for event in events if event[0] == "closed"]), 4)
+                # Successful commands may legitimately leave both raw streams
+                # empty except for the mandatory actual libtest stdout.
+                self.assertEqual(captures[environment_setup_bound["root"] + "/target/source-slots-compile.stdout"], b"")
+                self.assertEqual(captures[environment_setup_bound["root"] + "/target/source-slots-test.stderr"], b"")
 
         # The unchanged run owner keeps its private-output contract and actual
         # original exit/timeout handling; subprocess.run is never entered here.

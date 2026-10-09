@@ -253,7 +253,24 @@ ENGINEERING_WAIT_STATUS_REGIONS = (('            throw Refusal.condition("missin
   '\n'
   '        let first = try quitSheet(app, window)\n'))
 
+ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.\n'
+ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
+ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
+
+def without_artifact_wait_diagnostic_source(source):
+    if 'MRK_MACOS_ENGINEERING_ARTIFACT_QUERY' not in source:
+        return source  # Historical intermediate source remains valid for old inverses.
+    if (source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN) != 1 or source.count(ARTIFACT_WAIT_DIAGNOSTIC_END) != 1
+            or source.count('MRK_MACOS_ENGINEERING_ARTIFACT_QUERY') != 1):
+        raise AssertionError('artifact wait diagnostic source markers differ')
+    start = source.index(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN)
+    end = source.index(ARTIFACT_WAIT_DIAGNOSTIC_END, start) + len(ARTIFACT_WAIT_DIAGNOSTIC_END)
+    if hashlib.sha256(source[start:end].encode()).hexdigest() != ARTIFACT_WAIT_DIAGNOSTIC_SHA256:
+        raise AssertionError('artifact wait diagnostic exact SOURCE differs')
+    return source[:start] + source[end:]
+
 def without_engineering_wait_status_source(source):
+    source = without_artifact_wait_diagnostic_source(source)
     if not any(current in source for _, current in ENGINEERING_WAIT_STATUS_REGIONS):
         return source
     for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
@@ -1615,6 +1632,57 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             with self.subTest(semantic_heading_refusal=label):
                 with self.assertRaises(AssertionError):
                     self.restored_semantic_heading_queries(changed)
+
+        # New diagnostic is removed exactly before ALL unchanged historical pins.
+        actual_artifact_source = (ROOT / SWIFT).read_text()
+        self.assertEqual(actual_artifact_source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN), 1)
+        self.assertEqual(actual_artifact_source.count(ARTIFACT_WAIT_DIAGNOSTIC_END), 1)
+        sample_start = actual_artifact_source.index(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN)
+        sample_end = actual_artifact_source.index(ARTIFACT_WAIT_DIAGNOSTIC_END) + len(ARTIFACT_WAIT_DIAGNOSTIC_END)
+        artifact_sample = actual_artifact_source[sample_start:sample_end]
+        self.assertEqual(digest(artifact_sample.encode()), ARTIFACT_WAIT_DIAGNOSTIC_SHA256)
+        self.assertEqual(digest(without_artifact_wait_diagnostic_source(actual_artifact_source).encode()),
+                         'f2f33688e491bd0ae4ce1a0d357b214da03102601f1b7c051fd645f372daf135')
+        # Literal roster equals actual UI text; no raw AX labels or guessed states.
+        protocol = (ROOT / 'desktop/src/artifactInspectionProtocol.ts').read_text()
+        component = (ROOT / 'desktop/src/components/ArtifactInspection.tsx').read_text()
+        table = protocol.split('export const artifactAvailabilityText={', 1)[1].split('};', 1)[0]
+        availability_texts = {
+            (quoted or plain): text for quoted, plain, text in
+            re.findall(r"(?:'([^']+)'|([a-z]+)):'([^']*)'", table)}
+        states = ('available', 'runtime-unqualified', 'busy', 'shutdown', 'cleanup-unknown',
+                  'document-lost', 'unsupported-platform')
+        self.assertEqual(set(availability_texts), set(states))
+        texts = tuple(availability_texts[key] for key in states) + (
+            'Waiting for original native status.', 'No new artifact outcome confirmed')
+        actual_texts = tuple(re.findall(r'^            "([^"\n]+)"[,]?$', artifact_sample, re.MULTILINE))
+        self.assertEqual(actual_texts, texts)
+        for text in texts[-2:]: self.assertIn(text, component)
+        self.assertIn('artifactAvailabilityText[state.status.availability]', component)
+        self.assertIn('for property in ["label", "title", "value"]', artifact_sample)
+        self.assertIn('for text in artifactDiagnosticTexts', artifact_sample)
+        self.assertEqual(artifact_sample.count('try remaining(1)'), 1)
+        self.assertLess(artifact_sample.index('try remaining(1)'), artifact_sample.index('let count = renderer.staticTexts'))
+        self.assertIn('NSPredicate(format: "%K == %@", property, text)', artifact_sample)
+        self.assertIn('counts.append(String(min(count, 5)))', artifact_sample)
+        self.assertNotIn('.label', artifact_sample)
+        self.assertNotIn('.title', artifact_sample)
+        self.assertNotIn('.value', artifact_sample)
+        self.assertNotIn('debugDescription', artifact_sample)
+        self.assertNotIn('print(text', artifact_sample)
+        self.assertTrue(actual_artifact_source[sample_end:].startswith(
+            '        _ = try waitElement(artifactAvailability, in: renderer,\n'))
+        for mutated in (artifact_sample.replace('"label", "title", "value"', '"identifier", "title", "value"', 1),
+                        artifact_sample.replace('try remaining(1)', 'try remaining(5)', 1),
+                        artifact_sample.replace('%K == %@', '%K CONTAINS %@', 1),
+                        artifact_sample.replace('renderer.staticTexts', 'renderer.descendants(matching: .any)', 1),
+                        artifact_sample.replace('sample=pre-wait', 'sample=after-wait', 1),
+                        artifact_sample.replace('nonAtomic=1', 'nonAtomic=0', 1)):
+            self.assertNotEqual(mutated, artifact_sample)
+            with self.assertRaises(AssertionError):
+                without_artifact_wait_diagnostic_source(actual_artifact_source.replace(artifact_sample, mutated, 1))
+        with self.assertRaises(AssertionError):
+            without_artifact_wait_diagnostic_source(actual_artifact_source.replace(artifact_sample, artifact_sample * 2, 1))
 
         # The new smoke is a separate private profile. Restore only its exact
         # reviewed regions, then retain EVERY historical ordinary-source pin

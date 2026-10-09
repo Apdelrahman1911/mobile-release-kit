@@ -76,7 +76,7 @@ class GitHubPreflightFrameTests(unittest.TestCase):
         initial_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "action": action_data})
         request = setup.parse_initial(initial_data)
         go_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "go": {"requestSha256": request.digest, "token": PRIVATE}})
-        def run_case(fault=None):
+        def run_case(fault=None, environment=False):
             events, outgoing, closed = [], bytearray(), []
             incoming = [initial_data, go_data, b""]
             clock = [100.0]
@@ -112,7 +112,7 @@ class GitHubPreflightFrameTests(unittest.TestCase):
                                     path=setup_engine.os.path)
             class Reader:
                 def __init__(self):
-                    self.cursor = setup.Schedule(setup.Action.parse(action_data))
+                    self.cursor = setup.EnvironmentSchedule(setup.EnvironmentAction.parse(action_data)) if environment else setup.Schedule(setup.Action.parse(action_data))
                 def read(self, step, reference=None):
                     self.cursor.claim(step, reference)
                     events.append(step)
@@ -122,6 +122,8 @@ class GitHubPreflightFrameTests(unittest.TestCase):
                             {"id": 2, "full_name": "owner/repo", "default_branch": "main", "visibility": "private", "archived": False}
                             if step.startswith("repository-") else
                             {"enabled": False, "allowed_actions": "selected", "sha_pinning_required": True})
+                    if environment and not (step == "account" or step.startswith("repository-")):
+                        body = env_body if step == "environment-before" else {"total_count": 0, "custom_deployment_protection_rules": []}
                     return ReadResult({"status": 200, "body": body, "failure": "none"}, _control())
             def factory(action, token, **kwargs):
                 self.assertEqual((action.value(), token, kwargs), (action_data, PRIVATE, {"started": 100.0, "runtime_dir": "/inert/runtime"}))
@@ -146,6 +148,31 @@ class GitHubPreflightFrameTests(unittest.TestCase):
                 self.assertEqual(result["reason"], "none")
                 self.assertFalse(result["writeClaimed"])
                 self.assertEqual(events[events.index("factory") + 1:], ["account", "repository-before", "resource-before", "repository-after"] + ["write"] * events[events.index("factory") + 1:].count("write"))
+
+        env_selection = {"kind": "environment_protection", "mode": "configure", "stage": "candidate",
+            "waitTimerMinutes": 30, "preventSelfReview": None, "reviewerLogin": None, "branches": None}
+        action_data = {"kind": "prepare", "target": {**target_data, "selection": env_selection}, "prepared": None}
+        env_body = {"id": 71, "node_id": "env", "name": "mobile-candidate", "url": "https://api.github.com/inert",
+                    "html_url": "https://github.com/inert", "created_at": "2026-10-09T12:00:00Z", "updated_at": "2026-10-09T12:00:00Z",
+                    "protection_rules": [], "deployment_branch_policy": None}
+        initial_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "action": action_data})
+        request = setup.parse_initial(initial_data)
+        go_data = frame({"protocol": setup.PROTOCOL, "id": "setup", "go": {"requestSha256": request.digest, "token": PRIVATE}})
+        for fault in (None, "bad-go", "late-go", "write", "close", "close-interrupt", "transport-close", "transport-and-close"):
+            status, outgoing, events, closed = run_case(fault, environment=True)
+            self.assertEqual(closed, [12, 11, 10])
+            self.assertNotIn(PRIVATE.encode(), outgoing)
+            self.assertEqual(status, 0 if fault is None else 74 if fault in {"close", "close-interrupt"} else 70)
+            if fault in {"bad-go", "late-go", "write"}:
+                self.assertNotIn("factory", events)
+            if fault is None or fault in {"close", "close-interrupt"}:
+                result = json.loads(outgoing.splitlines()[1])["result"]
+                self.assertEqual(result["reason"], "none")
+                self.assertFalse(result["writeClaimed"])
+                self.assertEqual(result["observed"]["id"], "71")
+                self.assertEqual(result["prepared"]["after"]["waitTimerMinutes"], 30)
+                self.assertEqual([event for event in events if event in {"account", "repository-before", "environment-before", "custom-before", "repository-after"}],
+                                 ["account", "repository-before", "environment-before", "custom-before", "repository-after"])
 
     def test_initial_and_go_frames_reject_extra_pipelined_duplicate_or_unbound_input(self):
         request = engine.parse_initial(frame(initial()))
@@ -174,6 +201,41 @@ class GitHubPreflightFrameTests(unittest.TestCase):
             with patch.object(setup_engine, "os", ports), patch.object(setup_engine, "time", SimpleNamespace(monotonic=lambda: 100.0)):
                 with self.assertRaises(ValueError):
                     setup_engine._read_initial(10, 110.0)
+
+        selection = {"kind": "environment_protection", "mode": "configure", "stage": "external-testing",
+                     "waitTimerMinutes": 43200, "preventSelfReview": True, "reviewerLogin": None, "branches": None}
+        selected = setup.EnvironmentTarget.parse({"projectBinding": "a" * 64, "repository": "owner/repo",
+            "accountId": "1", "repositoryId": "2", "selection": selection})
+        before_policy = {"waitTimerMinutes": 0, "protectedBranches": True, "requiredReviewers": {
+            "preventSelfReview": False, "reviewers": [{"type": "Team", "id": str(2**63 - 1 - index)} for index in range(6)]}}
+        observed = setup.EnvironmentFacts.parse({"name": "mobile-external-testing", "id": "71", "policy": before_policy})
+        reviewed = setup.EnvironmentPrepared.parse(setup.EnvironmentPrepared(selected, observed, None, "2026-10-09T12:00:00Z").value())
+        action = setup.EnvironmentAction("apply", selected, reviewed)
+        value = {"protocol": setup.PROTOCOL, "id": "setup", "action": action.value()}
+        raw = frame(value)
+        parsed = setup.parse_initial(raw)
+        self.assertIs(type(parsed.action), setup.EnvironmentAction)
+        self.assertEqual(parsed.action, action)
+        self.assertLessEqual(len(raw), 8192)
+        ready = json.loads(setup.ready_frame(parsed))
+        self.assertEqual(ready["ready"]["requestSha256"], hashlib.sha256(raw).hexdigest())
+        go = {"protocol": setup.PROTOCOL, "id": "setup", "go": {"requestSha256": parsed.digest, "token": PRIVATE}}
+        self.assertEqual(setup.parse_go(frame(go), parsed), PRIVATE)
+        for changed in (frame(value) + frame(go), frame({**value, "token": PRIVATE}),
+                        frame({**value, "action": {**action.value(), "target": {**selected.value(),
+                            "selection": {**selection, "stage": "arbitrary"}}}})):
+            with self.assertRaises(ValueError):
+                setup.parse_initial(changed)
+        for path in (("reviewer",), ("after", "requiredReviewers", "preventSelfReview")):
+            changed = copy.deepcopy(value)
+            if len(path) == 1:
+                del changed["action"]["prepared"][path[0]]
+            else:
+                changed["action"]["prepared"][path[0]][path[1]][path[2]] = 1
+            with self.assertRaises(ValueError):
+                setup.parse_initial(frame(changed))
+        with self.assertRaises(ValueError):
+            setup.parse_go(frame({**go, "go": {**go["go"], "requestSha256": "0" * 64}}), parsed)
 
     def test_pending_is_fresh_native_scope_only_and_go_contains_no_token(self):
         value = initial(); value["action"] = None

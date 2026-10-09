@@ -1,4 +1,4 @@
-"""Private fixed two-setting helper; no public method/URL/credential interface.
+"""Private fixed Setup helper; no public method/URL/credential interface.
 
 The existing native Supervisor owns the original child, final GO and retirement.
 A READY or JSON result is not consent, sent-byte proof or local finality.
@@ -63,7 +63,12 @@ def main(*, started: float, runtime_dir: str) -> int:
 
         reader = policy._make_live_reader(request.action, token, started=started, runtime_dir=runtime_dir)
         observed = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-        result = policy.execute(request.action, reader, observed_at=observed)
+        if type(request.action) is policy.EnvironmentAction:
+            result = policy.execute_environment(request.action, reader, observed_at=observed)
+        elif type(request.action) is policy.Action:
+            result = policy.execute(request.action, reader, observed_at=observed)
+        else:
+            raise ProtocolError("Unknown fixed Setup action")
         reader = None
         token = None
         check()

@@ -305,7 +305,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py', 'size': 19517, 'sha256': '1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py', 'size': 14149, 'sha256': 'a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py', 'size': 11006, 'sha256': '93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda'},
-    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 3696, 'sha256': '0b07dbfeec2d418eb2b969ea6d39e81caa782d8737df123f98f998d2b722407d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 3977, 'sha256': '10f6f1947f42b22096c197bbc79ce9d4edcd73860ea56d54c46a28823404a022'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_images_protocol.py', 'size': 9003, 'sha256': 'd4b8aa46d95ec7447c8e6a879f021ef8b82fa936020133c62508a75d18e99e63'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_initialization_protocol.py', 'size': 15547, 'sha256': 'e72c015f5d1fece9fd8bcd4ef2b910a457491e89a8b0eeaab866260e7d4b85d0'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py', 'size': 5216, 'sha256': '64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45'},
@@ -325,7 +325,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py', 'size': 13949, 'sha256': 'e21d3e6ad0d99bf0750e8b08e6c884aa2cb50e3155c7d0fa894d66fe529fa49d'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py', 'size': 17536, 'sha256': '2671a28e5bc05c509a576283c3c6f0d2c5bd655cbe1652c14aaabd95bc111411'},
     {'path': '/work/inputs/core-source/src/mobile_release/_github_action_family.py', 'size': 634, 'sha256': '999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc'},
-    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 48358, 'sha256': 'ca3d312c5786a47862e862c9a739702d251866c595255f8f66e73430eab2a5f2'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 50422, 'sha256': 'd96e60dab1041665de0c1236a164e7858fae55baee16dbd4590b5a7c3f1550a8'},
     {'path': '/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py', 'size': 17327, 'sha256': 'c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638'},
     {'path': '/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py', 'size': 19514, 'sha256': 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'},
     {'path': '/work/inputs/core-source/src/mobile_release/_native_process.py', 'size': 62175, 'sha256': '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'},
@@ -394,7 +394,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/evidence_layout.py', 'size': 2011, 'sha256': 'e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_preflight.py', 'size': 23244, 'sha256': '9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_release.py', 'size': 37400, 'sha256': '5862c2989f2818e8d6c9faef277fbd5b8608bdfd5e1b63e22dc9057bb51b8cfa'},
-    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 18970, 'sha256': '9cb789151c6994ff269a6f2e20e2657bf5b0ddcd55ab206683e1fae8cbe54d08'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 49306, 'sha256': 'e587661c31c456cbfbfecb68ebe3763c63c1ac9ee6c50edb43ae24532bbbf462'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_edit.py', 'size': 22213, 'sha256': '138d38e2379ae7c2d04142862232dd9adf4e2b7165b708c3a80500c02be411d4'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_recovery.py', 'size': 42208, 'sha256': '946dd7427df669228d2674202fa3063d5e539e6dc844636349c9d35633a032ab'},
     {'path': '/work/inputs/core-source/src/mobile_release/init_transaction.py', 'size': 124739, 'sha256': 'e31438ba7b62d147a5d2df5567b5fc796ad7c917fcf32155c41d4df731a80ce0'},
@@ -824,6 +824,12 @@ SOURCE_SLOTS_ARTIFACT_TESTS = (
     'saved_command_owner::tests::artifact_original_closure_distinguishes_unentered_from_claimed_and_unreturned_workers',
     'saved_command_owner::tests::artifact_two_frames_without_selected_originals_never_publish_and_first_stop_never_renews',
     'supervisor::macos_github_actions_original_data_contract',
+)
+SOURCE_SLOTS_ENVIRONMENT_SELECTION = "environment-setup1"
+SOURCE_SLOTS_ENVIRONMENT_EVIDENCE = "desktop-macos-environment-setup-data-v1"
+# One existing original/codec DATA group; whole lib compiles, no installed write.
+SOURCE_SLOTS_ENVIRONMENT_TESTS = (
+    "supervisor::macos_github_actions_original_data_contract",
 )
 SOURCE_SLOTS_BUILD_INPUTS = (
     ("desktop/macos-installed-inputs/build-release-intel.json", 4096),
@@ -2997,11 +3003,13 @@ def compile_workflow_binding(environment: dict[str, str], scope: str = COMPILE_S
             "Compiler workflow event or exact dispatch source differs")
     initialization = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_initialization(environment)
     artifact = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_artifact(environment)
+    environment_setup = scope == SOURCE_SLOTS_SCOPE and source_slots_requested_environment_setup(environment)
     return {"workflowPath": profile["workflow"], "workflowSha": sha,
             "workflowRef": environment["GITHUB_WORKFLOW_REF"], "sourceSha": sha,
             "runId": run_id, "attempt": attempt,
             **({"sourceSlotsSelection": SOURCE_SLOTS_INITIALIZATION_SELECTION} if initialization else
-               {"sourceSlotsSelection": SOURCE_SLOTS_ARTIFACT_SELECTION} if artifact else {})}
+               {"sourceSlotsSelection": SOURCE_SLOTS_ARTIFACT_SELECTION} if artifact else
+               {"sourceSlotsSelection": SOURCE_SLOTS_ENVIRONMENT_SELECTION} if environment_setup else {})}
 
 
 def workflow_native_binding(environment: dict[str, str]) -> dict[str, str]:
@@ -3127,11 +3135,15 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
         elif source_slots_is_artifact(context):
             expected.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
                             sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif source_slots_is_environment_setup(context):
+            expected.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                            sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
         if phase == "compile":
             expected["testResult"] = (validate_source_slots_removal_result(value.get("testResult")) if removal
                                       else validate_source_slots_initialization_result(value.get("testResult"))
                                       if source_slots_is_initialization(context) else validate_source_slots_artifact_result(value.get("testResult"))
-                                      if source_slots_is_artifact(context) else validate_source_slots_result(value.get("testResult")))
+                                      if source_slots_is_artifact(context) else validate_source_slots_environment_result(value.get("testResult"))
+                                      if source_slots_is_environment_setup(context) else validate_source_slots_result(value.get("testResult")))
     if context["executionScope"] == GTK_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
     require(same_compile_json(value, expected),
@@ -7235,7 +7247,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         value["testResult"] = (validate_source_slots_removal_result(source_slots_result) if source_slots_is_removal(context)
                                else validate_source_slots_initialization_result(source_slots_result)
                                if source_slots_is_initialization(context) else validate_source_slots_artifact_result(source_slots_result)
-                               if source_slots_is_artifact(context) else validate_source_slots_result(source_slots_result))
+                               if source_slots_is_artifact(context) else validate_source_slots_environment_result(source_slots_result)
+                                      if source_slots_is_environment_setup(context) else validate_source_slots_result(source_slots_result))
     if main_compiled is not None:
         require(context.get("executionScope") == ENGINEERING_COMPILE_SCOPE and name == "compile"
                 and compiled is None, "Unexpected engineering main artifact")
@@ -7267,6 +7280,9 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
             elif source_slots_is_artifact(context):
                 value.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
                              sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+            elif source_slots_is_environment_setup(context):
+                value.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                             sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
         if context["executionScope"] == GTK_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], sg1=context["sg1"])
         validate_compile_receipt(value, context, name)
@@ -7706,7 +7722,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     context.update(binding)
     if scope == SOURCE_SLOTS_SCOPE:
         require(re.fullmatch(r"[0-9a-f]{40}", tree) is not None and tree != "0" * 40, "SourceSlots source tree differs")
-        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context), artifact=source_slots_is_artifact(context))
+        context["sourceSlots"] = source_slots_selection(slots_removal, initialization=source_slots_is_initialization(context), artifact=source_slots_is_artifact(context), environment_setup=source_slots_is_environment_setup(context))
         if slots_removal:
             context["sourceSlotsBuild"] = slots_build
     if engineering_work is not None:
@@ -7785,6 +7801,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         elif source_slots_is_artifact(context):
             public.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE,
                           sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif source_slots_is_environment_setup(context):
+            public.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE,
+                          sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
         public["notQualified"].extend(("other-tests", "supplier-native-loading", "Apple-provider-closure", "service-registration", "signing", "installed-runtime"))
     if scope == MAC_COMPILE_SCOPE:
         compiler = compiler_binding(context)
@@ -7876,6 +7895,7 @@ def load_context(platform: str, scope: str = BOUNDARY_SCOPE, *, retention_only: 
             require(removal == (os.environ.get("GITHUB_REF") == SOURCE_SLOTS_REMOVAL_REF)
                     and source_slots_is_initialization(context) == source_slots_requested_initialization(os.environ)
                     and source_slots_is_artifact(context) == source_slots_requested_artifact(os.environ)
+                    and source_slots_is_environment_setup(context) == source_slots_requested_environment_setup(os.environ)
                     and context.get("source") == str(Path(os.environ["GITHUB_WORKSPACE"]).resolve(strict=True))
                     and type(context.get("sourceTree")) is str
                     and re.fullmatch(r"[0-9a-f]{40}", context["sourceTree"]) is not None
@@ -8604,9 +8624,9 @@ def compile_gtk(context: dict, cargo: str, common: list[str], environment: dict[
 
 def source_slots_requested_initialization(environment: dict) -> bool:
     selection = environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1")
-    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION),
+    require(type(selection) is str and selection in ("allocation1", SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION),
             "Unknown fixed Intel DATA dispatch selection")
-    if selection in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION):
+    if selection in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION):
         require(environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                 and environment.get("GITHUB_REF") == SOURCE_SLOTS_REF
                 and environment.get("MRK_EXPECTED_SHA") == environment.get("GITHUB_SHA"),
@@ -8619,7 +8639,7 @@ def source_slots_is_initialization(context: dict) -> bool:
     if "sourceSlotsSelection" not in context:
         return False
     require(type(context["sourceSlotsSelection"]) is str
-            and context["sourceSlotsSelection"] in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION),
+            and context["sourceSlotsSelection"] in (SOURCE_SLOTS_INITIALIZATION_SELECTION, SOURCE_SLOTS_ARTIFACT_SELECTION, SOURCE_SLOTS_ENVIRONMENT_SELECTION),
             "Named DATA context selection differs")
     return context["sourceSlotsSelection"] == SOURCE_SLOTS_INITIALIZATION_SELECTION
 
@@ -8634,10 +8654,24 @@ def source_slots_is_artifact(context: dict) -> bool:
     return context.get("sourceSlotsSelection") == SOURCE_SLOTS_ARTIFACT_SELECTION
 
 
-def source_slots_selection(removal: bool = False, *, initialization: bool = False, artifact: bool = False) -> dict:
-    require(type(removal) is bool and type(initialization) is bool and type(artifact) is bool
-            and sum((removal, initialization, artifact)) <= 1,
+def source_slots_requested_environment_setup(environment: dict) -> bool:
+    source_slots_requested_initialization(environment)  # SAME closed dispatch validation.
+    return environment.get("MRK_SOURCE_SLOTS_SELECTION", "allocation1") == SOURCE_SLOTS_ENVIRONMENT_SELECTION
+
+
+def source_slots_is_environment_setup(context: dict) -> bool:
+    source_slots_is_initialization(context)  # SAME closed context tag validation.
+    return context.get("sourceSlotsSelection") == SOURCE_SLOTS_ENVIRONMENT_SELECTION
+
+
+def source_slots_selection(removal: bool = False, *, initialization: bool = False, artifact: bool = False,
+                           environment_setup: bool = False) -> dict:
+    require(type(removal) is bool and type(initialization) is bool and type(artifact) is bool and type(environment_setup) is bool
+            and sum((removal, initialization, artifact, environment_setup)) <= 1,
             "Unknown Intel DATA selector")
+    if environment_setup:
+        return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
+                "testTarget": "lib", "tests": list(SOURCE_SLOTS_ENVIRONMENT_TESTS)}
     if artifact:
         return {"target": SOURCE_SLOTS_TARGET, "features": [SOURCE_SLOTS_FEATURES],
                 "testTarget": "lib", "tests": list(SOURCE_SLOTS_ARTIFACT_TESTS)}
@@ -8693,7 +8727,7 @@ def source_slots_build_inputs(source: Path) -> dict:
 def source_slots_is_removal(context: dict) -> bool:
     removal = source_slots_removal_workflow(context.get("workflowRef"))
     initialization = source_slots_is_initialization(context)
-    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization, artifact=source_slots_is_artifact(context))),
+    require(same_compile_json(context.get("sourceSlots"), source_slots_selection(removal, initialization=initialization, artifact=source_slots_is_artifact(context), environment_setup=source_slots_is_environment_setup(context))),
             "SourceSlots context selector differs from its workflow")
     if removal:
         validate_source_slots_build(context.get("sourceSlotsBuild"))
@@ -8783,6 +8817,32 @@ def source_slots_artifact_test_result(raw: bytes) -> dict:
                          + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
     require(match is not None, "Artifact DATA stdout is missing, extra, ignored or failed")
     return validate_source_slots_artifact_result({"tests": list(SOURCE_SLOTS_ARTIFACT_TESTS), "running": 10, "passed": 10,
+                                                 "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def validate_source_slots_environment_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Environment DATA result fields differ")
+    require(same_compile_json(value["tests"], list(SOURCE_SLOTS_ENVIRONMENT_TESTS))
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 1), ("passed", 1), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Environment DATA did not pass exactly its one selected test")
+    return value
+
+
+def source_slots_environment_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Environment DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Environment DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in SOURCE_SLOTS_ENVIRONMENT_TESTS)
+    match = re.fullmatch(r"\n?running 1 test\n" + rows
+                         + r"\ntest result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Environment DATA stdout is missing, extra, ignored or failed")
+    return validate_source_slots_environment_result({"tests": list(SOURCE_SLOTS_ENVIRONMENT_TESTS), "running": 1, "passed": 1,
                                                  "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
 
 
@@ -9157,6 +9217,7 @@ def phase_source_slots(name: str, context: dict) -> None:
     removal = source_slots_is_removal(context)
     initialization = source_slots_is_initialization(context)
     artifact = source_slots_is_artifact(context)
+    environment_setup = source_slots_is_environment_setup(context)
     require(name in ("acquire", "compile", "clean"), "Wrong SourceSlots phase")
     root, source = Path(context["root"]), Path(context["source"])
     if name == "clean":
@@ -9210,7 +9271,7 @@ def phase_source_slots(name: str, context: dict) -> None:
             # follows it. No ignored filter, arbitrary selector or other graph.
             test_args = (["--", "--exact", "--test-threads=1", "--format", "pretty", "--color", "never",
                           *(SOURCE_SLOTS_REMOVAL_TESTS if removal else SOURCE_SLOTS_INITIALIZATION_TESTS if initialization
-                            else SOURCE_SLOTS_ARTIFACT_TESTS)] if removal or initialization or artifact
+                            else SOURCE_SLOTS_ARTIFACT_TESTS if artifact else SOURCE_SLOTS_ENVIRONMENT_TESTS)] if removal or initialization or artifact or environment_setup
                          else [SOURCE_SLOTS_TEST, "--", "--exact", "--test-threads=1"])
             # JSON short changes only rendered, not the full compiler-message payload.
             # B needs no artifact JSON: preserve all diagnostics in bounded short text.
@@ -9275,7 +9336,8 @@ def phase_source_slots(name: str, context: dict) -> None:
                 raise
             if check == "mac-source-slots-data-test":
                 result = (source_slots_removal_test_result(raw) if removal else source_slots_initialization_test_result(raw)
-                          if initialization else source_slots_artifact_test_result(raw) if artifact else source_slots_test_result(raw))
+                          if initialization else source_slots_artifact_test_result(raw) if artifact else source_slots_environment_test_result(raw)
+                          if environment_setup else source_slots_test_result(raw))
         last_check = "source-post"
         source_slots_source_guard(source, root)
         source_slots_inputs_unchanged(context)
@@ -9300,6 +9362,9 @@ def phase_source_slots(name: str, context: dict) -> None:
         elif artifact:
             failure.update(scope=SOURCE_SLOTS_ARTIFACT_EVIDENCE, sourceSlots=context["sourceSlots"],
                            sourceSlotsSelection=SOURCE_SLOTS_ARTIFACT_SELECTION)
+        elif environment_setup:
+            failure.update(scope=SOURCE_SLOTS_ENVIRONMENT_EVIDENCE, sourceSlots=context["sourceSlots"],
+                           sourceSlotsSelection=SOURCE_SLOTS_ENVIRONMENT_SELECTION)
         if name == "compile" and last_check == "headless-test-compile-only":
             if compiler_diagnostic is None:
                 compiler_diagnostic = source_slots_diagnostic_unavailable(None, "original-unavailable")

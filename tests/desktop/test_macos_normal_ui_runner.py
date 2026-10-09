@@ -264,7 +264,24 @@ ENGINEERING_WAIT_STATUS_REGIONS = (('            throw Refusal.condition("missin
   '\n'
   '        let first = try quitSheet(app, window)\n'))
 
+ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: seven availability texts plus waiting/error.\n'
+ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
+ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
+
+def without_artifact_wait_diagnostic_source(source):
+    if 'MRK_MACOS_ENGINEERING_ARTIFACT_QUERY' not in source:
+        return source  # Historical intermediate source remains valid for old inverses.
+    if (source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN) != 1 or source.count(ARTIFACT_WAIT_DIAGNOSTIC_END) != 1
+            or source.count('MRK_MACOS_ENGINEERING_ARTIFACT_QUERY') != 1):
+        raise AssertionError('artifact wait diagnostic source markers differ')
+    start = source.index(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN)
+    end = source.index(ARTIFACT_WAIT_DIAGNOSTIC_END, start) + len(ARTIFACT_WAIT_DIAGNOSTIC_END)
+    if hashlib.sha256(source[start:end].encode()).hexdigest() != ARTIFACT_WAIT_DIAGNOSTIC_SHA256:
+        raise AssertionError('artifact wait diagnostic exact SOURCE differs')
+    return source[:start] + source[end:]
+
 def without_engineering_wait_status_source(source):
+    source = without_artifact_wait_diagnostic_source(source)
     if not any(current in source for _, current in ENGINEERING_WAIT_STATUS_REGIONS):
         return source
     for previous, current in ENGINEERING_WAIT_STATUS_REGIONS:
@@ -4479,6 +4496,84 @@ class NormalPhaseDataTests(unittest.TestCase):
         self.assertFalse(maximum["findingsTruncated"])
         self.assertLessEqual(len(MODULE.encoded(maximum)) + 1, 4096)
         self.assertNotIn(b"PRIVATE", MODULE.encoded(maximum))
+
+        # Same failed original, closed nine-text roster, three properties only.
+        # Zero means no exact match in this one sample; missing rows stay unknown.
+        artifact_states = ("available", "runtime-unqualified", "busy", "shutdown", "cleanup-unknown",
+                           "document-lost", "unsupported-platform", "waiting", "error")
+        artifact_rows = [(f"MRK_MACOS_ENGINEERING_ARTIFACT_QUERY=v1;property={prop};type=staticText;"
+                          "counts=0,1,2,3,4,5,0,1,2;sample=pre-wait;nonAtomic=1").encode()
+                         + (b"\r\n" if index % 2 else b"\n")
+                         for index, prop in enumerate(("label", "title", "value"))]
+        artifact_expected = [{"stream": "stdout", "kind": "artifactAvailability", "property": prop,
+            "elementType": "staticText", "counts": dict(zip(artifact_states, (0, 1, 2, 3, 4, 5, 0, 1, 2))),
+            "sample": "pre-wait", "nonAtomic": True} for prop in ("label", "title", "value")]
+        for length in range(4):
+            partial = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess(["fixed-original"], 65, b"".join(artifact_rows[:length]), b""), engineering=True)
+            self.assertEqual(partial["queryObservations"], artifact_expected[:length])
+            self.assertEqual(partial["status"], "classified" if length else "unclassified")
+            self.assertEqual(partial["originalReturncode"], 65)
+            self.assertEqual(partial["requireObservations"], [])
+            self.assertFalse(any(partial["markers"].values()))
+            self.assertIsNone(partial["dashboardReadiness"])
+        reversed_rows = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess([], 65, b"".join(reversed(artifact_rows)), b""), engineering=True)
+        self.assertEqual(reversed_rows["queryObservations"], list(reversed(artifact_expected)))
+        for artifact_count in range(6):
+            row = artifact_rows[0].replace(b"0,1,2,3,4,5,0,1,2", b",".join([str(artifact_count).encode()] * 9))
+            admitted = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, row, b""), engineering=True)
+            self.assertEqual(admitted["queryObservations"][0]["counts"], dict.fromkeys(artifact_states, artifact_count))
+        artifact_row = artifact_rows[0]
+        invalid_artifacts = (
+            artifact_row[:-1], artifact_row.replace(b"v1", b"v2"), artifact_row.replace(b"label", b"identifier"),
+            artifact_row.replace(b"staticText", b"any"), artifact_row.replace(b"staticText", b"staticTexts"),
+            *(artifact_row.replace(b"0,1,2,3,4,5,0,1,2", token) for token in (
+                b"", b"0,1,2,3,4,5,0,1", b"0,1,2,3,4,5,0,1,2,3", b"6,1,2,3,4,5,0,1,2",
+                b"-1,1,2,3,4,5,0,1,2", b"01,1,2,3,4,5,0,1,2", b"+1,1,2,3,4,5,0,1,2",
+                b"true,1,2,3,4,5,0,1,2", b"0, 1,2,3,4,5,0,1,2")),
+            artifact_row.replace(b"pre-wait", b"after-wait"), artifact_row.replace(b"nonAtomic=1", b"nonAtomic=0"),
+            b"prefix " + artifact_row, artifact_row[:-1] + b";private=" + secret + b"\n",
+            artifact_row + artifact_row, artifact_row + artifact_row[:-1],
+            b"MRK_MACOS_ENGINEERING_ARTIFACT", b"noise\ntrailing MRK_MACOS_ENGINEERING_ARTIFACT_",
+        )
+        for raw in invalid_artifacts:
+            for supplied in (raw + b"".join(artifact_rows), b"".join(artifact_rows) + raw):
+                rejected = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                    subprocess.CompletedProcess([], 65, guide_maximum + require_maximum + supplied, native_error), engineering=True)
+                self.assertEqual(rejected["queryObservations"], maximum["queryObservations"])
+                self.assertEqual(rejected["requireObservations"], maximum["requireObservations"])
+                self.assertEqual(rejected["errorCodes"], observed["errorCodes"])
+                self.assertEqual(rejected["status"], "unavailable")
+                self.assertEqual(rejected["originalReturncode"], 65)
+                self.assertNotIn(secret, MODULE.encoded(rejected))
+        for stdout, stderr in ((b"", artifact_row), (artifact_row, artifact_row),
+                               (artifact_row, artifact_row[:-1])):
+            rejected = MODULE.normal_failure_diagnostics("test", engineering_selection,
+                subprocess.CompletedProcess([], 65, stdout, stderr), engineering=True)
+            self.assertEqual(rejected["queryObservations"], [])
+            self.assertEqual(rejected["status"], "unavailable")
+        for phase, selection in (("build", None), ("query", None), ("summary", engineering_selection)):
+            rejected = MODULE.normal_failure_diagnostics(phase, selection,
+                subprocess.CompletedProcess([], 65, artifact_row, b""), engineering=True)
+            self.assertEqual(rejected["queryObservations"], [])
+            self.assertEqual(rejected["status"], "unavailable")
+        ordinary_artifacts = MODULE.normal_failure_diagnostics("test", "test.xcresult",
+            subprocess.CompletedProcess([], 65, query * 5 + b"".join(artifact_rows), b""))
+        for key in many:
+            if key not in ("stdoutBytes", "stdoutSha256"):
+                self.assertEqual(ordinary_artifacts[key], many[key])
+        full = MODULE.normal_failure_diagnostics("test", engineering_selection,
+            subprocess.CompletedProcess([], 65, guide_maximum + codes_maximum + sites_maximum + require_maximum
+                                        + b"".join(artifact_rows), b""), engineering=True)
+        for key in maximum:
+            if key not in ("stdoutBytes", "stdoutSha256", "queryObservations"):
+                self.assertEqual(full[key], maximum[key])
+        self.assertEqual(full["queryObservations"], maximum["queryObservations"] + artifact_expected)
+        self.assertLessEqual(len(MODULE.encoded(full)) + 1, 4096)
+        self.assertFalse(full["findingsTruncated"])
+        self.assertNotIn(b"PRIVATE", MODULE.encoded(full))
 
         engineering_work = Path("/Users/runner/work/_temp/mrk-macos-engineering-ui.ABCDef12")
         engineering_tmp = str(engineering_work / "normal-ui/tmp") + "/"

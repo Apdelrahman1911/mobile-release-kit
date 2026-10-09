@@ -2322,6 +2322,14 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     guide_pattern = (re.escape(guide_namespace) + rb"=v1;property=(label|title);type=(any|button|checkBox)"
                      rb";matches=([0-5]);exceedsFour=([01]);nonAtomic=1")
     guide_rows, guide_seen, guide_invalid = [], set(), False
+    # Fixed seven actual availability codes plus waiting/error, in SOURCE order.
+    # Numeric counts are observations only; 5 denotes more than four matches.
+    artifact_states = ("available", "runtime-unqualified", "busy", "shutdown", "cleanup-unknown",
+                       "document-lost", "unsupported-platform", "waiting", "error")
+    artifact_namespace = b"MRK_MACOS_ENGINEERING_ARTIFACT_QUERY"
+    artifact_pattern = (re.escape(artifact_namespace) + rb"=v1;property=(label|title|value);type=staticText"
+                        rb";counts=([0-5](?:,[0-5]){8});sample=pre-wait;nonAtomic=1")
+    artifact_rows, artifact_seen, artifact_invalid = [], set(), False
 
     # This supplement belongs only to the fixed DATA method. Never promote raw
     # reason text, dynamic helper messages, or another test's output to a code.
@@ -2599,6 +2607,19 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                             "exceedsFour": exceeds, "nonAtomic": True})
                 # Still examine other fixed namespaces on this record; a malformed
                 # mixed/partial line cannot hide a duplicate first-failure marker.
+            if engineering and (artifact_namespace in record or (record and artifact_namespace.startswith(record))
+                    or (not complete and any(record.endswith(artifact_namespace[:size])
+                                             for size in range(1, len(artifact_namespace))))):
+                match = re.fullmatch(artifact_pattern, record) if engineering_require and complete and stream == "stdout" else None
+                if match is None or match.group(1) in artifact_seen:
+                    artifact_invalid = True
+                else:
+                    artifact_seen.add(match.group(1))  # Exactly three properties; never deduplicate evidence.
+                    artifact_rows.append({"stream": "stdout", "kind": "artifactAvailability",
+                        "property": match.group(1).decode("ascii"), "elementType": "staticText",
+                        "counts": dict(zip(artifact_states, map(int, match.group(2).split(b",")))),
+                        "sample": "pre-wait", "nonAtomic": True})
+                # Keep checking fixed namespaces so mixed lines cannot hide old failures.
             if engineering_require and (engineering_namespace in record
                     or (record and engineering_namespace.startswith(record))
                     or (not complete and any(record.endswith(engineering_namespace[:size])
@@ -2639,6 +2660,8 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                     "matches": count, "exceedsFour": exceeds, "nonAtomic": True}, 4, distinct=False)
     if engineering_require and not guide_invalid:
         value["queryObservations"] = guide_rows  # Partial sets stay partial/nonAtomic, never padded or authoritative.
+    if engineering_require and not artifact_invalid:
+        value["queryObservations"].extend(artifact_rows)  # Partial sets remain partial, never zero-filled.
     if engineering_require and engineering_candidates:
         if engineering_candidates == 1 and engineering_candidate is not None:
             value["requireObservations"].append(engineering_candidate)
@@ -2663,7 +2686,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         while value["compilerDiagnostics"] and len(encoded(value)) + 1 > 4094:
             value["compilerDiagnostics"].pop()
             value["findingsTruncated"] = True
-    value["status"] = ("unavailable" if require_invalid or guide_invalid or output_invalid else "classified" if any(value[key]
+    value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
         or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")

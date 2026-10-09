@@ -59,6 +59,16 @@ class _ResponseRole(Enum):
     RELEASE_VERSION = "release-version"
     SETUP_ACTIONS_WRITE = "setup-actions-write"
     SETUP_WORKFLOW_WRITE = "setup-workflow-write"
+    SETUP_ENVIRONMENT_READ = "setup-environment-read"
+    SETUP_ENVIRONMENT_LIST = "setup-environment-list"
+    SETUP_ENVIRONMENT_CUSTOM_READ = "setup-environment-custom-read"
+    SETUP_ENVIRONMENT_REVIEWER_READ = "setup-environment-reviewer-read"
+    SETUP_ENVIRONMENT_WRITE = "setup-environment-write"
+
+
+_ENVIRONMENT_READ_ROLES = frozenset({_ResponseRole.SETUP_ENVIRONMENT_READ, _ResponseRole.SETUP_ENVIRONMENT_LIST,
+    _ResponseRole.SETUP_ENVIRONMENT_CUSTOM_READ, _ResponseRole.SETUP_ENVIRONMENT_REVIEWER_READ})
+_ENVIRONMENT_ROLES = _ENVIRONMENT_READ_ROLES | {_ResponseRole.SETUP_ENVIRONMENT_WRITE}
 
 
 def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, int]:
@@ -67,7 +77,7 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         raise ValueError("Invalid fixed GitHub response role")
     if (role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.RELEASE_VERSION}
             and profile is not _ExchangeProfile.RELEASE_PREPARE
-            or role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}
+            or role in ({_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE} | _ENVIRONMENT_ROLES)
             and profile is not _ExchangeProfile.SETUP):
         raise ValueError("Fixed GitHub response role belongs to another action")
     return (768 * 1024 if role is _ResponseRole.RELEASE_CONFIG else MAX_BODY_BYTES,
@@ -91,6 +101,19 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
             tail = parts[4:]
             if role is _ResponseRole.STANDARD:
                 valid = method == "GET" and tail in ([], ["actions", "permissions"], ["actions", "permissions", "workflow"])
+            elif role in _ENVIRONMENT_ROLES:
+                from .github_setup_remote import _ENVIRONMENT_NAMES, _environment_login
+                names = dict(_ENVIRONMENT_NAMES).values()
+                if role is _ResponseRole.SETUP_ENVIRONMENT_LIST:
+                    valid = method == "GET" and tail == ["environments?per_page=100&page=1"]
+                elif role is _ResponseRole.SETUP_ENVIRONMENT_REVIEWER_READ:
+                    valid = method == "GET" and len(tail) == 3 and tail[0] == "collaborators" and tail[2] == "permission"
+                    if valid:
+                        _environment_login(tail[1])
+                elif role is _ResponseRole.SETUP_ENVIRONMENT_CUSTOM_READ:
+                    valid = method == "GET" and len(tail) == 3 and tail[0] == "environments" and tail[1] in names and tail[2] == "deployment_protection_rules"
+                else:
+                    valid = method == ("PUT" if role is _ResponseRole.SETUP_ENVIRONMENT_WRITE else "GET") and len(tail) == 2 and tail[0] == "environments" and tail[1] in names
             else:
                 expected = ["actions", "permissions"] + (["workflow"] if role is _ResponseRole.SETUP_WORKFLOW_WRITE else [])
                 valid = method == "PUT" and tail == expected
@@ -109,17 +132,21 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
 
 def _setup_body(profile: _ExchangeProfile, role: _ResponseRole, body: object) -> None:
     _role_limits(profile, role)
-    if role is _ResponseRole.STANDARD:
+    if role is _ResponseRole.STANDARD or role in _ENVIRONMENT_READ_ROLES:
         if body is not None:
             raise ValueError("Fixed Setup GET has a body")
         return
     if profile is not _ExchangeProfile.SETUP or role not in {
-            _ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}:
+            _ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_ENVIRONMENT_WRITE}:
         raise ValueError("Invalid fixed Setup body role")
-    from .github_setup_remote import MAX_BODY_BYTES as MAX_SETUP_BODY, Policy
+    from .github_setup_remote import MAX_BODY_BYTES as MAX_SETUP_BODY, Policy, environment_put_policy
 
     if type(body) is not bytes or not 1 <= len(body) <= MAX_SETUP_BODY:
         raise ValueError("Invalid fixed Setup body bound")
+    if role is _ResponseRole.SETUP_ENVIRONMENT_WRITE:
+        value = _decode_json(body, limit=MAX_SETUP_BODY, nodes=64, depth=3, exact=True)
+        environment_put_policy(value)
+        return
     value = _decode_json(body, limit=MAX_SETUP_BODY, nodes=32, depth=3, exact=True)
     kind = "actions_enabled" if role is _ResponseRole.SETUP_ACTIONS_WRITE else "workflow_token_policy"
     Policy.parse(kind, value)
@@ -581,7 +608,8 @@ def _header_control(head: _Head, budget: _Budget, *,
     delay = None if blocked else max(delays) if delays else 60 if recognized else None
     base = _status_reason(head.status)
     if (head.status == 204 and _role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}
-            or head.status == 409 and _role is _ResponseRole.SETUP_WORKFLOW_WRITE):
+            or head.status == 409 and _role is _ResponseRole.SETUP_WORKFLOW_WRITE
+            or head.status == 422 and _role is _ResponseRole.SETUP_ENVIRONMENT_WRITE):
         base = "none"  # Only these already-bound response roles admit the status.
     if invalid:
         reason = "response-invalid"
