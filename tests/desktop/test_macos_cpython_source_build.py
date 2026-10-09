@@ -8750,19 +8750,40 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     line = seal.failure_diagnostic(error)
                     self.assertLessEqual(len(line.encode("ascii")), 512)
                     self.assertIn("category=" + category, line)
-                    self.assertIn("phase=unavailable calls=unavailable data=known nonAtomic=true", line)
+                    self.assertIn("phase=unavailable calls=unavailable data=known lastRc=unavailable inflight=unavailable scratchRetired=unavailable sourcePost=unavailable nonAtomic=true", line)
                     self.assertNotIn("private", line)
                 BUILD.DATA.unknown()
                 with patch.object(seal, "_DIAGNOSTIC_STAGE", "/private/path"), \
                      patch.object(seal, "_DIAGNOSTIC_BUILD", SimpleNamespace(phase="sdk-path", entered=1, returned=1)):
                     self.assertEqual(seal.failure_diagnostic(HostileError()),
-                        "MRK_SEAL_DIAGNOSTIC_V1 stage=unknown reason=unclassified category=other phase=unavailable calls=unavailable data=unknown nonAtomic=true")
+                        "MRK_SEAL_DIAGNOSTIC_V1 stage=unknown reason=unclassified category=other phase=unavailable calls=unavailable data=unknown lastRc=unavailable inflight=unavailable scratchRetired=unavailable sourcePost=unavailable nonAtomic=true")
                 # Unentered exact-class DATA receiver tests only diagnostic
                 # field bounding, not a native lifetime or cleanup claim.
                 receiver = object.__new__(seal.SealBuild)
                 receiver.phase, receiver.entered, receiver.returned = "helper-native-test", 22, 21
                 with patch.object(seal, "_DIAGNOSTIC_BUILD", receiver):
                     self.assertIn("phase=helper-native-test calls=22/21 data=unknown", seal.failure_diagnostic(HostileError()))
+                    receiver.inflight, receiver.scratch_retired, receiver.source_post = False, True, False
+                    receiver.commands = [{"returned": True, "returncode": 2}, {"returned": False}]
+                    line = seal.failure_diagnostic(BUILD.BuildRefused("original-command-failed"))
+                    self.assertIn("reason=original-command-failed", line)
+                    self.assertIn("lastRc=2 inflight=false scratchRetired=true sourcePost=false nonAtomic=true", line)
+                    for value in (0, -1, -(2 ** 31), 2 ** 31 - 1):
+                        receiver.commands = [{"returned": True, "returncode": value}]
+                        self.assertIn("lastRc=" + str(value) + " ", seal.failure_diagnostic(HostileError()))
+                    for value in (True, False, "private-value", None, -(2 ** 31) - 1, 2 ** 31):
+                        receiver.commands = [{"returned": True, "returncode": value}]
+                        self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
+                    for commands in ([{"returned": 1, "returncode": 0}], [{}] * 23, (), None):
+                        receiver.commands = commands
+                        self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
+                    receiver.inflight, receiver.scratch_retired, receiver.source_post = 1, 0, "private-value"
+                    self.assertIn("inflight=unavailable scratchRetired=unavailable sourcePost=unavailable", seal.failure_diagnostic(HostileError()))
+                    for reason in ("original-command-failed", "work-entry", "static-libtool-metadata"):
+                        line = seal.failure_diagnostic(BUILD.BuildRefused(reason))
+                        self.assertIn("reason=" + reason + " ", line)
+                        self.assertLessEqual(len(line.encode("ascii")), 512)
+                    self.assertIn("reason=unclassified ", seal.failure_diagnostic(BUILD.BuildRefused("/private/unknown")))
                     receiver.phase, receiver.returned = "private-value", 23
                     self.assertIn("phase=unknown calls=unavailable data=unknown", seal.failure_diagnostic(HostileError()))
                     receiver.entered, receiver.returned = True, False
