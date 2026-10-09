@@ -58,6 +58,18 @@ jobs:
           test "$(git symbolic-ref -q HEAD || true)" = ''
           test -z "$(git status --porcelain --untracked-files=all)"
 
+      - name: Prepare only the selected hosted Python executable mode
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_SEAL_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          # The official framework installer uses root:admin 0775. Tighten this
+          # exact original before normal admission; no recursive/cache changes.
+          /usr/bin/sudo -n -- "$MRK_SEAL_PYTHON" -I -S -B \
+            desktop/tools/macos_github_seal_build.py --prepare-hosted-python "$MRK_SEAL_PYTHON"
+
       - name: Fixed canonical static build and native tests
         id: build
         timeout-minutes: 18

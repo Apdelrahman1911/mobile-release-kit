@@ -86,6 +86,11 @@ _DIAGNOSTIC_STAGES = frozenset((
     "qualification-load", "owner-load", "cancellation-load", "build-init", "build-execute",
 ))
 _DIAGNOSTIC_REASONS = frozenset((
+    "hosted-python-preparation-context", "hosted-python-preparation-original",
+    "hosted-python-preparation-open", "hosted-python-preparation-deadline",
+    "hosted-python-preparation-short", "hosted-python-preparation-post",
+    "hosted-python-preparation-alias", "hosted-python-preparation-mode",
+    "hosted-python-preparation-bytes",
     "fixed-seal-target", "fixed-seal-native-host", "fixed-seal-run",
     "fixed-seal-workflow-context", "actual-setup-python-entry", "builder-source-kind",
     "builder-source-original", "builder-source-short", "builder-source-post",
@@ -165,6 +170,51 @@ def python_entry_binding(selected, reported):
     need(all(identity(path.stat()) == fixed for path in paths)
          and identity(resolved[0].lstat()) == fixed, "actual-setup-python-entry")
     return ((selected, reported), str(resolved[0]), fixed)
+
+
+
+def prepare_hosted_python(selected):
+    """Remove only the observed group-write bit from this hosted interpreter.
+
+    This separate explicit root preparation never enters the build/core owner.
+    It does not copy/relocate Python, change libraries or relax tool admission.
+    """
+    need(B is None and sys.platform == "darwin" and sys.version_info[:3] == (3, 14, 7)
+         and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+         and os.getuid() == os.geteuid() == 0, "hosted-python-preparation-context")
+    binding = python_entry_binding(selected, sys.executable)
+    paths, resolved, before = binding
+    need(before[3] == 0 and before[5] == 1 and 0 < before[6] <= 512 * MIB
+         and stat.S_IMODE(before[2]) in (0o775, 0o755), "hosted-python-preparation-original")
+    fields = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                          info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    deadline = time.monotonic() + 15
+    fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        need(fields(os.fstat(fd)) == before, "hosted-python-preparation-open")
+        def digest(expected):
+            os.lseek(fd, 0, os.SEEK_SET)
+            total = 0; value = hashlib.sha256()
+            while total < before[6]:
+                need(time.monotonic() < deadline, "hosted-python-preparation-deadline")
+                block = os.read(fd, min(MIB, before[6] - total))
+                need(bool(block), "hosted-python-preparation-short")
+                total += len(block); value.update(block)
+            need(not os.read(fd, 1) and fields(os.fstat(fd)) == expected,
+                 "hosted-python-preparation-post")
+            return value.digest()
+        original_hash = digest(before)
+        need(python_entry_binding(*paths) == binding, "hosted-python-preparation-alias")
+        if stat.S_IMODE(before[2]) == 0o775:
+            os.fchmod(fd, 0o755)
+        after = fields(os.fstat(fd))
+        need(after[:2] == before[:2] and after[2] == stat.S_IFREG | 0o755
+             and after[3:8] == before[3:8], "hosted-python-preparation-mode")
+        need(digest(after) == original_hash, "hosted-python-preparation-bytes")
+        need(python_entry_binding(*paths) == (paths, resolved, after)
+             and time.monotonic() < deadline, "hosted-python-preparation-alias")
+    finally:
+        os.close(fd)  # One consuming close. Any failure stops preparation.
 
 
 def bootstrap_builder():
@@ -1184,11 +1234,16 @@ def main():
 
 
 if __name__ == "__main__":
+    preparing = len(sys.argv) == 3 and sys.argv[1] == "--prepare-hosted-python"
     try:
-        main()
+        if preparing:
+            prepare_hosted_python(sys.argv[2])
+        else:
+            main()
     except BaseException as error:
         # No exception payload, environment, path or secret material is printed.
         print(failure_diagnostic(error), file=sys.stderr)
         print("Canonical seal build refused; only finalized public evidence is eligible for retention.", file=sys.stderr)
         raise SystemExit(1) from None
-    print("Canonical seal native tests returned; packaging and the framed parent integration remain separate.")
+    print("Hosted Python executable mode prepared; native build remains unexecuted." if preparing else
+          "Canonical seal native tests returned; packaging and the framed parent integration remain separate.")

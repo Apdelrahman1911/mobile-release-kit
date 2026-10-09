@@ -8583,6 +8583,60 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                             seal.SealBuild.recheck_tools(receiver, full=True)
                     self.assertTrue(BUILD.DATA.known)
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Dedicated hosted preparation uses a real tiny file/FD/chmod;
+            # only root/platform identity is synthetic. Never elevate a test.
+            for scenario in ("tighten", "already-protected", "foreign-owner", "wrong-mode", "chmod-failed", "alias-changed"):
+                with self.subTest(python_mode=scenario), scratch() as root:
+                    target = root / "python"
+                    target.write_bytes(b"inert Python fixture; never executable code")
+                    target.chmod(0o755 if scenario == "already-protected" else 0o777 if scenario == "wrong-mode" else 0o775)
+                    selected = root / "action-python"
+                    selected.symlink_to(target.name)
+                    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+                    real_stat, real_lstat, real_fstat, real_chmod = Path.stat, Path.lstat, os.fstat, os.fchmod
+                    def root_facts(value):
+                        data = {key: getattr(value, key) for key in fields}
+                        if BUILD.stat.S_ISREG(value.st_mode):
+                            data["st_uid"] = 1 if scenario == "foreign-owner" else 0
+                        return SimpleNamespace(**data)
+                    def named_stat(path, *args, **kwargs):
+                        return root_facts(real_stat(path, *args, **kwargs))
+                    def named_lstat(path, *args, **kwargs):
+                        return root_facts(real_lstat(path, *args, **kwargs))
+                    def chmod(fd, mode):
+                        if scenario == "chmod-failed":
+                            raise PermissionError("synthetic denied mode change")
+                        real_chmod(fd, mode)
+                        if scenario == "alias-changed":
+                            selected.unlink(); selected.symlink_to("missing")
+                    with patch.object(seal, "B", None), patch.object(sys, "platform", "darwin"), \
+                         patch.object(sys, "version_info", (3, 14, 7)), patch.object(sys, "executable", str(target)), \
+                         patch.object(os, "getuid", return_value=0), patch.object(os, "geteuid", return_value=0), \
+                         patch.object(Path, "stat", named_stat), patch.object(Path, "lstat", named_lstat), \
+                         patch.object(os, "fstat", lambda fd: root_facts(real_fstat(fd))), \
+                         patch.object(os, "fchmod", side_effect=chmod) as changed:
+                        if scenario in {"foreign-owner", "wrong-mode"}:
+                            with self.assertRaisesRegex(ValueError, "^hosted-python-preparation-original$"):
+                                seal.prepare_hosted_python(str(selected))
+                            changed.assert_not_called()
+                        elif scenario == "chmod-failed":
+                            with self.assertRaises(PermissionError):
+                                seal.prepare_hosted_python(str(selected))
+                            changed.assert_called_once()
+                        elif scenario == "alias-changed":
+                            with self.assertRaises(FileNotFoundError):
+                                seal.prepare_hosted_python(str(selected))
+                            changed.assert_called_once()
+                        else:
+                            seal.prepare_hosted_python(str(selected))
+                            self.assertEqual(changed.call_count, 0 if scenario == "already-protected" else 1)
+                    self.assertEqual(target.read_bytes(), b"inert Python fixture; never executable code")
+                    if scenario in {"tighten", "already-protected", "alias-changed"}:
+                        self.assertEqual(BUILD.stat.S_IMODE(target.stat().st_mode), 0o755)
+            with patch.object(seal, "B", None), patch.object(os, "open", side_effect=AssertionError("context must refuse before open")) as opened:
+                with self.assertRaisesRegex(ValueError, "^hosted-python-preparation-context$"):
+                    seal.prepare_hosted_python("/unadmitted")
+                opened.assert_not_called()
             # The actual protected_tool leaf gate emits only the reused
             # bounded scalar/role envelope. Inert lstat facts force each
             # predicate in its ORIGINAL order; no tool read/run is admitted.
