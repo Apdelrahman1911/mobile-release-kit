@@ -8463,14 +8463,14 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     path = parent / "libsodium.la"
                     path.symlink_to("wrong.la" if mode == "wrong-target" else "../libsodium.la")
                     verdict = SimpleNamespace(complete=True, fatal=False, contained=True)
-                    receiver = SimpleNamespace(private=root, check=lambda: None, libtool_alias_original=None,
+                    receiver = SimpleNamespace(private=root, check=lambda: None, libtool_alias_originals={},
                         guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)),
                         cleaning=False, inflight=False)
                     invoke = lambda chosen=path, retire=False: seal.SealBuild.libtool_alias(receiver, chosen, retire=retire)
                     if mode == "wrong-target":
                         with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-pre"):
                             invoke()
-                        self.assertIsNone(receiver.libtool_alias_original)
+                        self.assertEqual(receiver.libtool_alias_originals, {})
                     elif mode == "other-name":
                         other = parent / "foreign.la"
                         other.symlink_to("../libsodium.la")
@@ -8488,10 +8488,10 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                             with self.assertRaisesRegex(BUILD.BuildRefused, "generated-alias-post"):
                                 invoke()
                         self.assertEqual(calls, ["../libsodium.la", "../libsodium.la"])
-                        self.assertIsNone(receiver.libtool_alias_original)
+                        self.assertEqual(receiver.libtool_alias_originals, {})
                     else:
                         invoke()
-                        self.assertIsNotNone(receiver.libtool_alias_original)
+                        self.assertEqual(set(receiver.libtool_alias_originals), {"libsodium.la"})
                         if mode == "same-target-replaced":
                             old = parent / "saved-original.la"
                             path.rename(old)
@@ -8530,6 +8530,38 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # All nine fixed official metadata aliases are ordinary generated
+            # work, including eight convenience archives on both Darwin CPUs.
+            self.assertEqual(set(seal.LIBTOOL_ARCHIVES), {
+                "libsodium.la", "libaesni.la", "libarmcrypto.la", "libsse2.la",
+                "libssse3.la", "libsse41.la", "libavx2.la", "libavx512f.la", "librdrand.la",
+            })
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                parent = root / "build/src/libsodium/.libs"
+                parent.mkdir(parents=True)
+                verdict = SimpleNamespace(complete=True, fatal=False, contained=True)
+                receiver = SimpleNamespace(private=root, check=lambda: None, libtool_alias_originals={},
+                    guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)),
+                    cleaning=True, inflight=False)
+                for alias_name in seal.LIBTOOL_ARCHIVES:
+                    (parent.parent / alias_name).write_bytes(b"fixed generated metadata")
+                    (parent / alias_name).symlink_to("../" + alias_name)
+                first = parent / "libaesni.la"
+                with self.assertRaisesRegex(BUILD.BuildRefused, "^generated-alias-unrecorded$"):
+                    seal.SealBuild.libtool_alias(receiver, first, retire=True)
+                self.assertTrue(first.is_symlink())
+                self.assertEqual(receiver.libtool_alias_originals, {})
+                for alias_name in seal.LIBTOOL_ARCHIVES:
+                    seal.SealBuild.libtool_alias(receiver, parent / alias_name)
+                self.assertEqual(set(receiver.libtool_alias_originals), set(seal.LIBTOOL_ARCHIVES))
+                receiver.libtool_alias = lambda path, retire=False: seal.SealBuild.libtool_alias(receiver, path, retire=retire)
+                for alias_name in seal.LIBTOOL_ARCHIVES:
+                    receiver.libtool_alias(parent / alias_name, retire=True)
+                    self.assertFalse((parent / alias_name).is_symlink())
+                    self.assertEqual((parent.parent / alias_name).read_bytes(), b"fixed generated metadata")
+                self.assertEqual(set(receiver.libtool_alias_originals), set(seal.LIBTOOL_ARCHIVES))
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
             # Real private files and symlinked DIRECTORY spellings exercise
             # original identity and the production tool admission/POST. These
             # tiny executable-mode text fixtures are NEVER executed as tools.

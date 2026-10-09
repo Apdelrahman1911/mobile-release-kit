@@ -34,6 +34,13 @@ INVENTORY_PIN = (189190, "451eff5b5ead60459e0631bf790d6e19f985cf57d58031b0c0eaa2
 ARCHIVE = "desktop/github-seal-inputs/libsodium-1.0.22.tar.gz"
 ARCHIVE_PIN = (2008529, "adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349")
 RAW_PIN = (9676800, "2f78c3e629fbe938b3b99297d6d5fb02307ea5458c12744554e4377603d5fdb8")
+# Official Makefile.am:243-254 static convenience archives plus libsodium.
+# ltmain.sh:11301 emits one .libs/<name> -> ../<name> per .la link.
+LIBTOOL_ARCHIVES = (
+    "libsodium.la", "libaesni.la", "libarmcrypto.la", "libsse2.la",
+    "libssse3.la", "libsse41.la", "libavx2.la", "libavx512f.la", "librdrand.la",
+)
+LIBTOOL_MAKEFILE_PIN = (13770, "a3fd526d03210d2a0262ee1ef360167259a1923089be80cb5b040cc88168bef8")
 WORK_SECONDS, CLEANUP_SECONDS = 900, 60
 WORK_ENTRIES, WORK_BYTES, PUBLIC_BYTES = 8192, 512 * MIB, 96 * MIB
 OUTPUT_LIMIT, QUERY_LIMIT = MIB, 65536
@@ -165,6 +172,8 @@ _DIAGNOSTIC_REASONS = frozenset((
     'generated-alias-pre',
     'generated-alias-retirement-post',
     'generated-alias-unsettled',
+    'generated-alias-unrecorded',
+    'canonical-libtool-archive-roster',
     'helper-exact-native-test',
     'helper-fixed-roster',
     'helper-no-build-discovery',
@@ -533,7 +542,7 @@ class SealBuild:
         self.success_ready = False
         self.source_post = False
         self.runtime_rosters = {}
-        self.libtool_alias_original = None
+        self.libtool_alias_originals = {}
 
     def check(self):
         if self.cleaning:
@@ -655,11 +664,13 @@ class SealBuild:
         return body, original
 
     def libtool_alias(self, path, *, retire=False):
-        # Unmodified official ltmain.sh:11301 creates exactly this link even
-        # for --disable-shared. It is generated work, NEVER a read/link input.
-        expected = self.private / "build/src/libsodium/.libs/libsodium.la"
+        # Fixed official archive names only; these generated aliases are never
+        # admitted as our source, selected library, or public artifact inputs.
+        parent_path = self.private / "build/src/libsodium/.libs"
         self.check()
-        B.need(path == expected, "unexpected-generated-alias")
+        B.need(path.parent == parent_path and path.name in LIBTOOL_ARCHIVES,
+               "unexpected-generated-alias")
+        expected_target = "../" + path.name
         if retire:
             # DATA.known is the pre-acquisition baseline: our held parent below
             # is itself a pending original until its consuming close returns.
@@ -675,12 +686,13 @@ class SealBuild:
         with B.DATA.acquiring(os.open, os.close, path.parent, flags) as fd:
             B.need(B.identity(os.fstat(fd)) == B.identity(parent)
                    and B.identity(os.stat(path.name, dir_fd=fd, follow_symlinks=False)) == B.identity(before)
-                   and os.readlink(path.name, dir_fd=fd) == "../libsodium.la", "generated-alias-pre")
+                   and os.readlink(path.name, dir_fd=fd) == expected_target, "generated-alias-pre")
             original = (B.identity(before), B.custody(parent))
-            B.need(self.libtool_alias_original is None or self.libtool_alias_original == original,
-                   "generated-alias-changed")
+            recorded = self.libtool_alias_originals.get(path.name)
+            B.need(recorded is None or recorded == original, "generated-alias-changed")
+            B.need(not retire or recorded == original, "generated-alias-unrecorded")
             B.need(B.identity(os.stat(path.name, dir_fd=fd, follow_symlinks=False)) == B.identity(before)
-                   and os.readlink(path.name, dir_fd=fd) == "../libsodium.la"
+                   and os.readlink(path.name, dir_fd=fd) == expected_target
                    and B.identity(os.fstat(fd)) == B.identity(parent)
                    and B.identity(path.parent.lstat()) == B.identity(parent), "generated-alias-post")
             if retire:
@@ -698,7 +710,7 @@ class SealBuild:
                 B.need(B.custody(os.fstat(fd)) == B.custody(parent)
                        and B.custody(path.parent.lstat()) == B.custody(parent), "generated-alias-parent-post")
             else:
-                self.libtool_alias_original = original
+                self.libtool_alias_originals[path.name] = original
         self.check()
 
     def census(self):
@@ -928,6 +940,9 @@ class SealBuild:
             os.utime(path, (mtime, mtime), follow_symlinks=False)
         del raw, parts, compressed
         self.sodium_source = self.original_source()
+        makefile = self.sodium_source["src/libsodium/Makefile.am"]
+        B.need((makefile["size"], makefile["sha256"]) == LIBTOOL_MAKEFILE_PIN,
+               "canonical-libtool-archive-roster")
         self.helper = self.private / "sources/macos-github-seal"
         self.mkdir(self.helper)
         self.mkdir(self.helper / "src")
@@ -1258,11 +1273,12 @@ class SealBuild:
             self.retain_products()
         if self.private_identity is not None:
             self.census()  # Enforce our tighter 8192/512MiB before the donor retire.
-            alias = self.private / "build/src/libsodium/.libs/libsodium.la"
-            if self.libtool_alias_original is not None:
-                self.libtool_alias(alias, retire=True)
-            else:
-                B.need(absent(alias), "unadmitted-generated-alias")
+            for name in LIBTOOL_ARCHIVES:
+                alias = self.private / "build/src/libsodium/.libs" / name
+                if name in self.libtool_alias_originals:
+                    self.libtool_alias(alias, retire=True)
+                else:
+                    B.need(absent(alias), "unadmitted-generated-alias")
             B.retire_tree(self.private, self.cleanup_deadline)
         self.scratch_retired = True
 
