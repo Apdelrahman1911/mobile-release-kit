@@ -13,14 +13,14 @@ STEP_NAMES = (
     "Check out the exact reviewed source without retained credentials",
     "Select fixed isolated preparation Python",
     "Prepare only the locked fixture graphs through the original command owner",
-    "Compile and test changed Parent2 and Record1 DATA groups",
+    "Observe the fixed product Installer argument through the original Context owner",
     "Publish only the closed source-bound fixture summary",
     "Preserve only the bounded reviewed summary",
     "Require closed scoped qualification without full E2 acceptance",
 )
 # Frozen active source, not values derived from the subject during a test.
 EXPECTED_HEADER = "name: Desktop macOS fixed maintenance fixture\n\non:\n  push:\n    branches:\n      - verify/desktop-macos-maintenance-fixture\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: desktop-macos-maintenance-fixture-${{ github.ref }}\n  cancel-in-progress: false\n\njobs:\n  e2_fixture:\n    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'\n    runs-on: macos-26\n    timeout-minutes: 100\n    env:\n      # No shell startup file, inherited compiler switch or credential reaches\n      # a preparation/native child. Child environments below are reconstructed.\n      BASH_ENV: ''\n      ENV: ''\n"
-EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Two existing Cargo originals within990s: changed Parent2 and Record1 DATA only.\n          # No C fixture/sudo/Installer/SM/Keychain or live removal qualification.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --qualify-removal-parent-data\n\n"
+EXPECTED_NATIVE = "        id: native\n        timeout-minutes: 70\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          set -euo pipefail\n          umask 077\n          ulimit -n 1024\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          # Same120s Context: direct component and fixed one-component product/$1 observation.\n          # No Cargo suite, signing, SM, Keychain, payload installation or maintenance authority.\n          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \\\n            GITHUB_ACTIONS=true RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \\\n            GITHUB_REPOSITORY='${{ github.repository }}' GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \\\n            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \\\n            GITHUB_WORKSPACE='${{ github.workspace }}' RUNNER_TEMP='${{ runner.temp }}' GITHUB_JOB=e2_fixture \\\n            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \\\n            MRK_EXPECTED_SHA='${{ github.sha }}' MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \\\n            MRK_MACOS_WORK='${{ steps.prepare.outputs.root }}' RUSTUP_TOOLCHAIN=1.98.1 \\\n            RUSTUP_HOME=/Users/runner/.rustup CARGO_HOME=/Users/runner/.cargo \\\n            DEVELOPER_DIR=/Library/Developer/CommandLineTools MACOSX_DEPLOYMENT_TARGET=26.0 \\\n            '${{ steps.python.outputs.python-path }}' -I -S -B \\\n            /Users/runner/work/mobile-release-kit/mobile-release-kit/desktop/tools/macos_e2_native_fixture.py --observe-context-receipts\n\n"
 EXPECTED_IF_LINES = (
     "    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-maintenance-fixture'",
     "        if: always() && !cancelled() && steps.prepare.outcome == 'success'",
@@ -177,9 +177,9 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertEqual(active(native).count("exec /usr/bin/env -i"), 1)
         self.assertEqual(active(native).count(" --observe-service-layout"), 0)
         self.assertEqual(active(native).count(" --observe-service-cocoa-startup"), 0)
-        self.assertEqual(active(native).count(" --qualify-removal-parent-data"), 1)
+        self.assertEqual(active(native).count(" --qualify-removal-parent-data"), 0)
         self.assertEqual(active(native).count(" --qualify-removal-recovery-data"), 0)
-        self.assertEqual(active(native).count(" --observe-context-receipts"), 0)
+        self.assertEqual(active(native).count(" --observe-context-receipts"), 1)
         self.assertIn("owner = qualification.load_owner(CHECKOUT)", active(prepare))
         self.assertEqual(active(prepare).count("owner.run_owned("), 1)
         for required in (
@@ -1118,7 +1118,9 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             '".github/workflows/desktop-macos-maintenance-fixture.yml", '
             '"desktop/tools/macos_maintenance_fixture_prepare.sh", '
             '"desktop/tools/macos_maintenance_fixture_publish.sh", '
-            '"desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE, fixture.LAYOUT_SOURCE):'))
+            '"desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE, fixture.LAYOUT_SOURCE, '
+            '*((fixture.CONTEXT_DISTRIBUTION_SOURCE, fixture.CONTEXT_README_SOURCE) '
+            'if CONTEXT_PRODUCT_SELECTED else ())):'))
         self.assertLess(publish.index('"summary-source-correspondence"'), publish.index('_entry, result_body ='))
         self.assertIn("MRK_NATIVE_STEP_OUTCOME: ${{ steps.native.outcome }}", active(self.steps[STEP_NAMES[5]]))
         self.assertIn('outcome = os.environ["MRK_NATIVE_STEP_OUTCOME"]', active(publish))
@@ -1145,13 +1147,13 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('b"registration_qualified=true\\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\\n"', publish)
         self.assertEqual(publish.count('fixture.registration_publication_tick('), 24)
         self.assertGreater(publish.rindex('fixture.registration_publication_tick('), publish.index('os.close(fd)'))
-        route = section(publish, '              # This committed workflow selects only fixed registration primitive qualification.',
+        route = section(publish, '              # This committed workflow selects only the fixed public product Context.',
                         '              known_pass = (')
         self.assertIn('fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")', route)
         self.assertIn('context_receipt_diagnostic = None', route)
         self.assertIn('diagnostic_captured = False', route)
         self.assertNotIn('context_receipt_diagnostic_result(', route)
-        self.assertNotIn('context_observation_result(', route)
+        self.assertIn('complete_context = fixture.context_observation_result(result, source)', route)
         self.assertIn('contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured)', publish)
         self.assertEqual([line.strip() for line in active(publish).splitlines() if 'summary["diagnosticCaptured"] =' in line],
                          ['summary["diagnosticCaptured"] = False'] * 2)
@@ -1184,10 +1186,11 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertIn('registration_qualified = registration is not None', route)
         self.assertIn('REMOVAL_DATA_SELECTED = False', publish)
         self.assertIn('REMOVAL_INTEGRATION_SELECTED = False', publish)
-        self.assertIn('REMOVAL_PARENT_SELECTED = True', publish)
+        self.assertIn('REMOVAL_PARENT_SELECTED = False', publish)
+        self.assertIn('CONTEXT_PRODUCT_SELECTED = True', publish)
         self.assertIn('REMOVAL_CHANGES_SELECTED = False', publish)
         self.assertIn('REMOVAL_RECOVERY_SELECTED = False', publish)
-        self.assertIn('if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:', route)
+        self.assertIn('if outcome == "success" and not CONTEXT_PRODUCT_SELECTED and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:', route)
         self.assertIn('if outcome == "success" and REMOVAL_DATA_SELECTED:', route)
         self.assertIn('removal_data = fixture.removal_data_result(result, source, rows)', route)
         self.assertIn('removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,', publish)
@@ -1309,14 +1312,16 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertLess(publish.index(context), publish.index(units))
         layout = section(publish, "              service_layout = None", "              native_rust_tests = None")
         self.assertEqual(flat(layout), flat("""service_layout = None
-            selected_roles = (fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
+            selected_roles = (fixture.CONTEXT_ROLES if CONTEXT_PRODUCT_SELECTED else
+                              fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
                               fixture.PARENT_ROLES if REMOVAL_PARENT_SELECTED else
                               fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
                               fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES)
             layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
             fixture.need(layout_record["selected"] is False and layout_record["started"] is False
                          and all(call["role"] in selected_roles for call in calls)
-                         and [call["role"] for call in calls] == list(selected_roles[:len(calls)]),
+                         and (CONTEXT_PRODUCT_SELECTED
+                              or [call["role"] for call in calls] == list(selected_roles[:len(calls)])),
                          "summary-registration-route")
             if layout_record["observerSourceSha256"] is not None:
                 fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
@@ -1383,7 +1388,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                          ['summary["contextDistributionDiagnostic"] = None'] * 2)
         audit = section(self.owner, "    def context_audit(", "    def observe_installer_context(")
         self.assertIn('members = context_xar(body)', audit)
-        self.assertIn('return context_product(body, *component)', audit)
+        self.assertIn('return context_product(body, *component, presentation=presentation)', audit)
         self.assertIn('self._context_audit_refusal = error', audit)
         self.assertIn('any(entry is original for original in self.outputs.entries)', audit)
         self.assertIn('admitted = context_audit_call_data(package, self.phase, call_index, self.calls)', audit)
@@ -1405,7 +1410,7 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
                       'and self.outputs_closed and self.protected_closed and native_finality and context_finality',
                       'and layout_finality and not self.cleanup_errors'):
             self.assertIn(token, finish)
-        btm = section(publish, "              btm_log = None", "              # This committed workflow selects only fixed registration primitive qualification.")
+        btm = section(publish, "              btm_log = None", "              # This committed workflow selects only the fixed public product Context.")
         self.assertEqual(flat(active(btm)), flat("""btm_log = None
             btm_record = fixture.btm_log_data(result["btmLogObservation"], source, calls)
             fixture.need(type(btm_record["schemaVersion"]) is int and btm_record["schemaVersion"] == 3
@@ -1632,6 +1637,8 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
         self.assertNotIn("*", active(upload))
         for required in (
             "ACCEPTED: ${{ steps.publication.outputs.accepted }}",
+            "CONTEXT_COMPLETED: ${{ steps.publication.outputs.context_observation_completed }}",
+            "PRODUCT_ARGUMENT_OBSERVED: ${{ steps.publication.outputs.installer_product_argument_observed }}",
             "REGISTRATION_QUALIFIED: ${{ steps.publication.outputs.registration_qualified }}",
             "REMOVAL_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_data_qualified }}",
             "REMOVAL_INTEGRATION_DATA_QUALIFIED: ${{ steps.publication.outputs.removal_integration_data_qualified }}",
@@ -1642,10 +1649,53 @@ class MacE2FixtureWorkflowSourceTests(unittest.TestCase):
             "NATIVE_OUTCOME: ${{ steps.native.outcome }}",
             "PUBLICATION_OUTCOME: ${{ steps.publication.outcome }}",
             'set -euo pipefail',
-            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == true && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
+            '[[ "$PREPARATION_OUTCOME" == success && "$NATIVE_OUTCOME" == success && "$PUBLICATION_OUTCOME" == success && "$CONTEXT_COMPLETED" == true && "$PRODUCT_ARGUMENT_OBSERVED" == true && "$REMOVAL_RECOVERY_DATA_QUALIFIED" == false && "$REMOVAL_CHANGES_DATA_QUALIFIED" == false && "$REMOVAL_PARENT_DATA_QUALIFIED" == false && "$REMOVAL_INTEGRATION_DATA_QUALIFIED" == false && "$REMOVAL_DATA_QUALIFIED" == false && "$REGISTRATION_QUALIFIED" == false && "$ACCEPTED" == false ]]',
         ):
             with self.subTest(finality=required):
                 self.assertIn(required, active(final))
+
+        self.assertIn('"installerProductArgumentObserved": False,', publish)
+        self.assertIn('installerProductArgumentObserved=bool(product_argument_observed),', publish)
+        self.assertEqual([line.strip() for line in active(publish).splitlines()
+            if 'summary["installerProductArgumentObserved"] =' in line],
+            ['summary["installerProductArgumentObserved"] = False'] * 2)
+        self.assertIn('b"installer_product_argument_observed=true\\n" if summary["installerProductArgumentObserved"] else b"installer_product_argument_observed=false\\n"', publish)
+        self.assertEqual(publish.count('fixture.context_publication_tick('), 4)
+        self.assertGreater(publish.rindex('fixture.context_publication_tick('), publish.index('os.close(fd)'))
+        self.assertLess(publish.index('"summary-context-presentation-source"'), publish.index('_entry, result_body ='))
+        self.assertNotIn('installerProductArgumentObserved', gates)
+        promotion = textwrap.dedent(section(publish,
+            '              context_completed = installer_context is not None and installer_context["completed"]',
+            '              known_pass = ('))
+        # Only the existing pure route block, not imports/files/publication or
+        # native. Actual full owner-result mutation tests live in ContextTests.
+        observed = {"completed": True, "deadlineNs": "200000000000"}
+        class ValidatedContext:
+            CONTEXT_SECONDS = 120
+            decimal = staticmethod(int)
+            def context_observation_result(_self, report, source):
+                self.assertIs(report, marker); self.assertEqual(source, "a" * 40)
+                calls.append("observation")
+                return observed
+            def context_publication_tick(_self, value, previous):
+                self.assertIs(value, observed); self.assertEqual(previous, 80_000_000_000)
+                calls.append("clock")
+                if failure: raise ValueError("same-original clock refused")
+                return 150_000_000_000
+            def context_product_argument_observed(_self, report, source):
+                self.assertIs(report, marker); calls.append("argument")
+                return argument
+        marker = object()
+        for outcome, argument, failure in (("success", True, False), ("success", False, False),
+                                           ("success", True, True), ("failure", True, False)):
+            calls = []
+            ns = {"installer_context": observed, "CONTEXT_PRODUCT_SELECTED": True,
+                  "outcome": outcome, "fixture": ValidatedContext(), "result": marker, "source": "a" * 40}
+            exec(compile(promotion, "<fixed-context-publication-route>", "exec"), ns)
+            self.assertEqual(ns["context_completed"], outcome == "success" and not failure)
+            self.assertEqual(ns["product_argument_observed"], outcome == "success" and argument and not failure)
+            self.assertEqual(calls, [] if outcome != "success" else ["observation", "clock"] if failure
+                             else ["observation", "clock", "argument"])
 
 
 if __name__ == "__main__":

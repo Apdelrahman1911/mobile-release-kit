@@ -2648,10 +2648,18 @@ class InstallerContextTests(unittest.TestCase):
             parent = ET.SubElement(toc, "file", id=str(serial))
             ET.SubElement(parent, "name").text = fixture.CONTEXT_PACKAGES[1]
             ET.SubElement(parent, "type").text = "directory"
+        resources = None
+        if fixture.CONTEXT_PRESENTATION_RESOURCE in members:
+            serial += 1
+            resources = ET.SubElement(toc, "file", id=str(serial))
+            ET.SubElement(resources, "name").text = "Resources"
+            ET.SubElement(resources, "type").text = "directory"
         for name, content in members.items():
             serial += 1
-            element = ET.SubElement(toc if name == "Distribution" else parent, "file", id=str(serial))
-            ET.SubElement(element, "name").text = name
+            resource = name == fixture.CONTEXT_PRESENTATION_RESOURCE
+            target = resources if resource else toc if name == "Distribution" else parent
+            element = ET.SubElement(target, "file", id=str(serial))
+            ET.SubElement(element, "name").text = "InstallerReadMe.html" if resource else name
             ET.SubElement(element, "type").text = "file"
             data = ET.SubElement(element, "data")
             for key, value in (("length", len(content)), ("offset", 32 + len(heap)), ("size", len(content))):
@@ -2826,6 +2834,68 @@ class InstallerContextTests(unittest.TestCase):
             calls = [{"role": "context-product-build", "entered": True, "returned": True, "returncode": 0}]
             self.assertIs(fixture.context_distribution_diagnostic_data(diagnostic, diagnostic["phase"],
                           "context-product-distribution", calls), diagnostic)
+
+        # Same accepted public Install presentation, with only the three fixed
+        # nonshipping identifier/version/component substitutions. Inert XAR DATA
+        # here is not an observed productbuild or GUI Installer execution.
+        distribution_source = (PATH.parents[1] / "macos-installed-inputs/Distribution.xml").read_bytes()
+        readme = (PATH.parents[1] / "macos-installed-inputs/InstallerReadMe.html").read_bytes()
+        self.assertEqual(fixture.digest(distribution_source), "02f90d45759692d95c9c3ca8599f7c4a597cf3d07df9f47cda18ae4e26fc021a")
+        self.assertEqual(fixture.digest(readme), "361f0e5ea46d1b4ccad9b8302afd35c7b9f8f4b8600cc339393532a5d6e1ff71")
+        presentation = (distribution_source, readme)
+        distribution, resource = fixture.context_presentation_data(*presentation)
+        self.assertEqual(resource, readme)
+        self.assertEqual(fixture.digest(distribution), "e04f7696d5af2db7225932ac2352a659959c9cb0360826daa3d68e91c51d974e")
+        self.assertEqual(distribution.count(fixture.CONTEXT_IDENTIFIERS[1].encode("ascii")), 2)
+        for changed in ((distribution_source + b" ", readme), (distribution_source, readme + b" "),
+                        (bytearray(distribution_source), readme), (distribution_source, b"")):
+            with self.assertRaisesRegex(fixture.Refused, "^context-presentation-source$"):
+                fixture.context_presentation_data(*changed)
+        for directory in (False, True):
+            expected = {"Distribution": distribution, fixture.CONTEXT_PRESENTATION_RESOURCE: readme,
+                        **(members if directory else {fixture.CONTEXT_PACKAGES[1]: component})}
+            product = self.xar(expected, directory=directory)
+            fixture.context_product(product, component, members, presentation=presentation)
+            actual = fixture.context_xar(product, product=True, presentation=True)
+            self.assertEqual(actual[fixture.CONTEXT_PRESENTATION_RESOURCE], readme)
+            with self.assertRaises(fixture.Refused):
+                fixture.context_product(product, component, members)  # Old mode remains resource-free.
+            for replacement in (None, readme + b"unexpected"):
+                changed = dict(expected)
+                if replacement is None:
+                    changed.pop(fixture.CONTEXT_PRESENTATION_RESOURCE)
+                else:
+                    changed[fixture.CONTEXT_PRESENTATION_RESOURCE] = replacement
+                with self.assertRaises(fixture.Refused):
+                    fixture.context_product(self.xar(changed, directory=directory), component, members,
+                                            presentation=presentation)
+            for changed_distribution in (
+                distribution.replace(b'InstallerReadMe.html', b'Other.html', 1),
+                distribution.replace(b'allow-external-scripts="false"', b'allow-external-scripts="true"'),
+                distribution.replace(b'</installer-gui-script>', b'<script>arbitrary()</script></installer-gui-script>'),
+                distribution.replace(b'>context-wrapped.pkg<', b'>https://outside.invalid/component.pkg<'),
+                distribution.replace(b'auth="root"', b'auth="none"'),
+            ):
+                changed = dict(expected, Distribution=changed_distribution)
+                with self.assertRaises(fixture.Refused):
+                    fixture.context_product(self.xar(changed, directory=directory), component, members,
+                                            presentation=presentation)
+            for mode in ("foreign-resource", "second-resource", "symlink-resource", "renamed-directory"):
+                def mutate_resource(toc):
+                    root = next(e for e in toc.findall("file") if e.findtext("name") == "Resources")
+                    leaf = root.find("file")
+                    if mode == "foreign-resource":
+                        leaf.find("name").text = "foreign.html"
+                    elif mode == "second-resource":
+                        extra = copy.deepcopy(leaf); extra.set("id", "999")
+                        extra.find("name").text = "second.html"; root.append(extra)
+                    elif mode == "symlink-resource":
+                        leaf.find("type").text = "symlink"
+                    else:
+                        root.find("name").text = "OtherResources"
+                with self.subTest(presentation=mode, directory=directory), self.assertRaises(fixture.Refused):
+                    fixture.context_product(self.xar(expected, directory=directory, mutate=mutate_resource),
+                                            component, members, presentation=presentation)
 
     def test_archive_alias_payload_overlap_tail_checksum_hooks_and_product_change_are_refused(self):
         members = {"PackageInfo": self.package_info(), "Scripts": b"inert"}
@@ -3330,6 +3400,26 @@ class InstallerContextTests(unittest.TestCase):
                 fixture.context_record(fixture.canonical(row), SOURCE, "b" * 64, "component",
                                        100_000_000_000, expected_output, packages)
 
+        # $1 must match its own full nominated original, independently of the
+        # environment PACKAGE_PATH. Reuse the real raw-record parser.
+        for case, label in (("component", "direct-component"), ("product", "outer-product")):
+            raw = self.raw(case=case)
+            raw.update(scriptArgumentCount=3, thirdArgumentIsRoot=True)
+            raw["argumentOne"] = dict(valid["packagePath"], match=label)
+            package = {label: packages["outer-product"]}
+            parsed = fixture.context_record(fixture.canonical(raw), SOURCE, "b" * 64, case,
+                                            100_000_000_000, expected_output, package)
+            self.assertEqual(parsed["argumentOne"], {"kind": "nominated", "match": label, "originalMatched": True})
+            for change in (
+                lambda row: row["argumentOne"]["original"].__setitem__(8, 21),
+                lambda row: row["argumentOne"].update(closed=False),
+                lambda row: row["argumentOne"].update(sha256="e" * 64),
+            ):
+                bad = copy.deepcopy(raw); change(bad)
+                with self.assertRaises(fixture.Refused):
+                    fixture.context_record(fixture.canonical(bad), SOURCE, "b" * 64, case,
+                                            100_000_000_000, expected_output, package)
+
     def test_public_projection_cannot_grant_authority_or_invent_unexecuted_cases_and_closes(self):
         value = self.public()
         self.assertEqual(fixture.installer_context_data(value, SOURCE), value)
@@ -3470,6 +3560,55 @@ class InstallerContextTests(unittest.TestCase):
                                 failure=None, phase=originals[-1]["role"], scratchRetired=True, protectedRetentionRequired=False)
                 self.assertIs(fixture.context_observation_result(complete, SOURCE), context)
                 self.assertEqual(len(originals), 12 if empty_boms else 10)
+                qualified = copy.deepcopy(complete)
+                qualified["artifacts"] = {fixture.CONTEXT_PRESENTATION_ARTIFACT: dict(fixture.CONTEXT_PRESENTATION_PINS)}
+                for index, label in enumerate(("direct-component", "outer-product")):
+                    current = qualified["installerContext"]["cases"][index]
+                    raw = self.raw(case=current["case"])
+                    original_id = (1, 30 + index, 0o100600, 501, 20, 1, 4096, 10, 20)
+                    raw.update(scriptArgumentCount=3, thirdArgumentIsRoot=True)
+                    raw["argumentOne"] = {"kind": "nominated", "match": label, "opened": True,
+                        "closed": True, "original": list(original_id), "sha256": "d" * 64}
+                    raw_body = fixture.canonical(raw)
+                    current.update(fixture.context_record(raw_body, SOURCE, "b" * 64, current["case"],
+                        100_000_000_000, (1, 2, 0o100600, 501, 20, 1),
+                        {label: {"original": original_id, "sha256": "d" * 64}}), recordSha256=fixture.digest(raw_body))
+                self.assertTrue(fixture.context_product_argument_observed(qualified, SOURCE))
+                self.assertFalse(fixture.context_product_argument_observed(complete, SOURCE))
+                for argument, count, target in (
+                    ({"kind": "missing", "match": None, "originalMatched": None}, 0, False),
+                    ({"kind": "empty", "match": None, "originalMatched": None}, 3, True),
+                    ({"kind": "other", "match": None, "originalMatched": None}, 3, True),
+                    ({"kind": "nominated", "match": "wrapped-component", "originalMatched": True}, 3, True),
+                    ({"kind": "nominated", "match": "direct-component", "originalMatched": True}, 3, True),
+                    ({"kind": "nominated", "match": "outer-product", "originalMatched": True}, 2, False),
+                    ({"kind": "nominated", "match": "outer-product", "originalMatched": True}, 3, False),
+                ):
+                    wrong = copy.deepcopy(qualified)
+                    wrong["installerContext"]["cases"][1].update(argumentOne=argument,
+                        scriptArgumentCount=count, thirdArgumentIsRoot=target,
+                        packagePath={"kind": "nominated", "match": "outer-product", "originalMatched": True})
+                    self.assertFalse(fixture.context_product_argument_observed(wrong, SOURCE))
+                    self.assertIsNotNone(fixture.context_observation_result(wrong, SOURCE))
+                    self.assertTrue(wrong["scratchRetired"])  # Known clean observation, not argument authority.
+                for mutate in (
+                    lambda data: data.pop("artifacts"),
+                    lambda data: data["artifacts"].clear(),
+                    lambda data: data["artifacts"][fixture.CONTEXT_PRESENTATION_ARTIFACT].update(readmeSourceSha256="e" * 64),
+                    lambda data: data["artifacts"][fixture.CONTEXT_PRESENTATION_ARTIFACT].update(extra=True),
+                    lambda data: data.update(failure="context-deadline"),
+                ):
+                    wrong = copy.deepcopy(qualified); mutate(wrong)
+                    self.assertFalse(fixture.context_product_argument_observed(wrong, SOURCE))
+                for mutate in (
+                    lambda data: data.update(outputClosesKnown=False),
+                    lambda data: data.update(scratchRetired=False),
+                    lambda data: data["installerContext"]["cases"][1]["argumentOne"].update(originalMatched=False),
+                    lambda data: data["originalCalls"][-1].update(returned=False),
+                ):
+                    wrong = copy.deepcopy(qualified); mutate(wrong)
+                    with self.assertRaises(fixture.Refused):
+                        fixture.context_product_argument_observed(wrong, SOURCE)
                 self.assertFalse(complete["passed"] or context["receiptsRetired"] or context["maintenanceQualified"])
                 for mutate in (
                     lambda data: data.update(sourceClosesKnown=False), lambda data: data.update(outputClosesKnown=False),
@@ -3522,6 +3661,16 @@ class InstallerContextTests(unittest.TestCase):
                         fixture.context_observation_result(changed, SOURCE)
                 self.assertLess(len(fixture.canonical(complete)), 65536)
                 self.assertLess(len(fixture.canonical(context)), 49152)
+
+        # Same original endpoint across publication and consuming closes; a
+        # future clock, rollback or exhausted final second cannot qualify.
+        clock = {"deadlineNs": "200000000000"}
+        with patch.object(fixture.time, "clock_gettime_ns", return_value=150_000_000_000):
+            self.assertEqual(fixture.context_publication_tick(clock, 80_000_000_000), 150_000_000_000)
+        for previous, now in ((79_999_999_999, 150_000_000_000), (150_000_000_001, 150_000_000_000),
+                              (150_000_000_000, 199_000_000_001), (150_000_000_000, 200_000_000_000)):
+            with patch.object(fixture.time, "clock_gettime_ns", return_value=now), self.assertRaises(fixture.Refused):
+                fixture.context_publication_tick(clock, previous)
 
     def test_common_deadline_is_checked_before_and_after_the_original_owner_return(self):
         self.assertEqual(fixture.context_timeout(100_000_000_000, 40_100_000_000, 60), 59)
@@ -4197,6 +4346,28 @@ class InstallerContextTests(unittest.TestCase):
         self.assertNotIn('--forget', source)
         self.assertIn('fixture.installer_context_data(result["installerContext"], source)', publish)
         self.assertIn('installer_context is not None and installer_context["completed"]', publish)
+
+        import ast
+        tree = ast.parse(source)
+        methods = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        observer_method = ast.get_source_segment(source, methods["observe_installer_context"])
+        self.assertIn('if self.context_receipts_selected:', observer_method)
+        self.assertIn('self.source.read(CONTEXT_DISTRIBUTION_SOURCE)', observer_method)
+        self.assertIn('self.source.read(CONTEXT_README_SOURCE)', observer_method)
+        self.assertIn('product_argv.extend(("--resources", str(resource_root)))', observer_method)
+        self.assertEqual(observer_method.count('self.context_command("context-product-build", product_argv, 30)'), 1)
+        self.assertEqual(observer_method.count('self.outputs.read(resource_entry) == expected_readme'), 1)
+        self.assertLess(observer_method.index('self.artifacts[CONTEXT_PRESENTATION_ARTIFACT]'),
+                        observer_method.index('self.complete_installer_context(package_entries, packages)'))
+        self.assertNotIn('context_product_argument_observed(', observer_method)
+        self.assertIn('CONTEXT_PRODUCT_SELECTED = True', publish)
+        self.assertIn('--observe-context-receipts', workflow)
+        self.assertEqual(publish.count('fixture.context_publication_tick('), 4)
+        self.assertGreater(publish.rindex('fixture.context_publication_tick('), publish.index('os.close(fd)'))
+        self.assertIn('"$PRODUCT_ARGUMENT_OBSERVED" == true', workflow)
+        self.assertIn('"$ACCEPTED" == false', workflow)
+        self.assertEqual(fixture.CONTEXT_SECONDS, 120)
+        self.assertEqual(fixture.CONTEXT_PACKAGE_LIMIT, 8 * 1024 * 1024)
 
 
 if __name__ == "__main__":

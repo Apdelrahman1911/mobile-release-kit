@@ -250,6 +250,18 @@ CONTEXT_PACKAGE_LABELS = ("direct-component", "wrapped-component", "outer-produc
 CONTEXT_SOURCE = NATIVE + "/src/e2_installer_context.c"
 CONTEXT_SECONDS, CONTEXT_PACKAGE_LIMIT = 120, 8 * 1024 * 1024
 CONTEXT_RECEIPT_ARGUMENT = "--observe-context-receipts"
+# This fixed presentation profile is SOURCE-only. The ordinary full E2 Context
+# keeps its original synthetic distribution; only the context-only route uses
+# the accepted one-component Install wrapper shape and exact static resource.
+CONTEXT_DISTRIBUTION_SOURCE = "desktop/macos-installed-inputs/Distribution.xml"
+CONTEXT_README_SOURCE = "desktop/macos-installed-inputs/InstallerReadMe.html"
+CONTEXT_PRESENTATION_ARTIFACT = "installer-context-product-presentation"
+CONTEXT_PRESENTATION_RESOURCE = "Resources/InstallerReadMe.html"
+CONTEXT_PRESENTATION_PINS = {
+    "distributionSourceSha256": "02f90d45759692d95c9c3ca8599f7c4a597cf3d07df9f47cda18ae4e26fc021a",
+    "readmeSourceSha256": "361f0e5ea46d1b4ccad9b8302afd35c7b9f8f4b8600cc339393532a5d6e1ff71",
+    "inputDistributionSha256": "e04f7696d5af2db7225932ac2352a659959c9cb0360826daa3d68e91c51d974e",
+}
 CONTEXT_RECEIPT_ROLES = ("context-component-receipt-diagnostic-query", "context-component-receipt-diagnostic-census")
 CONTEXT_POST_CENSUS_ROLES = ("context-component-receipt-post-census", "context-product-receipt-post-census")
 CONTEXT_ROLES = ("context-helper-build", "context-component-build", "context-product-component-build",
@@ -1592,14 +1604,15 @@ def context_metadata_diagnostic_data(value, phase, failure, calls):
     return value if len(canonical(value)) <= 2048 else None
 
 
-def context_xar(body, *, product=False):
+def context_xar(body, *, product=False, presentation=False):
     """Two closed scripts-only envelopes, never an extractor or production parser.
 
     XAR's format checksum covers the compressed TOC. Its heap interval and every
     member must cover the original archive exactly. Independent SHA256 of the
     complete original, not the format's possible SHA1, binds package evidence.
     """
-    need(type(product) is bool and type(body) is bytes and 28 <= len(body) <= CONTEXT_PACKAGE_LIMIT,
+    need(type(product) is bool and type(presentation) is bool and (not presentation or product)
+         and type(body) is bytes and 28 <= len(body) <= CONTEXT_PACKAGE_LIMIT,
          "context-xar-bound")
     magic, header, version, compressed, expanded, checksum = struct.unpack_from(">IHHQQI", body)
     algorithms = {1: ("sha1", 20), 3: ("sha256", 32), 4: ("sha512", 64)}
@@ -1632,6 +1645,8 @@ def context_xar(body, *, product=False):
     if product:
         allowed = {"Distribution", CONTEXT_PACKAGES[1],
                    *(CONTEXT_PACKAGES[1] + "/" + name for name in ("PackageInfo", "Scripts", "Bom"))}
+        if presentation:
+            allowed.update(("Resources", CONTEXT_PRESENTATION_RESOURCE))
     queue = [(element, "") for element in toc.findall("file")]
     while queue:
         element, parent = queue.pop(0)
@@ -1721,8 +1736,10 @@ def context_xar(body, *, product=False):
         name = parent + name
         need(name in allowed and name not in members and name not in directories, "context-xar-roster")
         if kind == "directory":
-            need(product and name == CONTEXT_PACKAGES[1] and not parent
-                 and element.find("data") is None and 2 <= len(element.findall("file")) <= 3,
+            children = len(element.findall("file"))
+            need(product and not parent and element.find("data") is None
+                 and (name == CONTEXT_PACKAGES[1] and 2 <= children <= 3
+                      or presentation and name == "Resources" and children == 1),
                  "context-xar-directory")
             directories.add(name)
             queue.extend((child, name + "/") for child in element.findall("file"))
@@ -1758,7 +1775,8 @@ def context_xar(body, *, product=False):
                      "context-xar-member-checksum")
         members[name] = decoded
         intervals.append((offset, offset + length))
-        need(len(members) <= 4 and len(seen_ids) <= 5, "context-xar-count")
+        need(len(members) <= (5 if presentation else 4)
+             and len(seen_ids) <= (7 if presentation else 5), "context-xar-count")
     cursor = 0
     for low, high in sorted(intervals):
         need(low == cursor, "context-xar-unaccounted")
@@ -1769,9 +1787,11 @@ def context_xar(body, *, product=False):
              "context-component-roster")
     else:
         embedded = {CONTEXT_PACKAGES[1] + "/" + name for name in ("PackageInfo", "Scripts")}
-        need(set(members) == {"Distribution", CONTEXT_PACKAGES[1]}
-             or set(members) in ({"Distribution", *embedded},
-                                {"Distribution", *embedded, CONTEXT_PACKAGES[1] + "/Bom"}),
+        resources = {CONTEXT_PRESENTATION_RESOURCE} if presentation else set()
+        need((not presentation or "Resources" in directories)
+             and (set(members) == {"Distribution", CONTEXT_PACKAGES[1], *resources}
+                  or set(members) in ({"Distribution", *embedded, *resources},
+                                     {"Distribution", *embedded, CONTEXT_PACKAGES[1] + "/Bom", *resources})),
              "context-product-roster")
     return members
 
@@ -1814,6 +1834,27 @@ def context_distribution():
             '<choice id="context" visible="false"><pkg-ref id="' + CONTEXT_IDENTIFIERS[1] + '"/></choice>'
             '<pkg-ref id="' + CONTEXT_IDENTIFIERS[1] + '" version="1">'
             + CONTEXT_PACKAGES[1] + '</pkg-ref></installer-gui-script>\n').encode("ascii")
+
+
+def context_presentation_data(distribution, readme):
+    """Only the exact accepted public Install template/resource; no path or XML policy input."""
+    need(type(distribution) is bytes and 0 < len(distribution) <= 65536
+         and digest(distribution) == CONTEXT_PRESENTATION_PINS["distributionSourceSha256"]
+         and type(readme) is bytes and 0 < len(readme) <= 65536
+         and digest(readme) == CONTEXT_PRESENTATION_PINS["readmeSourceSha256"],
+         "context-presentation-source")
+    original_id = b"dev.mobile-release-kit.desktop.installed"
+    need(distribution.count(original_id) == 2
+         and distribution.count(b"__MRK_PACKAGE_VERSION__") == 1
+         and distribution.count(b"MobileReleaseKit.pkg") == 1, "context-presentation-source")
+    # Only fixed nonshipping identity/version/local component substitutions.
+    # The actual options, resource nodes and resource body remain byte exact.
+    selected = distribution.replace(original_id, CONTEXT_IDENTIFIERS[1].encode("ascii"))
+    selected = selected.replace(b"__MRK_PACKAGE_VERSION__", b"1").replace(
+        b"MobileReleaseKit.pkg", CONTEXT_PACKAGES[1].encode("ascii"))
+    need(digest(selected) == CONTEXT_PRESENTATION_PINS["inputDistributionSha256"],
+         "context-presentation-source")
+    return selected, readme
 
 
 CONTEXT_DISTRIBUTION_ARTIFACT = "installer-context-distribution-refusal"
@@ -1983,8 +2024,14 @@ def context_distribution_diagnostic_data(value, phase, failure, calls):
     return value if len(canonical(value)) <= 8192 else None
 
 
-def context_product(body, component, component_members):
-    members = context_xar(body, product=True)
+def context_product(body, component, component_members, *, presentation=None):
+    expected_distribution, expected_readme = context_distribution(), None
+    if presentation is not None:
+        need(type(presentation) is tuple and len(presentation) == 2, "context-presentation-source")
+        expected_distribution, expected_readme = context_presentation_data(*presentation)
+    members = context_xar(body, product=True, presentation=presentation is not None)
+    if presentation is not None:
+        need(members[CONTEXT_PRESENTATION_RESOURCE] == expected_readme, "context-presentation-resource")
     def tree(element):
         return (element.tag, tuple(sorted(element.attrib.items())), (element.text or "").strip(),
                 tuple((tree(child), (child.tail or "").strip()) for child in element))
@@ -2023,7 +2070,7 @@ def context_product(body, component, component_members):
             if (reference.text or "").strip() == "#" + CONTEXT_PACKAGES[1]:
                 reference.text = CONTEXT_PACKAGES[1]
         site, reference_index = "tree", None
-        need(tree(distribution) == tree(context_xml(context_distribution(), 65536)),
+        need(tree(distribution) == tree(context_xml(expected_distribution, 65536)),
              "context-product-distribution")
     except Refused as error:
         if type(error) is Refused and error.args == ("context-product-distribution",):
@@ -2043,7 +2090,8 @@ def context_product(body, component, component_members):
         need(members[CONTEXT_PACKAGES[1]] == component, "context-product-component")
     else:
         embedded = {name.removeprefix(CONTEXT_PACKAGES[1] + "/"): content
-                    for name, content in members.items() if name != "Distribution"}
+                    for name, content in members.items()
+                    if name not in ("Distribution", CONTEXT_PRESENTATION_RESOURCE)}
         need(embedded == component_members, "context-product-component")
 
 
@@ -2258,6 +2306,37 @@ def context_observation_result(result, source):
          and all(call["returned"] is True and type(call.get("returncode")) is int and call["returncode"] == 0
                  for call in calls), "context-observation-calls")
     return value
+
+
+def context_product_argument_observed(result, source):
+    """A closed exact product/$1 observation, never completed-package or UI authority.
+
+    Do not change observation completion/retirement if this predicate is false.
+    The native helper can safely finish after observing an unusable temp path.
+    """
+    value = context_observation_result(result, source)
+    if value is None:
+        return False
+    artifacts = result.get("artifacts")
+    if (type(artifacts) is not dict
+            or artifacts.get(CONTEXT_PRESENTATION_ARTIFACT) != CONTEXT_PRESENTATION_PINS):
+        return False
+    for row, label in zip(value["cases"], ("direct-component", "outer-product")):
+        if (row["scriptArgumentCount"] < 3 or row["thirdArgumentIsRoot"] is not True
+                or row["argumentOne"] != {"kind": "nominated", "match": label, "originalMatched": True}):
+            return False
+    return True
+
+
+def context_publication_tick(value, previous):
+    """Check the SAME Context endpoint through the existing publisher's closes."""
+    deadline = decimal(value["deadlineNs"])
+    origin = deadline - CONTEXT_SECONDS * 1_000_000_000
+    now = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    need(type(previous) is int and 0 <= origin <= previous <= now,
+         "context-publication-clock")
+    context_timeout(deadline, now, CONTEXT_SECONDS)
+    return now
 
 
 def context_receipt_query_classification(stdout, stderr, returncode):
@@ -4294,7 +4373,7 @@ class Operation:
         context_timeout(deadline, time.clock_gettime_ns(time.CLOCK_MONOTONIC), CONTEXT_SECONDS)
         self.context_receipt_diagnostic = value  # Provisional until ALL original closes and writer return.
 
-    def context_audit(self, entry, body, *, component=None, identifier=None, expected=None):
+    def context_audit(self, entry, body, *, component=None, identifier=None, expected=None, presentation=None):
         """Pure archive/PackageInfo/scripts DATA after the original body read.
 
         No acquisition, tool call or readback belongs in this refusal boundary.
@@ -4304,7 +4383,7 @@ class Operation:
         stage, members = "archive", None
         try:
             if component is not None:
-                return context_product(body, *component)
+                return context_product(body, *component, presentation=presentation)
             members = context_xar(body)
             stage = "package-info"
             context_package_info(members["PackageInfo"], identifier)
@@ -4391,6 +4470,11 @@ class Operation:
         deadline = time.clock_gettime_ns(time.CLOCK_MONOTONIC) + CONTEXT_SECONDS * 1_000_000_000
         need(0 < deadline <= MAX_RAW, "context-deadline")
         self.installer_context["deadlineNs"] = str(deadline)
+        presentation = None
+        expected_distribution, expected_readme = context_distribution(), None
+        if self.context_receipts_selected:
+            presentation = (self.source.read(CONTEXT_DISTRIBUTION_SOURCE), self.source.read(CONTEXT_README_SOURCE))
+            expected_distribution, expected_readme = context_presentation_data(*presentation)
         context_root = self.scratch / "installer-context"
         self.mkdir(context_root)
         original_outputs = {case: self.context_output(context_root / (case + "-record.json")) for case in CONTEXT_CASES}
@@ -4467,20 +4551,33 @@ class Operation:
                  and self.outputs.read(helper_entry) == helper_body, "context-scripts-changed")
             components.append((body, members))
             package_entries.append(entry)
+        resource_entry, resource_root = None, None
+        if presentation is not None:
+            resource_root = context_root / "resources"
+            self.mkdir(resource_root)
+            resource_path = resource_root / "InstallerReadMe.html"
+            self.outputs.publish(resource_path, expected_readme)
+            resource_entry, resource_body = self.outputs.file(resource_path, 65536, modes=(0o600,))
+            need(resource_body == expected_readme
+                 and os.listdir(self.outputs.directories[resource_root]["fd"]) == ["InstallerReadMe.html"],
+                 "context-presentation-resource")
         distribution = context_root / "Distribution"
-        self.outputs.publish(distribution, context_distribution())
+        self.outputs.publish(distribution, expected_distribution)
         distribution_entry, distribution_body = self.outputs.file(distribution, 65536, modes=(0o600,))
         self.phase = "context-productbuild-original"
         product_tool, product_tool_body = self.outputs.file(Path("/usr/bin/productbuild"), 4 * 1024 * 1024,
                                                            uid=0, modes=(0o555, 0o755))
         self.artifacts["installer-context-productbuild"] = {"sha256": digest(product_tool_body), "bytes": len(product_tool_body)}
-        self.context_command("context-product-build", ["/usr/bin/productbuild", "--distribution", str(distribution),
-                             "--package-path", str(context_root), str(package_paths[2])], 30)
+        product_argv = ["/usr/bin/productbuild", "--distribution", str(distribution), "--package-path", str(context_root)]
+        if presentation is not None:
+            product_argv.extend(("--resources", str(resource_root)))
+        product_argv.append(str(package_paths[2]))
+        self.context_command("context-product-build", product_argv, 30)
         self.phase = "context-product-audit"
         entry, body = self.outputs.file(package_paths[2], CONTEXT_PACKAGE_LIMIT, modes=(0o600, 0o644))
-        self.context_audit(entry, body, component=components[1])
+        self.context_audit(entry, body, component=components[1], presentation=presentation)
         package_entries.append(entry)
-        need(self.outputs.read(distribution_entry) == distribution_body == context_distribution()
+        need(self.outputs.read(distribution_entry) == distribution_body == expected_distribution
              and self.outputs.read(product_tool) == product_tool_body,
              "context-distribution-changed")
         packages = {label: {"original": list(entry["identity"]), "sha256": digest(self.outputs.read(entry))}
@@ -4504,6 +4601,13 @@ class Operation:
                  and digest(self.outputs.read(package_entries[2])) == packages[CONTEXT_PACKAGE_LABELS[2]]["sha256"],
                  "context-packages-changed")
             self.installer_context["cases"].append(observed)
+        if presentation is not None:
+            need(self.source.read(CONTEXT_DISTRIBUTION_SOURCE) == presentation[0]
+                 and self.source.read(CONTEXT_README_SOURCE) == presentation[1]
+                 and self.outputs.read(resource_entry) == expected_readme
+                 and os.listdir(self.outputs.directories[resource_root]["fd"]) == ["InstallerReadMe.html"],
+                 "context-presentation-resource")
+            self.artifacts[CONTEXT_PRESENTATION_ARTIFACT] = dict(CONTEXT_PRESENTATION_PINS)
         self.complete_installer_context(package_entries, packages)
 
     def compiler_environment(self, target):

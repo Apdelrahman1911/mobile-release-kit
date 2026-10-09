@@ -70,7 +70,8 @@ if not bootstrap_ok:
     raise SystemExit("E2 summary DATA source admission refused.")
 REMOVAL_DATA_SELECTED = False  # Historical two-graph4/10 DATA selection.
 REMOVAL_INTEGRATION_SELECTED = False  # Historical fixed17 scope remains independently validated.
-REMOVAL_PARENT_SELECTED = True  # Two existing originals: changed Parent2 and selected-B Record1 DATA only.
+REMOVAL_PARENT_SELECTED = False  # Historical Parent2/Record1 DATA remains independently validated.
+CONTEXT_PRODUCT_SELECTED = True  # Fixed source-bound product/$1 observation only; no maintenance authority.
 REMOVAL_CHANGES_SELECTED = False  # Historical changed11 scope remains independently validated.
 REMOVAL_RECOVERY_SELECTED = False  # NativeRecovery4 unchanged; no overlapping rerun.
 OWNER_DIAGNOSTIC_ROLES = (
@@ -295,6 +296,7 @@ OWNER_DIAGNOSTIC_REFUSALS = (
     'context-package-hook', 'context-package-identifier', 'context-package-identity',
     'context-package-no-payload', 'context-package-original', 'context-packages-changed',
     'context-product-component', 'context-product-distribution', 'context-product-roster',
+    'context-presentation-source', 'context-presentation-resource', 'context-publication-clock',
     'context-public-binding', 'context-public-case', 'context-public-completion',
     'context-public-observation', 'context-public-order', 'context-public-receipts',
     'context-public-started', 'context-public-unentered', 'context-receipt-binding',
@@ -428,7 +430,7 @@ summary = {
     "contextPackageInfoDiagnostic": None,
     "contextDistributionDiagnostic": None,
     "contextReceiptDiagnostic": None, "diagnosticCaptured": False,
-    "contextObservationCompleted": False,
+    "contextObservationCompleted": False, "installerProductArgumentObserved": False,
     "registrationReservation": None, "registrationReservationQualified": False, "registrationFailure": None,
     "removalData": None, "removalDataQualified": False, "removalDataDiagnostic": None,
     "removalIntegrationData": None, "removalIntegrationDataQualified": False, "removalIntegrationDataDiagnostic": None,
@@ -461,7 +463,9 @@ try:
                      "desktop/tools/macos_maintenance_fixture_prepare.sh",
                      "desktop/tools/macos_maintenance_fixture_publish.sh",
                      "desktop/macos-installed-inputs/build-release.json", fixture.CONTEXT_SOURCE,
-                     fixture.LAYOUT_SOURCE):
+                     fixture.LAYOUT_SOURCE,
+                     *((fixture.CONTEXT_DISTRIBUTION_SOURCE, fixture.CONTEXT_README_SOURCE)
+                       if CONTEXT_PRODUCT_SELECTED else ())):
         row = rows[relative]
         _entry, content = book.file(CHECKOUT / relative, 1048576, modes=(0o444, 0o644))
         fixture.need(len(content) == row["size"] and fixture.digest(content) == row["sha256"]
@@ -472,6 +476,11 @@ try:
             release = release_data["release"]
             fixture.need(type(release) is str and re.fullmatch(r"[a-z0-9_.-]{1,63}", release),
                          "summary-release-source")
+    if CONTEXT_PRODUCT_SELECTED:
+        fixture.need(rows[fixture.CONTEXT_DISTRIBUTION_SOURCE]["sha256"]
+                     == fixture.CONTEXT_PRESENTATION_PINS["distributionSourceSha256"]
+                     and rows[fixture.CONTEXT_README_SOURCE]["sha256"]
+                     == fixture.CONTEXT_PRESENTATION_PINS["readmeSourceSha256"], "summary-context-presentation-source")
     _entry, result_body = book.file(work / "e2-native-result.json", 65536, modes=(0o600,))
     result = fixture.decode(result_body, 65536)
     expected_keys = set("""schemaVersion type source tree workflowSource workflow runId runAttempt platform toolchain
@@ -536,15 +545,20 @@ try:
         # An unfinished/unknown phase can never qualify native acceptance.
         installer_context = context_record
     service_layout = None
-    selected_roles = (fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
+    selected_roles = (fixture.CONTEXT_ROLES if CONTEXT_PRODUCT_SELECTED else
+                      fixture.RECOVERY_ROLES if REMOVAL_RECOVERY_SELECTED else fixture.CHANGES_ROLES if REMOVAL_CHANGES_SELECTED else
                       fixture.PARENT_ROLES if REMOVAL_PARENT_SELECTED else
                       fixture.INTEGRATION_ROLES if REMOVAL_INTEGRATION_SELECTED else
                       fixture.REMOVAL_ROLES if REMOVAL_DATA_SELECTED else fixture.REGISTRATION_ROLES)
     layout_record = fixture.service_layout_data(result["serviceLayoutObservation"], source)
     fixture.need(layout_record["selected"] is False and layout_record["started"] is False
                  and all(call["role"] in selected_roles for call in calls)
-                 and [call["role"] for call in calls] == list(selected_roles[:len(calls)]),
+                 and (CONTEXT_PRODUCT_SELECTED
+                      or [call["role"] for call in calls] == list(selected_roles[:len(calls)])),
                  "summary-registration-route")
+    # Context has two finite receipt variants and two optional empty-Bom calls.
+    # Diagnostics admit only these fixed roles; ANY positive observation below
+    # additionally requires context_observation_result's complete exact order.
     if layout_record["observerSourceSha256"] is not None:
         fixture.need(layout_record["observerSourceSha256"] == rows[fixture.LAYOUT_SOURCE]["sha256"],
                      "summary-cocoa-source")
@@ -674,14 +688,14 @@ try:
         # Exact own-event masks/hashes are mentions, not path lookups,
         # causal findings, native finality or service authority.
         btm_log = btm_record
-    # This committed workflow selects only fixed registration primitive qualification.
-    # Full E2/Cocoa/Context helper paths are unchanged but are not selected here.
+    # This committed workflow selects only the fixed public product Context.
+    # Other SOURCE-selected profiles retain their exact independent validators.
     fixture.need(result["contextReceiptDiagnostic"] is None, "summary-context-receipt-route")
     context_receipt_diagnostic = None
     diagnostic_captured = False
     registration = None
     registration_last = None
-    if outcome == "success" and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:
+    if outcome == "success" and not CONTEXT_PRODUCT_SELECTED and not REMOVAL_DATA_SELECTED and not REMOVAL_INTEGRATION_SELECTED and not REMOVAL_PARENT_SELECTED and not REMOVAL_CHANGES_SELECTED and not REMOVAL_RECOVERY_SELECTED:
         try:
             registration = fixture.registration_reservation_result(result, source, rows)
             registration_last = fixture.registration_publication_tick(
@@ -787,6 +801,22 @@ try:
         recovery_diagnostic = fixture.installer_worker_diagnostic_data(
             failed_graphs[0]["removalDataDiagnostic"], failed_graphs[0], rows, removal_role=failed_graphs[0]["role"])
     context_completed = installer_context is not None and installer_context["completed"]
+    product_argument_observed, context_last = False, None
+    if CONTEXT_PRODUCT_SELECTED:
+        context_completed = False
+        if outcome == "success":
+            try:
+                complete_context = fixture.context_observation_result(result, source)
+                if complete_context is not None:
+                    context_last = fixture.context_publication_tick(
+                        complete_context, fixture.decimal(complete_context["deadlineNs"])
+                        - fixture.CONTEXT_SECONDS * 1_000_000_000)
+                    product_argument_observed = fixture.context_product_argument_observed(result, source)
+                    context_completed = True
+            except BaseException:
+                product_argument_observed, context_completed, context_last = False, False, None
+    # A closed but nonmatching $1 remains a completed observation. It fails the
+    # product prerequisite, without retroactively inventing unknown scratch.
     known_pass = (
         outcome == "success" and result["passed"] is True and result["outcome"] == "passed"
         and result["failure"] is None and all(result[key] for key in flags)
@@ -817,6 +847,7 @@ try:
         contextDistributionDiagnostic=context_distribution_diagnostic,
         contextReceiptDiagnostic=context_receipt_diagnostic, diagnosticCaptured=bool(diagnostic_captured),
         contextObservationCompleted=bool(context_completed),
+        installerProductArgumentObserved=bool(product_argument_observed),
         registrationReservation=registration, registrationReservationQualified=registration_qualified, registrationFailure=registration_failure,
         removalData=removal_data, removalDataQualified=removal_qualified, removalDataDiagnostic=removal_diagnostic,
         removalIntegrationData=integration_data, removalIntegrationDataQualified=integration_qualified, removalIntegrationDataDiagnostic=integration_diagnostic,
@@ -824,7 +855,7 @@ try:
         removalChangesData=changes_data, removalChangesDataQualified=changes_qualified, removalChangesDataDiagnostic=changes_diagnostic,
         removalRecoveryData=recovery_data, removalRecoveryDataQualified=recovery_qualified, removalRecoveryDataDiagnostic=recovery_diagnostic,
         ownerDiagnostic=native_owner_failure_data(result["phase"], result["failure"], calls),
-        failure=None if (recovery_qualified if REMOVAL_RECOVERY_SELECTED else changes_qualified if REMOVAL_CHANGES_SELECTED else parent_qualified if REMOVAL_PARENT_SELECTED else integration_qualified if REMOVAL_INTEGRATION_SELECTED else removal_qualified if REMOVAL_DATA_SELECTED else registration_qualified) else "native-step-or-owner-did-not-establish-acceptance")
+        failure=None if (product_argument_observed if CONTEXT_PRODUCT_SELECTED else recovery_qualified if REMOVAL_RECOVERY_SELECTED else changes_qualified if REMOVAL_CHANGES_SELECTED else parent_qualified if REMOVAL_PARENT_SELECTED else integration_qualified if REMOVAL_INTEGRATION_SELECTED else removal_qualified if REMOVAL_DATA_SELECTED else registration_qualified) else "native-step-or-owner-did-not-establish-acceptance")
     book.check()
 except BaseException:
     summary["accepted"] = False
@@ -861,6 +892,7 @@ except BaseException:
     summary["contextReceiptDiagnostic"] = None
     summary["diagnosticCaptured"] = False
     summary["contextObservationCompleted"] = False
+    summary["installerProductArgumentObserved"] = False
     summary["failure"] = "owner-result-missing-or-refused"
 finally:
     if not book.finish():
@@ -898,6 +930,7 @@ finally:
         summary["contextReceiptDiagnostic"] = None
         summary["diagnosticCaptured"] = False
         summary["contextObservationCompleted"] = False
+        summary["installerProductArgumentObserved"] = False
         summary["failure"] = "summary-input-close-unknown"
 publisher = fixture.Originals()
 try:
@@ -913,6 +946,8 @@ try:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)
     if summary["removalRecoveryDataQualified"]:
         recovery_last = fixture.registration_publication_tick(summary["removalRecoveryData"], recovery_last)
+    if CONTEXT_PRODUCT_SELECTED and summary["contextObservationCompleted"]:
+        context_last = fixture.context_publication_tick(summary["installerContext"], context_last)
     body = fixture.canonical(summary)
     fixture.need(len(body) <= 49152, "summary-output-bound")
     publisher.publish(work / "e2-workflow-result.json", body, 0o600)
@@ -929,6 +964,8 @@ try:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)
     if summary["removalRecoveryDataQualified"]:
         recovery_last = fixture.registration_publication_tick(summary["removalRecoveryData"], recovery_last)
+    if CONTEXT_PRODUCT_SELECTED and summary["contextObservationCompleted"]:
+        context_last = fixture.context_publication_tick(summary["installerContext"], context_last)
     output_path = Path(os.environ["GITHUB_OUTPUT"])
     fixture.need(output_path.parent == WORK_PARENT / "_runner_file_commands"
                  and re.fullmatch(r"set_output_[A-Za-z0-9-]+", output_path.name), "summary-step-output-route")
@@ -940,6 +977,7 @@ try:
         line = ((b"accepted=true\n" if summary["accepted"] else b"accepted=false\n")
                 + (b"diagnostic_captured=true\n" if summary["diagnosticCaptured"] else b"diagnostic_captured=false\n")
                 + (b"context_observation_completed=true\n" if summary["contextObservationCompleted"] else b"context_observation_completed=false\n")
+                + (b"installer_product_argument_observed=true\n" if summary["installerProductArgumentObserved"] else b"installer_product_argument_observed=false\n")
                 + (b"registration_qualified=true\n" if summary["registrationReservationQualified"] else b"registration_qualified=false\n")
                 + (b"removal_data_qualified=true\n" if summary["removalDataQualified"] else b"removal_data_qualified=false\n")
                 + (b"removal_integration_data_qualified=true\n" if summary["removalIntegrationDataQualified"] else b"removal_integration_data_qualified=false\n")
@@ -964,9 +1002,11 @@ try:
         changes_last = fixture.registration_publication_tick(summary["removalChangesData"], changes_last)
     if summary["removalRecoveryDataQualified"]:
         recovery_last = fixture.registration_publication_tick(summary["removalRecoveryData"], recovery_last)
+    if CONTEXT_PRODUCT_SELECTED and summary["contextObservationCompleted"]:
+        context_last = fixture.context_publication_tick(summary["installerContext"], context_last)
 except BaseException:
     publisher.finish()
     raise SystemExit("E2 bounded summary publication refused; no acceptance is established.")
-print("Recovery DATA compiled and six selected groups completed; live recovery and shipping-image qualification remain pending."
-      if summary["removalRecoveryDataQualified"] else "Recovery DATA failed; retained summary is failure evidence only.")
+print("Fixed product/$1 observation completed; production package, GUI and maintenance qualification remain separate."
+      if summary["installerProductArgumentObserved"] else "Product/$1 prerequisite not established; retained summary is observation/failure evidence only.")
 PY_PUBLISH

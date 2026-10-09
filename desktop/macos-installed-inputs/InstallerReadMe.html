@@ -1,21 +1,18 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Mobile Release Kit installation</title></head>
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Mobile Release Kit installation and recovery</title></head>
 <body>
-<h1>Verified fixed-location installation</h1>
-<p>This package supports the fixed macOS 26 ARM64 profile. Installer obtains administrator authorization;
-only the fixed native installer writes the app and runtime. The application and Python never run as root.</p>
-<p>The app belongs at <code>/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app</code>.
-This is not a movable drag-copy installation. No other location is offered or searched.</p>
-<p>The verified Installer checks whether it can perform a fresh installation, leave an exact same-package
-installation unchanged, restore a missing app at its fixed location, or update an explicitly authorized predecessor.
-These are not general repair or overwrite permissions. Modified, partial or unknown files may be refused.
-<strong>Uninstall is unavailable.</strong> The existing engineering-v1 installation has no automatic migration route.</p>
-<p>Quit Mobile Release Kit and finish its work before continuing. Installer's quit prompt does not prove
-that all original workers have settled. The Installer must independently obtain its maintenance ownership.</p>
-<p>Keep projects, credential vault and Keychain records, signing originals, provider registrations,
-moved copies, unrelated files and partial-installation evidence. Do not delete the protected tree,
-change its permissions, or force-close processes to make a retry pass.</p>
-<p>If the verified package refuses a missing, moved or conflicting installation, preserve the existing files
-and obtain a separately reviewed recovery route. This package does not search for, move or remove another copy.
-These instructions do not prove package signing, notarization or release readiness.</p>
-</body></html>
+<h1>Before you install</h1>
+<p>If Mobile Release Kit is running, use <strong>Prepare app to quit</strong> when available, then quit the app normally. Do not force quit it to make installation proceed.</p>
+<p>Run <strong>Install.pkg</strong> from its complete original disk image. Keep <code>producer.json</code> and <code>producer.sig</code> alongside the package. The installer checks which action can safely be performed at the fixed managed location; this page is not permission to replace or delete files.</p>
+<h2>If installation does not finish</h2>
+<p><strong>Different failures have different causes.</strong> A generic Installer failure does not mean that recovery completed, or that an older package is necessarily required.</p>
+<ol>
+<li>Wait for Installer to finish before trying again. Keep existing installation and recovery files, projects and saved credentials. Do not delete managed folders or change their permissions to force progress.</li>
+<li>Recovery of an interrupted installation may require <strong>the same release's original Install disk image</strong> that was being installed. A newer installer cannot always repair an incomplete older installation. If the result asks for the original installer, obtain that exact release's complete disk image rather than guessing another version.</li>
+<li>To see details without Terminal, keep Installer open and choose <strong>Window &gt; Installer Log</strong> (Command-L). In that window choose <strong>Show All Logs</strong>; use <strong>Save</strong> to keep a copy if you need support. Review a log before sharing it.</li>
+<li>If the required original package is unavailable, or a retry with the correct package still fails, stop and keep the files and log for support. Do not repeatedly try unrelated packages.</li>
+</ol>
+<p>This information can also appear at the end of installation. It does not replace Installer's actual success or failure result. A package log is diagnostic information, not proof that installation or recovery finished.</p>
+</body>
+</html>

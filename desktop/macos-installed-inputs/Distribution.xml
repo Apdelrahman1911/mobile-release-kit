@@ -1,21 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Static presentation preparation only. Not selected by an existing workflow.
-     Target macOS26 productbuild/outer-package audit remains separately owed.
-     The component stays scripts-only, fixed-entry and fresh-only. -->
+<!-- Fixed Install product presentation. The original component remains
+     scripts-only; native admission, ownership and completed-package proof
+     decide whether installation can proceed. No automatic app termination. -->
 <installer-gui-script minSpecVersion="2">
-  <title>Mobile Release Kit — engineering fresh installation</title>
+  <title>Mobile Release Kit — installation and recovery</title>
   <options customize="never" require-scripts="false" allow-external-scripts="false" rootVolumeOnly="true"/>
   <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
   <volume-check script="true">
     <allowed-os-versions><os-version min="26.0" before="27"/></allowed-os-versions>
   </volume-check>
   <readme file="InstallerReadMe.html" mime-type="text/html"/>
+  <conclusion file="InstallerReadMe.html" mime-type="text/html"/>
   <choices-outline><line choice="fixed-install"/></choices-outline>
-  <choice id="fixed-install" title="Fresh installation at the fixed protected location" visible="false">
+  <choice id="fixed-install" title="Install at the fixed protected location" visible="false">
     <pkg-ref id="dev.mobile-release-kit.desktop.installed"/>
   </choice>
-  <pkg-ref id="dev.mobile-release-kit.desktop.installed" version="0.1.1" auth="root">MobileReleaseKit.pkg</pkg-ref>
-  <pkg-ref id="dev.mobile-release-kit.desktop.installed">
-    <must-close><app id="dev.mobile-release-kit.desktop"/></must-close>
-  </pkg-ref>
+  <pkg-ref id="dev.mobile-release-kit.desktop.installed" version="__MRK_PACKAGE_VERSION__" auth="root">MobileReleaseKit.pkg</pkg-ref>
 </installer-gui-script>
