@@ -103,7 +103,7 @@ PROVIDER_LOADS = ("/usr/lib/libSystem.B.dylib", "/usr/lib/libresolv.9.dylib",
     "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
     "/System/Library/Frameworks/Security.framework/Versions/A/Security")
 PROVIDER_VERSION = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
-    b"https://github.com/cli/cli/releases/tag/v2.88.1-mrk-history.1\n")
+    b"https://github.com/cli/cli/releases/latest\n")
 PROVIDER_REFUSAL = b"managed history provider: controls\n"
 
 

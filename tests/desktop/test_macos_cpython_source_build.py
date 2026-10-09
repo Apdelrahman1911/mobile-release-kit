@@ -8613,7 +8613,21 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 ("provider-version", 15, 65536), ("provider-invalid-controls", 15, 65536)))
             self.assertEqual((seal.WORK_SECONDS, seal.CLEANUP_SECONDS, seal.WORK_ENTRIES, seal.WORK_BYTES),
                              (900, 60, 8192, 512 * 1024 * 1024))
-            self.assertTrue(seal.provider_output("provider-version", 0, seal.PROVIDER_VERSION, b""))
+            # Actual both-architecture output and the unchanged upstream
+            # changelogURL rule: the modified version's second hyphen chooses
+            # /latest, not a fabricated upstream release tag. Keep every byte.
+            observed_version = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
+                                b"https://github.com/cli/cli/releases/latest\n")
+            self.assertEqual(len(observed_version), 88)
+            self.assertEqual(seal.PROVIDER_VERSION, observed_version)
+            self.assertTrue(seal.provider_output("provider-version", 0, observed_version, b""))
+            for changed_version_output in (
+                    observed_version.replace(b"releases/latest", b"releases/tag/v2.88.1-mrk-history.1"),
+                    observed_version.replace(b"2.88.1-mrk-history.1", b"2.88.1"),
+                    observed_version.replace(b"2026-10-09", b"2026-10-10"),
+                    observed_version + b"extra\n"):
+                self.assertFalse(seal.provider_output("provider-version", 0, changed_version_output, b""))
+            self.assertFalse(seal.provider_output("provider-version", 0, observed_version, b"unexpected\n"))
             self.assertTrue(seal.provider_output("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL))
             for role, code, stdout, stderr in (("provider-version", 1, seal.PROVIDER_VERSION, b""),
                     ("provider-invalid-controls", 0, b"", seal.PROVIDER_REFUSAL),
