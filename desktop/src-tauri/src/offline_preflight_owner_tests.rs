@@ -13,7 +13,7 @@ fn projection() -> RunProjection { RunProjection { operation_id: "a".repeat(32),
     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
     outcome: None, reason: Reason::None, result: None, stage: None } }
 fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
-    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None });
+    owner.original_for_test().inner.lock().prepared = Some(Prepared { projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
 }
 fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
 fn active() -> (OfflinePreflightOwner, Arc<Session>) {
@@ -24,7 +24,8 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
     let session = Arc::new(Session { domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
-        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, native_failure: Mutex::new(None),
+        material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
+        artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
         android_control: None,
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
@@ -40,6 +41,9 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
             any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         fixture: None,
     });
+    // Offline fixture data must not acquire another domain's input or tool loan.
+    assert!(session.artifact_selection.is_none() && session.artifact_tools.is_none()
+        && session.artifact_binding.lock().unwrap().is_none());
     let p = RunProjection { operation_id: p.operation_id, owner_generation: p.owner_generation, context: p.context,
         phase: Phase::Starting, intent_usable: false, outcome: None, reason: Reason::None, result: None, stage: None };
     owner.original_for_test().inner.lock().active = Some(Active { owner: session.clone(), projection: p, first_stop: None, work_expired: false,
@@ -48,7 +52,7 @@ fn active() -> (OfflinePreflightOwner, Arc<Session>) {
 }
 
 fn offline_context(owner: &Session) -> &wire::Context {
-    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) => panic!("offline test context") }
+    match &owner.context { Context::OfflinePreflight(context) => context, Context::AndroidBuild(_) | Context::ProjectRecovery(_) | Context::IOSArchive(_) | Context::ArtifactInspection(_) => panic!("offline test context") }
 }
 
 pub(crate) fn qualification_is_closed_without_a_runtime_or_another_owners_permit() {

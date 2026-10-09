@@ -24,12 +24,15 @@ fn rig_profile(profile: Profile, github_receipt: Option<Arc<Mutex<GitHubReadRece
         key: 1, id: "inert-only-1".into(), profile, github_receipt,
         preflight_receipt: None, preflight_request: None, preflight_gate: None, preflight_go_claimed: AtomicBool::new(false),
         release_receipt: None, release_request: None, release_gate: None,
+        setup_receipt: None, setup_request: None, setup_gate: None,
         state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, reply)),
         resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(), permit: Mutex::new(Some(permit)),
         driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
         #[cfg(all(feature = "development-runtime"))]
         observation: Arc::new(Mutex::new(hosted_tests::Observation::default())),
     });
+    // Passive/read fixtures carry no remote setup request, receipt or GO gate.
+    assert!(owner.setup_receipt.is_none() && owner.setup_request.is_none() && owner.setup_gate.is_none());
     lock(&supervisor.inner.owners).insert(owner.key, owner.clone());
     Rig { supervisor, owner, receiver }
 }
@@ -64,7 +67,7 @@ fn staged_tasks(rig: &Rig) -> (oneshot::Sender<()>, oneshot::Sender<()>) {
     let outcome = match rig.owner.profile {
         Profile::Passive(_) => ReadOutcome::Passive(Value::String("inert-result".into())),
         Profile::GitHubReadOnly => ReadOutcome::GitHub(inert_github_outcome()),
-        Profile::GitHubPreflight | Profile::GitHubRelease => panic!("action profiles are not passive/GitHub-read fixtures"),
+        Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup => panic!("action profiles are not passive/GitHub-read fixtures"),
     };
     *rig.owner.driver.try_lock().unwrap() = Some(tokio::spawn(async move {
         driver.await.unwrap();
