@@ -2158,8 +2158,15 @@ def app_command(args):
              ("remover", "expected_remover", "remover_cargo_messages", "remover_cargo_target_dir")), "package-role-remover-required")
     remover = read(args.remover, REMOVER_BYTES)
     need(sha(args.expected_remover) and digest(remover) == args.expected_remover, "remover-final-signed-digest")
-    remover_compiled = remover_cargo_artifact(read(args.remover_cargo_messages, 8 * 1024 * 1024),
-                                            args.remover, args.remover_cargo_target_dir, remover, target=target)
+    abrupt = getattr(args, "removal_abrupt_fixture", False)
+    need(type(abrupt) is bool and (not abrupt or role == "ordinary-image" and target == ARM_TARGET),
+         "app-removal-fixture-role")
+    if abrupt:
+        remover_compiled = removal_fixture_cargo_artifact(read(args.remover_cargo_messages, 4 * 1024 * 1024),
+            args.remover, args.remover_cargo_target_dir, remover, role="abrupt", target=target)
+    else:
+        remover_compiled = remover_cargo_artifact(read(args.remover_cargo_messages, 8 * 1024 * 1024),
+                                                args.remover, args.remover_cargo_target_dir, remover, target=target)
     helper = read(args.vault_helper, 32 * 1024 * 1024)
     need(sha(args.expected_vault_helper) and digest(helper) == args.expected_vault_helper,
          "helper-final-signed-digest")
@@ -2438,21 +2445,27 @@ def package_info(body, *, fixture=False, selection=None, remove=False):
     return identifier
 
 
-def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None):
+def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None,
+                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None):
     selection = selected_build(selection)
     owner = packager_ids()
     scripts = tree(scripts_path, packager=True)
     if remove:
         need(sha(expected_remover), "remove-program-anchor")
+        expected_script = (read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192)
+            if removal_fixture_role is None else removal_fixture_script_data(removal_fixture_role,
+                correlation=removal_fixture_correlation, target=removal_fixture_binding, selection=selection))
+        need(removal_fixture_role is not None or removal_fixture_correlation is removal_fixture_binding is None,
+             "remove-script-purpose")
         need(set(scripts) == {"postinstall", REMOVER_NAME}
-             and scripts["postinstall"] == (read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192), 0o555),
-             "remove-fixed-scripts-only")
+             and scripts["postinstall"] == (expected_script, 0o555), "remove-fixed-scripts-only")
         program, mode = scripts[REMOVER_NAME]
         need(mode == 0o555 and 0 < len(program) <= REMOVER_BYTES and digest(program) == expected_remover,
              "remove-program-correspondence")
         macho(program, target=selection.target)
     else:
-        need(expected_remover is None, "remove-program-purpose")
+        need(expected_remover is removal_fixture_role is removal_fixture_correlation is removal_fixture_binding is None,
+             "remove-program-purpose")
     with parent(package_path) as (fd, name):
         package, info = read_at(fd, name, MAX_BYTES)
         need((info.st_uid, info.st_gid) == owner, "original-package-owner")
@@ -2470,7 +2483,8 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
 
 def prepare_package_command(args):
     selection = source_build_selection(command_target(args))
-    removal = {"expected_remover": getattr(args, "expected_remover", None)} if getattr(args, "remove", False) else {}
+    removal = ({"expected_remover": getattr(args, "expected_remover", None), **removal_fixture_script_arguments(args)}
+               if getattr(args, "remove", False) else {})
     scripts, package, members, identifier, owner = original_package(args.scripts, args.package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
     # This is not archive extraction: only validated, unchanged PackageInfo
     # DATA is copied to a fixed literal name in an exclusively-created root.
@@ -2490,7 +2504,8 @@ def package_format_input_command(args):
 
 def audit_command(args):
     selection = source_build_selection(command_target(args))
-    removal = {"expected_remover": getattr(args, "expected_remover", None)} if getattr(args, "remove", False) else {}
+    removal = ({"expected_remover": getattr(args, "expected_remover", None), **removal_fixture_script_arguments(args)}
+               if getattr(args, "remove", False) else {})
     scripts, original, original_members, identifier, _owner = original_package(args.scripts, args.original_package, fixture=args.fixture, selection=selection, remove=getattr(args, "remove", False), **removal)
     package = read(args.package)
     members = xar_members(package)
@@ -2749,6 +2764,12 @@ def audit_install_product_command(args):
 
 def remove_scripts_command(args):
     selection = source_build_selection(command_target(args))
+    fixture_arguments = removal_fixture_script_arguments(args)
+    if fixture_arguments:
+        need(fixture_arguments["removal_fixture_role"] == "abrupt", "remove-script-fixture-role")
+        return removal_fixture_scripts_command(argparse.Namespace(target=selection.target, role="abrupt",
+            correlation=None, target_binding=None, remover=args.remover, expected_remover=args.expected_remover,
+            output=args.output))
     need(sha(args.expected_remover), "remove-program-anchor")
     body = read(DESKTOP / "macos-installed-inputs/remove-postinstall", 8192)
     with parent(args.remover) as (fd, name):
@@ -2760,6 +2781,313 @@ def remove_scripts_command(args):
     return {"schemaVersion": 1, "packageIdentifier": REMOVE_PACKAGE_ID, "packageVersion": selection.package_version,
             "postinstallSha256": digest(body), "removerSha256": digest(program), "scriptFileCount": 2,
             "destinationPayloadEntries": 0, "qualification": "remove-scripts-staged-not-executed"}
+
+
+# Two NONSHIPPING real-root cases. DATA below never authorizes a native effect,
+# accepts a cleanup result on its own, or changes any ordinary Remove template.
+REMOVAL_FIXTURE_CASES = ("ordinary", "abrupt")
+REMOVAL_FIXTURE_PHASES = {
+    "ordinary": ("before", "after-cancel", "terminal"),
+    "abrupt": ("before", "after-cut", "terminal"),
+}
+REMOVAL_FIXTURE_FEATURES = {
+    "abrupt": "macos-installed-removal-abrupt-fixture",
+    "observer": "macos-installed-removal-observer",
+}
+REMOVAL_FIXTURE_COMMON = ("sourceCommit", "target", "release", "inventorySha256", "packageSha256",
+                          "removeDescriptorSha256", "removeSignatureSha256")
+REMOVAL_FIXTURE_SCRIPT_PREFIX = b'''#!/bin/sh
+# NONSHIPPING: one fixed original supervisor; no test payload or root override.
+set -eu
+umask 077
+[ "$#" -eq 3 ] || exit 78
+[ "$3" = "/" ] || exit 78
+case "$1" in /*) ;; *) exit 78 ;; esac
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 78 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 78
+'''
+REMOVAL_FIXTURE_ABRUPT_SCRIPT = (REMOVAL_FIXTURE_SCRIPT_PREFIX
+    + b'exec ./mrk-macos-remove --fixture-supervise "$1"\n')
+
+
+def removal_fixture_case_data(case):
+    need(type(case) is str and case in REMOVAL_FIXTURE_CASES, "removal-fixture-fixed-case")
+    return REMOVAL_FIXTURE_PHASES[case]
+
+
+def removal_fixture_mount_path(correlation, role):
+    need(maintenance_hex(correlation, 32) and type(role) is str
+         and role in ("install", "target", "observers"), "removal-fixture-fixed-mount")
+    return Path("/Volumes") / ("MRK-Removal-" + correlation + "-" + role)
+
+
+def removal_fixture_binding_data(value, *, selection=None):
+    selection = selected_build(selection)
+    need(selection.target == ARM_TARGET and type(value) is dict and set(value) == set(REMOVAL_FIXTURE_COMMON)
+         and maintenance_hex(value["sourceCommit"], 40) and value["target"] == ARM_TARGET
+         and value["release"] == selection.release
+         and all(maintenance_hex(value[key], 64) for key in REMOVAL_FIXTURE_COMMON[3:]),
+         "removal-fixture-binding")
+    return value
+
+
+def removal_fixture_script_data(role, *, correlation=None, target=None, selection=None):
+    """Closed SOURCE form only. Never accept arbitrary expected script bytes."""
+    if role == "abrupt":
+        need(correlation is None and target is None, "removal-fixture-abrupt-script-purpose")
+        return REMOVAL_FIXTURE_ABRUPT_SCRIPT
+    need(type(role) is str and role in ("observer-before", "observer-after-cancel", "observer-after-cut", "observer-terminal"),
+         "removal-fixture-script-role")
+    target = removal_fixture_binding_data(target, selection=selection)
+    package = removal_fixture_mount_path(correlation, "target") / "Remove.pkg"
+    # All interpolated characters are from fixed ASCII components or nonzero
+    # lowercase hex, not a shell-quoting function or caller-selected location.
+    body = (REMOVAL_FIXTURE_SCRIPT_PREFIX.replace(b"one fixed original supervisor", b"one fixed readonly observer")
+        + ("exec ./mrk-macos-remove --fixture-observe-" + role[len("observer-"):]
+           + ' "$1" ' + " ".join("'" + item + "'" for item in (str(package), target["packageSha256"],
+               target["removeDescriptorSha256"], target["removeSignatureSha256"])) + "\n").encode("ascii"))
+    need(len(body) <= 1024, "removal-fixture-script-bound")
+    return body
+
+
+def removal_fixture_cargo_artifact(messages, binary, target_dir, body, *, role, target=ARM_TARGET):
+    """Actual compiled fixed feature graph; no signing/execution authority."""
+    need(target == ARM_TARGET and role in REMOVAL_FIXTURE_FEATURES, "removal-fixture-cargo-role")
+    root, binary, target_dir = DESKTOP / "src-tauri", Path(binary), Path(target_dir)
+    need(binary.is_absolute() and target_dir.is_absolute()
+         and all(part not in (".", "..") for part in binary.parts + target_dir.parts)
+         and binary == target_dir / target / "release" / REMOVER_NAME
+         and type(body) is bytes and 32 <= len(body) <= REMOVER_BYTES, "removal-fixture-cargo-output")
+    records = cargo_records(messages)
+    matches = [row for row in records if row["target"].get("name") == REMOVER_NAME
+               or str(binary) in row.get("filenames", []) or row.get("executable") == str(binary)]
+    need(len(matches) == 1, "removal-fixture-cargo-one-binary")
+    row, features = matches[0], sorted(["macos-installed-remover", REMOVAL_FIXTURE_FEATURES[role]])
+    kind = row["target"]
+    need(row.get("package_id") == "path+" + root.as_uri() + "#mobile-release-kit-desktop@0.1.1"
+         and row.get("manifest_path") == str(root / "Cargo.toml") and kind.get("name") == REMOVER_NAME
+         and kind.get("kind") == ["bin"] and kind.get("crate_types") == ["bin"]
+         and kind.get("src_path") == str(root / "src/bin/macos_install.rs") and kind.get("edition") == "2021"
+         and row.get("executable") == str(binary) and row.get("filenames") == [str(binary)], "removal-fixture-cargo-source")
+    cargo_profile(row, test=False)
+    cargo_features(row, features)
+    cargo_library(records, root, "mobile-release-kit-desktop", "mobile_release_desktop", features, test=False)
+    cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
+                  "mrk_macos_installed_native", ["default"], test=False)
+    need(not any(item is not row and item["target"].get("kind") in
+                 (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "removal-fixture-no-mixed-graph")
+    macho(body, target=target)
+    return {"schemaVersion": 1, "role": role, "target": target, "features": features,
+            "binarySha256": digest(body), "cargoMessagesSha256": digest(messages),
+            "qualification": "source-bound-nonshipping-program-not-signed-or-executed"}
+
+
+def removal_fixture_scripts_command(args):
+    selection = source_build_selection(command_target(args))
+    need(selection.target == ARM_TARGET and sha(args.expected_remover), "removal-fixture-program-anchor")
+    body = removal_fixture_script_data(args.role, correlation=args.correlation, target=args.target_binding, selection=selection)
+    with parent(args.remover) as (fd, name):
+        program, info = read_at(fd, name, REMOVER_BYTES, zero_flags=True)
+        need(stat.S_IMODE(info.st_mode) == 0o555 and digest(program) == args.expected_remover,
+             "removal-fixture-program-correspondence")
+        macho(program, target=ARM_TARGET)
+    write_tree(args.output, {"postinstall": (body, 0o555), REMOVER_NAME: (program, 0o555)}, root_mode=0o755)
+    return {"schemaVersion": 1, "role": args.role, "packageIdentifier": REMOVE_PACKAGE_ID,
+            "packageVersion": selection.package_version, "postinstallSha256": digest(body),
+            "removerSha256": digest(program), "scriptFileCount": 2, "destinationPayloadEntries": 0,
+            "qualification": "nonshipping-fixed-scripts-staged-not-executed"}
+
+
+def removal_fixture_export_name(kind, descriptor, *, role=None):
+    need(maintenance_hex(descriptor, 64), "removal-fixture-export-binding")
+    if kind == "observer":
+        need(role is None, "removal-fixture-export-role")
+        name, limit = "removal-observer-v1-" + descriptor + ".json", 65536
+    elif kind == "effects":
+        need(role is None, "removal-fixture-export-role")
+        name, limit = "removal-fixture-effects-v1-" + descriptor + ".json", 4096
+    else:
+        need(kind == "supervisor" and role in ("live", "resume"), "removal-fixture-export-role")
+        name, limit = "removal-fixture-supervisor-v1-" + role + "-" + descriptor + ".json", 4096
+    return INSTALL_ROOT.parent / name, limit
+
+
+def removal_fixture_export_data(body, kind, expected, *, role=None, selection=None):
+    expected = removal_fixture_binding_data(expected, selection=selection)
+    _path, limit = removal_fixture_export_name(kind, expected["removeDescriptorSha256"], role=role)
+    need(type(body) is bytes and 0 < len(body) <= limit and body.endswith(b"\n"), "removal-fixture-export-bound")
+    value = maintenance_json(body, limit)
+    common = set(REMOVAL_FIXTURE_COMMON) | {"schemaVersion", "kind", "transportState"}
+    if kind == "effects":
+        fields = common | {"requestId", "rootNonce", "genesisSnapshotSha256", "previousTipSha256", "prefix",
+                           "returnedUnlinks", "appRootUnlinkOrdinal"}
+        need(set(value) == fields and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+             and value["kind"] == "removal-fixture-effects-v1"
+             and value["transportState"] == "pending-original-child-exit"
+             and all(value[key] == expected[key] for key in REMOVAL_FIXTURE_COMMON)
+             and all(maintenance_hex(value[key], 32) for key in ("requestId", "rootNonce"))
+             and all(maintenance_hex(value[key], 64) for key in ("genesisSnapshotSha256", "previousTipSha256"))
+             and type(value["prefix"]) is int and value["prefix"] == 4
+             and type(value["returnedUnlinks"]) is int and 0 < value["returnedUnlinks"] <= 4096
+             and type(value["appRootUnlinkOrdinal"]) is int
+             and value["appRootUnlinkOrdinal"] == value["returnedUnlinks"], "removal-fixture-effects-fields")
+    else:
+        need(kind == "supervisor", "removal-fixture-export-purpose")
+        fields = common | {"role", "actualChildReturncode", "originalChildWaitObserved", "effectsSha256"}
+        need(set(value) == fields and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+             and value["kind"] == "removal-fixture-supervisor-v1" and value["role"] == role
+             and value["transportState"] == "pending-original-installer-exit"
+             and all(value[key] == expected[key] for key in REMOVAL_FIXTURE_COMMON)
+             and type(value["actualChildReturncode"]) is int
+             and value["actualChildReturncode"] == (86 if role == "live" else 0)
+             and value["originalChildWaitObserved"] is True
+             and (value["effectsSha256"] is None if role == "live" else maintenance_hex(value["effectsSha256"], 64)),
+             "removal-fixture-supervisor-fields")
+    return value
+
+
+def removal_fixture_observer_data(body, expected, own, phase, *, selection=None):
+    expected = removal_fixture_binding_data(expected, selection=selection)
+    need(phase in ("before", "after-cancel", "after-cut", "terminal") and type(own) is dict
+         and set(own) == {"packageSha256", "descriptorSha256", "signatureSha256"}
+         and all(maintenance_hex(v, 64) for v in own.values()), "removal-observer-expected")
+    need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n"), "removal-observer-bound")
+    value = maintenance_json(body, 65536)
+    fields = {"schemaVersion", "kind", "phase", "ownPackageSha256", "ownDescriptorSha256", "ownSignatureSha256",
+              "binding", "rootIdentity", "installationStateSha256", "installedProducerSha256", "installedSignatureSha256",
+              "payloadCommitmentSha256", "expectedFiles", "expectedDirectories", "presentFiles", "presentDirectories",
+              "appPresent", "firstEligibleAbsent", "allPayloadAbsent", "lockMode", "archives", "transportState"}
+    need(set(value) == fields and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "removal-observer-v1" and value["phase"] == phase and value["binding"] == expected
+         and type(value["binding"]) is dict and set(value["binding"]) == set(REMOVAL_FIXTURE_COMMON)
+         and (value["ownPackageSha256"], value["ownDescriptorSha256"], value["ownSignatureSha256"])
+             == (own["packageSha256"], own["descriptorSha256"], own["signatureSha256"])
+         and value["transportState"] == "pending-original-installer-exit"
+         and value["lockMode"] == ("shared-readonly" if phase == "after-cancel" else "exclusive")
+         and all(maintenance_hex(value[key], 64) for key in ("installationStateSha256", "installedProducerSha256",
+                  "installedSignatureSha256", "payloadCommitmentSha256")), "removal-observer-binding")
+    identity = value["rootIdentity"]
+    need(type(identity) is list and len(identity) == 9
+         and all(type(n) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", n) for n in identity), "removal-observer-root")
+    actual = tuple(map(int, identity))
+    need(-(1 << 31) <= actual[0] < 1 << 31 and 0 < actual[1] < 1 << 64
+         and actual[2] == stat.S_IFDIR | 0o755 and 0 < actual[3] < 1 << 64
+         and actual[4] == actual[5] == 0 and 0 <= actual[6] < 1 << 63
+         and all(-(1 << 63) <= n < 1 << 63 for n in actual[7:]), "removal-observer-root")
+    for kind in ("Files", "Directories"):
+        need(type(value["expected" + kind]) is int and 0 < value["expected" + kind] <= MAX_FILES
+             and type(value["present" + kind]) is int and 0 <= value["present" + kind] <= value["expected" + kind],
+             "removal-observer-payload-count")
+    need(all(type(value[key]) is bool for key in ("appPresent", "firstEligibleAbsent", "allPayloadAbsent"))
+         and value["allPayloadAbsent"] == (value["presentFiles"] == value["presentDirectories"] == 0)
+         and (not value["allPayloadAbsent"] or not value["appPresent"]), "removal-observer-payload-state")
+    archives = value["archives"]
+    need(type(archives) is list and len(archives) <= 64, "removal-observer-archive-bound")
+    names, requests = [], set()
+    keys = {"invocation", "snapshotSha256", "tipSha256", "prefix", "requestId", "rootNonce", "previousTipSha256",
+            "genesisSnapshotSha256", "immutableControlsSha256"}
+    for row in archives:
+        need(type(row) is dict and set(row) == keys and maintenance_hex(row["invocation"], 32)
+             and row["invocation"] == row["rootNonce"] and maintenance_hex(row["requestId"], 32)
+             and row["requestId"] not in requests
+             and type(row["prefix"]) is int and 1 <= row["prefix"] <= 4
+             and all(maintenance_hex(row[key], 64) for key in ("tipSha256", "genesisSnapshotSha256", "immutableControlsSha256"))
+             and (row["snapshotSha256"] is None or maintenance_hex(row["snapshotSha256"], 64))
+             and (row["previousTipSha256"] is None or maintenance_hex(row["previousTipSha256"], 64))
+             and ((row["snapshotSha256"] == row["genesisSnapshotSha256"] and row["previousTipSha256"] is None)
+                  if row["snapshotSha256"] is not None else row["previousTipSha256"] is not None),
+             "removal-observer-archive-row")
+        names.append(row["invocation"])
+        requests.add(row["requestId"])
+    need(names == sorted(set(names)), "removal-observer-archive-order")
+    return value
+
+
+def removal_fixture_observation_pair(before, after, *, phase):
+    """Compare already validated independent observations; DATA, never a lock."""
+    need(phase in ("after-cancel", "after-cut", "terminal") and before["phase"] == "before" and after["phase"] == phase,
+         "removal-observer-comparison-phase")
+    need(not before["archives"] and before["appPresent"] and not before["firstEligibleAbsent"]
+         and not before["allPayloadAbsent"]
+         and (before["presentFiles"], before["presentDirectories"])
+             == (before["expectedFiles"], before["expectedDirectories"]), "removal-observer-fresh-baseline")
+    need(before["binding"] == after["binding"] and before["expectedFiles"] == after["expectedFiles"]
+         and before["expectedDirectories"] == after["expectedDirectories"]
+         and all(before[key] == after[key] for key in ("installationStateSha256", "installedProducerSha256", "installedSignatureSha256",
+                                                        "payloadCommitmentSha256"))
+         and all(before["rootIdentity"][index] == after["rootIdentity"][index] for index in (0, 1, 2, 4, 5)),
+         "removal-observer-original-baseline")
+    if phase == "after-cancel":
+        need(after["archives"] == before["archives"] and after["rootIdentity"] == before["rootIdentity"]
+             and after["payloadCommitmentSha256"] == before["payloadCommitmentSha256"]
+             and (after["presentFiles"], after["presentDirectories"]) == (before["presentFiles"], before["presentDirectories"])
+             and after["appPresent"] and not after["firstEligibleAbsent"] and not after["allPayloadAbsent"],
+             "removal-cancel-unchanged")
+    elif phase == "after-cut":
+        need(len(after["archives"]) == 1 and after["archives"][0]["prefix"] == 3
+             and after["archives"][0]["snapshotSha256"] is not None
+             and after["firstEligibleAbsent"] and after["appPresent"] and not after["allPayloadAbsent"]
+             and after["presentFiles"] + after["presentDirectories"]
+                 == before["expectedFiles"] + before["expectedDirectories"] - 1,
+             "removal-cut-one-real-effect")
+    else:
+        need(after["allPayloadAbsent"] and not after["appPresent"] and after["firstEligibleAbsent"],
+             "removal-terminal-payload-absence")
+
+
+def removal_fixture_terminal_data(case, before, middle, terminal, *, supervisor=None, effects=None, effects_sha=None):
+    removal_fixture_case_data(case)
+    removal_fixture_observation_pair(before, middle, phase="after-cancel" if case == "ordinary" else "after-cut")
+    removal_fixture_observation_pair(before, terminal, phase="terminal")
+    rows = terminal["archives"]
+    if case == "ordinary":
+        need(supervisor is None and effects is None and effects_sha is None and len(rows) == 1
+             and rows[0]["prefix"] == 4 and rows[0]["snapshotSha256"] is not None,
+             "removal-ordinary-terminal")
+    else:
+        need(type(supervisor) is dict and supervisor["role"] == "resume" and supervisor["actualChildReturncode"] == 0
+             and supervisor["originalChildWaitObserved"] is True and type(effects) is dict
+             and maintenance_hex(effects_sha, 64) and supervisor["effectsSha256"] == effects_sha
+             and len(rows) == 2, "removal-resume-original-results")
+        old = middle["archives"][0]
+        actual_old = [row for row in rows if row["invocation"] == old["invocation"]]
+        fresh = [row for row in rows if row["invocation"] != old["invocation"]]
+        need(actual_old == [old] and len(fresh) == 1, "removal-resume-immutable-previous")
+        new = fresh[0]
+        need(new["prefix"] == 4 and new["snapshotSha256"] is None and new["requestId"] != old["requestId"]
+             and new["rootNonce"] != old["rootNonce"] and new["previousTipSha256"] == old["tipSha256"]
+             and new["genesisSnapshotSha256"] == old["genesisSnapshotSha256"]
+             and effects["requestId"] == new["requestId"] and effects["rootNonce"] == new["rootNonce"]
+             and effects["previousTipSha256"] == old["tipSha256"]
+             and effects["genesisSnapshotSha256"] == old["genesisSnapshotSha256"]
+             and effects["returnedUnlinks"] == before["expectedFiles"] + before["expectedDirectories"] - 1
+             and effects["appRootUnlinkOrdinal"] == effects["returnedUnlinks"], "removal-resume-raw-tip-genesis-effects")
+    return {"schemaVersion": 1, "case": case, "targetBinding": before["binding"],
+            "archives": len(rows), "allPayloadAbsent": True,
+            "abruptProcessCutObserved": case == "abrupt", "samePackageLinkedResumeObserved": case == "abrupt",
+            "appRootLastReturnedEffectObserved": case == "abrupt", "powerLossQualified": False,
+            "ordinaryOriginalFinalityRequired": True, "qualification": "pending-original-owner-finality"}
+
+
+def removal_fixture_marker_data(body, correlation, case, name, *, complete=False):
+    removal_fixture_case_data(case)
+    need(maintenance_hex(correlation, 32) and name in (("launched", "cancel-observed") if case == "ordinary" else ("launched",))
+         and type(body) is bytes and len(body) <= 128 and type(complete) is bool, "removal-ui-marker-shape")
+    expected = ("mrk-removal-ui-v1\n" + correlation + "\n" + case + "\n" + name + "\n").encode("ascii")
+    need(body == expected if complete else expected.startswith(body), "removal-ui-marker-bytes")
+    return body == expected  # A scheduling hint only; not the writer's future close.
+
+
+def removal_fixture_original_data(case, role, returncode, *, entered, returned, captures_settled):
+    removal_fixture_case_data(case)
+    expected = {"ordinary": {"live-cancel": 1, "live-continue": 0}, "abrupt": {"live-cut": 1, "resume": 0}}[case]
+    need(role in expected and type(returncode) is int and returncode == expected[role]
+         and entered is True and returned is True and captures_settled is True, "removal-fixture-original-outcome")
+    return returncode
 
 
 def observation_inventory(args, *, selection=None):
@@ -3243,6 +3571,61 @@ def packaging_removal_descriptor_data(installed, inventory, program, package, so
     body = canonical(document) + b"\n"
     need(len(body) <= REMOVE_DESCRIPTOR_BYTES, "remove-descriptor-bound")
     return body
+
+
+def packaging_observer_descriptor_data(installed, inventory, installed_program, own_program, package,
+                                      source, selection, *, source_commit, manifest):
+    """NONSHIPPING O: preserve genuine target lineage, bind different own code.
+
+    The existing ordinary constructor performs every installed tuple/inventory
+    comparison against the actual sixth input. This DATA never replaces the
+    emitter's genuine installed signature or actual own-program verifier.
+    """
+    selection = selected_build(selection)
+    need(selection.target == ARM_TARGET and type(own_program) is bytes
+         and 0 < len(own_program) <= REMOVER_BYTES and digest(own_program) != digest(installed_program),
+         "observer-distinct-program")
+    body = packaging_removal_descriptor_data(installed, inventory, installed_program, package, source, selection,
+                                            source_commit=source_commit, manifest=manifest)
+    macho(own_program, target=selection.target)
+    value = maintenance_json(body, REMOVE_DESCRIPTOR_BYTES)
+    value["removerExecutableSha256"] = digest(own_program)
+    result = canonical(value) + b"\n"
+    need(len(result) <= REMOVE_DESCRIPTOR_BYTES, "observer-descriptor-bound")
+    return result
+
+
+def removal_observer_copy_quote_data(sizes):
+    """Before reads/write_tree, charge both live bodies and their output copies.
+
+    Values must come from the SAME retained original fstats. The caller checks
+    actual byte lengths and originals again after every read; this is not RSS
+    or an authority inferred from caller-supplied lengths.
+    """
+    names = ("package", "observer", "installedProgram", "inventory", "installed", "signature")
+    limits = (MAX_BYTES, REMOVER_BYTES, REMOVER_BYTES, 1024 * 1024,
+              PRODUCER_DESCRIPTOR_BYTES, PRODUCER_SIGNATURE_BYTES)
+    need(type(sizes) is dict and set(sizes) == set(names)
+         and all(type(sizes[n]) is int and 0 < sizes[n] <= cap for n, cap in zip(names, limits)),
+         "observer-copy-quote-inputs")
+    quote = 2 * (sum(sizes.values()) + REMOVE_DESCRIPTOR_BYTES) + 16 * 1024 * 1024
+    need(quote <= MAX_BYTES, "observer-copy-quote-bound")
+    return quote
+
+
+def removal_fixture_script_arguments(args):
+    role = getattr(args, "removal_fixture_role", None)
+    correlation = getattr(args, "removal_fixture_correlation", None)
+    target = getattr(args, "removal_fixture_binding", None)
+    if role is None:
+        need(correlation is None and target is None, "removal-fixture-script-purpose")
+        return {}
+    # SOURCE roles only. The actual owner must separately admit the B/O graph,
+    # completed P and raw sidecars; this selection is never a signature proof.
+    removal_fixture_script_data(role, correlation=correlation, target=target,
+                                selection=source_build_selection(command_target(args)))
+    return {"removal_fixture_role": role, "removal_fixture_correlation": correlation,
+            "removal_fixture_binding": target}
 
 
 def remove_input_command(args):
@@ -4355,6 +4738,8 @@ def main(argv=None):
     app.add_argument("--expected-remover", required=True)
     app.add_argument("--remover-cargo-messages", required=True, type=Path)
     app.add_argument("--remover-cargo-target-dir", required=True, type=Path)
+    app.add_argument("--removal-abrupt-fixture", action="store_true",
+                     help="NONSHIPPING exact same-engine abrupt graph; never ordinary product qualification")
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--bundletool-archive", required=True, type=Path)
     app.add_argument("--aapt2-archive", required=True, type=Path)
@@ -4407,9 +4792,11 @@ def main(argv=None):
     remove_scripts.add_argument("--output", required=True, type=Path)
     remove_scripts.add_argument("--remover", required=True, type=Path)
     remove_scripts.add_argument("--expected-remover", required=True)
+    remove_scripts.add_argument("--removal-abrupt-fixture", action="store_true")
     for name in ("prepare-remove-package", "audit-remove-package"):
         package = commands.add_parser(name)
         package.set_defaults(fixture=False, remove=True)
+        package.add_argument("--removal-abrupt-fixture", action="store_true")
         package.add_argument("--expected-remover", required=True)
         package.add_argument("--scripts", required=True, type=Path)
         package.add_argument("--package", required=True, type=Path)
@@ -4457,6 +4844,11 @@ def main(argv=None):
         command.add_argument("--target", choices=MAC_TARGETS, default=ARM_TARGET,
                              help="Exact Mac build target; unqualified legacy routes remain ARM-only")
     args = parser.parse_args(argv)
+    if getattr(args, "removal_abrupt_fixture", False) and args.command != "app":
+        need(args.command in ("remove-scripts", "prepare-remove-package", "audit-remove-package"),
+             "removal-fixture-cli-purpose")
+        args.removal_fixture_role = "abrupt"
+        args.removal_fixture_correlation = args.removal_fixture_binding = None
     need(args.command == "describe-runtime" or os.getuid() != 0 and os.getuid() == os.geteuid(), "only-installer-is-privileged")
     if args.command in ("installer-log-cursor", "installer-log-capture"):
         result, status = installer_log_diagnostic(args)

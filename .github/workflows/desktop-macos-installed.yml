@@ -6,6 +6,7 @@ on:
       - verify/desktop-macos-installed
       - verify/desktop-macos-preview
       - verify/desktop-macos-image-compile
+      - verify/desktop-macos-removal-lifecycle
 
 permissions:
   contents: read
@@ -17,39 +18,23 @@ concurrency:
 
 jobs:
   engineering-install:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
     environment: macos-developer-id
-    name: normal-installed-${{ matrix.target }}
+    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
     # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.
     # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.
     # Remove preview adds90 nominal step maxima; this sum establishes no fit.
     # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.
+    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
+    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
+    # then one removal owner990 (fixed segment sum963); no budget restart.
     timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            runner: macos-26
-            machine: arm64
-            hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'
-            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'
-            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'
-            supplier_run: '37467019389'
-            supplier_attempt: '1'
-            supplier_artifact: '11415902210'
-          - target: x86_64-apple-darwin
-            runner: macos-26-intel
-            machine: x86_64
-            hosted_job: github-hosted-macos26-x86_64
-            supplier_receipt: 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b'
-            supplier_tar: '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd'
-            supplier_source: '079ab2a2c8fef88f01bf909e7669c685f07e1375'
-            supplier_run: '37476532238'
-            supplier_attempt: '1'
-            supplier_artifact: '11419502465'
+        # Only this fixed ref selects two fresh ARM machines; no cross-product or Intel removal case.
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b","supplier_tar":"739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd","supplier_source":"079ab2a2c8fef88f01bf909e7669c685f07e1375","supplier_run":"37476532238","supplier_attempt":"1","supplier_artifact":"11419502465"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -59,12 +44,13 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
       # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.
       MRK_MACOS_ANDROID_UI_SCOPE: disabled
       # Separately reviewed unsigned archive UI; an installed app is still mandatory.
       MRK_MACOS_IOS_UI_SCOPE: disabled
       # A separate reviewed SOURCE change selects the targeted recovery run.
-      # Default seven cases and the singleton are distinct native obligations.
+      # Default seven cases and each closed singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven
       # Final signed M comes only from the fixed configured SOURCE nomination.
       MRK_BUNDLED_RUNTIME_SOURCE_SHA256: fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0
@@ -122,10 +108,16 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ) ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ) ]] || exit 1
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+            [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
+          else
+            [[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+          fi
           case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
             ordinary-seven) ;;
-            saved-version-recovery) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            saved-version-recovery|workflow-refusal) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
             *) exit 1 ;;
           esac
           [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
@@ -299,6 +291,18 @@ jobs:
               value.update({"scope": "normal-macos-early-preview", "fixedFixtureCases": 8, "aclPrimitiveCases": 0,
                             "selectedRegressionGroups": [], "instrumented": False, "applicationLaunched": False,
                             "fullUIQualified": False, "distributionQualified": False})
+          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-removal-lifecycle":
+              case = os.environ["MRK_MACOS_REMOVAL_CASE"]
+              if build_target != "aarch64-apple-darwin" or case not in ("ordinary", "abrupt"):
+                  raise ValueError("removal fixed source case")
+              correlation = os.urandom(16).hex()
+              if correlation == "0" * 32: raise ValueError("removal fresh correlation")
+              value.update(scope="same-package-removal-lifecycle-preparation-only", removalCase=case,
+                  removalCorrelation=correlation, fixedFixtureCases=0, aclPrimitiveCases=0,
+                  selectedRegressionGroups=[], instrumented=case == "abrupt", applicationLaunched=False,
+                  fullUIQualified=False, removalQualified=False, powerLossQualified=False, distributionQualified=False)
+              with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as environment:
+                  environment.write("MRK_MACOS_REMOVAL_CORRELATION=" + correlation + "\n")
           data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
           if len(data) > 65536: raise ValueError("source/tool binding size refused")
           fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
@@ -606,7 +610,7 @@ jobs:
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
+        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
         timeout-minutes: 9
         shell: bash
         env:
@@ -1085,11 +1089,15 @@ jobs:
           image_sha=${image_sha%% *}
           [[ "$image_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
           printf 'MRK_MACOS_DESKTOP_IMAGE_SHA256=%s\n' "$image_sha" >> "$GITHUB_ENV"
+          remover_features=macos-installed-remover
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
+            remover_features=macos-installed-removal-abrupt-fixture
+          fi
           # Same24-minute app-build budget; no independent timeout entitlement.
           # This current SOURCE role cannot embed its not-yet-created inventory.
           set +e
           PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
-            --locked --offline --release --jobs 1 --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
+            --locked --offline --release --jobs 1 --no-default-features --features "$remover_features" --bin mrk-macos-remove \
             --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
             > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"
           remover_status=$?
@@ -1104,6 +1112,21 @@ jobs:
             exit "$remover_status"
           fi
           [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+            # Separate genuine nonshipping observer graph; same24min preparation step.
+            # No key/signature/Installer execution and no target inventory substitution.
+            set +e
+            PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/removal-observer-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \
+              --locked --offline --release --jobs 1 --no-default-features --features macos-installed-removal-observer --bin mrk-macos-remove \
+              --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
+              > "$MRK_MACOS_WORK/removal-observer-build.jsonl" 2> "$MRK_MACOS_WORK/removal-observer-build.stderr"
+            observer_status=$?
+            printf '%s\n' "$observer_status" > "$MRK_MACOS_WORK/removal-observer-build.status"
+            observer_status_saved=$?
+            set -e
+            if [[ "$observer_status" != 0 ]]; then exit "$observer_status"; fi
+            [[ "$observer_status_saved" == 0 ]] || exit "$observer_status_saved"
+          fi
       - name: Record the effective pinned compiler from the successful build context
         timeout-minutes: 1
         shell: bash
@@ -1192,8 +1215,12 @@ jobs:
           [[ "$remover_result" =~ ^sha256=[0-9a-f]{64}$ ]] || exit 1
           MRK_MACOS_REMOVER_SHA256=${remover_result#sha256=}
           printf 'MRK_MACOS_REMOVER_SHA256=%s\n' "$MRK_MACOS_REMOVER_SHA256" >> "$GITHUB_ENV"
+          removal_arguments=()
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
+            removal_arguments=(--removal-abrupt-fixture)
+          fi
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \
             --package-role ordinary-image \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
@@ -1374,6 +1401,7 @@ jobs:
               os.fsync(stream.fileno())
           PY
       - name: Build the separate fixed eight-case Installer package from the same completed input
+        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
         timeout-minutes: 8
         shell: bash
         run: |
@@ -1431,6 +1459,7 @@ jobs:
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
+        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
         timeout-minutes: 18
         shell: bash
         run: |
@@ -1469,6 +1498,7 @@ jobs:
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
+        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2128,14 +2158,18 @@ jobs:
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
       - name: Prepare the fixed two-file removal package without executing it
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
         timeout-minutes: 8
         shell: bash
         run: |
           set -euo pipefail
           set -o noclobber
           umask 077
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target "$MRK_MACOS_TARGET" \
+          removal_arguments=()
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
+            removal_arguments=(--removal-abrupt-fixture)
+          fi
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \
             --remover "$MRK_MACOS_WORK/input/app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove" \
             --expected-remover "$MRK_MACOS_REMOVER_SHA256" --output "$MRK_MACOS_WORK/remove-scripts" \
             > "$MRK_MACOS_WORK/remove-scripts-result.json"
@@ -2143,7 +2177,7 @@ jobs:
           /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/remove-scripts" \
             --identifier dev.mobile-release-kit.desktop.remove --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
             --install-location / --ownership recommended "$MRK_MACOS_WORK/Remove-original.pkg"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target "$MRK_MACOS_TARGET" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
             --scripts "$MRK_MACOS_WORK/remove-scripts" --package "$MRK_MACOS_WORK/Remove-original.pkg" \
             --output "$MRK_MACOS_WORK/remove-package-parts" > "$MRK_MACOS_WORK/remove-package-prepare.json"
           # Native tools only write fresh outputs as this nonroot account.
@@ -2177,7 +2211,7 @@ jobs:
           [[ $xar_status == 0 ]] || exit "$xar_status"
           # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.
       - name: Sign and notarize the completed removal package without executing it
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
         timeout-minutes: 32
         shell: bash
         env:
@@ -2213,7 +2247,8 @@ jobs:
           # plus the retained purpose-specific receipt; no removal is executed.
 
       - name: Emit the genuine removal descriptor and readonly carrier without Installer
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        id: removal_package
         timeout-minutes: 18
         shell: bash
         env:
@@ -2244,6 +2279,72 @@ jobs:
           # Actual original0 and the exact Remove-purpose receipt are both
           # required by finalization. Unknown resources remain retained.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Prepare three source-bound readonly observation carriers without removal
+        id: removal_observers
+        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MRK_MACOS_INSTALLER_P12_BASE64: ${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}
+          MRK_MACOS_INSTALLER_P12_PASSWORD: ${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_REMOVAL_CORRELATION" =~ ^[0-9a-f]{32}$ ]] || exit 1
+          # ONE existing1740s work/1800s hard owner. Eight sequential, known
+          # retired purpose-specific contexts; all158 bounded records persist.
+          # Parent may hold both configured inputs; each actual signer child
+          # still receives only its existing purpose, never an expanded key set.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare-removal-observers --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/removal-observers.stdout" 2> "$MRK_MACOS_WORK/removal-observers.stderr"
+          preparation_status=$?
+          printf '%s\n' "$preparation_status" > "$MRK_MACOS_WORK/removal-observers.status"
+          preparation_status_saved=$?
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$preparation_status" != 0 ]]; then exit "$preparation_status"; fi
+          [[ "$preparation_status_saved" == 0 ]] || exit "$preparation_status_saved"
+      - name: One genuine fixed removal journey through the existing original owners
+        id: removal_fixture
+        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # No credential input or global process limit mutation during UI/
+          # Installer overlap. The worker checks this exact inherited1GiB.
+          [[ -z "${MRK_MACOS_DEVELOPER_ID_P12_BASE64+x}" && -z "${MRK_MACOS_DEVELOPER_ID_P12_PASSWORD+x}" && -z "${MRK_MACOS_INSTALLER_P12_BASE64+x}" && -z "${MRK_MACOS_INSTALLER_P12_PASSWORD+x}" && -z "${MRK_MACOS_NOTARY_API_KEY_BASE64+x}" ]] || exit 1
+          ulimit -f 1048576
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py package-removal-fixture --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/package-removal-fixture.stdout" 2> "$MRK_MACOS_WORK/package-removal-fixture.stderr"
+          removal_status=$?
+          printf '%s\n' "$removal_status" > "$MRK_MACOS_WORK/package-removal-fixture.status"
+          removal_status_saved=$?
+          set -e
+          if [[ "$removal_status" != 0 ]]; then exit "$removal_status"; fi
+          [[ "$removal_status_saved" == 0 ]] || exit "$removal_status_saved"
+          # This is only the returned original helper0. Its closed bound receipt
+          # separately joins actual Installer/UI/supervisor/observer outcomes.
+          # No protected path/log copy, fake peer, release or power-loss claim.
       - name: Notarize staple and verify the separate readonly removal carrier
         if: github.ref == 'refs/heads/verify/desktop-macos-preview'
         timeout-minutes: 32
@@ -3833,9 +3934,9 @@ jobs:
           print("Two ordinary saved-check journeys observed complete negative offline findings and genuine Idle; mutation recovery, readiness and independent all-worker finality remain unproved.")
           PY_SAVED_CHECKS_RESULT
 
-      - name: Recover one real interrupted saved-version journal through the ordinary Mac UI
+      - name: Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI
         id: normal_saved_version_recovery_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')
         timeout-minutes: 11
         shell: bash
         env:
@@ -3844,12 +3945,17 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;
+            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;
+            *) exit 1 ;;
+          esac
           # Finite per-file logical size only; not RAM, total disk, service limits or finality.
           set +e
           ulimit -f 1048576
           file_limit_status=$?
           set -e
-          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test-file-limit.status" || exit $?
+          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test-file-limit.status" || exit $?
           [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
           # normal_context freshly verifies both actual RLIMIT_FSIZE values;
           # its original receipt/status, not a prior budget report, gates acceptance.
@@ -3862,25 +3968,25 @@ jobs:
               "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
           }
           # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s recovery journey; unchanged420s command/585s phase, including the fixed20s producer.
+          # One selected300s journey; unchanged420s command/585s phase. Only recovery runs its fixed20s producer.
           set +e
           clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
             -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
             -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
             -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery \
+            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/${singleton}-test.xcresult" \
+            -only-testing:MRKNormalAppUITests/NormalAppUITests/"$singleton_method" \
             -parallel-testing-enabled NO -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
             -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.log" 2>&1
+            > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.log" 2>&1
           test_status=$?
           set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.status"
+          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-test.status"
           [[ "$test_status" == 0 ]] || exit "$test_status"
-      - name: Bind the singleton saved-version recovery to original XCTest and the same ordinary package
+      - name: Bind only the selected singleton to original XCTest and the same ordinary preview package
         id: normal_saved_version_recovery_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3889,6 +3995,11 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+            saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;
+            workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;
+            *) exit 1 ;;
+          esac
           # Each summary has its own finite one-GiB file limit and original owner phase.
           ulimit -f 1048576
           set +e
@@ -3897,11 +4008,11 @@ jobs:
             "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
             "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
             "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
-            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary saved-version-recovery-test.xcresult \
-            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.stderr"
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary "${singleton}-test.xcresult" \
+            > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.stderr"
           summary_status=$?
           set -e
-          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.status"
+          printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/${singleton}-summary.status"
           [[ "$summary_status" == 0 ]] || exit "$summary_status"
           "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_VERSION_RECOVERY_RESULT'
           import hashlib, json, os, re, stat
@@ -3909,9 +4020,15 @@ jobs:
           root = Path(os.environ["MRK_MACOS_WORK"])
           source, target = os.environ["GITHUB_SHA"], os.environ["MRK_MACOS_TARGET"]
           if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
-              raise ValueError("saved-version result SOURCE differs")
+              raise ValueError("singleton result SOURCE differs")
           def need(value):
-              if not value: raise ValueError("original saved-version recovery binding refused")
+              if not value: raise ValueError("original selected singleton binding refused")
+          def singleton_selection(scope):
+              need(type(scope) is str and scope in ("saved-version-recovery", "workflow-refusal"))
+              return (scope, "testSyntheticProjectSavedVersionRecovery" if scope == "saved-version-recovery"
+                      else "testSyntheticProjectManagedWorkflowRefusal")
+          selected_scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
+          stem, method = singleton_selection(selected_scope)
           def read(name, limit):
               path = root / name
               fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -3944,7 +4061,6 @@ jobs:
                and all(preview.get(key) == "passed" for key in ("normalBuild", "packageAudit", "installationReadback")))
           prior_bytes = read("normal-ui/diagnostics-result.json", 65536)
           prior = decode(prior_bytes)
-          need(os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"] == "saved-version-recovery")
           need(prior.get("scope") == "ordinary-ui-observed-original-diagnostics-report-and-settled-projection"
                and prior.get("target") == target and prior.get("applicationSourceCommit") == prior.get("harnessSourceCommit") == source
                and prior.get("workflow") == ".github/workflows/desktop-macos-installed.yml"
@@ -3954,14 +4070,14 @@ jobs:
           # Its success is never a substitute for this case's fresh input/original owners.
           build_bytes = read("normal-ui/build.command-admission.json", 32768)
           need(digest(build_bytes) == prior.get("buildCommandAdmissionSha256") and type(prior.get("toolchain")) is dict)
-          for name in ("build", "saved-version-recovery-test-file-limit", "saved-version-recovery-test", "saved-version-recovery-summary"):
+          for name in ("build", stem + "-test-file-limit", stem + "-test", stem + "-summary"):
               need(read("normal-ui/" + name + ".status", 16) == b"0\n")
           roster = ("normal-ui-source-roster", 15, 1048576, 0)
           def admitted(name, phase, seconds, roles):
               raw = read("normal-ui/" + name, 32768); value = decode(raw)
               need(value.get("schemaVersion") == 1 and type(value["schemaVersion"]) is int
                    and value.get("scope") == ("actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only")
-                   and value.get("sourceCommit") == source and value.get("target") == target and value.get("resultBundle") == "saved-version-recovery-test.xcresult"
+                   and value.get("sourceCommit") == source and value.get("target") == target and value.get("resultBundle") == stem + "-test.xcresult"
                    and value.get("normalPhase" if phase == "test" else "phase") == phase
                    and value.get("originalCommandReturned") is True and value.get("sourcePrePostMatched") is True
                    and hex64(value.get("sourceRosterSha256")) and value.get("fileLimitBytes") == [1073741824, 1073741824]
@@ -3984,66 +4100,99 @@ jobs:
                        and row["stdoutBytes"] + row["stderrBytes"] <= limit
                        and all(hex64(row.get(k)) for k in ("argvSha256", "stdoutSha256", "stderrSha256")))
               return value, raw
-          runner, runner_bytes = admitted("saved-version-recovery-test.runner-admission.json", "test", 585,
-              [roster, ("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, 86),
-               ("verify-generated-runner", 30, 1048576, 0), ("generated-runner-entitlements", 30, 1048576, 0),
-               ("one-admitted-ui-test", 420, 1048576, 0), roster])
-          summary_owner, summary_owner_bytes = admitted("saved-version-recovery-summary.command-admission.json", "summary", 90,
+          def singleton_test_roles(scope):
+              singleton_selection(scope)
+              prefix = [("normal-ui-source-roster", 15, 1048576, 0)]
+              if scope == "saved-version-recovery":
+                  prefix += [("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, 86)]
+              return prefix + [("verify-generated-runner", 30, 1048576, 0),
+                  ("generated-runner-entitlements", 30, 1048576, 0), ("one-admitted-ui-test", 420, 1048576, 0),
+                  ("normal-ui-source-roster", 15, 1048576, 0)]
+          runner, runner_bytes = admitted(stem + "-test.runner-admission.json", "test", 585,
+              singleton_test_roles(selected_scope))
+          summary_owner, summary_owner_bytes = admitted(stem + "-summary.command-admission.json", "summary", 90,
               [roster, ("normal-ui-summary", 30, 262144, 0), roster])
           need(summary_owner.get("originalCommandRole") == "normal-ui-summary"
                and runner.get("appSandboxEntitlement") in ("absent", "false") and runner.get("strictCodesignOriginalZero") is True
                and runner.get("originalProductsPrePostMatched") is True and runner.get("originalClosesCompleted") is True
                and runner.get("reSignedOrRepaired") is False
                and runner["sourceRosterSha256"] == summary_owner["sourceRosterSha256"] == decode(build_bytes)["sourceRosterSha256"])
-          summary_bytes = read("normal-ui/saved-version-recovery-summary.raw.json", 262144)
+          summary_bytes = read("normal-ui/" + stem + "-summary.raw.json", 262144)
           need(len(summary_bytes) == summary_owner["commands"][1]["stdoutBytes"] and digest(summary_bytes) == summary_owner["commands"][1]["stdoutSha256"])
           summary = decode(summary_bytes)
           counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
           need(all(type(summary.get(k)) is int and summary[k] == v for k, v in counts.items()))
-          recovery = runner.get("savedVersionRecovery")
-          digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")
-          positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")
-          need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", "publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}
-               and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)
-               and recovery["interruptedGuiSaveObserved"] is False
-               and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), ("publicOriginalCount", 13), ("readyJournalFileCount", 6)))
-               and recovery["sourceInputsSha256"] == os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]
-               and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]
-               and recovery["runtimeResultSha256"] == digest(read("runtime-result.json", 65536))
-               and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]
-               and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == digest(b""))
-          result = {"schemaVersion": 1, "scope": "ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",
+          def singleton_case_data(scope, runner, preview, expected_inputs, runtime_digest):
+              singleton_selection(scope)
+              if scope == "workflow-refusal":
+                  need(runner.get("managedWorkflowRefusalMarkerObserved") is True
+                       and "savedVersionRecovery" not in runner and runtime_digest is None)
+                  return {"scope": "ordinary-ui-observed-original-managed-workflow-refusal",
+                      "managedWorkflowRefusalUI": "passed", "managedWorkflowBundleRefused": True,
+                      "fixtureOriginalsPreserved": True, "workflowMutationObserved": False,
+                      "remoteGitHubOperationObserved": False, "releasePromotionObserved": False,
+                      "coreOutcomeObserved": {"effect": "not_started", "journal": "not_created", "resources": "settled"},
+                      "nativeProjectionObserved": {"finality": "settled"}}
+              need("managedWorkflowRefusalMarkerObserved" not in runner)
+              recovery = runner.get("savedVersionRecovery")
+              digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", "fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")
+              positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", "sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")
+              need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", "publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}
+                   and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)
+                   and recovery["interruptedGuiSaveObserved"] is False
+                   and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), ("publicOriginalCount", 13), ("readyJournalFileCount", 6)))
+                   and recovery["sourceInputsSha256"] == expected_inputs
+                   and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]
+                   and recovery["runtimeResultSha256"] == runtime_digest
+                   and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]
+                   and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == digest(b""))
+              return {"scope": "ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",
+                  "savedVersionRecoveryUI": "passed", "savedVersionRecovery": recovery,
+                  "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"},
+                  "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": {"name": "1.2.3", "build": "7"},
+                  "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, "interruptedGuiSaveObserved": False,
+                  "configurationTextImagesRecoveryObserved": False}
+          case_data = singleton_case_data(selected_scope, runner, preview,
+              os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
+              digest(read("runtime-result.json", 65536)) if selected_scope == "saved-version-recovery" else None)
+          result = {"schemaVersion": 1, **case_data,
               "applicationSourceCommit": source, "harnessSourceCommit": source, "workflow": ".github/workflows/desktop-macos-installed.yml",
               **{key: preview[key] for key in ("sourceTree", "runId", "runAttempt", "platform", "packageSha256", "packageSize", "runtimeManifestSha256",
                   "installerInventorySha256", "normalBinaryBeforeSigningSha256", "signedAppBinarySha256")}, "target": target,
               "toolchain": prior["toolchain"], "buildCommandAdmissionSha256": digest(build_bytes), "priorResultSha256": digest(prior_bytes),
               "generatedRunnerAdmissionSha256": digest(runner_bytes), "summaryCommandAdmissionSha256": digest(summary_owner_bytes),
-              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery", "testCounts": counts,
-              "nativeSummarySha256": digest(summary_bytes), "savedVersionRecoveryUI": "passed", "savedVersionRecovery": recovery,
-              "selectedSavedFileScope": "saved-version-recovery", "savedOfflineAndEmptyBuildInputCohortObserved": False,
-              "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", "reason": "none"},
-              "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": {"name": "1.2.3", "build": "7"},
-              "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, "interruptedGuiSaveObserved": False,
-              "configurationTextImagesRecoveryObserved": False, "applicationStateAfterNormalQuit": "notRunning", "originalReferenceAndGateTerminalObserved": True,
+              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/" + method, "testCounts": counts,
+              "nativeSummarySha256": digest(summary_bytes),
+              "selectedSavedFileScope": selected_scope, "savedOfflineAndEmptyBuildInputCohortObserved": False,
+              "applicationStateAfterNormalQuit": "notRunning", "originalReferenceAndGateTerminalObserved": True,
               "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state", "independentOwnerResourceProof": False,
               "fullUIQualified": False, "distributionQualified": False, "productReady": False}
           body = json.dumps(result, sort_keys=True, separators=(",", ":"), allow_nan=False).encode() + b"\n"
           need(len(body) <= 65536)
-          fd = os.open(root / "normal-ui/saved-version-recovery-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          fd = os.open(root / ("normal-ui/" + stem + "-result.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
           try:
               with os.fdopen(fd, "wb", closefd=False) as output:
                   output.write(body); output.flush(); os.fsync(fd)
           finally: os.close(fd)
-          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, other domains and all-worker finality remain unproved.")
+          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, other domains and all-worker finality remain unproved."
+                if selected_scope == "saved-version-recovery" else
+                "One preview-packaged GitHub local bundle refusal observed; remote GitHub, promotion, default-seven and independent all-worker finality remain unproved.")
           PY_SAVED_VERSION_RECOVERY_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: always() && steps.work.outputs.root != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: desktop-macos-installed-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ format('{0}/source-binding.json
+            {0}/removal-observer-build.status
+            {0}/removal-observers.status
+            {0}/android-helper-prepare-removal-observers.json
+            {0}/package-removal-fixture.status
+            {0}/android-helper-package-removal-fixture.json
+            {0}/normal-ui/removal-ordinary-test.runner-admission.json
+            {0}/normal-ui/removal-abrupt-test.runner-admission.json
             {0}/normal-ui/android-inputs.status
             {0}/normal-ui/android-input-status.json
             {0}/prepare-ui-inputs-failure.json
@@ -4120,6 +4269,14 @@ jobs:
             {0}/normal-ui/saved-version-recovery-summary.command-admission.json
             {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json
             {0}/normal-ui/saved-version-recovery-result.json
+            {0}/normal-ui/workflow-refusal-test-file-limit.status
+            {0}/normal-ui/workflow-refusal-test.status
+            {0}/normal-ui/workflow-refusal-test.runner-admission.json
+            {0}/normal-ui/workflow-refusal-test.failure-diagnostics.json
+            {0}/normal-ui/workflow-refusal-summary.status
+            {0}/normal-ui/workflow-refusal-summary.command-admission.json
+            {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json
+            {0}/normal-ui/workflow-refusal-result.json
             {0}/normal-ui/build.status
             {0}/normal-ui/test.status
             {0}/normal-ui/test.runner-admission.json
@@ -4376,7 +4533,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
         timeout-minutes: 3
         shell: bash
         run: |
@@ -4410,10 +4567,11 @@ jobs:
                   or binding["frontendAbsentAtAdmission"] is not True or not shutil.rmtree.avoids_symlink_attacks):
               raise ValueError("task cleanup original refused")
           scope = os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"]
-          if scope not in ("ordinary-seven", "saved-version-recovery"):
+          if scope not in ("ordinary-seven", "saved-version-recovery", "workflow-refusal"):
               raise ValueError("task cleanup SOURCE scope refused")
-          test_stem, summary_stem = (("saved-checks-test", "saved-checks-summary") if scope == "ordinary-seven"
-                                    else ("saved-version-recovery-test", "saved-version-recovery-summary"))
+          stem = {"ordinary-seven": "saved-checks", "saved-version-recovery": "saved-version-recovery",
+                  "workflow-refusal": "workflow-refusal"}[scope]
+          test_stem, summary_stem = stem + "-test", stem + "-summary"
           # The skipped cohort supplies no finality or cleanup authority.
           saved_directory = root / ("normal-ui/" + test_stem + ".xcresult")
           saved_logs = (test_stem + ".log", summary_stem + ".raw.json", summary_stem + ".stderr")

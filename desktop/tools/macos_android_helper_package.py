@@ -680,7 +680,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -869,9 +869,9 @@ def signing_requirement(identity, identifier):
             ' and certificate leaf = H"' + identity[1] + '"')
 
 
-def producer_artifact(messages, checkout, target_root, target, *, remove=False):
+def producer_artifact(messages, checkout, target_root, target, *, remove=False, observer=False):
     """One explicit nonshipping example graph; no packaged code is rebuilt."""
-    need(type(remove) is bool, "producer-compiler-purpose")
+    need(type(remove) is bool and type(observer) is bool and (not observer or remove), "producer-compiler-purpose")
     build_profile(target)
     need(type(messages) is bytes and 0 < len(messages) <= 4 * 1024 * 1024
          and messages.endswith(b"\n"), "producer-compiler-bound")
@@ -899,11 +899,12 @@ def producer_artifact(messages, checkout, target_root, target, *, remove=False):
             artifacts.append(row)
     example = "macos_remove_producer" if remove else "macos_package_producer"
     feature = "macos-remove-producer" if remove else "macos-package-producer"
+    selected_features = ["macos-remove-observer-producer", feature] if observer else [feature]
     binary = target_root / target / "release/examples" / example
     specs = (("desktop/src-tauri", "mobile-release-kit-desktop", example, "examples/" + example + ".rs",
-              ["example"], ["bin"], [feature], str(binary)),
+              ["example"], ["bin"], selected_features, str(binary)),
              ("desktop/src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", "src/lib.rs",
-              ["lib"], ["lib"], [feature], None),
+              ["lib"], ["lib"], selected_features, None),
              ("desktop/native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", "src/lib.rs",
               ["lib"], ["lib"], ["default", "package-producer-signing"], None))
     chosen = []
@@ -928,17 +929,177 @@ def producer_artifact(messages, checkout, target_root, target, *, remove=False):
 
 
 
+# NONSHIPPING fixed existing-owner extension. Neither role is a normal product
+# selector, a root override, or a serialized source/cleanup capability.
+REMOVAL_REF = "refs/heads/verify/desktop-macos-removal-lifecycle"
+REMOVAL_OWNER_PHASES = ("prepare-removal-observers", "package-removal-fixture")
+REMOVAL_CASES = ("ordinary", "abrupt")
+REMOVAL_OBSERVER_PROGRAM = "mrk-macos-removal-observer"
+REMOVAL_OBSERVER_PRODUCER = "macos-remove-observer-producer"
+REMOVAL_INPUT_NAMES = ("Remove.pkg", "remove-producer.json", "remove-producer.sig")
+REMOVAL_PHASE_ENDPOINTS = {"attach": 60, "before": 120, "joint": 720, "resume": 843,
+                           "terminal": 903, "detach": 933, "settle": 963}
+
+
+def removal_context_data(environment, target):
+    need(target == ARM_TARGET and environment.get("GITHUB_REF") == REMOVAL_REF
+         and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
+         and environment.get("MRK_MACOS_REMOVAL_CASE") in REMOVAL_CASES,
+         "removal-fixture-fixed-route")
+    correlation = environment.get("MRK_MACOS_REMOVAL_CORRELATION")
+    need(type(correlation) is str and re.fullmatch(r"[0-9a-f]{32}", correlation)
+         and correlation != "0" * 32, "removal-fixture-correlation")
+    return environment["MRK_MACOS_REMOVAL_CASE"], correlation
+
+
+def removal_native_result_data(case, role, status):
+    """Fixed expected NONZERO test route only; never changes Install0 policy."""
+    need(case in REMOVAL_CASES and type(status) is int, "removal-original-case-status")
+    expected = {"ordinary": {"removal-live-cancel": 1, "removal-live-continue": 0},
+                "abrupt": {"removal-live-cut": 1, "removal-resume": 0}}[case]
+    return role in expected and status == expected[role]
+
+
+def removal_runtime_roles(case):
+    need(case in REMOVAL_CASES, "removal-fixed-runtime-case")
+    return (("removal-target-attach", "removal-observers-attach", "removal-observer-before")
+        + (("removal-live-cancel", "removal-observer-after-cancel", "removal-live-continue")
+           if case == "ordinary" else ("removal-live-cut", "removal-observer-after-cut", "removal-resume"))
+        + ("removal-observer-terminal", "removal-observers-detach", "removal-target-detach"))
+
+
+class _RemovalHostClock:
+    """Only an adapter to the SAME containing clock, not another deadline."""
+    def __init__(self, operation):
+        self.operation = operation
+
+    def check(self):
+        self.operation.package_clock()
+
+
+
+def removal_preparation_roles(case):
+    need(case in REMOVAL_CASES, "observer-fixed-preparation-case")
+    middle = "after-cancel" if case == "ordinary" else "after-cut"
+    roles = ["observer-program-sign", "observer-program-verify", "observer-producer-build"]
+    for phase in ("before", middle, "terminal"):
+        roles.extend("observer-" + phase + "-" + role for role in
+                     ("pkgbuild", "tar", "xar") + FINAL_PACKAGE_ROLES + ("producer-emitter",))
+    roles.extend("observer-" + role for role in REMOVE_PACKAGE_ROLES[2:])
+    return tuple(roles)
+
+
+def removal_credential_roster_data():
+    application = CREDENTIAL_ROLES[:17] + ("search-final", "default-after")
+    return (application + ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
+            + (INSTALLER_CREDENTIAL_ROSTER + application) * 3 + application)
+
+
+def removal_credential_quote_data():
+    # This bounds the retained managed rows, not process RSS. A list with twice
+    # the fixed158 slots covers simultaneous old/new append storage; every
+    # actual container size is checked against this quote while accumulating.
+    roster = removal_credential_roster_data()
+    need(len(roster) == 158, "observer-credential-fixed-count")
+    sample = {"role": max(CREDENTIAL_ROLES, key=len), "entered": True,
+              "returned": True, "settled": True, "status": -65536}
+    row_bound = sys.getsizeof(sample) + sum(sys.getsizeof(key) + sys.getsizeof(value)
+                                           for key, value in sample.items()) + 256
+    quote = sys.getsizeof([None] * 316) + 158 * row_bound
+    need(type(quote) is int and quote <= 512 * 1024, "observer-credential-record-storage")
+    return quote
+
+
+def removal_original_storage_data(entries, registry, additional):
+    """Managed Original metadata only; aliases/native iterator internals are not copied.
+
+    The fixed8MiB work reservation separately covers bounded source/control/
+    name-roster/transient native scan buffers. This measures retained Python
+    containers/scalars, NOT RSS or hidden allocator/native bookkeeping.
+    """
+    need(type(entries) is list and type(registry) is dict and type(additional) is int
+         and 0 <= additional <= 128 and len(entries) <= 24576
+         and len(registry) <= len(entries), "removal-original-storage-input")
+    def scalar(value, depth):
+        need(depth <= 6, "removal-original-metadata-depth")
+        size = sys.getsizeof(value)
+        if type(value) in (tuple, list):
+            need(len(value) <= 64, "removal-original-metadata-vector")
+            size += sum(scalar(item, depth + 1) for item in value)
+        elif type(value) is dict:
+            need(len(value) <= 64, "removal-original-metadata-map")
+            for key, item in value.items():
+                need(type(key) is str and len(key) <= 128, "removal-original-metadata-key")
+                size += sys.getsizeof(key) + scalar(item, depth + 1)
+        else:
+            need(value is None or type(value) in (int, bool, str, bytes), "removal-original-metadata-scalar")
+            if type(value) in (str, bytes):
+                need(len(value) <= 4096, "removal-original-metadata-string")
+        return size
+    # Both old/new list+registry storage remain charged across an append.
+    total = 2 * (sys.getsizeof(entries) + sys.getsizeof(registry))
+    for entry in entries:
+        need(type(entry) is dict and len(entry) <= 64, "removal-original-metadata-row")
+        row = sys.getsizeof(entry)
+        for key, value in entry.items():
+            need(type(key) is str and len(key) <= 128, "removal-original-field")
+            row += sys.getsizeof(key)
+            if key == "parent_entry":
+                # SAME retained entry, already measured in this table.
+                need(value is None or type(value) is dict, "removal-original-parent-alias")
+            elif key == "iterator":
+                # Native iterator is at most one active original. Its borrowed
+                # fixed scan buffer is in the work reservation, not a body copy.
+                row += sys.getsizeof(value)
+            else:
+                row += scalar(value, 0)
+        need(row <= 16384, "removal-original-row-storage")
+        total += row
+    # Sixty-four fixed extra rows cover the existing bounded source/three
+    # capture-publication helpers between new-owner boundaries. Each is
+    # measured again at the next boundary; they do not gain lifetime/FD credit.
+    return total + (additional + 64) * 16384
+
+
+def removal_prepared_data(value, environment, target, case, correlation):
+    """Closed transport after a separately observed original preparation0.
+
+    Still not P/signature/peer authority: the actual mounted originals and
+    observer/native admissions independently establish those relationships.
+    """
+    fields = {"schemaVersion", "phase", "source", "target", "workflowSource", "runId", "runAttempt",
+              "case", "correlation", "passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired",
+              "nativeCalls", "nativeCallsSha256", "credentialCalls", "credentialCallsSha256", "credentialContexts",
+              "targetBinding", "targetFiles", "targetImage", "observerImage", "observers", "observerProgramSha256",
+              "controlBytes", "productReady"}
+    need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["phase"] == "prepare-removal-observers"
+         and value["source"] == value["workflowSource"] == environment["GITHUB_SHA"]
+         and value["target"] == target == ARM_TARGET and value["runId"] == environment["GITHUB_RUN_ID"]
+         and value["runAttempt"] == environment["GITHUB_RUN_ATTEMPT"] and value["case"] == case
+         and value["correlation"] == correlation
+         and all(value[key] is True for key in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired"))
+         and value["productReady"] is False and type(value["nativeCalls"]) is int and value["nativeCalls"] == 46
+         and type(value["credentialCalls"]) is int and value["credentialCalls"] == 158
+         and type(value["credentialContexts"]) is int and value["credentialContexts"] == 8
+         and type(value["controlBytes"]) is int and 0 < value["controlBytes"] <= 16 * 1024 * 1024
+         and all(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key]) and value[key] != "0" * 64
+                 for key in ("nativeCallsSha256", "credentialCallsSha256", "observerProgramSha256")),
+         "observer-preparation-original-binding")
+    return value
+
+
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES, "closed-phase")
+        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
         self.phase, self.environment, self.stager = phase, environment, stager
         # Exhaustive SOURCE-selected purpose. No filenames/roles come from DATA.
-        self.removal = phase in REMOVE_PHASES
+        self.removal = phase in REMOVE_PHASES + REMOVAL_OWNER_PHASES
         # The existing SOURCE-selected ordinary workflow alone ships this UI.
         # Aqua observation and the separate Remove package keep their flat form.
         self.install_product = not self.removal and environment.get("MRK_MACOS_PACKAGE_ROLE") == "ordinary-image"
@@ -954,6 +1115,22 @@ class Operation:
         self.final_image_directory = "remove-distribution-final" if self.removal else "distribution-final"
         self.image_identifier = "dev.mobile-release-kit.desktop.remove-distribution" if self.removal else "dev.mobile-release-kit.desktop.distribution"
         self.producer_filename = "macos-remove-producer" if self.removal else "macos-package-producer"
+        self.removal_case = self.removal_correlation = None
+        self.removal_prep_phase = self.removal_final_context = None
+        self.removal_preparation_complete = self.removal_complete = self.removal_unknown = False
+        self.removal_credential_reserved = self.removal_control_reserved = 0
+        self.removal_host_module = self.removal_api = None
+        self.removal_thread = self.removal_threading = self.removal_runner = None
+        self.removal_ui_joined = False
+        self.removal_ui_result = self.removal_ui_error = self.removal_ui_facts = None
+        self.removal_ui_outcome = {"done": False, "known": False}
+        self.removal_scan_state = "closed"
+        self.removal_original_reserved = 0
+        self.removal_joint_deadline = self.removal_baseline_mount = None
+        self.removal_mounts, self.removal_sources, self.removal_system_parents = [], [], []
+        self.removal_output_facts, self.removal_markers = {}, {}
+        self.removal_pending_outputs = set()
+        self.removal_requests = None
         self.entries, self.calls, self.errors = [], [], []
         self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
@@ -1008,7 +1185,7 @@ class Operation:
                         "developerIdOrNotarizationQualified": False, "productReady": False}
         if phase in FINAL_IMAGE_PHASES:
             self.receipt["distributionQualified"] = False
-        if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+        if phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or phase == "prepare-removal-observers":
             self.receipt.update(notaryAuthentication={"created": False, "closed": False, "retired": False},
                                 toolchain=None, helperIdentifier=None)
 
@@ -1124,12 +1301,12 @@ class Operation:
     def call(self, role, argv, environment, *, cwd, timeout, limit):
         need(self.credential_known() and not self.credential_failed, "credential-dispatch-unknown")
         image_purpose = {"distribution-sign": "distribution-image", "observation-sign": "observation-image"}.get(role)
-        if self.phase in ("package-install", "package-remove") and image_purpose is not None:
+        if self.phase in ("package-install", "package-remove", "prepare-removal-observers") and image_purpose is not None:
             need(self.credential_active is not None and self.credential_active.get("purpose") == image_purpose
                  and self.credential_active["ready"] and self.credential_active["roles"] == IMAGE_CREDENTIAL_ROLES[image_purpose],
                  "package-image-credential-required")
         if role == "final-package-sign":
-            need(self.phase in FINAL_PACKAGE_PHASES and self.credential_active is not None
+            need(self.removal_final_active() and self.credential_active is not None
                  and self.credential_active.get("purpose") == "installer" and self.credential_active["ready"]
                  and self.credential_active["roles"] == (role,), "installer-credential-required")
         if self.credential_active is not None:
@@ -1150,11 +1327,12 @@ class Operation:
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "notary-original-dispatch-boundary")
             self.notary_clock()
-        if self.phase in FINAL_PACKAGE_PHASES:
+        if self.removal_final_active():
+            current = self.removal_final_calls()
             roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
             need(not self.notary_retiring and not self.notary_unknown and not self.errors
-                 and self.stager_io_pending is None and len(self.calls) < len(roles)
-                 and role == roles[len(self.calls)]
+                 and self.stager_io_pending is None and len(current) < len(roles)
+                 and role == roles[len(current)]
                  and self.notary_mutation_pending == (role in ("final-package-productbuild", "final-package-staple"))
                  and self.signing_mutation_pending == (role == "final-package-sign")
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
@@ -1177,7 +1355,19 @@ class Operation:
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "python-original-dispatch-boundary")
             self.python_clock()
-        record = {"role": role, "entered": True, "returned": False, "capturesSettled": False}
+        recorded_role = self.removal_recorded_role(role)
+        if self.phase == "prepare-removal-observers":
+            roles = removal_preparation_roles(self.removal_case)
+            need(len(self.calls) < len(roles) and recorded_role == roles[len(self.calls)]
+                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
+                 "observer-preparation-original-order")
+            self.notary_clock()
+        if self.phase == "package-removal-fixture":
+            roles = removal_runtime_roles(self.removal_case)
+            need(not self.removal_unknown and len(self.calls) < len(roles) and role == roles[len(self.calls)],
+                 "removal-runtime-original-order")
+            self.package_clock()
+        record = {"role": recorded_role, "entered": True, "returned": False, "capturesSettled": False}
         self.calls.append(record)
         try:
             # This is the SAME owner invocation, after package clock/reserve
@@ -1213,7 +1403,7 @@ class Operation:
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
-        prefix = "android-helper-" + ((self.phase + "-") if self.removal else "") + role
+        prefix = "android-helper-" + ((self.phase + "-") if self.removal else "") + recorded_role
         self.publish(prefix + (".jsonl" if role == "build" else ".stdout"), result.stdout)
         self.publish(prefix + ".stderr", result.stderr)
         self.publish(prefix + ".status", (str(result.returncode) + "\n").encode("ascii"))
@@ -1221,7 +1411,9 @@ class Operation:
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
         diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
-        need(result.returncode == 0 or diagnostic and result.returncode == 1, "original-nonzero-" + role)
+        need(result.returncode == 0 or diagnostic and result.returncode == 1
+             or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode),
+             "original-nonzero-" + role)
         if self.credential_active is not None:
             self.credential_clock(self.credential_active)
             self.credential_census(self.credential_active)
@@ -1239,7 +1431,7 @@ class Operation:
             self.python_clock(work=not cleanup)
         elif self.package_endpoint is not None:
             self.package_clock()
-        elif self.phase in FINAL_PACKAGE_PHASES:
+        elif self.phase in FINAL_PACKAGE_PHASES or self.phase == "prepare-removal-observers":
             self.notary_clock(work=not cleanup)
         return now
 
@@ -1253,7 +1445,7 @@ class Operation:
         elif self.package_endpoint is not None:
             self.package_clock()
             endpoint = min(endpoint, self.package_endpoint)
-        elif self.phase in FINAL_PACKAGE_PHASES:
+        elif self.phase in FINAL_PACKAGE_PHASES or self.phase == "prepare-removal-observers":
             _observed, outer = self.notary_clock()
             endpoint = min(endpoint, outer)
         return {"observed": now, "endpoint": endpoint, "ready": False, "retiring": False, "pending": None,
@@ -1329,13 +1521,19 @@ class Operation:
         """The SAME process owner, but no public raw argv/captures/exception text."""
         need(context is self.credential_active and role in CREDENTIAL_ROLES
              and self.credential_known() and context["pending"] is None
-             and len(self.credential_calls) < 64 and timeout in (10, 30), "credential-fixed-original")
+             and len(self.credential_calls) < (158 if self.phase == "prepare-removal-observers" else 64) and timeout in (10, 30), "credential-fixed-original")
+        if self.phase == "prepare-removal-observers":
+            self.removal_credential_records_post()
+            need(role == removal_credential_roster_data()[len(self.credential_calls)]
+                 and self.removal_credential_reserved == removal_credential_quote_data(),
+                 "observer-credential-before-append")
         now = self.credential_clock(context, cleanup=context["retiring"])
         endpoint = context["endpoint"] - (0 if context["retiring"] else 30_000_000_000)
         need(now + (timeout + 3) * 1_000_000_000 < endpoint, "credential-dispatch-reserve")
         self.credential_census(context)
         record = {"role": role, "entered": True, "returned": False, "settled": False, "status": None}
         self.credential_calls.append(record)
+        self.removal_credential_records_post()
         environment = self.native_environment()
         environment["HOME"] = "/Users/runner"
         try:
@@ -1346,6 +1544,7 @@ class Operation:
                  and type(result.stdout) is bytes and type(result.stderr) is bytes
                  and len(result.stdout) + len(result.stderr) <= 16384, "credential-original-return")
             record.update(returned=True, settled=True, status=result.returncode)
+            self.removal_credential_records_post()
             self.credential_clock(context, cleanup=context["retiring"])
             self.credential_census(context)
         except BaseException:
@@ -1465,12 +1664,13 @@ class Operation:
     def credential_scope(self, purpose, *, producer=None):
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
-                 "installer": ("final-package-sign",), **IMAGE_CREDENTIAL_ROLES,
+                 "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
                  **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
               or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
+              or self.phase == "prepare-removal-observers" and purpose in ("observer-program", "installer", "producer", "distribution-image")
               or purpose in SIGNING_PHASES and self.phase == purpose)
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
         if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
@@ -1493,11 +1693,11 @@ class Operation:
             self.credential_active = context  # Inside the whole acquisition/use/unwind guard.
             self.credential_contexts.append(fact)
             if purpose == "installer":
-                need(not any(name in self.environment for name in CREDENTIAL_VARIABLES), "installer-no-application-secret")
+                need(self.phase == "prepare-removal-observers" or not any(name in self.environment for name in CREDENTIAL_VARIABLES), "installer-no-application-secret")
                 body, secret = credential_values({old: self.environment.get(new)
                     for old, new in zip(CREDENTIAL_VARIABLES, INSTALLER_CREDENTIAL_VARIABLES)})
             else:
-                need(not any(name in self.environment for name in INSTALLER_CREDENTIAL_VARIABLES), "application-no-installer-secret")
+                need(self.phase == "prepare-removal-observers" or not any(name in self.environment for name in INSTALLER_CREDENTIAL_VARIABLES), "application-no-installer-secret")
                 body, secret = credential_values(self.environment)
             password = os.urandom(32).hex()
             self.credential_private_root(context, body)
@@ -1562,7 +1762,7 @@ class Operation:
             context["ready"] = True
             yield
             context["ready"] = False
-            need(tuple(row["role"] for row in self.calls[before:]) == context["roles"], "credential-callback-roster")
+            need(tuple(row["role"] for row in self.calls[before:]) == tuple(self.removal_recorded_role(role) for role in context["roles"]), "credential-callback-roster")
             if purpose == "producer":
                 need(self.read(copied) == copied_body, "credential-producer-callback-post")
             for entry, data in self.package_sources:
@@ -1945,7 +2145,7 @@ class Operation:
             self.recheck_directory(key["root"])
             need(os.listdir(key["root"]["fd"]) == [key["name"]]
                  and self.read(key["entry"]) == key["body"], "notary-key-original-changed")
-        if self.phase in FINAL_PACKAGE_PHASES:
+        if self.removal_final_active():
             self.final_package_post(work=work)
         if self.phase in FINAL_IMAGE_PHASES:
             self.final_image_post(work=work)
@@ -2063,11 +2263,11 @@ class Operation:
     @contextlib.contextmanager
     def notary_key_scope(self):
         package_prefix = None
-        if self.phase in FINAL_PACKAGE_PHASES:
+        if self.removal_final_active():
             roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
             package_prefix = roles[:roles.index("final-package-submit")]
         need((self.phase in NOTARY_PHASES and len(self.calls) == 5
-              or self.phase in FINAL_PACKAGE_PHASES and tuple(call["role"] for call in self.calls) == package_prefix
+              or self.removal_final_active() and self.removal_final_calls() == package_prefix
               or self.phase in FINAL_IMAGE_PHASES and len(self.calls) == 3)
              and self.notary_key is None
              and self.notary_known(), "notary-key-purpose")
@@ -2796,7 +2996,7 @@ class Operation:
                 and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls))
 
     def final_package_io(self, label, function, *args, **kwargs):
-        need(self.phase in FINAL_PACKAGE_PHASES and self.final_package_known() and not self.notary_retiring,
+        need(self.removal_final_active() and self.final_package_known() and not self.notary_retiring,
              "final-package-io-unknown")
         self.notary_clock()
         self.stage = label
@@ -2839,7 +3039,7 @@ class Operation:
         result = self.final_package_io("final-package-original-audit", audit,
             argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
                                original_package=self.work / self.packager_filename,
-                               **({"remove": True, "expected_remover": self.environment.get("MRK_MACOS_REMOVER_SHA256")} if self.removal else {})))
+                               **self.removal_package_audit_arguments()))
         need(type(result) is dict and result.get("packageSize") == size and type(result["packageSize"]) is int
              and result.get("packageSha256") == sha and self.notary_stream(entry) == sha,
              "final-package-audit-original")
@@ -2892,8 +3092,9 @@ class Operation:
 
     def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
         roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
-        need(self.phase in FINAL_PACKAGE_PHASES and self.final_package_known() and not self.notary_retiring
-             and len(self.calls) < len(roles) and role == roles[len(self.calls)],
+        current = self.removal_final_calls()
+        need(self.removal_final_active() and self.final_package_known() and not self.notary_retiring
+             and len(current) < len(roles) and role == roles[len(current)],
              "final-package-fixed-role-order")
         need((self.notary_key is not None) == (role in ("final-package-submit", "final-package-log"))
              and (self.credential_active is None or role == "final-package-sign"
@@ -3078,8 +3279,8 @@ class Operation:
         self.notary_post()
 
     def finalize_package(self):
-        need(self.phase in FINAL_PACKAGE_PHASES and self.signing is not None
-             and not any(name in self.environment for name in CREDENTIAL_VARIABLES), "final-package-configured-purpose")
+        need(self.removal_final_active() and self.signing is not None
+             and (self.phase == "prepare-removal-observers" or not any(name in self.environment for name in CREDENTIAL_VARIABLES)), "final-package-configured-purpose")
         self.notary_space(reserve=True)  # Existing3GiB floor plus2GiB additional reservation.
         self.installer_sources()
         profile = self.source_original(NOTARY_PROFILE, "source-final-package-notary-profile", 1024)
@@ -3126,7 +3327,7 @@ class Operation:
             self.final_package_call("final-package-sign", ["/usr/bin/productsign", "--sign", self.installer_selection["identityCommonName"],
                 "--keychain", str(self.credential_active["path"] / "identity.keychain-db"), "--timestamp",
                 str(self.work / self.unsigned_package_name / self.package_filename), str(path)], maximum=60)
-        need(self.credential_active is None and self.credential_known() and len(self.credential_calls) == 20,
+        need(self.credential_active is None and self.credential_known() and len(self.credential_calls) == 20 + (self.removal_final_context["credentials"] if self.phase == "prepare-removal-observers" else 0),
              "final-package-installer-context-not-retired")
         signed_audit = self.final_package_audit(self.final_package_output, path)
         need({key: value for key, value in signed_audit.items() if key not in ("packageSha256", "packageSize")}
@@ -3764,8 +3965,1269 @@ class Operation:
                             residentImageSha256=expected_image, residentImageBytes=len(image_body),
                             residentImageOriginal=image["identity"])
 
+    def removal_package_audit_arguments(self):
+        if not self.removal:
+            return {}
+        expected = self.environment.get("MRK_MACOS_REMOVER_SHA256")
+        if self.phase == "prepare-removal-observers":
+            need(self.removal_final_active() and self.removal_prep_phase in self.stager.removal_fixture_case_data(self.removal_case),
+                 "observer-audit-same-final-context")
+            context = self.removal_final_context
+            expected = context["program"]
+            fixture = {"removal_fixture_role": "observer-" + self.removal_prep_phase,
+                       "removal_fixture_correlation": self.removal_correlation,
+                       "removal_fixture_binding": self.removal_binding}
+            need(context["fixture"] == fixture, "observer-audit-fixed-source-template")
+            return {"remove": True, "expected_remover": expected, **fixture}
+        fixture = {}
+        if self.environment.get("GITHUB_REF") == REMOVAL_REF:
+            case, _correlation = removal_context_data(self.environment, self.target)
+            if case == "abrupt":
+                fixture["removal_fixture_role"] = "abrupt"
+        return {"remove": True, "expected_remover": expected, **fixture}
+
+    def removal_input_control(self, name, role, limit=16384):
+        original = self.original(self.work_entry, name, role, limit, (0o600,))
+        body = self.read(original)
+        self.package_outputs.append((original, digest(body)))
+        return final_package_json(body, limit, "removal-preparation-control-format")
+
+    def removal_previous_owner(self, phase):
+        need(phase in ("package-install", "package-remove"), "removal-previous-fixed-owner")
+        status = self.original(self.work_entry, phase + ".status", "removal-previous-owner-status", 8, (0o600,))
+        need(self.read(status) == b"0\n", "removal-previous-original-owner-zero")
+        self.package_outputs.append((status, digest(b"0\n")))
+        value = self.removal_input_control("android-helper-" + phase + ".json", "removal-previous-owner")
+        need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+             and value.get("phase") == phase and value.get("target") == self.target
+             and value.get("source") == value.get("workflowSource") == self.image_source
+             and value.get("runId") == self.environment["GITHUB_RUN_ID"]
+             and value.get("runAttempt") == self.environment["GITHUB_RUN_ATTEMPT"]
+             and value.get("packageRole") == "ordinary-image" and value.get("productReady") is False
+             and all(value.get(key) is True for key in ("passed", "originalClosesKnown", "targetRetired", "outerFinalityRequired")),
+             "removal-previous-owner-source")
+        roles = self.stager.PACKAGING_CALL_ROLES if phase == "package-install" else REMOVE_PACKAGE_ROLES
+        calls = value.get("originalCalls")
+        need(type(calls) is list and len(calls) == len(roles)
+             and all(type(row) is dict and row.get("role") == role and row.get("entered") is True
+                 and row.get("returned") is True and row.get("capturesSettled") is True and type(row.get("returncode")) is int
+                 and (row["returncode"] == 0 or phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
+                      and row["returncode"] == 1) for row, role in zip(calls, roles)), "removal-previous-owner-originals")
+        if phase == "package-install":
+            observed = value.get("distribution")
+            need(type(observed) is dict and observed.get("kind") == "mrk-ordinary-package-observed-v2"
+                 and observed.get("target") == self.target and observed.get("release") == self.image_release
+                 and all(observed.get(key) is True for key in ("originalInstallerReturnedZero", "sameRequestV2Readback",
+                                                              "originalMountDetached", "groupEndpointMet")),
+                 "removal-baseline-install-readback")
+        return value
+
+    def removal_preparation_inputs(self):
+        self.removal_selection = self.stager.BuildSelection(self.target,
+            self.stager.build_release_data(self.read(self.release_entry), target=self.target)["packageVersion"], self.image_release)
+        self.removal_previous_owner("package-install")
+        owner = self.removal_previous_owner("package-remove")
+        distribution = owner.get("removalDistribution")
+        need(type(distribution) is dict and distribution.get("kind") == "mrk-remove-package-emitted-image-v1"
+             and distribution.get("target") == self.target and distribution.get("release") == self.image_release
+             and distribution.get("groupEndpointMet") is True and distribution.get("installerEntered") is False
+             and distribution.get("removalExecuted") is False, "removal-target-package-preparation")
+        root = self.directory(self.work_entry, "remove-producer-root", "removal-target-three-originals")
+        need(set(self.removal_names(root, 3)) == set(REMOVAL_INPUT_NAMES), "removal-target-preparation-roster")
+        self.package_roots.append((root, set(REMOVAL_INPUT_NAMES)))
+        files, bodies = {}, {}
+        for leaf in REMOVAL_INPUT_NAMES:
+            limit = self.stager.MAX_BYTES if leaf == "Remove.pkg" else 16384 if leaf.endswith("json") else 512
+            entry = self.original(root, leaf, "removal-target-preparation-input", limit, (0o444,))
+            # The package is streamed by the original final-P observer here;
+            # only its bounded sidecars are retained as DATA.
+            sha = self.notary_stream(entry) if self.phase == "prepare-removal-observers" else self.removal_stream(entry, limit=limit)[0][1]
+            files[leaf] = {"bytes": entry["identity"][6], "sha256": sha}
+            if leaf != "Remove.pkg":
+                bodies[leaf] = self.read(entry)
+            self.package_outputs.append((entry, sha))
+        need(files["Remove.pkg"] == {"bytes": distribution["packageBytes"], "sha256": distribution["packageSha256"]}
+             and files["remove-producer.json"]["sha256"] == distribution["descriptorSha256"]
+             and files["remove-producer.sig"]["sha256"] == distribution["signatureSha256"]
+             and distribution["inventorySha256"] == self.environment["MRK_MACOS_INSTALL_INVENTORY_SHA256"]
+             and distribution["removerExecutableSha256"] == self.environment["MRK_MACOS_REMOVER_SHA256"],
+             "removal-target-preparation-source")
+        binding = {"sourceCommit": self.image_source, "target": self.target, "release": self.image_release,
+                   "inventorySha256": distribution["inventorySha256"], "packageSha256": files["Remove.pkg"]["sha256"],
+                   "removeDescriptorSha256": files["remove-producer.json"]["sha256"],
+                   "removeSignatureSha256": files["remove-producer.sig"]["sha256"]}
+        self.stager.removal_fixture_binding_data(binding, selection=self.removal_selection)
+        image = distribution.get("userImage")
+        need(type(image) is dict and set(image) == {"file", "sha256", "bytes"}
+             and image["file"] == "MobileReleaseKit-Remove.dmg" and self.stager.maintenance_hex(image["sha256"], 64)
+             and type(image["bytes"]) is int and 0 < image["bytes"] <= self.stager.MAX_BYTES, "removal-target-image-binding")
+        self.removal_binding, self.removal_target_files, self.removal_target_image = binding, files, image
+        return binding
+
+    def removal_credential_records_post(self):
+        if self.phase != "prepare-removal-observers":
+            return
+        roster = removal_credential_roster_data()
+        need(tuple(row["role"] for row in self.credential_calls) == roster[:len(self.credential_calls)]
+             and len(self.credential_calls) <= 158, "observer-credential-cumulative-roster")
+        actual = sys.getsizeof(self.credential_calls)
+        for row in self.credential_calls:
+            need(set(row) == {"role", "entered", "returned", "settled", "status"}
+                 and all(type(row[key]) is bool for key in ("entered", "returned", "settled"))
+                 and (row["status"] is None or type(row["status"]) is int and -65536 <= row["status"] <= 65535),
+                 "observer-credential-record-shape")
+            actual += sys.getsizeof(row) + sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in row.items())
+        need(actual <= self.removal_credential_reserved and self.removal_control_reserved <= 16 * 1024 * 1024,
+             "observer-credential-actual-storage")
+
+    def removal_recorded_role(self, role):
+        if self.phase != "prepare-removal-observers":
+            return role
+        return "observer-" + ((self.removal_prep_phase + "-") if self.removal_prep_phase else "") + role
+
+    def removal_final_active(self):
+        return self.phase in FINAL_PACKAGE_PHASES or (self.phase == "prepare-removal-observers"
+            and self.removal_final_context is not None)
+
+    def removal_final_calls(self):
+        if self.phase in FINAL_PACKAGE_PHASES:
+            return tuple(row["role"] for row in self.calls)
+        need(self.removal_final_active(), "observer-final-package-context")
+        prefix = "observer-" + self.removal_prep_phase + "-"
+        rows = self.calls[self.removal_final_context["calls"]:]
+        need(all(row["role"].startswith(prefix) for row in rows), "observer-final-original-role")
+        return tuple(row["role"][len(prefix):] for row in rows)
+
+    def removal_prepare_io(self, label, function, *args, **kwargs):
+        need(self.phase == "prepare-removal-observers" and self.final_package_known(), "observer-preparation-known")
+        self.notary_clock()
+        self.stage = self.stager_io_pending = "observer-" + label
+        value = function(*args, **kwargs)
+        self.notary_clock()
+        self.stager_io_pending = None
+        return value
+
+    def removal_prepare_call(self, role, argv, *, maximum=30, limit=65536, cwd=None, environment=None):
+        need(self.phase == "prepare-removal-observers" and self.final_package_known(), "observer-preparation-call-known")
+        now, endpoint = self.notary_clock()
+        timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
+        need(timeout >= 1 and (role != "producer-emitter" or timeout == 123), "observer-preparation-call-budget")
+        result = self.call(role, argv, self.native_environment() if environment is None else environment,
+            cwd=self.work if cwd is None else cwd, timeout=timeout, limit=limit)
+        self.notary_clock()
+        return result
+
+    def removal_prepare_program(self):
+        """Own O is a signed copy of the exact SOURCE observer graph, not B."""
+        messages = self.original(self.work_entry, "removal-observer-build.jsonl", "observer-compiler-record", 4 * 1024 * 1024, (0o600,))
+        status = self.original(self.work_entry, "removal-observer-build.status", "observer-compiler-status", 8, (0o600,))
+        need(self.read(status) == b"0\n", "observer-original-compiler-status")
+        directory = self.descend(self.work_entry, ("removal-observer-target", self.target, "release"))
+        original = self.original(directory, self.stager.REMOVER_NAME, "observer-compiler-program", self.stager.REMOVER_BYTES,
+                                 (0o700, 0o755), alias=True)
+        body = self.read(original)
+        self.stager.removal_fixture_cargo_artifact(self.read(messages), self.work / "removal-observer-target" / self.target / "release" / self.stager.REMOVER_NAME,
+            self.work / "removal-observer-target", body, role="observer", target=self.target)
+        copied_root = self.package_directory("removal-observer-program")
+        self.removal_prepare_io("program-copy", self.stager.write_tree,
+            self.work / "removal-observer-program" / "signed", {self.stager.REMOVER_NAME: (body, 0o555)},
+            root_mode=0o700, current_owned=True)
+        signed_root = self.directory(copied_root, "signed", "observer-signed-program-root")
+        unsigned = self.original(signed_root, self.stager.REMOVER_NAME, "observer-unsigned-program", self.stager.REMOVER_BYTES, (0o555,))
+        need(self.read(unsigned) == self.read(original) == body, "observer-program-copy-original")
+        before = unsigned["identity"]
+        self.signing_mutation_pending = True
+        os.fchmod(unsigned["fd"], 0o755); os.fsync(unsigned["fd"])
+        unsigned["identity"] = signature(os.fstat(unsigned["fd"]))
+        need(unsigned["identity"][:2] == before[:2] and unsigned["identity"][3:8] == before[3:8]
+             and unsigned["identity"][2] == stat.S_IFREG | 0o755 and self.read(unsigned) == body,
+             "observer-owned-signing-mode")
+        self.signing_mutation_pending = False
+        matcher = self.signing_matcher()
+        entitlements = self.source_original("desktop/packaging/macos-empty-entitlements.plist", "observer-empty-entitlements", 1024)
+        empty = self.read(entitlements)
+        need(digest(empty) == self.stager.SIGNED_ENTITLEMENTS_SHA256, "observer-empty-entitlements")
+        self.package_sources.append((entitlements, empty))
+        path = self.work / "removal-observer-program/signed" / self.stager.REMOVER_NAME
+        with self.credential_scope("observer-program"):
+            self.signing_mutation_pending = True
+            # This is the same genuine Application identity/purpose, not an
+            # ad-hoc observer. Only the separate example gets a private CDHash.
+            result = self.call("program-sign", ["/usr/bin/codesign", "--force", "--sign", self.signing[1],
+                "--options", "runtime", "--entitlements", str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist"),
+                "--identifier", "dev.mobile-release-kit.desktop.remove", "--timestamp", str(path)],
+                self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            signed = self.original(signed_root, self.stager.REMOVER_NAME, "observer-signed-program", self.stager.REMOVER_BYTES, (0o755,))
+            signed_body = self.read(signed)
+            matcher.macho_content_valid(body, signed_body, self.arch, signing=True)
+            self.close(unsigned)
+            need(unsigned["closed"] and not self.errors, "observer-program-prior-close")
+            self.signing_mutation_pending = False
+            verified = self.removal_prepare_call("program-verify", ["/usr/bin/codesign", "--verify", "--strict", "-R",
+                signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove"), str(path)])
+            need(not verified.stdout and not verified.stderr, "observer-program-purpose-verification")
+            before = signed["identity"]
+            self.signing_mutation_pending = True
+            os.fchmod(signed["fd"], 0o555); os.fsync(signed["fd"])
+            signed["identity"] = signature(os.fstat(signed["fd"]))
+            need(signed["identity"][:2] == before[:2] and signed["identity"][3:8] == before[3:8]
+                 and signed["identity"][2] == stat.S_IFREG | 0o555 and self.read(signed) == signed_body,
+                 "observer-program-owned-mode")
+            self.signing_mutation_pending = False
+        self.package_outputs.extend(((original, digest(body)), (signed, digest(signed_body)),
+                                     (messages, digest(self.read(messages))), (status, digest(b"0\n"))))
+        return signed, path
+
+    def removal_prepare_emitter(self):
+        environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
+        environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
+                           MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"])
+        compiled = self.removal_prepare_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
+            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1",
+            "--target", self.target, "--no-default-features", "--features", "macos-remove-observer-producer",
+            "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
+            maximum=480, limit=4 * 1024 * 1024, cwd=self.checkout / "desktop/src-tauri", environment=environment)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target, remove=True, observer=True)
+        directory = self.descend(self.target_entry, (self.target, "release", "examples"))
+        executable = self.original(directory, binary.name, "observer-producer-compiler", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
+        body = self.read(executable)
+        self.stager.macho(body, system_only=True, target=self.target)
+        return self.producer_signing_copy(executable, body)
+
+    def removal_prepare_one(self, phase, target, own_program, own_path, producer):
+        self.removal_prep_phase = phase
+        before_entries = len(self.entries)
+        source_count, output_count, roots_count = len(self.package_sources), len(self.package_outputs), len(self.package_roots)
+        parent_target, parent_name = self.target_entry, self.target_name
+        label = "removal-observer-" + phase
+        self.scripts_name, self.packager_filename = label + "-scripts", label + "-original.pkg"
+        self.unsigned_package_name, self.final_package_name = label + "-unsigned", label + "-final"
+        scripts = self.work / self.scripts_name
+        own_sha = digest(self.read(own_program))
+        self.removal_prepare_io("fixed-scripts", self.stager.removal_fixture_scripts_command,
+            argparse.Namespace(target=self.target, role="observer-" + phase, correlation=self.removal_correlation,
+                target_binding=target, remover=own_path, expected_remover=own_sha, output=scripts))
+        self.removal_prepare_call("pkgbuild", ["/usr/bin/pkgbuild", "--nopayload", "--scripts", str(scripts),
+            "--identifier", self.stager.REMOVE_PACKAGE_ID, "--version", self.removal_selection.package_version,
+            "--install-location", "/", "--ownership", "recommended", str(self.work / self.packager_filename)])
+        fixture = dict(removal_fixture_role="observer-" + phase, removal_fixture_correlation=self.removal_correlation,
+                       removal_fixture_binding=target)
+        self.removal_prepare_io("package-parts", self.stager.prepare_package_command,
+            argparse.Namespace(target=self.target, fixture=False, remove=True, expected_remover=own_sha, scripts=scripts,
+                package=self.work / self.packager_filename, output=self.work / (label + "-parts"), **fixture))
+        self.removal_prepare_call("tar", ["/usr/bin/tar", "-c", "-z", "-f", str(self.work / (label + "-parts/Scripts")),
+            "--format=odc", "--uid=0", "--gid=0", "--no-acls", "--no-xattrs", "--no-fflags", "--no-mac-metadata", "."],
+            cwd=scripts, environment={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC", "COPYFILE_DISABLE": "1"})
+        self.package_directory(self.unsigned_package_name)
+        self.removal_prepare_call("xar", ["/usr/bin/xar", "-c", "-f", str(self.work / self.unsigned_package_name / "Remove.pkg"),
+            "--compression=none", "PackageInfo", "Scripts"], cwd=self.work / (label + "-parts"),
+            environment={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TZ": "UTC", "COPYFILE_DISABLE": "1"})
+        # One fixed per-carrier workspace, still inside the SAME outer owner.
+        os.mkdir("o-" + phase, 0o700, dir_fd=parent_target["fd"])
+        self.target_entry = self.directory(parent_target, "o-" + phase, "observer-one-target")
+        self.target_name = parent_name + "/o-" + phase
+        os.mkdir("tmp", 0o700, dir_fd=self.target_entry["fd"])
+        self.directory(self.target_entry, "tmp", "observer-one-tmp")
+        self.removal_final_context = {"calls": len(self.calls), "credentials": len(self.credential_calls), "fixture": fixture,
+                                      "program": own_sha}
+        self.finalize_package()  # unchanged actual sign/notary/staple/audit engine
+        finalized = dict(self.receipt["finalPackage"])
+        package_entry = self.final_package_output
+        self.removal_final_context = None
+        # Actual sizes of the SAME retained originals, before allocating either
+        # program body/copy. The caller never assigns an expected source by DATA.
+        installed_root = self.directory(self.work_entry, "producer-root", "observer-installed-root")
+        installed = self.original(installed_root, "producer.json", "observer-installed-producer", 65536, (0o444,))
+        signature = self.original(installed_root, "producer.sig", "observer-installed-signature", 512, (0o444,))
+        input_root = self.directory(self.work_entry, "input", "observer-installed-input")
+        inventory = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "observer-installed-inventory", 1048576, (0o444,))
+        parts = ("app/" + self.stager.REMOVER).split("/")
+        installed_program = self.original(self.descend(input_root, tuple(parts[:-1])), parts[-1],
+            "observer-genuine-installed-remover", self.stager.REMOVER_BYTES, (0o555,))
+        rows = {"package": package_entry, "observer": own_program, "installedProgram": installed_program,
+                "inventory": inventory, "installed": installed, "signature": signature}
+        sizes = {key: os.fstat(entry["fd"]).st_size for key, entry in rows.items()}
+        copy_quote = self.stager.removal_observer_copy_quote_data(sizes)
+        need(copy_quote + len(producer[1]) <= self.stager.MAX_BYTES,
+             "observer-copy-and-retained-example-overlap")
+        values = {key: self.read(entry) for key, entry in rows.items()}
+        need(all(len(values[key]) == sizes[key] for key in rows), "observer-copy-actual-sizes")
+        source = self.stager.packaging_signing_data(self.producer_profile, self.service_profile)
+        descriptor = self.stager.packaging_observer_descriptor_data(values["installed"], values["inventory"],
+            values["installedProgram"], values["observer"], values["package"], source, self.removal_selection,
+            source_commit=self.image_source, manifest=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"])
+        need(digest(values["inventory"]) == target["inventorySha256"]
+             and digest(values["installedProgram"]) == self.environment["MRK_MACOS_REMOVER_SHA256"], "observer-target-input-conservation")
+        files = {"remove-descriptor-input.json": (descriptor, 0o444), "producer.json": (values["installed"], 0o444),
+            "producer.sig": (values["signature"], 0o444), "install-inventory.json": (values["inventory"], 0o444),
+            "mrk-macos-remove": (values["observer"], 0o555), "installed-mrk-macos-remove": (values["installedProgram"], 0o555)}
+        input_path = self.work / (label + "-input")
+        self.removal_prepare_io("six-input-copy", self.stager.write_tree, input_path, files, root_mode=0o700, current_owned=True)
+        copy_root = self.directory(self.work_entry, input_path.name, "observer-six-inputs")
+        for name, (body, mode) in files.items():
+            copied = self.original(copy_root, name, "observer-six-input-original", len(body), (mode,))
+            need(self.read(copied) == body, "observer-six-input-copy-post")
+            self.package_outputs.append((copied, digest(body)))
+        self.package_roots.append((copy_root, set(files)))
+        phase_root = self.directory(self.removal_observer_root, phase, "observer-distribution-phase")
+        package_copy = self.package_file(phase_root, "Remove.pkg", values["package"])
+        package_sha = digest(values["package"])
+        del files, body, values
+        self.package_post()
+        with self.credential_scope("producer", producer=producer):
+            emitted = self.removal_prepare_call("producer-emitter", [str(self.work / self.producer_filename),
+                "--package-root", str(self.work / "removal-observer-root" / phase), "--observer-input-root", str(input_path)],
+                maximum=123, limit=4096)
+            desc = self.original(phase_root, "remove-producer.json", "observer-emitted-descriptor", 16384, (0o444,))
+            sig = self.original(phase_root, "remove-producer.sig", "observer-emitted-signature", 512, (0o444,))
+            desc_body, sig_body = self.read(desc), self.read(sig)
+            summary = self.stager.emitted_removal_data(emitted.stdout, emitted.stderr, emitted.returncode,
+                self.read(package_copy), desc_body, sig_body, descriptor)
+            self.package_outputs.extend(((desc, digest(desc_body)), (sig, digest(sig_body))))
+        need(set(self.removal_names(phase_root, 3)) == set(REMOVAL_INPUT_NAMES), "observer-emitted-three-inputs")
+        expected = {"Remove.pkg": {"bytes": package_copy["identity"][6], "sha256": package_sha},
+            "remove-producer.json": {"bytes": len(desc_body), "sha256": digest(desc_body)},
+            "remove-producer.sig": {"bytes": len(sig_body), "sha256": digest(sig_body)}}
+        self.package_post()
+        self.notary_clock()
+        # Only actual known settled phase originals are released. The actual
+        # source directories stay cached/live; no closed cache hit is reused.
+        need(self.notary_known() and self.credential_active is None and self.notary_key is None, "observer-phase-settled")
+        self.removal_prepared[phase] = {"files": expected, "finalPackage": finalized,
+            "emission": summary, "copyQuote": copy_quote, "observerProgramSha256": own_sha}
+        for entry in self.entries[before_entries:]:
+            ancestor = entry
+            source_directory = entry["kind"] == "directory"
+            while source_directory and ancestor is not None and ancestor is not self.source_entry:
+                ancestor = ancestor.get("parent_entry")
+            if source_directory and ancestor is self.source_entry:
+                continue
+            if entry["kind"] == "directory" and entry.get("parent_entry") is self.work_entry and entry.get("name") in ("input", "producer-root"):
+                continue
+            if entry["kind"] == "directory":
+                cursor = entry
+                while cursor is not None and cursor.get("parent_entry") is not self.work_entry:
+                    cursor = cursor.get("parent_entry")
+                if cursor is not None and cursor.get("name") == "input":
+                    continue
+            # Root phase directory is reused by final image preparation.
+            if entry is phase_root:
+                continue
+            self.close(entry)
+            need(entry["closed"], "observer-phase-consuming-close")
+        del self.package_sources[source_count:]
+        del self.package_outputs[output_count:]
+        del self.package_roots[roots_count:]
+        self.target_entry, self.target_name = parent_target, parent_name
+        self.notary_roots, self.notary_tools, self.final_package_roots, self.final_package_inputs = [], {}, [], []
+        self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_complete = False
+        self.removal_prep_phase = None
+        return expected
+
+    def prepare_removal_observers(self):
+        need(self.phase == "prepare-removal-observers" and self.signing is not None and not self.calls,
+             "observer-preparation-fixed-entry")
+        self.removal_case, self.removal_correlation = removal_context_data(self.environment, self.target)
+        self.removal_credential_reserved = removal_credential_quote_data()
+        # Fixed bookkeeping/source-read reserve, separate from the accepted
+        # actual INPUT6 body/copy quote. It is not an RSS/allocator guarantee.
+        self.removal_control_reserved = self.removal_credential_reserved + 8 * 1024 * 1024
+        need(self.removal_control_reserved <= 16 * 1024 * 1024, "observer-control-reserve")
+        self.removal_credential_records_post()
+        target = self.removal_preparation_inputs()
+        own_program, own_path = self.removal_prepare_program()
+        producer = self.removal_prepare_emitter()
+        phases = self.stager.removal_fixture_case_data(self.removal_case)
+        self.removal_observer_root = self.package_directory("removal-observer-root")
+        for phase in phases:
+            self.package_clock()
+            os.mkdir(phase, 0o700, dir_fd=self.removal_observer_root["fd"])
+        need(set(self.removal_names(self.removal_observer_root, 3)) == set(phases), "observer-three-phase-roster")
+        self.removal_prepared = {}
+        for phase in phases:
+            need(self.credential_active is None and self.credential_known() and not self.credential_failed
+                 and all(row["closed"] and row["retired"] and row["searchRestored"] and row["defaultUnchanged"]
+                         for row in self.credential_contexts), "observer-previous-credential-retirement")
+            self.removal_prepare_one(phase, target, own_program, own_path, producer)
+        # Drop the separately sealed example body before image allocation;
+        # its same original/hash stays in the cumulative original ledger.
+        del producer
+        self.package_roots.append((self.removal_observer_root, set(phases)))
+        expected = {phase: self.removal_prepared[phase]["files"] for phase in phases}
+        for phase in phases:
+            root = self.directory(self.removal_observer_root, phase, "observer-image-phase")
+            need(set(self.removal_names(root, 3)) == set(REMOVAL_INPUT_NAMES), "observer-image-phase-roster")
+            self.package_roots.append((root, set(REMOVAL_INPUT_NAMES)))
+            for leaf in REMOVAL_INPUT_NAMES:
+                item = expected[phase][leaf]
+                entry = self.original(root, leaf, "observer-image-input", item["bytes"], (0o444,))
+                need(entry["identity"][6] == item["bytes"] and self.notary_stream(entry) == item["sha256"],
+                     "observer-image-exact-phase-input")
+                self.package_outputs.append((entry, item["sha256"]))
+        self.image_directory = "removal-observer-distribution"
+        self.image_filename = "MobileReleaseKit-Observation.dmg"
+        self.image_identifier = "dev.mobile-release-kit.desktop.observation"
+        self.distribution_entry = self.package_directory(self.image_directory)
+        self.package_post()
+        image, _path = self.package_image(self.removal_observer_root, "distribution")
+        self.package_post()
+        self.removal_credential_records_post()
+        need(tuple(row["role"] for row in self.calls) == removal_preparation_roles(self.removal_case)
+             and tuple(row["role"] for row in self.credential_calls) == removal_credential_roster_data()
+             and tuple(row["purpose"] for row in self.credential_contexts) ==
+                 ("observer-program", "installer", "producer", "installer", "producer", "installer", "producer", "distribution-image")
+             and self.notary_known() and self.notary_key is None, "observer-preparation-cumulative-finality")
+        self.removal_observer_image = image
+        self.removal_observer_program_sha = digest(self.read(own_program))
+        self.sha256 = image["sha256"]
+        self.removal_preparation_complete = True
+        self.notary_clock()
+
+    def removal_preparation_receipt(self):
+        need(self.removal_preparation_complete and self.receipt["passed"] and self.receipt["targetRetired"]
+             and self.receipt["originalClosesKnown"] and self.notary_known()
+             and len(self.calls) == 46 and len(self.credential_calls) == 158
+             and len(self.credential_contexts) == 8, "observer-preparation-receipt-finality")
+        # The private cumulative ledger is never reset. Public count/hash are
+        # compact projections of its complete actual originals, not fake rows.
+        native = self.stager.canonical(self.calls)
+        credential = self.stager.canonical(self.credential_calls)
+        need(len(native) <= 32768 and len(credential) <= 32768, "observer-preparation-ledger-bound")
+        value = {"schemaVersion": 1, "phase": self.phase, "source": self.image_source, "target": self.target,
+            "workflowSource": self.environment["GITHUB_WORKFLOW_SHA"], "runId": self.environment["GITHUB_RUN_ID"],
+            "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"], "case": self.removal_case, "correlation": self.removal_correlation,
+            "passed": True, "targetRetired": True, "originalClosesKnown": True, "outerFinalityRequired": True,
+            "nativeCalls": len(self.calls), "nativeCallsSha256": digest(native), "credentialCalls": len(self.credential_calls),
+            "credentialCallsSha256": digest(credential), "credentialContexts": len(self.credential_contexts),
+            "targetBinding": self.removal_binding, "targetFiles": self.removal_target_files,
+            "targetImage": self.removal_target_image, "observerImage": self.removal_observer_image,
+            "observers": {phase: self.removal_prepared[phase]["files"] for phase in self.stager.removal_fixture_case_data(self.removal_case)},
+            "observerProgramSha256": self.removal_observer_program_sha, "controlBytes": self.removal_control_reserved + self.removal_original_reserved,
+            "productReady": False}
+        return removal_prepared_data(value, self.environment, self.target, self.removal_case, self.removal_correlation)
+
+    def removal_clock(self, segment=None):
+        now = self.package_clock()
+        if segment is not None:
+            need(segment in REMOVAL_PHASE_ENDPOINTS, "removal-fixed-segment")
+            endpoint = self.package_started + REMOVAL_PHASE_ENDPOINTS[segment] * 1_000_000_000
+            if segment == "joint" and self.removal_joint_deadline is not None:
+                endpoint = min(endpoint, self.removal_joint_deadline)
+            need(now < endpoint, "removal-segment-deadline")
+            return now, endpoint
+        return now, self.package_endpoint
+
+    def removal_reserve(self, rows=1):
+        # Names are fixed SOURCE components. No process RSS or allocator claim.
+        active_scan = int(self.removal_scan_state in ("acquiring", "owned", "closing", "unknown"))
+        need(type(rows) is int and 0 <= rows <= 128 and len(self.entries) + rows <= 24576
+             and sum(entry["fd"] is not None for entry in self.entries) + active_scan + rows <= 96,
+             "removal-original-headroom")
+        if self.removal_control_reserved == 0:
+            # The new protected baseline route uses this same bounded work
+            # before its first hold. Ordinary package routes never call here.
+            self.removal_control_reserved = 8 * 1024 * 1024
+        quote = removal_original_storage_data(self.entries, self.entry_registry, rows)
+        reserved = max(self.removal_original_reserved, quote)
+        need(self.removal_control_reserved + reserved <= 16 * 1024 * 1024,
+             "removal-original-control-pool")
+        self.removal_original_reserved = reserved  # No credit on close/trim.
+        self.package_clock()
+
+    def removal_host(self):
+        need(self.removal_host_module is not None and self.removal_api is None, "removal-host-source")
+        self.removal_api = self.removal_host_module.DarwinAPI(_RemovalHostClock(self), target=self.target)
+        self.removal_api.waitable_sigchld()
+        # Initialize the stager's fixed libc observer BEFORE the UI thread.
+        self.stager.no_xattrs(self.target_entry["fd"])
+
+    def removal_acl(self, entry, info):
+        self.package_clock()
+        value = self.removal_host_module._acl_snapshot(self.removal_api.library, entry["fd"],
+                                                       self.removal_host_module.full9(info))
+        need(type(value) is dict and value.get("empty") is True and value.get("phase") == 0
+             and value.get("filesecFreeReturned") is True
+             and value.get("aclFreeResult") in (None, 0), "removal-original-empty-acl")
+        self.package_clock()
+        return value["snapshotFlags"]
+
+    def removal_directory_facts(self, entry, *, protected=False, readonly=False, private=False):
+        self.package_clock()
+        need(self.entry_registry.get(id(entry)) is entry and entry["fd"] is not None and not entry["closed"],
+             "removal-directory-original")
+        info = os.fstat(entry["fd"])
+        named = os.lstat("/") if entry.get("name") == "/" else os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)
+        need(signature(info) == signature(named) and stat.S_ISDIR(info.st_mode)
+             and not info.st_mode & 0o7022, "removal-directory-named-held")
+        if protected:
+            need(info.st_uid == info.st_gid == 0, "removal-protected-owner")
+        elif private:
+            need((info.st_uid, info.st_gid) == (os.getuid(), os.getgid())
+                 and stat.S_IMODE(info.st_mode) == 0o700, "removal-channel-directory")
+        # On the actual read-only distribution, identity is conserved but is
+        # NOT represented as root ownership or a producer/ACL authority. This
+        # is exactly completed_package::Held's distinct read-only policy.
+        flags = getattr(info, "st_flags", None) if readonly else self.removal_acl(entry, info)
+        need(type(flags) is int and 0 <= flags < 1 << 32, "removal-directory-flags")
+        fs = self.removal_api.filesystem(entry["fd"])
+        need(type(fs["flags"]) is int and fs["flags"] & 0x1000
+             and not fs["flags"] & (0x20 | 0x4000000)
+             and (readonly or not fs["flags"] & 0x200000), "removal-local-filesystem")
+        if readonly:
+            need(fs["flags"] & 1 and fs["typeName"] in ("hfs", "apfs"), "removal-readonly-filesystem")
+        else:
+            need(fs["typeName"] == "apfs", "removal-protected-apfs")
+        if private:
+            need(flags == 0, "removal-input-flags")
+            self.stager.no_xattrs(entry["fd"])
+        need(signature(os.fstat(entry["fd"])) == signature(info), "removal-directory-post")
+        return signature(info), flags, fs
+
+    def removal_open_directory(self, parent, name, role, *, protected=False, readonly=False, private=False):
+        self.removal_reserve()
+        # Register acquisition custody BEFORE the syscall; an exception is not
+        # an Absent or a known-close receipt.
+        entry = self.register(None, role, "removal-directory", None if parent is None else parent["fd"], name)
+        entry["parent_entry"] = parent
+        entry["fd"] = os.open("/" if parent is None else name, READ_FLAGS | os.O_DIRECTORY,
+                              **({} if parent is None else {"dir_fd": parent["fd"]}))
+        entry["removal_policy"] = (protected, readonly, private)
+        entry["removal_facts"] = self.removal_directory_facts(entry, protected=protected, readonly=readonly, private=private)
+        return entry
+
+    def removal_directory_post(self, entry):
+        protected, readonly, private = entry["removal_policy"]
+        need(self.removal_directory_facts(entry, protected=protected, readonly=readonly, private=private)
+             == entry["removal_facts"], "removal-directory-facts-changed")
+
+    def removal_names(self, entry, maximum=350):
+        """Bounded observations through one retained, consuming-close iterator."""
+        need(type(maximum) is int and 0 <= maximum <= 350
+             and type(entry) is dict and self.entry_registry.get(id(entry)) is entry
+             and type(entry["fd"]) is int and entry["fd"] >= 0 and not entry["closed"],
+             "removal-roster-original")
+        need(not self.removal_unknown and self.removal_scan_state == "closed",
+             "removal-roster-previous-unknown")
+        self.package_clock()
+        self.removal_reserve(1)
+        # Same lifetime ledger as every other original. The iterator owns a
+        # transient duplicate, not an integer FD we may close or reconstruct.
+        original = self.register(None, "removal-roster-reader", "removal-iterator", entry["fd"], None)
+        original["iterator"] = None  # Allocate the slot BEFORE acquisition.
+        values = []
+        self.removal_scan_state = "acquiring"
+        try:
+            original["iterator"] = os.scandir(entry["fd"])
+        except OSError:
+            original["closed"] = True  # No iterator was returned.
+            self.removal_scan_state = "closed"
+            raise
+        except BaseException:
+            self.removal_scan_state = "unknown"
+            self.removal_unknown = True
+            raise
+        self.removal_scan_state = "owned"
+        first_error = None
+        try:
+            self.package_clock()
+            for item in original["iterator"]:
+                self.package_clock()
+                name = item.name
+                need(len(values) < maximum and type(name) is str and 0 < len(name) <= 255
+                     and len(name.encode("utf-8", "strict")) <= 255
+                     and name not in (".", "..") and "/" not in name and "\0" not in name
+                     and name not in values, "removal-bounded-roster")
+                values.append(name)
+        except BaseException as error:
+            first_error = error
+        finally:
+            # Known iterator cleanup still runs after a validation/clock
+            # refusal. An uncertain close is never retried or called absent.
+            self.removal_scan_state = "closing"
+            try:
+                original["iterator"].close()
+            except BaseException as error:
+                self.removal_scan_state = "unknown"
+                self.removal_unknown = True
+                if first_error is None:
+                    first_error = error
+            else:
+                original["closed"] = True
+                original["iterator"] = None
+                self.removal_scan_state = "closed"
+            try:
+                self.package_clock()
+            except BaseException as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+        return sorted(values)
+
+    def removal_roster(self, entry, maximum=350):
+        self.package_clock()
+        names = self.removal_names(entry, maximum)
+        rows = {}
+        for name in names:
+            info = os.stat(name, dir_fd=entry["fd"], follow_symlinks=False)
+            rows[name] = (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+            self.package_clock()
+        need(self.removal_names(entry, maximum) == sorted(rows), "removal-roster-post")
+        return rows
+
+    def removal_own_parent_post(self, entry, before_roster, name, *, present):
+        """Only after an actual returned own create/mount/export/unmount.
+
+        The full namespace must equal exactly that one SOURCE effect. All
+        permission/identity-bearing facts remain equal; no global timestamp
+        or discovered-name relaxation is provided to callers.
+        """
+        before, flags, fs = entry["removal_facts"]
+        protected, readonly, private = entry["removal_policy"]
+        current = self.removal_directory_facts(entry, protected=protected, readonly=readonly, private=private)
+        after = self.removal_roster(entry)
+        need(current[0][:3] == before[:3] and current[0][4:6] == before[4:6]
+             and current[1:] == (flags, fs), "removal-own-parent-original")
+        wanted = dict(before_roster)
+        if present:
+            need(name not in wanted and name in after, "removal-own-parent-new-name")
+            wanted[name] = after[name]
+        else:
+            need(name in wanted and name not in after, "removal-own-parent-absent-name")
+            del wanted[name]
+        need(after == wanted, "removal-own-parent-exact-effect")
+        entry["removal_facts"] = current
+        return after
+
+    def removal_absent(self, parent, name):
+        self.removal_directory_post(parent)
+        try:
+            os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+        except FileNotFoundError:
+            self.removal_directory_post(parent)
+            return
+        raise Refused("removal-fixed-name-collision")
+
+    def removal_stream(self, entry, *, limit, expected=None, keep=False):
+        self.package_clock()
+        need(self.entry_registry.get(id(entry)) is entry and entry["fd"] is not None
+             and not entry["closed"] and type(keep) is bool, "removal-file-original")
+        parent, name = entry["parent"], entry["name"]
+        before = os.fstat(entry["fd"])
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit
+             and signature(before) == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)),
+             "removal-file-named-held")
+        need(not keep or before.st_size <= 65536, "removal-retained-small-control")
+        readonly = entry.get("removal_readonly", False)
+        if not readonly:
+            self.stager.no_xattrs(entry["fd"])
+            need(self.removal_acl(entry, before) == 0, "removal-file-flags")
+        flags = getattr(before, "st_flags", None)
+        need(type(flags) is int and (entry.get("removal_flags", flags) == flags), "removal-file-flags-changed")
+        entry["removal_flags"] = flags
+        digestor, position, chunks = hashlib.sha256(), 0, []
+        while position < before.st_size:
+            self.package_clock()
+            block = os.pread(entry["fd"], min(65536, before.st_size - position), position)
+            need(block and len(block) <= before.st_size - position, "removal-file-short-read")
+            digestor.update(block)
+            if keep:
+                chunks.append(block)
+            position += len(block)
+        need(os.pread(entry["fd"], 1, position) == b"" and getattr(os.fstat(entry["fd"]), "st_flags", None) == flags
+             and signature(os.fstat(entry["fd"])) == signature(before)
+             == signature(os.stat(name, dir_fd=parent, follow_symlinks=False)), "removal-file-post")
+        facts = (signature(before), digestor.hexdigest())
+        need(expected is None or facts == expected, "removal-file-bytes-changed")
+        return facts, b"".join(chunks) if keep else None
+
+    def removal_open_file(self, parent, name, role, limit, *, owned=False, keep=False, readonly=False):
+        self.removal_reserve()
+        entry = self.register(None, role, "removal-file", parent["fd"], name)
+        entry["parent_entry"] = parent
+        entry["fd"] = os.open(name, READ_FLAGS, dir_fd=parent["fd"])
+        info = os.fstat(entry["fd"])
+        need((readonly or (info.st_uid, info.st_gid) == ((os.getuid(), os.getgid()) if owned else (0, 0)))
+             and stat.S_IMODE(info.st_mode) == 0o444, "removal-file-owner-mode")
+        entry["removal_readonly"] = readonly
+        facts, body = self.removal_stream(entry, limit=limit, keep=keep)
+        entry.update(removal_file_facts=facts, removal_limit=limit)
+        return entry, body
+
+    def removal_inputs_post(self):
+        self.removal_clock()
+        for mount in self.removal_mounts:
+            if mount.get("known") and not mount["detached"]:
+                self.removal_directory_post(mount["entry"])
+                for parent, roster in mount["rosters"]:
+                    self.removal_directory_post(parent)
+                    need(self.removal_roster(parent) == roster, "removal-mounted-roster-changed")
+                for entry in mount["files"]:
+                    self.removal_stream(entry, limit=entry["removal_limit"], expected=entry["removal_file_facts"])
+        for entry in self.removal_sources:
+            self.removal_stream(entry, limit=entry["removal_limit"], expected=entry["removal_file_facts"])
+        self.removal_directory_post(self.removal_volumes)
+        self.removal_directory_post(self.removal_slash)
+        self.removal_clock()
+
+    def removal_native_call(self, role, argv, *, segment, maximum, minimum=1, limit=65536):
+        need(self.phase == "package-removal-fixture" and self.package_settled() and not self.removal_unknown,
+             "removal-dispatch-custody")
+        self.removal_reserve(0)
+        roster = removal_runtime_roles(self.removal_case)
+        need(len(self.calls) < len(roster) and role == roster[len(self.calls)], "removal-original-role-order")
+        now, endpoint = self.removal_clock(segment)
+        timeout = min(maximum, (endpoint - now - 3_000_000_000) // 1_000_000_000)
+        need(timeout >= minimum, "removal-original-budget-before-dispatch")
+        result = self.call(role, argv, self.native_environment(), cwd=self.work, timeout=timeout, limit=limit)
+        self.removal_clock(segment)
+        self.removal_reserve(0)
+        return result
+
+    def removal_attach(self, role, path, expected, *, phases=()):
+        need(role in ("target", "observers") and (role == "observers") == bool(phases), "removal-attach-role")
+        name = self.stager.removal_fixture_mount_path(self.removal_correlation, role).name
+        mount_path = Path("/Volumes") / name
+        self.removal_absent(self.removal_volumes, name)
+        before = self.removal_roster(self.removal_volumes)
+        context = {"role": role, "name": name, "path": mount_path, "entered": True,
+                   "known": False, "detached": False, "entry": None, "device": None, "files": [], "rosters": []}
+        self.removal_mounts.append(context)  # Custody precedes original attach.
+        result = self.removal_native_call("removal-" + role + "-attach", ["/usr/bin/hdiutil", "attach", str(path),
+            "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount_path), "-plist"],
+            segment="attach", maximum=30)
+        context["device"] = self.stager.distribution_mount_data(result.stdout, result.stderr, result.returncode, mount_path)
+        entry = self.removal_open_directory(self.removal_volumes, name, "removal-mounted-" + role, readonly=True)
+        context["entry"] = entry
+        need(entry["removal_facts"][0][0] != self.removal_volumes["removal_facts"][0][0]
+             and entry["removal_facts"][2]["mountOn"] == str(mount_path)
+             and entry["removal_facts"][2]["mountFrom"] == context["device"], "removal-actual-mount-device")
+        self.removal_own_parent_post(self.removal_volumes, before, name, present=True)
+        context["known"] = True
+        groups = [(None, entry)]
+        if role == "observers":
+            need(self.removal_names(entry, len(phases)) == sorted(phases), "removal-observer-mount-roster")
+            groups = [(phase, self.removal_open_directory(entry, phase, "removal-mounted-observer-phase", readonly=True))
+                      for phase in phases]
+            context["rosters"].append((entry, self.removal_roster(entry)))
+        bundles = {}
+        for phase, parent in groups:
+            need(self.removal_names(parent, 3) == sorted(REMOVAL_INPUT_NAMES), "removal-three-input-roster")
+            bodies, facts = {}, {}
+            for leaf in REMOVAL_INPUT_NAMES:
+                limit = self.stager.MAX_BYTES if leaf == "Remove.pkg" else 16384 if leaf.endswith("json") else 512
+                original, body = self.removal_open_file(parent, leaf, "removal-mounted-input", limit,
+                    keep=leaf != "Remove.pkg", readonly=True)
+                context["files"].append(original)
+                row = original["removal_file_facts"]
+                selected = expected if phase is None else expected[phase]
+                need((row[0][6], row[1]) == (selected[leaf]["bytes"], selected[leaf]["sha256"]),
+                     "removal-mounted-source-binding")
+                facts[leaf], bodies[leaf] = row, body
+            context["rosters"].append((parent, self.removal_roster(parent)))
+            bundles[phase] = {"path": mount_path if phase is None else mount_path / phase,
+                              "facts": facts, "bodies": bodies, "parent": parent}
+        self.removal_inputs_post()
+        return context, bundles
+
+    def removal_result_parent(self):
+        library = self.removal_open_directory(self.removal_slash, "Library", "removal-system-library", protected=True)
+        parent = self.removal_open_directory(library, "Application Support", "removal-result-parent", protected=True)
+        self.removal_system_parents.extend((library, parent))
+        return parent
+
+    def removal_accept_outputs(self, role):
+        # Every allowed own effect is fixed by the actual original just joined.
+        # No caller-selected path set, output-body assertion or marker grants it.
+        need(self.calls and self.calls[-1]["role"] == role and self.calls[-1]["returned"] is True
+             and self.calls[-1]["capturesSettled"] is True and not self.removal_pending_outputs,
+             "removal-output-original-call")
+        record = self.calls[-1]
+        allowed = set()
+        first_request = role in ("removal-live-cancel", "removal-live-cut")
+        if role.startswith("removal-observer-"):
+            phase = role[len("removal-observer-"):]
+            need(phase in self.removal_observers and record["returncode"] == 0, "removal-output-observer-role")
+            own = self.removal_observers[phase]["own"]
+            allowed.add(self.stager.removal_fixture_export_name("observer", own["descriptorSha256"])[0].name)
+        else:
+            need(removal_native_result_data(self.removal_case, role, record["returncode"]), "removal-output-returned-status")
+            if self.removal_case == "abrupt":
+                purpose = "live" if role == "removal-live-cut" else "resume"
+                allowed.add(self.stager.removal_fixture_export_name("supervisor", self.removal_binding["removeDescriptorSha256"], role=purpose)[0].name)
+                if purpose == "resume":
+                    allowed.add(self.stager.removal_fixture_export_name("effects", self.removal_binding["removeDescriptorSha256"])[0].name)
+        parent, before = self.removal_output_parent, self.removal_output_roster
+        old, flags, fs = parent["removal_facts"]
+        current = self.removal_directory_facts(parent, protected=True)
+        after = self.removal_roster(parent)
+        need(current[0][:3] == old[:3] and current[0][4:6] == old[4:6] and current[1:] == (flags, fs),
+             "removal-returned-support-original")
+        requests = "MobileReleaseKit-RemovalRequests"
+        additions = allowed | ({requests} if first_request else set())
+        need(not additions.intersection(before) and set(after) == set(before) | additions
+             and all(after[name] == fact for name, fact in before.items()), "removal-exact-returned-support-roster")
+        if first_request or self.removal_requests is not None:
+            named = os.stat(requests, dir_fd=parent["fd"], follow_symlinks=False)
+            named_flags = getattr(named, "st_flags", None)
+            need(named.st_mode == stat.S_IFDIR | 0o755 and named.st_uid == named.st_gid == 0
+                 and type(named_flags) is int and named_flags == 0
+                 and signature(os.stat(requests, dir_fd=parent["fd"], follow_symlinks=False)) == signature(named),
+                 "removal-named-request-directory")
+            observed = (named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid, named_flags)
+            need((first_request and self.removal_requests is None) or observed == self.removal_requests,
+                 "removal-named-request-directory-changed")
+            # This is explicitly NAMED metadata only. No contents audit or a
+            # held directory FD are NOT claimed; no cleanup/admission authority.
+            self.removal_requests = observed
+        parent["removal_facts"], self.removal_output_roster = current, after
+        self.removal_pending_outputs = allowed
+
+    def removal_output_read(self, kind, binding, *, role=None, own=None, phase=None):
+        descriptor = binding["removeDescriptorSha256"] if own is None else own["descriptorSha256"]
+        path, limit = self.stager.removal_fixture_export_name(kind, descriptor, role=role)
+        parent = self.removal_output_parent
+        need(path.parent == self.stager.INSTALL_ROOT.parent and path.name in self.removal_pending_outputs,
+             "removal-output-returned-creation")
+        self.removal_directory_post(parent)
+        entry, body = self.removal_open_file(parent, path.name, "removal-result-original", limit, keep=True)
+        if kind == "observer":
+            result = self.stager.removal_fixture_observer_data(body, binding, own, phase, selection=self.removal_selection)
+        else:
+            result = self.stager.removal_fixture_export_data(body, kind, binding, role=role, selection=self.removal_selection)
+        self.removal_stream(entry, limit=limit, expected=entry["removal_file_facts"])
+        facts = entry["removal_file_facts"]
+        self.close(entry)
+        need(entry["closed"], "removal-output-close-unknown")
+        self.removal_output_facts[path.name] = (limit, facts)
+        self.removal_pending_outputs.remove(path.name)
+        self.removal_directory_post(parent)
+        self.removal_clock()
+        return result, facts[1]
+
+    def removal_outputs_post(self):
+        need(not self.removal_pending_outputs, "removal-unread-returned-output")
+        self.removal_directory_post(self.removal_output_parent)
+        need(self.removal_roster(self.removal_output_parent) == self.removal_output_roster,
+             "removal-output-complete-roster-post")
+        for name, (limit, expected) in self.removal_output_facts.items():
+            original, _ = self.removal_open_file(self.removal_output_parent, name, "removal-output-post", limit)
+            self.removal_stream(original, limit=limit, expected=expected)
+            self.close(original)
+            need(original["closed"], "removal-output-post-close")
+        self.removal_directory_post(self.removal_output_parent)
+
+    def removal_observe(self, phase, *, segment):
+        own = self.removal_observers[phase]
+        self.removal_inputs_post()
+        result = self.removal_native_call("removal-observer-" + phase,
+            ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(own["path"] / "Remove.pkg"),
+             "-target", "/", "-dumplog", "-verboseR"], segment=segment, maximum=60, minimum=55, limit=256 * 1024)
+        need(result.returncode == 0, "removal-observer-original-zero")
+        self.removal_accept_outputs("removal-observer-" + phase)
+        facts, _sha = self.removal_output_read("observer", self.removal_binding, own=own["own"], phase=phase)
+        actual = signature(os.fstat(self.removal_install_root["fd"]))
+        named = signature(os.stat(self.stager.INSTALL_ROOT.name, dir_fd=self.removal_output_parent["fd"], follow_symlinks=False))
+        need(tuple(map(int, facts["rootIdentity"])) == actual == named, "removal-observer-same-retained-root")
+        # Root may change only through our genuine Installer operations. The
+        # independent observer has audited that entire actual current root.
+        previous = self.removal_install_root["removal_facts"]
+        current = self.removal_directory_facts(self.removal_install_root, protected=True)
+        need(current[0][:3] == previous[0][:3] and current[0][4:6] == previous[0][4:6]
+             and current[1:] == previous[1:], "removal-root-original-conservation")
+        self.removal_install_root["removal_facts"] = current
+        self.removal_inputs_post()
+        return facts
+
+    def removal_marker(self, name, deadline):
+        parent = self.removal_channel
+        while True:
+            self.removal_clock("joint")
+            with self.removal_ui_lock:
+                done = self.removal_ui_outcome["done"]
+            need(time.monotonic_ns() < deadline and not done, "removal-marker-original-live")
+            self.removal_directory_post(self.removal_channel_parent)
+            names = self.removal_names(parent, 2 if self.removal_case == "ordinary" else 1)
+            allowed = {"launched", "cancel-observed"} if self.removal_case == "ordinary" else {"launched"}
+            need(set(names).issubset(allowed) and len(set(names)) == len(names), "removal-channel-closed-roster")
+            if name in names:
+                self.removal_reserve()
+                entry = self.register(None, "removal-marker-" + name, "removal-marker", parent["fd"], name)
+                entry["fd"] = os.open(name, READ_FLAGS, dir_fd=parent["fd"])
+                info = os.fstat(entry["fd"])
+                need(stat.S_ISREG(info.st_mode) and (info.st_uid, info.st_gid) == (os.getuid(), os.getgid())
+                     and stat.S_IMODE(info.st_mode) == 0o600 and info.st_nlink == 1 and 0 <= info.st_size <= 128,
+                     "removal-marker-original-shape")
+                self.stager.no_xattrs(entry["fd"])
+                need(self.removal_acl(entry, info) == 0, "removal-marker-flags")
+                body = os.pread(entry["fd"], 129, 0)
+                need(signature(os.fstat(entry["fd"])) == signature(info)
+                     == signature(os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)), "removal-marker-original-post")
+                complete = self.stager.removal_fixture_marker_data(body, self.removal_correlation, self.removal_case, name)
+                self.close(entry)
+                need(entry["closed"], "removal-marker-close-unknown")
+                if complete:
+                    self.removal_markers[name] = (signature(info), digest(body))
+                    return  # Hint only; final original UI result/close/join is still mandatory.
+            time.sleep(0.05)
+
+    def removal_ui_start(self, deadline):
+        need(self.removal_runner is not None and self.removal_thread is None and self.removal_resource is not None,
+             "removal-preloaded-ui-source")
+        need(self.removal_resource.getrlimit(self.removal_resource.RLIMIT_FSIZE) == (1073741824, 1073741824),
+             "removal-continuous-process-file-limit")
+        normal = self.work / "normal-ui"
+        channel = self.work / "removal-ui-v1" / ("r-" + self.removal_correlation)
+        environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner",
+            "TMPDIR": str(normal / "tmp") + "/", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TZ": "UTC",
+            "DEVELOPER_DIR": str(NOTARY_XCODE), "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": self.image_source,
+            "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": self.image_source,
+            "TEST_RUNNER_MRK_NORMAL_UI_REMOVAL_CHANNEL": str(channel)}
+        self.removal_ui_deadline = deadline
+        need(self.removal_ui_outcome == {"done": False, "known": False}, "removal-ui-original-once")
+        def run_ui():
+            # This worker alone creates/uses its phase/cancellation owner.
+            # No mutable main FD book, module load, environment or cwd update.
+            try:
+                phase = self.removal_runner.NormalPhase(self.owner, environment, self.checkout,
+                    self.removal_runner.RemovalPhaseClock(deadline), retain_nonzero=True)
+                original, facts = self.removal_runner.execute_removal_ui_phase(phase,
+                    case=self.removal_case, derived=normal / "DerivedData", channel=channel,
+                    source=self.image_source, file_limit=(1073741824, 1073741824), target=self.target)
+                with self.removal_ui_lock:
+                    self.removal_ui_outcome.update(original=original, facts=facts, known=True)
+            except BaseException as error:
+                with self.removal_ui_lock:
+                    self.removal_ui_outcome.update(error=error, known=False)
+            finally:
+                with self.removal_ui_lock:
+                    self.removal_ui_outcome["done"] = True
+        self.removal_thread = self.removal_threading.Thread(target=run_ui, name="mrk-fixed-removal-ui", daemon=False)
+        self.removal_thread.start()  # Entered before dispatch; no discovered thread/PID.
+
+    def removal_ui_join(self):
+        thread = self.removal_thread
+        if thread is None:
+            return
+        remaining = (self.removal_ui_deadline - time.monotonic_ns()) / 1_000_000_000
+        if remaining > 0:
+            thread.join(remaining)
+        need(not thread.is_alive(), "removal-original-ui-thread-unjoined")
+        self.removal_ui_joined = True
+        with self.removal_ui_lock:
+            result = dict(self.removal_ui_outcome)
+        need(result.get("done") is True and result.get("known") is True, "removal-original-ui-finality-unknown")
+        original, facts = result["original"], result["facts"]
+        need(type(original) is subprocess.CompletedProcess and original.returncode == 0
+             and facts["case"] == self.removal_case and facts["sourceCommit"] == self.image_source
+             and facts["sourcePrePostMatched"] is True and facts["originalCommandReturned"] is True
+             and facts["workerJoin"] == "pending-caller-original-join"
+             and facts["observation"]["originalAppTerminated"] is True
+             and facts["observation"]["uiGateClosed"] is True and facts["observation"]["uiChannelClosed"] is True
+             and facts["observation"]["normalQuit"] is False and facts["observation"]["gateFree"] == "unqualified", "removal-ui-returned-facts")
+        need(self.removal_resource.getrlimit(self.removal_resource.RLIMIT_FSIZE) == (1073741824, 1073741824),
+             "removal-process-file-limit-changed")
+        self.removal_ui_facts = facts
+        self.removal_channel_post()
+
+    def removal_channel_post(self):
+        parent = self.removal_channel
+        wanted = ("launched", "cancel-observed") if self.removal_case == "ordinary" else ("launched",)
+        need(set(self.removal_names(parent, len(wanted))) == set(wanted) and set(self.removal_markers) == set(wanted),
+             "removal-ui-final-roster")
+        before, flags, fs = parent["removal_facts"]
+        after = self.removal_directory_facts(parent, private=True)
+        need(after[0][:3] == before[:3] and after[0][4:6] == before[4:6] and after[1:] == (flags, fs),
+             "removal-ui-channel-original")
+        parent["removal_facts"] = after
+        for name in wanted:
+            info = os.stat(name, dir_fd=parent["fd"], follow_symlinks=False)
+            need(signature(info) == self.removal_markers[name][0], "removal-ui-marker-changed")
+        self.removal_directory_post(self.removal_channel_parent)
+
+    def removal_detach_all(self):
+        need(self.removal_complete and self.removal_ui_joined and self.package_settled()
+             and not self.removal_unknown, "removal-detach-finality")
+        self.removal_inputs_post()
+        for context in reversed(self.removal_mounts):
+            need(context["known"] and not context["detached"], "removal-mount-original")
+            for entry in context["files"]:
+                self.close(entry)
+                need(entry["closed"], "removal-mounted-file-close")
+            for entry, _ in reversed(context["rosters"]):
+                self.close(entry)
+                need(entry["closed"], "removal-mounted-directory-close")
+            entry = context["entry"]
+            self.close(entry)
+            need(entry["closed"], "removal-mount-close")
+            before = self.removal_roster(self.removal_volumes)
+            self.removal_native_call("removal-" + context["role"] + "-detach",
+                ["/usr/bin/hdiutil", "detach", context["device"]], segment="detach", maximum=15)
+            self.removal_own_parent_post(self.removal_volumes, before, context["name"], present=False)
+            context["detached"] = True
+        self.removal_clock("settle")
+
+    def removal_preload(self):
+        need(self.removal_thread is None and self.removal_runner is None, "removal-preload-once")
+        # All imports/module publication occur before the single UI worker.
+        # This is the existing host's read-only native adapter, not preparation
+        # or repair of a hosted machine/root/ACL.
+        for filename, label in (("macos_xcode_host_preparation.py", "host"), ("macos_normal_ui_runner.py", "runner")):
+            entry = self.source_original("desktop/tools/" + filename, "removal-" + label + "-source", 512 * 1024)
+            body = self.read(entry)
+            self.package_sources.append((entry, body))
+            self.stager_io_pending = "removal-preload-" + label
+            module = load_data(self.checkout, filename, "_mrk_removal_" + label)
+            need(self.read(entry) == body, "removal-loaded-source-post")
+            self.stager_io_pending = None
+            if label == "host":
+                self.removal_host_module = module
+            else:
+                self.removal_runner = module
+        import threading
+        import resource
+        self.removal_threading, self.removal_resource = threading, resource
+        need(threading.current_thread() is threading.main_thread() and len(threading.enumerate()) == 1
+             and resource.getrlimit(resource.RLIMIT_FSIZE) == (1073741824, 1073741824),
+             "removal-pre-overlap-process-state")
+        self.removal_ui_lock = threading.Lock()
+        self.removal_host()
+
+    def removal_runtime_images(self, prepared):
+        images = (("remove-distribution", "MobileReleaseKit-Remove.dmg", prepared["targetImage"]),
+                  ("removal-observer-distribution", "MobileReleaseKit-Observation.dmg", prepared["observerImage"]))
+        paths = []
+        for directory, filename, facts in images:
+            need(type(facts) is dict and set(facts) == {"file", "sha256", "bytes"} and facts["file"] == filename
+                 and type(facts["bytes"]) is int and 0 < facts["bytes"] <= self.stager.MAX_BYTES
+                 and self.stager.maintenance_hex(facts["sha256"], 64), "removal-image-preparation-data")
+            root = self.directory(self.work_entry, directory, "removal-task-image-directory")
+            need(self.removal_names(root, 1) == [filename], "removal-image-original-roster")
+            entry, _ = self.removal_open_file(root, filename, "removal-image-original", self.stager.MAX_BYTES, owned=True)
+            actual = entry["removal_file_facts"]
+            need((actual[0][6], actual[1]) == (facts["bytes"], facts["sha256"]), "removal-image-source-correspondence")
+            self.removal_sources.append(entry)
+            paths.append(self.work / directory / filename)
+        return paths
+
+    def removal_channel_create(self):
+        self.removal_reserve(2)
+        self.recheck_directory(self.work_entry)
+        os.mkdir("removal-ui-v1", 0o700, dir_fd=self.work_entry["fd"])
+        # A parent alias from the same actual work FD, never a new path root.
+        parent = self.removal_open_directory(self.work_entry, "removal-ui-v1", "removal-channel-parent", private=True)
+        self.removal_channel_parent = parent
+        name = "r-" + self.removal_correlation
+        before = self.removal_roster(parent)
+        need(not before, "removal-channel-parent-fresh")
+        os.mkdir(name, 0o700, dir_fd=parent["fd"])
+        self.removal_channel = self.removal_open_directory(parent, name, "removal-channel", private=True)
+        self.removal_own_parent_post(parent, before, name, present=True)
+        need(not self.removal_names(self.removal_channel, 0), "removal-channel-fresh")
+
+    def package_removal_fixture(self):
+        need(self.phase == "package-removal-fixture" and not self.calls and self.signing is not None,
+             "removal-fixed-owner-entry")
+        self.removal_case, self.removal_correlation = removal_context_data(self.environment, self.target)
+        self.package_started = self.package_observed = time.monotonic_ns()
+        self.package_endpoint = self.package_started + 990_000_000_000
+        # Reserve this fixed owner's bounded source/control/roster workspace
+        # BEFORE source loads, held inputs, JSON parses or UI overlap. Native
+        # root actors and the pre-existing UI owner retain their own caps;
+        # this is not a process RSS/allocator-overhead assertion.
+        need(self.removal_control_reserved == 0, "removal-runtime-work-once")
+        self.removal_control_reserved = 8 * 1024 * 1024
+        self.removal_reserve(0)
+        self.removal_preload()
+        self.removal_preparation_inputs()
+        status = self.original(self.work_entry, "removal-observers.status", "removal-observer-preparation-status", 8, (0o600,))
+        need(self.read(status) == b"0\n", "removal-observer-preparation-original-zero")
+        self.package_outputs.append((status, digest(b"0\n")))
+        prepared = removal_prepared_data(self.removal_input_control("android-helper-prepare-removal-observers.json",
+            "removal-observer-preparation-receipt"), self.environment, self.target, self.removal_case, self.removal_correlation)
+        phases = self.stager.removal_fixture_case_data(self.removal_case)
+        need(prepared["targetBinding"] == self.removal_binding and prepared["targetFiles"] == self.removal_target_files
+             and prepared["targetImage"] == self.removal_target_image and set(prepared["observers"]) == set(phases),
+             "removal-prepared-actual-target")
+        target_image, observer_image = self.removal_runtime_images(prepared)
+        self.removal_slash = self.removal_open_directory(None, "/", "removal-system-root", protected=True)
+        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-protected-volumes", protected=True)
+        self.removal_output_parent = self.removal_result_parent()
+        self.removal_output_roster = self.removal_roster(self.removal_output_parent)
+        self.removal_absent(self.removal_output_parent, "MobileReleaseKit-RemovalRequests")
+        self.removal_install_root = self.removal_open_directory(self.removal_output_parent, self.stager.INSTALL_ROOT.name,
+                                                               "removal-installed-root", protected=True)
+        self.removal_channel_create()
+        _target_mount, targets = self.removal_attach("target", target_image, prepared["targetFiles"])
+        _observer_mount, observers = self.removal_attach("observers", observer_image, prepared["observers"], phases=phases)
+        self.removal_target = targets[None]
+        self.removal_observers = {}
+        names = set()
+        for phase in phases:
+            bundle = observers[phase]
+            facts = bundle["facts"]
+            own = {"packageSha256": facts["Remove.pkg"][1], "descriptorSha256": facts["remove-producer.json"][1],
+                   "signatureSha256": facts["remove-producer.sig"][1]}
+            need(own["descriptorSha256"] != self.removal_binding["removeDescriptorSha256"], "removal-observer-independent-input")
+            bundle["own"] = own
+            self.removal_observers[phase] = bundle
+            names.add(self.stager.removal_fixture_export_name("observer", own["descriptorSha256"])[0].name)
+        need(len(names) == 3, "removal-three-distinct-observer-exports")
+        if self.removal_case == "abrupt":
+            names.update(self.stager.removal_fixture_export_name("supervisor", self.removal_binding["removeDescriptorSha256"], role=role)[0].name
+                         for role in ("live", "resume"))
+            names.add(self.stager.removal_fixture_export_name("effects", self.removal_binding["removeDescriptorSha256"])[0].name)
+        for name in names:
+            self.removal_absent(self.removal_output_parent, name)
+        before = self.removal_observe("before", segment="before")
+        # Validate the fresh baseline BEFORE launching an app or sending Remove.
+        need(not before["archives"] and before["appPresent"] and not before["firstEligibleAbsent"]
+             and not before["allPayloadAbsent"]
+             and (before["presentFiles"], before["presentDirectories"]) == (before["expectedFiles"], before["expectedDirectories"]),
+             "removal-genuine-installed-baseline")
+        now, joint = self.removal_clock("joint")
+        self.removal_joint_deadline = min(joint, now + 600_000_000_000)
+        self.removal_ui_start(self.removal_joint_deadline)
+        self.removal_marker("launched", self.removal_joint_deadline)
+        live = "removal-live-cancel" if self.removal_case == "ordinary" else "removal-live-cut"
+        package = self.removal_target["path"] / "Remove.pkg"
+        argv = ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(package), "-target", "/", "-dumplog", "-verboseR"]
+        self.removal_inputs_post()
+        self.removal_native_call(live, argv, segment="joint", maximum=123, minimum=123, limit=256 * 1024)
+        self.removal_accept_outputs(live)
+        if self.removal_case == "ordinary":
+            self.removal_marker("cancel-observed", self.removal_joint_deadline)
+            middle = self.removal_observe("after-cancel", segment="joint")
+            self.stager.removal_fixture_observation_pair(before, middle, phase="after-cancel")
+            self.removal_inputs_post()
+            self.removal_native_call("removal-live-continue", argv, segment="joint", maximum=123, minimum=123, limit=256 * 1024)
+            self.removal_accept_outputs("removal-live-continue")
+        else:
+            # The actual supervisor report86 is required before the separate
+            # readonly O. Installer1 alone does NOT prove an abrupt child cut.
+            supervisor, _ = self.removal_output_read("supervisor", self.removal_binding, role="live")
+            need(supervisor["actualChildReturncode"] == 86 and supervisor["originalChildWaitObserved"] is True,
+                 "removal-cut-actual-original-child")
+            middle = self.removal_observe("after-cut", segment="joint")
+            self.stager.removal_fixture_observation_pair(before, middle, phase="after-cut")
+        self.removal_ui_join()
+        self.removal_clock("joint")
+        supervisor = effects = effects_sha = None
+        if self.removal_case == "abrupt":
+            self.removal_inputs_post()
+            self.removal_outputs_post()
+            self.removal_native_call("removal-resume", argv, segment="resume", maximum=123, minimum=123, limit=256 * 1024)
+            self.removal_accept_outputs("removal-resume")
+            effects, effects_sha = self.removal_output_read("effects", self.removal_binding)
+            supervisor, _ = self.removal_output_read("supervisor", self.removal_binding, role="resume")
+        terminal = self.removal_observe("terminal", segment="terminal")
+        final = self.stager.removal_fixture_terminal_data(self.removal_case, before, middle, terminal,
+            supervisor=supervisor, effects=effects, effects_sha=effects_sha)
+        self.removal_outputs_post()
+        self.removal_inputs_post()
+        self.package_post()
+        self.removal_complete = True
+        self.removal_detach_all()
+        self.removal_outputs_post()
+        need(len(self.removal_threading.enumerate()) == 1 and self.removal_ui_joined
+             and all(mount["detached"] for mount in self.removal_mounts), "removal-original-workers-settled")
+        self.sha256 = self.removal_binding["packageSha256"]
+        self.receipt["removalFixture"] = dict(final, originalUIJoined=True,
+            uiObservation=self.removal_ui_facts["observation"], outputs=len(self.removal_output_facts),
+            outputsSha256=digest(self.stager.canonical({name: facts[1][1] for name, facts in self.removal_output_facts.items()})),
+            requestsDirectoryNamedOnly=True, mountedInputsDetached=True, sourcePrePostMatched=True,
+            firstOriginalErrorPreserved=True, powerLossQualified=False, productReady=False)
+        self.removal_clock("settle")
+
+    def removal_finish_ready(self):
+        if self.phase == "prepare-removal-observers":
+            return (self.removal_preparation_complete and self.removal_final_context is None
+                    and self.notary_known() and self.notary_key is None)
+        if self.phase == "package-removal-fixture":
+            if self.removal_thread is not None and not self.removal_ui_joined:
+                try:
+                    self.removal_ui_join()
+                except BaseException as error:
+                    self.removal_unknown = True
+                    self.errors.append({"stage": "removal-ui-original-settlement", "type": type(error).__name__})
+            return (self.removal_complete and self.removal_ui_joined and not self.removal_unknown
+                    and all(mount["known"] and mount["detached"] for mount in self.removal_mounts)
+                    and self.package_settled())
+        return True
+
+    def removal_baseline_admit(self):
+        """The existing Install owner, on the fixed removal test ref only.
+
+        This is still its original990s operation and genuine V2 readback. It
+        only places the actual hdiutil mount under protected /Volumes; there
+        is no alternate install root, forced cleanup or ancestor-policy fix.
+        """
+        need(self.phase == "package-install" and self.environment.get("GITHUB_REF") == REMOVAL_REF,
+             "removal-baseline-fixed-owner")
+        self.removal_case, self.removal_correlation = removal_context_data(self.environment, self.target)
+        original = self.source_original("desktop/tools/macos_xcode_host_preparation.py", "removal-baseline-host-source", 512 * 1024)
+        body = self.read(original)
+        self.package_sources.append((original, body))
+        self.removal_host_module = load_data(self.checkout, "macos_xcode_host_preparation.py", "_mrk_removal_baseline_host")
+        need(self.read(original) == body, "removal-baseline-host-source-post")
+        self.removal_host()
+        self.removal_slash = self.removal_open_directory(None, "/", "removal-baseline-system-root", protected=True)
+        self.removal_volumes = self.removal_open_directory(self.removal_slash, "Volumes", "removal-baseline-volumes", protected=True)
+        parent = self.removal_result_parent()
+        # Before the genuine Install original, absence is actual and exact.
+        # The hosted-runner label itself is never installation ownership.
+        self.removal_absent(parent, self.stager.INSTALL_ROOT.name)
+        self.removal_absent(parent, "MobileReleaseKit-RemovalRequests")
+        self.removal_baseline_mount = self.stager.removal_fixture_mount_path(self.removal_correlation, "install")
+        self.removal_absent(self.removal_volumes, self.removal_baseline_mount.name)
+        self.removal_baseline_roster = self.removal_roster(self.removal_volumes)
+
+    def removal_baseline_attach(self, observation_path):
+        need(self.removal_baseline_mount is not None and not self.mount_entered,
+             "removal-baseline-one-attach")
+        path = self.removal_baseline_mount
+        self.removal_absent(self.removal_volumes, path.name)
+        self.stage = "package-readonly-attach"
+        attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path),
+            "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(path), "-plist"], timeout=60)
+        self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, path)
+        entry = self.removal_open_directory(self.removal_volumes, path.name, "removal-baseline-original-mount", readonly=True)
+        entry["kind"] = "mount"  # Existing consuming-close route, not a second FD.
+        info = os.fstat(entry["fd"])
+        entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+        self.mount_entry = entry
+        need(entry["removal_facts"][0][0] != self.removal_volumes["removal_facts"][0][0]
+             and entry["removal_facts"][2]["mountOn"] == str(path)
+             and entry["removal_facts"][2]["mountFrom"] == self.mount_device, "removal-baseline-original-device")
+        self.removal_own_parent_post(self.removal_volumes, self.removal_baseline_roster, path.name, present=True)
+        self.mount_known = True
+        return path
+
+    def removal_baseline_mount_post(self):
+        need(self.mount_known and not self.mount_detached and self.mount_entry is not None,
+             "removal-baseline-original-mount-unavailable")
+        self.removal_directory_post(self.mount_entry)
+        self.removal_directory_post(self.removal_volumes)
+        self.removal_directory_post(self.removal_slash)
+        need(self.removal_roster(self.removal_volumes) == dict(self.removal_baseline_roster,
+             **{self.removal_baseline_mount.name: (self.mount_entry["identity"][0], self.mount_entry["identity"][1], stat.S_IFDIR)}),
+             "removal-baseline-mounted-namespace")
+
+    def removal_baseline_detached(self):
+        # Called only after the existing actual unforced hdiutil original0.
+        need(self.calls[-1]["role"] == "distribution-detach" and self.calls[-1]["returned"]
+             and self.calls[-1].get("returncode") == 0 and self.calls[-1].get("capturesSettled") is True,
+             "removal-baseline-detach-original")
+        before = dict(self.removal_baseline_roster)
+        before[self.removal_baseline_mount.name] = (self.mount_entry["identity"][0], self.mount_entry["identity"][1], stat.S_IFDIR)
+        self.removal_own_parent_post(self.removal_volumes, before, self.removal_baseline_mount.name, present=False)
+        self.removal_absent(self.removal_volumes, self.removal_baseline_mount.name)
+        self.removal_directory_post(self.removal_slash)
+
     def package_clock(self):
-        if self.phase in FINAL_IMAGE_PHASES:
+        if self.phase in FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
             return self.notary_clock()[0]  # Same clock; never the package-install990s endpoint.
         now = time.monotonic_ns()
         need(type(now) is int and type(self.package_endpoint) is int
@@ -3806,6 +5268,8 @@ class Operation:
         return result
 
     def package_call(self, role, argv, *, environment=None, timeout=30, limit=65536, cwd=None):
+        if self.phase == "prepare-removal-observers":
+            return self.removal_prepare_call(role, argv, maximum=timeout, limit=limit, cwd=cwd, environment=environment)
         if self.phase in FINAL_IMAGE_PHASES:
             need(role == "distribution-detach" and argv == ["/usr/bin/hdiutil", "detach", self.mount_device]
                  and timeout == 30 and limit == 65536 and environment is None and cwd is None,
@@ -3855,9 +5319,13 @@ class Operation:
         self.package_clock()
         for root, names in self.package_roots:
             self.recheck_directory(root)
-            need(set(os.listdir(root["fd"])) == names, "package-source-layout-roster")
+            observed_names = self.removal_names(root, len(names)) if self.phase in REMOVAL_OWNER_PHASES else os.listdir(root["fd"])
+            need(set(observed_names) == names, "package-source-layout-roster")
         for entry, expected in self.package_outputs:
-            need(digest(self.read(entry)) == expected, "package-original-post")
+            sha = (self.notary_stream(entry) if self.phase == "prepare-removal-observers" else
+                   self.removal_stream(entry, limit=self.stager.MAX_BYTES)[0][1] if self.phase == "package-removal-fixture" else
+                   digest(self.read(entry)))
+            need(sha == expected, "package-original-post")
             self.package_clock()
         for entry, body in self.package_sources:
             need(self.read(entry) == body, "package-source-post")
@@ -3893,6 +5361,9 @@ class Operation:
         return {"file": path.name, "sha256": digest(body), "bytes": len(body)}, path
 
     def recheck_mount(self):
+        if self.removal_baseline_mount is not None:
+            self.removal_baseline_mount_post()
+            return
         entry = self.mount_entry
         self.package_clock()
         self.recheck_directory(self.work_entry)
@@ -3961,9 +5432,12 @@ class Operation:
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
         self.package_call("distribution-detach", ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=30)
-        self.recheck_directory(self.mount_placeholder)
-        need(not os.listdir(self.mount_placeholder["fd"]), "package-detached-mountpoint-not-empty")
-        os.rmdir("package-mount", dir_fd=self.work_entry["fd"])
+        if self.removal_baseline_mount is not None:
+            self.removal_baseline_detached()
+        else:
+            self.recheck_directory(self.mount_placeholder)
+            need(not os.listdir(self.mount_placeholder["fd"]), "package-detached-mountpoint-not-empty")
+            os.rmdir("package-mount", dir_fd=self.work_entry["fd"])
         self.mount_detached = True
         self.package_clock()
 
@@ -3972,6 +5446,8 @@ class Operation:
         self.package_started = self.package_observed = time.monotonic_ns()
         self.package_endpoint = self.package_started + 990_000_000_000
         self.package_clock()
+        if self.environment.get("GITHUB_REF") == REMOVAL_REF:
+            self.removal_baseline_admit()
         inventory_hash, manifest_hash = (self.environment.get(name) for name in
             ("MRK_MACOS_INSTALL_INVENTORY_SHA256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"))
         need(self.stager.maintenance_hex(inventory_hash, 64) and self.stager.maintenance_hex(manifest_hash, 64), "package-compiled-bindings")
@@ -4051,21 +5527,25 @@ class Operation:
         self.package_post()
         user_image, _user_path = self.package_image(root, "distribution")
         observation_image, observation_path = self.package_image(observed_root, "observation")
-        self.mount_placeholder = self.package_directory("package-mount")
-        self.stage = "package-readonly-attach"
-        attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path), "-readonly", "-nobrowse",
-            "-noautoopen", "-mountpoint", str(self.work / "package-mount"), "-plist"], timeout=60)
-        self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, self.work / "package-mount")
-        fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
-        self.mount_entry = self.register(fd, "package-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
-        info = os.fstat(fd)
-        self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
-        self.mount_known = True
+        if self.removal_baseline_mount is not None:
+            mount_path = self.removal_baseline_attach(observation_path)
+        else:
+            mount_path = self.work / "package-mount"
+            self.mount_placeholder = self.package_directory("package-mount")
+            self.stage = "package-readonly-attach"
+            attached = self.package_call("distribution-attach", ["/usr/bin/hdiutil", "attach", str(observation_path), "-readonly", "-nobrowse",
+                "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
+            self.mount_device = self.stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, mount_path)
+            fd = os.open("package-mount", READ_FLAGS | os.O_DIRECTORY, dir_fd=self.work_entry["fd"])
+            self.mount_entry = self.register(fd, "package-readonly-mount", "mount", self.work_entry["fd"], "package-mount")
+            info = os.fstat(fd)
+            self.mount_entry["identity"] = (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+            self.mount_known = True
         self.mount_inputs(expected, self.package_name)
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input", expected_source=self.image_source,
             expected_inventory=inventory_hash, expected_manifest=manifest_hash, request_id=request_id, expected_package=digest(body),
-            producer_descriptor=self.work / "package-mount/producer.json", producer_signature=self.work / "package-mount/producer.sig",
-            installer_status=self.work / "installer-output.status", package=self.work / "package-mount" / self.package_name,
+            producer_descriptor=mount_path / "producer.json", producer_signature=mount_path / "producer.sig",
+            installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
         self.package_diagnostic(args, capture=False)
@@ -4258,6 +5738,12 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if not self.removal_finish_ready():
+            # SAME unresolved originals/mounts/thread remain retained. A
+            # generic finally/known output close cannot grant fixture custody.
+            self.receipt.update(originalClosesKnown=False, targetRetired=False,
+                                directStagerIOPending=self.stager_io_pending, cleanupErrors=self.errors)
+            return
         if self.phase in PYTHON_PHASES:
             self.python_retirement()
         if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
@@ -4281,19 +5767,19 @@ class Operation:
                      and directory_identity(os.fstat(target_fd)) == self.target_entry["identity"]
                      and directory_identity(os.stat(self.target_name, dir_fd=work_fd, follow_symlinks=False)) == self.target_entry["identity"],
                      "cleanup-original-directory-changed")
-                if self.phase in ("package-install", "package-remove") and self.package_endpoint is not None:
+                if self.phase in ("package-install", "package-remove", "package-removal-fixture") and self.package_endpoint is not None:
                     self.package_clock()
                 if self.phase in PYTHON_PHASES:
                     need(self.python_retiring, "python-retirement-not-admitted")
                     self.python_clock(work=False)
-                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                     self.notary_clock(work=False)
                 shutil.rmtree(self.target_name, dir_fd=work_fd)
-                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+                if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                     self.notary_clock(work=False)
                 if self.phase in PYTHON_PHASES:
                     self.python_clock(work=False)
-                if self.phase in ("package-install", "package-remove") and self.package_endpoint is not None:
+                if self.phase in ("package-install", "package-remove", "package-removal-fixture") and self.package_endpoint is not None:
                     self.package_clock()
                 try:
                     os.stat(self.target_name, dir_fd=work_fd, follow_symlinks=False)
@@ -4330,7 +5816,7 @@ class Operation:
 
     def execute(self, expected=None):
         try:
-            if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+            if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                 self.notary_started = self.notary_observed = time.monotonic_ns()
                 self.notary_clock()
             if self.phase in PYTHON_PHASES:
@@ -4344,7 +5830,7 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
@@ -4359,6 +5845,10 @@ class Operation:
                     self.package_install()
                 elif self.phase == "package-remove":
                     self.package_remove()
+                elif self.phase == "prepare-removal-observers":
+                    self.prepare_removal_observers()
+                elif self.phase == "package-removal-fixture":
+                    self.package_removal_fixture()
                 elif self.phase in SIGNING_PHASES:
                     self.fixed_sign()
                 elif self.phase in NOTARY_PHASES:
@@ -4389,7 +5879,9 @@ class Operation:
                 except BaseException as error:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
-        roles = (FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
+        roles = ((removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
+                 (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
+                 FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
                  final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"]) if self.phase in FINAL_PACKAGE_PHASES else
                  NOTARY_ROLES if self.phase in NOTARY_PHASES else
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
@@ -4406,7 +5898,8 @@ class Operation:
                                   and tuple(call["role"] for call in self.calls) == roles
                                   and all(call["returned"] and call.get("capturesSettled") is True
                                        and (call["returncode"] == 0 or self.phase == "package-install"
-                                       and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1) for call in self.calls)
+                                       and call["role"] in ("installer-log-cursor", "installer-log-capture") and call["returncode"] == 1
+                                       or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, call["role"], call["returncode"])) for call in self.calls)
                                   and self.sha256 is not None
                                   and (self.phase not in FINAL_PACKAGE_PHASES or self.final_package_complete and self.notary_known()
                                        and self.notary_key is None and tuple(row["role"] for row in self.credential_calls) == INSTALLER_CREDENTIAL_ROSTER
@@ -4422,11 +5915,13 @@ class Operation:
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
                                   and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase not in PYTHON_PHASES
-                                            and (self.phase in ("package-install", "package-remove") or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                            and (self.phase in ("package-install", "package-remove") + REMOVAL_OWNER_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
+        if self.phase in REMOVAL_OWNER_PHASES:
+            self.receipt["passed"] = self.receipt["passed"] and self.removal_finish_ready()
         if self.phase == "package-remove":
             self.receipt["passed"] = (self.receipt["passed"] and self.removal_package_complete
                 and not self.installer_entered and not self.mount_entered and not self.installation_readback
@@ -4446,21 +5941,30 @@ class Operation:
                 self.python_publish_final("python3", self.python_signed, 0o555)
                 capsule = (json.dumps(self.python_capsule(), sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
                 self.python_publish_final("python-signed-receipt.json", capsule, 0o444)
-        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
             self.notary_clock(work=False)
         self.publish_receipt()
-        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES:
+        if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
             self.notary_clock(work=False)
         if self.phase in PYTHON_PHASES and self.receipt["passed"]:
             self.python_clock(work=False)
-        if self.phase in ("package-install", "package-remove") and self.receipt["passed"]:
+        if self.phase in ("package-install", "package-remove", "package-removal-fixture") and self.receipt["passed"]:
             self.package_clock()  # Receipt write/readback/closes are inside the SAME original group.
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
 
     def publish_receipt(self):
         need(self.work_entry is not None and self.work_entry.get("identity") is not None, "receipt-work-unavailable")
-        body = (json.dumps(self.receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        receipt = self.removal_preparation_receipt() if self.phase == "prepare-removal-observers" and self.receipt["passed"] else self.receipt
+        if self.phase == "prepare-removal-observers" and not self.receipt["passed"]:
+            # Keep the failed original ledger private; a finite projection may
+            # describe incompletion but never prints secrets or a success hash.
+            receipt = {key: self.receipt[key] for key in ("schemaVersion", "phase", "source", "target", "passed",
+                       "targetRetired", "originalClosesKnown", "outerFinalityRequired")}
+            receipt.update(nativeCalls=len(self.calls), credentialCalls=len(self.credential_calls),
+                           credentialContexts=len(self.credential_contexts), productReady=False,
+                           failure=self.receipt.get("failure", {"stage": self.stage, "type": "Incomplete"}))
+        body = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
         need(len(body) <= 16384, "receipt-bound")
         if self.phase in PYTHON_PHASES:
             self.python_publish_final("android-helper-" + self.phase + ".json", body, 0o600)
@@ -4496,7 +6000,12 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
-    if phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES:
+    if ref == REMOVAL_REF:
+        removal_context_data(environment, target)
+        need(phase not in PYTHON_PHASES and phase not in FINAL_IMAGE_PHASES, "removal-only-existing-purpose-route")
+    elif phase in REMOVAL_OWNER_PHASES:
+        raise Refused("removal-fixture-fixed-ref-only")
+    if (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
     python_phase = phase in PYTHON_PHASES
     if python_phase:
@@ -4504,7 +6013,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
              "closed-python-purpose-ref")
     workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview") else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -4536,8 +6045,8 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES)
-        if phase in FINAL_PACKAGE_PHASES:
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+        if phase in FINAL_PACKAGE_PHASES or phase == "prepare-removal-observers":
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)

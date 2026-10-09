@@ -55,7 +55,211 @@ SHIPPING_COMPILE_WORKFLOW_INVERSE = ((146, 80, 'e788721c52ce2b2a196b69441bd94695
 INSTALL_PRODUCT_WORKFLOW_INVERSE = ((108130, 217, '8b87b9b0b3e8ac89ee8e9b1a7220391eb723c318c97ac2456e4df9383b6cb2af', '          /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-unsigned"\n          [[ ! -e "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" && ! -L "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" ]] || exit 1\n'), (108515, 92, '4a2d1b9cb0b5f33ec56d16c48bf394c817eb903617c909b1ab7e756396edca87', '              /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-unsigned/MobileReleaseKit.pkg" \\\n'), (108845, 173, 'e22272f841ce8a1d0103144f86b07a6f1135464eb7eee018d42184c3333c4a5e', '          # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.\n'), (109104, 115, '24ebdf18c54cfa3c91d92f0ee23a44cfbb60d6ffa6aea5f4b837135bb18a2d0e', '      - name: Sign and notarize the completed scripts-only Installer package before final P\n'), (109846, 260, 'ac6b48901eabbef4f5e3c0ac970c51f45c100405432d1fa383eced046e839b2b', '          # A separate Installer identity signs the completed Scripts XAR.\n'))
 
 
+# Exact closed removal-lifecycle SOURCE successor. Every other workflow assertion
+# sees the byte-identical preceding workflow, never a partially ignored region.
+REMOVAL_LIFECYCLE_WORKFLOW_INVERSE = ((226, 47, 'a704747a4193562a5e58ae053eb9e1589916783e7b1522be2abde7179fb0957a', ''), (599, 69, '69f7174b3cd9ca531aeaf62491a0f1f3bc571a41a29916fb314f8a5155a08133', ''), (753, 79, '84369e0f4fd0a31f33781995dc1c75b89cd6ac7cc388c3524de894dd9871c949', ''), (1279, 1984, 'b649ec4cfe89d2c6978bc4021317eed27fcaaa8bf62d21cb76168e4e3cc79023', "include:\n          - target: aarch64-apple-darwin\n            runner: macos-26\n            machine: arm64\n            hosted_job: github-hosted-macos26-arm64\n            supplier_receipt: '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d'\n            supplier_tar: 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695'\n            supplier_source: '158cdff422e3837f7ab5e6192af76a578faf6fab'\n            supplier_run: '37467019389'\n            supplier_attempt: '1'\n            supplier_artifact: '11415902210'\n          - target: x86_64-apple-darwin\n            runner: macos-26-intel\n            machine: x86_64\n            hosted_job: github-hosted-macos26-x86_64\n            supplier_receipt: 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b'\n            supplier_tar: '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd'\n            supplier_source: '079ab2a2c8fef88f01bf909e7669c685f07e1375'\n            supplier_run: '37476532238'\n            supplier_attempt: '1'\n            supplier_artifact: '11419502465'"), (3730, 71, 'f9fefa3718ae898b78132aa38bdc5b3e362b73f0ecfa4a3db2baa1293dc10b6e', ''), (1195, 228, 'f38b1fc17d9d827d5e6807e506d4779c25910080aae3082d6b22ee39b48f0ac1', ''), (8134, 566, 'cebc4460add0cd6b3fdea1e916574147cd7cf02e02e1a568955bc58579ca9803', ') ]] || exit 1'), (22064, 1047, '2b394548ebccdb868edb041d7749ce405aef1a0cda862c499c793eb5bb58937c', ''), (43300, 69, '64b629967c59bc65a8424104f6d690f0a25b2db134ac45d7644a790d9620b685', ''), (99397, 78, '6801bd4de84db1e9812849b0af46cadd0ec2164ad823acfda2667a533993d1f7', ''), (103974, 78, '6801bd4de84db1e9812849b0af46cadd0ec2164ad823acfda2667a533993d1f7', ''), (106894, 78, '6801bd4de84db1e9812849b0af46cadd0ec2164ad823acfda2667a533993d1f7', ''), (76697, 3356, 'fd410e2faf1fdc677b84e0efacee8268056f61cf722f925eb0517a3371f9bed8', '# Same24-minute app-build budget; no independent timeout entitlement.\n          # This current SOURCE role cannot embed its not-yet-created inventory.\n          set +e\n          PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \\\n            --locked --offline --release --jobs 1 --no-default-features --features macos-installed-remover --bin mrk-macos-remove \\\n            --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \\\n            > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"\n          remover_status=$?\n          printf \'%s\\n\' "$remover_status" > "$MRK_MACOS_WORK/remover-build.status"\n          remover_status_saved=$?\n          set -e\n          if [[ "$remover_status" != 0 ]]; then\n            # Optional diagnostics cannot replace the original compiler status.\n            set +e\n            printf \'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\\n\' "$remover_status" >&2\n            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n            exit "$remover_status"\n          fi\n          [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"'), (86218, 401, '1437bb8f8e16e877d01975a568c24b027924764f80b086da4072da8f1f538ea0', '/bin/mkdir -m 700 "$MRK_MACOS_WORK/app"\n          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET'), (155958, 1430, '9115ca359f000551d59ba2793087d14a1f3983b078d39ce8bb8993ac0f64cfec', '\n        timeout-minutes: 8\n        shell: bash\n        run: |\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target "$MRK_MACOS_TARGET" \\\n            --remover "$MRK_MACOS_WORK/input/app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove" \\\n            --expected-remover "$MRK_MACOS_REMOVER_SHA256" --output "$MRK_MACOS_WORK/remove-scripts" \\\n            > "$MRK_MACOS_WORK/remove-scripts-result.json"\n          [[ ! -e "$MRK_MACOS_WORK/Remove-original.pkg" && ! -L "$MRK_MACOS_WORK/Remove-original.pkg" ]] || exit 1\n          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/remove-scripts" \\\n            --identifier dev.mobile-release-kit.desktop.remove --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \\\n            --install-location / --ownership recommended "$MRK_MACOS_WORK/Remove-original.pkg"\n          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target "$MRK_MACOS_TARGET'), (159621, 69, '69f7174b3cd9ca531aeaf62491a0f1f3bc571a41a29916fb314f8a5155a08133', ''), (161932, 97, '7c00a5aa8e446b1d4a35ca3a04cb8b148f559ea23aa1ccd49b4a52fed6a73967', ''), (163757, 4562, 'e23beb1ed1963fc3f92eab36981a8584c15020cd82b7e77cc310ea89a92ef124', ''), (314219, 599, '1fef83695b6cca6a40261680a661b4be77daf98802d55dd5e55704919220379f', "-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}\n          path: |\n            ${{ format('{0}/source-binding"))
+
+
+# Closed SOURCE-only singleton successor; all old workflow assertions see the exact predecessor.
+GITHUB_REFUSAL_WORKFLOW_INVERSE = ((4363,
+  87,
+  'd50265e789e53873f15ab75cff4803877dbde8b95b4192d7a7585cfbfcaa786f',
+  '      # Default seven cases and the singleton are distinct native obligations.\n'),
+ (8791,
+  128,
+  'e096c708a3ee6d790a39600a9150f94036ab3e712d88451865ccff1d30df0a2b',
+  '            saved-version-recovery) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;'),
+ (313704,
+  409,
+  '7761de9aa25b4e7dea114b692869124fc38ef49bd67c3126d920ff4ef94f904b',
+  '          print("One ordinary saved-version recovery passed after original core interrupt86; interrupted GUI Save, '
+  'other domains and all-worker finality remain unproved.")\n'),
+ (313371,
+  146,
+  'aac6598ec0d08a4d34bed289b631f6ade12eac7b7db0b737655da1342dc1b10a',
+  '          fd = os.open(root / "normal-ui/saved-version-recovery-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL '
+  '| os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)\n'),
+ (312040,
+  388,
+  '9e7b1f655813a122369fb1917f629d63adee88c6791db4cb8c66384923c642d0',
+  '              "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery", '
+  '"testCounts": counts,\n'
+  '              "nativeSummarySha256": digest(summary_bytes), "savedVersionRecoveryUI": "passed", '
+  '"savedVersionRecovery": recovery,\n'
+  '              "selectedSavedFileScope": "saved-version-recovery", "savedOfflineAndEmptyBuildInputCohortObserved": '
+  'False,\n'
+  '              "coreOutcomeObserved": {"effect": "rolled_back", "journal": "clean", "resources": "settled", '
+  '"reason": "none"},\n'
+  '              "nativeProjectionObserved": {"finality": "settled", "reason": "none"}, "freshSavedVersionObserved": '
+  '{"name": "1.2.3", "build": "7"},\n'
+  '              "inspectionClosedWithoutApply": True, "explicitFreshRecoveryConfirmation": True, '
+  '"interruptedGuiSaveObserved": False,\n'
+  '              "configurationTextImagesRecoveryObserved": False, "applicationStateAfterNormalQuit": "notRunning", '
+  '"originalReferenceAndGateTerminalObserved": True,\n'),
+ (309757,
+  3441,
+  '9094f214d7de5d0e897d2e9609d2a3cf03355b2d2f482145751e996db413dee2',
+  '          recovery = runner.get("savedVersionRecovery")\n'
+  '          digests = ("sourceInputsSha256", "runtimeManifestSha256", "runtimeResultSha256", "sourceClosureSha256", '
+  '"fixtureDataSha256", "producerSha256", "producerFramesSha256", "handoffSha256")\n'
+  '          positives = ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved", '
+  '"sourcePrePostMatched", "uiOriginalMarkersObserved", "originalClosesCompleted")\n'
+  '          need(type(recovery) is dict and set(recovery) == set(digests) | set(positives) | {"producerReturncode", '
+  '"publicOriginalCount", "readyJournalFileCount", "interruptedGuiSaveObserved"}\n'
+  '               and all(hex64(recovery[k]) for k in digests) and all(recovery[k] is True for k in positives)\n'
+  '               and recovery["interruptedGuiSaveObserved"] is False\n'
+  '               and all(type(recovery[k]) is int and recovery[k] == n for k, n in (("producerReturncode", 86), '
+  '("publicOriginalCount", 13), ("readyJournalFileCount", 6)))\n'
+  '               and recovery["sourceInputsSha256"] == os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]\n'
+  '               and recovery["runtimeManifestSha256"] == preview["runtimeManifestSha256"]\n'
+  '               and recovery["runtimeResultSha256"] == digest(read("runtime-result.json", 65536))\n'
+  '               and recovery["producerFramesSha256"] == runner["commands"][2]["stdoutSha256"]\n'
+  '               and runner["commands"][2]["stderrBytes"] == 0 and runner["commands"][2]["stderrSha256"] == '
+  'digest(b""))\n'
+  '          result = {"schemaVersion": 1, "scope": '
+  '"ordinary-ui-observed-original-saved-version-rollback-and-fresh-load",\n'),
+ (309252,
+  82,
+  '9f74bc560a8262b224ff4b68c5b01314439b2d9e8ae3dd3c0852451f507f839b',
+  '          summary_bytes = read("normal-ui/saved-version-recovery-summary.raw.json", 262144)\n'),
+ (308123,
+  839,
+  '93dc97b6ab8b18aa28d3a341e71fa1c17acd5a16bb50394dd726719f78737c09',
+  '          runner, runner_bytes = admitted("saved-version-recovery-test.runner-admission.json", "test", 585,\n'
+  '              [roster, ("saved-version-source-roster", 15, 65536, 0), ("saved-version-core-interrupt", 20, 65536, '
+  '86),\n'
+  '               ("verify-generated-runner", 30, 1048576, 0), ("generated-runner-entitlements", 30, 1048576, 0),\n'
+  '               ("one-admitted-ui-test", 420, 1048576, 0), roster])\n'
+  '          summary_owner, summary_owner_bytes = admitted("saved-version-recovery-summary.command-admission.json", '
+  '"summary", 90,\n'),
+ (305682,
+  150,
+  '1ea836eb80a7f4e54a6c682a19cd5ec65369e488399eb253a910f4b80f3d46d7',
+  '                   and value.get("sourceCommit") == source and value.get("target") == target and '
+  'value.get("resultBundle") == "saved-version-recovery-test.xcresult"\n'),
+ (305030,
+  95,
+  '5cbd6d7290ea5cb8bf28f89492dca8f64b2e4b9c903fb84914dc3b933625c094',
+  '          for name in ("build", "saved-version-recovery-test-file-limit", "saved-version-recovery-test", '
+  '"saved-version-recovery-summary"):\n'),
+ (303941,
+  0,
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  '          need(os.environ["MRK_MACOS_SAVED_FILE_UI_SCOPE"] == "saved-version-recovery")\n'),
+ (301673,
+  547,
+  '6047762ee9d6c02c50fc06a4d584b637d351bc948d8f0da012f26183d0d3e8fe',
+  '              if not value: raise ValueError("original saved-version recovery binding refused")\n'),
+ (301576,
+  66,
+  'c8d99524a0b36aa40ed5750b4c3e81fdc55dbdbd7c34ac0afeb78aa77ebc9e32',
+  '              raise ValueError("saved-version result SOURCE differs")\n'),
+ (301011,
+  100,
+  'ffa8efa5bb9f0ff59745bb37853951dcfb628705fe2881928758fd58d81d95a0',
+  '          printf \'%s\\n\' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.status"\n'),
+ (300655,
+  283,
+  'bc08e127ca87f1bf7ec187847f0894fbb3abce38442e8dcb8fa83ef681429264',
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-summary saved-version-recovery-test.xcresult \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.raw.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/saved-version-recovery-summary.stderr"\n'),
+ (300067, 343, 'c1c9eb9ab87521f518a7c63a9056201d9f7ff37ada9480a7ed377b38e336f6e2', ''),
+ (299648,
+  262,
+  '3a759c0048ae101b0c371faaf79c5d8dce1e5dc06fb9f9f967bc40a39af5b4c3',
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && "
+  "steps.normal_saved_version_recovery_ui_test.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == "
+  "'saved-version-recovery'\n"),
+ (299491,
+  104,
+  'a295c36879b006e35c9536afb9eecca98c104b83e71d96cf5d3f710a66b44b76',
+  '      - name: Bind the singleton saved-version recovery to original XCTest and the same ordinary package\n'),
+ (299328,
+  94,
+  '11a05e29dac5b101a4cebd4aa1380ea58a0a41b2475eaf0ae378fd10e46373a9',
+  '          printf \'%s\\n\' "$test_status" > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.status"\n'),
+ (299207,
+  69,
+  '236043dc2e3c74d2681c2cbfbb4cc6c6728b4d040ba5c584fd03c2ad9d63bfd2',
+  '            > "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.log" 2>&1\n'),
+ (298785,
+  172,
+  'a93e5ac7e4d414096982e8bd2a1be26c6a58833b131fb5dc3bcffd284a7d9c7d',
+  '            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test.xcresult" \\\n'
+  '            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedVersionRecovery \\\n'),
+ (298244,
+  114,
+  '90b4fd64a09a64d4d8a8c0bc6024d82aa22cf90169e6242f1f5c6f8d2f5b341d',
+  '          # One 300s recovery journey; unchanged420s command/585s phase, including the fixed20s producer.\n'),
+ (297261,
+  122,
+  'd093a0380bc51bcc7672693f969af8d24cf13103755e3c52f32a8c11f7307a4c',
+  '          printf \'%s\\n\' "$file_limit_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/saved-version-recovery-test-file-limit.status" || exit $?\n'),
+ (297072, 343, 'c1c9eb9ab87521f518a7c63a9056201d9f7ff37ada9480a7ed377b38e336f6e2', ''),
+ (296661,
+  253,
+  'b42009f70fc9ea61fa34b4e53f6823c4dc7a6dc607536bb442581fd7a8e59947',
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome "
+  "== 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery'\n"),
+ (296518,
+  105,
+  '9ed585b466ec2361e34aa42774b5a4e88a5b2e7d3b1a4a05c61e57a349fb7259',
+  '      - name: Recover one real interrupted saved-version journal through the ordinary Mac UI\n'),
+ (322009, 527, '208640236d3e7a4695ae9af7177327bc538d348918e1564d5b94b841647ef4f5', ''),
+ (336370,
+  195,
+  '455beda55ca0c1eef5420f6805c675e56da566eea999c21884ebb342f37244c6',
+  "(env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' && "
+  "steps.normal_saved_version_recovery_ui_result.outcome == 'success'))"),
+ (338706,
+  91,
+  '9a4e77caf8e16f2cac57280b59a58433cebe0384e59e48e0ee2af1763c79373c',
+  '          if scope not in ("ordinary-seven", "saved-version-recovery"):'),
+ (338866,
+  238,
+  '1a2441af766022dd62d9db6c67bcc1aa7db31db24a4ea865745d3d7fabd911b8',
+  '          test_stem, summary_stem = (("saved-checks-test", "saved-checks-summary") if scope == "ordinary-seven"\n'
+  '                                    else ("saved-version-recovery-test", "saved-version-recovery-summary"))'))
+
+
+def without_github_refusal_workflow(source):
+    marker = "      - name: Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI\n"
+    if marker not in source:
+        if "singleton_method=" in source or "singleton_case_data" in source:
+            raise AssertionError("partial GitHub refusal workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(GITHUB_REFUSAL_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("GitHub refusal workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "611783adbc1d6961c905005037fcf15605401e7b819eeff3f544a779d2bf18b0":
+        raise AssertionError("GitHub refusal workflow inverse changed prior source")
+    return value.decode()
+
+
+def without_removal_lifecycle_workflow(source):
+    source = without_github_refusal_workflow(source)
+    marker = "      - name: Prepare three source-bound readonly observation carriers without removal\n"
+    if marker not in source:
+        if any(token in source for token in ("verify/desktop-macos-removal-lifecycle", "package-removal-fixture --target", "prepare-removal-observers --target")):
+            raise AssertionError("partial removal lifecycle workflow")
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(REMOVAL_LIFECYCLE_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("removal lifecycle workflow fixed region differs")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "d89f5e09a105d2dc485d4c35db80f7ed7fefe4fd77d1b000a6939326af114238":
+        raise AssertionError("removal lifecycle workflow inverse changed prior source")
+    return value.decode()
+
+
 def without_install_product_workflow(source):
+    source = without_removal_lifecycle_workflow(source)
     marker = "      - name: Build fixed Installer presentation then sign and notarize the completed outer package before final P\n"
     if marker not in source:
         if "package-component" in source or "SOURCE ReadMe envelope" in source:
@@ -5701,6 +5905,187 @@ class MacInstalledData(unittest.TestCase):
         # delta is independently composed/reviewed, not fictitiously exercised.
         path = Path(__file__).absolute().parents[2] / ".github/workflows/desktop-macos-installed.yml"
         current = path.read_text(encoding="utf-8")
+        # One already-implemented refusal journey, not another default-seven pass.
+        singleton_test = workflow_step(current, "Exercise one selected saved-version recovery or GitHub refusal through the ordinary Mac UI")
+        singleton_result = workflow_step(current, "Bind only the selected singleton to original XCTest and the same ordinary preview package")
+        for selected in ("saved-version-recovery", "workflow-refusal"):
+            self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == '" + selected + "'", singleton_test)
+            self.assertIn("env.MRK_MACOS_SAVED_FILE_UI_SCOPE == '" + selected + "'", singleton_result)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-preview'", singleton_test)
+        self.assertIn('      MRK_MACOS_SAVED_FILE_UI_SCOPE: ordinary-seven\n', current)
+        self.assertIn('saved-version-recovery|workflow-refusal) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;', current)
+        for exact in ('workflow-refusal) singleton=workflow-refusal; singleton_method=testSyntheticProjectManagedWorkflowRefusal ;;',
+                      'saved-version-recovery) singleton=saved-version-recovery; singleton_method=testSyntheticProjectSavedVersionRecovery ;;',
+                      '-resultBundlePath "$MRK_MACOS_WORK/normal-ui/${singleton}-test.xcresult"',
+                      '-only-testing:MRKNormalAppUITests/NormalAppUITests/"$singleton_method"',
+                      '-default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300',
+                      'timeout-minutes: 11', '/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin'):
+            self.assertIn(exact, singleton_test)
+        self.assertIn('timeout-minutes: 3', singleton_result)
+        self.assertIn('--normal-summary "${singleton}-test.xcresult"', singleton_result)
+        code = singleton_result.split("<<'PY_SAVED_VERSION_RECOVERY_RESULT'\n", 1)[1].split('          PY_SAVED_VERSION_RECOVERY_RESULT', 1)[0]
+        code = '\n'.join(line[10:] if line.startswith('          ') else line for line in code.splitlines())
+        parsed = ast.parse(code)
+        functions = {node.name: node for node in parsed.body if isinstance(node, ast.FunctionDef)}
+        names = ('need', 'singleton_selection', 'unique', 'decode', 'digest', 'hex64', 'admitted', 'singleton_test_roles', 'singleton_case_data')
+        self.assertTrue(set(names).issubset(functions))
+        ns = {'hashlib': hashlib, 'json': json, 're': re}
+        exec(compile(ast.Module(body=[functions[name] for name in names], type_ignores=[]), '<fixed-singleton-data>', 'exec'), ns)
+        selection, roles, case_data = (ns[name] for name in ('singleton_selection', 'singleton_test_roles', 'singleton_case_data'))
+        self.assertEqual(selection('workflow-refusal'), ('workflow-refusal', 'testSyntheticProjectManagedWorkflowRefusal'))
+        self.assertEqual(selection('saved-version-recovery'), ('saved-version-recovery', 'testSyntheticProjectSavedVersionRecovery'))
+        for wrong in ('ordinary-seven', 'both', '', None, True, [], {}):
+            with self.subTest(scope=wrong), self.assertRaises(ValueError): selection(wrong)
+        refusal_roles = [('normal-ui-source-roster', 15, 1048576, 0), ('verify-generated-runner', 30, 1048576, 0),
+                         ('generated-runner-entitlements', 30, 1048576, 0), ('one-admitted-ui-test', 420, 1048576, 0),
+                         ('normal-ui-source-roster', 15, 1048576, 0)]
+        self.assertEqual(roles('workflow-refusal'), refusal_roles)
+        self.assertEqual(roles('saved-version-recovery'), refusal_roles[:1] +
+                         [('saved-version-source-roster', 15, 65536, 0), ('saved-version-core-interrupt', 20, 65536, 86)] + refusal_roles[1:])
+        refused = case_data('workflow-refusal', {'managedWorkflowRefusalMarkerObserved': True}, {}, '1' * 64, None)
+        self.assertEqual(refused['coreOutcomeObserved'], {'effect': 'not_started', 'journal': 'not_created', 'resources': 'settled'})
+        self.assertEqual(refused['scope'], 'ordinary-ui-observed-original-managed-workflow-refusal')
+        self.assertFalse(refused['workflowMutationObserved'])
+        self.assertFalse(refused['remoteGitHubOperationObserved'])
+        self.assertFalse(refused['releasePromotionObserved'])
+        self.assertNotIn('savedVersionRecovery', refused)
+        for marker in (None, False, 1, 'true', {}, []):
+            with self.subTest(marker=marker), self.assertRaises(ValueError):
+                case_data('workflow-refusal', {'managedWorkflowRefusalMarkerObserved': marker}, {}, '1' * 64, None)
+        with self.assertRaises(ValueError): case_data('workflow-refusal', {'managedWorkflowRefusalMarkerObserved': True, 'savedVersionRecovery': None}, {}, '1' * 64, None)
+        with self.assertRaises(ValueError): case_data('workflow-refusal', {'managedWorkflowRefusalMarkerObserved': True}, {}, '1' * 64, '2' * 64)
+        recovery = dict.fromkeys(('sourceInputsSha256', 'runtimeManifestSha256', 'runtimeResultSha256', 'sourceClosureSha256',
+                                 'fixtureDataSha256', 'producerSha256', 'producerFramesSha256', 'handoffSha256'), '1' * 64)
+        recovery.update(dict.fromkeys(('originalFixtureRestored', 'unrelatedOriginalsUnchanged', 'readyJournalRemoved', 'sourcePrePostMatched',
+                                      'uiOriginalMarkersObserved', 'originalClosesCompleted'), True))
+        recovery.update(producerReturncode=86, publicOriginalCount=13, readyJournalFileCount=6, interruptedGuiSaveObserved=False)
+        recovery_runner = {'savedVersionRecovery': recovery, 'commands': [{}, {}, {'stdoutSha256': '1' * 64, 'stderrBytes': 0, 'stderrSha256': hashlib.sha256(b'').hexdigest()}]}
+        recovered = case_data('saved-version-recovery', recovery_runner, {'runtimeManifestSha256': '1' * 64}, '1' * 64, '1' * 64)
+        self.assertIs(recovered['savedVersionRecovery'], recovery)
+        self.assertEqual(recovered['coreOutcomeObserved']['effect'], 'rolled_back')
+        for key, bad in (('producerReturncode', 0), ('producerReturncode', True), ('originalClosesCompleted', False),
+                         ('readyJournalRemoved', None), ('sourceInputsSha256', '2' * 64), ('runtimeManifestSha256', '2' * 64),
+                         ('runtimeResultSha256', '2' * 64), ('producerFramesSha256', '2' * 64)):
+            changed = copy.deepcopy(recovery_runner); changed['savedVersionRecovery'][key] = bad
+            with self.subTest(recovery=key, bad=bad), self.assertRaises(ValueError):
+                case_data('saved-version-recovery', changed, {'runtimeManifestSha256': '1' * 64}, '1' * 64, '1' * 64)
+        with self.assertRaises(ValueError):
+            case_data('saved-version-recovery', dict(recovery_runner, managedWorkflowRefusalMarkerObserved=True), {'runtimeManifestSha256': '1' * 64}, '1' * 64, '1' * 64)
+        # Actual existing admission validator: closed command roster, same source,
+        # original deadline/return semantics; no filesystem or command is entered.
+        doc = {'schemaVersion': 1, 'scope': 'actual-generated-xctrunner-admission-only', 'sourceCommit': 'a' * 40,
+               'target': 'aarch64-apple-darwin', 'resultBundle': 'workflow-refusal-test.xcresult', 'normalPhase': 'test',
+               'originalCommandReturned': True, 'sourcePrePostMatched': True, 'sourceRosterSha256': '1' * 64,
+               'fileLimitBytes': [1073741824, 1073741824], 'receiptPolicy': 'exclusive0600-readback-consuming-close', 'originalTestReturncode': 0,
+               'phaseClock': {'startNs': '1', 'deadlineNs': '585000000001', 'beforePublicationNs': '2', 'postCloseDeadlineRequired': True},
+               'commands': [dict(role=role, returncode=rc, roleCapSeconds=cap, timeoutSeconds=cap, outputLimitBytes=limit,
+                                 stdoutBytes=0, stderrBytes=0, argvSha256='1' * 64, stdoutSha256='1' * 64, stderrSha256='1' * 64)
+                            for role, cap, limit, rc in refusal_roles]}
+        current_doc = doc
+        def fixed_read(name, limit):
+            self.assertEqual((name, limit), ('normal-ui/workflow-refusal-test.runner-admission.json', 32768))
+            return json.dumps(current_doc).encode()
+        ns.update(read=fixed_read, source='a' * 40, target='aarch64-apple-darwin', stem='workflow-refusal')
+        admitted = lambda: ns['admitted']('workflow-refusal-test.runner-admission.json', 'test', 585, refusal_roles)
+        self.assertEqual(admitted()[0], doc)
+        for key, bad in (('sourceCommit', 'b' * 40), ('target', 'x86_64-apple-darwin'), ('resultBundle', 'saved-version-recovery-test.xcresult'),
+                         ('originalCommandReturned', False), ('sourcePrePostMatched', None), ('originalTestReturncode', True)):
+            current_doc = copy.deepcopy(doc); current_doc[key] = bad
+            with self.subTest(admission=key), self.assertRaises(ValueError): admitted()
+        for key, bad in (('deadlineNs', '586000000001'), ('beforePublicationNs', '585000000001'), ('postCloseDeadlineRequired', False)):
+            current_doc = copy.deepcopy(doc); current_doc['phaseClock'][key] = bad
+            with self.subTest(clock=key), self.assertRaises(ValueError): admitted()
+        for change in ('missing', 'extra', 'reverse', 'unknown', 'nonzero', 'producer86'):
+            current_doc = copy.deepcopy(doc)
+            if change == 'missing': current_doc['commands'].pop()
+            elif change == 'extra': current_doc['commands'].append(copy.deepcopy(current_doc['commands'][-1]))
+            elif change == 'reverse': current_doc['commands'].reverse()
+            elif change == 'unknown': current_doc['commands'][3]['returncode'] = None
+            elif change == 'nonzero': current_doc['commands'][3]['returncode'] = 1
+            else: current_doc['commands'][3].update(role='saved-version-core-interrupt', returncode=86)
+            with self.subTest(command=change), self.assertRaises(ValueError): admitted()
+        for literal in ('workflow-refusal) singleton=workflow-refusal;', '-maximum-test-execution-time-allowance 300',
+                        '"managedWorkflowRefusalMarkerObserved") is True', 'postCloseDeadlineRequired',
+                        '"workflow-refusal": "workflow-refusal"'):
+            self.assertIn(literal, current)
+            with self.assertRaises(AssertionError): without_github_refusal_workflow(current.replace(literal, literal + '-changed', 1))
+        # Do not weaken any existing removal, signing, default-seven or recovery assertion.
+        current = without_github_refusal_workflow(current)
+        # Characterize the real new SOURCE route, then restore the exact prior
+        # workflow before every unchanged historical package/fixture assertion.
+        removal_ref = "refs/heads/verify/desktop-macos-removal-lifecycle"
+        self.assertEqual(current.count("      - verify/desktop-macos-removal-lifecycle\n"), 1)
+        matrix = re.search(r"^        include: \$\{\{ fromJSON\(github\.ref == '([^']+)' && '([^']+)' \|\| '([^']+)'\) \}\}$", current, re.M)
+        self.assertIsNotNone(matrix)
+        self.assertEqual(matrix.group(1), removal_ref)
+        selected, fallback = json.loads(matrix.group(2)), json.loads(matrix.group(3))
+        self.assertEqual([row["target"] for row in fallback], ["aarch64-apple-darwin", "x86_64-apple-darwin"])
+        self.assertEqual(selected, [dict(fallback[0], removal_case=case) for case in ("ordinary", "abrupt")])
+        self.assertEqual([(row["runner"], row["machine"]) for row in selected], [("macos-26", "arm64")] * 2)
+        self.assertIn("${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}", current)
+        self.assertIn("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", current)
+        self.assertIn("    timeout-minutes: 350\n", current)
+        admission = workflow_step(current, "Admit only this exact disposable-hosted source route")
+        self.assertIn('case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac', admission)
+        self.assertIn('[[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1', admission)
+        self.assertIn('"$MRK_MACOS_TARGET" == aarch64-apple-darwin', admission)
+        for scope in ("ANDROID", "IOS"):
+            self.assertIn('"$MRK_MACOS_' + scope + '_UI_SCOPE" == disabled', admission)
+        for name in ("Build the separate fixed eight-case Installer package from the same completed input",
+                     "Standard Installer runs the one fixed fixture, never root libtest or a scenario selector",
+                     "Nonroot fixture readback leaves protected0700 staging closed and unchanged"):
+            self.assertIn("        if: github.ref != '" + removal_ref + "'\n", workflow_step(current, name))
+        build = workflow_step(current, "Build the ordinary selected-target desktop image and embedded frontend")
+        self.assertIn('remover_features=macos-installed-remover\n', build)
+        self.assertIn('"$MRK_MACOS_REMOVAL_CASE" == abrupt', build)
+        self.assertIn('remover_features=macos-installed-removal-abrupt-fixture\n', build)
+        self.assertIn('--features macos-installed-removal-observer --bin mrk-macos-remove', build)
+        self.assertNotIn('macos-installed-installer-fixture', build)
+        preparation_name = "Prepare three source-bound readonly observation carriers without removal"
+        runtime_name = "One genuine fixed removal journey through the existing original owners"
+        preparation, runtime = workflow_step(current, preparation_name), workflow_step(current, runtime_name)
+        self.assertIn("        if: github.ref == '" + removal_ref + "' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'\n", preparation)
+        self.assertIn("        if: github.ref == '" + removal_ref + "' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'\n", runtime)
+        self.assertIn("        timeout-minutes: 32\n", preparation)
+        self.assertIn("        timeout-minutes: 18\n", runtime)
+        credentials = ("MRK_MACOS_DEVELOPER_ID_P12_BASE64", "MRK_MACOS_DEVELOPER_ID_P12_PASSWORD",
+                       "MRK_MACOS_INSTALLER_P12_BASE64", "MRK_MACOS_INSTALLER_P12_PASSWORD", "MRK_MACOS_NOTARY_API_KEY_BASE64")
+        self.assertIn('export -n ' + ' '.join(credentials), preparation)
+        self.assertIn('unset ' + ' '.join(credentials), preparation)
+        for key in credentials:
+            self.assertIn('          ' + key + ': ${{ secrets.' + key + ' }}\n', preparation)
+            self.assertIn('"${' + key + '+x}"', runtime)
+        self.assertNotIn('secrets.', runtime)
+        self.assertIn('        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n', runtime)
+        self.assertIn('ulimit -f 1048576\n', runtime)
+        for block, phase, status in ((preparation, "prepare-removal-observers", "preparation"),
+                                     (runtime, "package-removal-fixture", "removal")):
+            call = '"$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py ' + phase + ' --target "$MRK_MACOS_TARGET"'
+            self.assertEqual(block.count(call), 1)
+            self.assertIn('set -o noclobber\n', block)
+            self.assertIn('umask 077\n', block)
+            self.assertLess(block.index('set +e\n'), block.index(call))
+            self.assertLess(block.index(call), block.index(status + '_status=$?\n'))
+            self.assertIn('if [[ "$' + status + '_status" != 0 ]]; then exit "$' + status + '_status"; fi', block)
+            self.assertIn('[[ "$' + status + '_status_saved" == 0 ]] || exit "$' + status + '_status_saved"', block)
+            self.assertNotIn('continue-on-error', block)
+            self.assertNotIn('/usr/sbin/installer', block)
+            self.assertNotIn('sudo', block)
+        self.assertLess(current.index('      - name: ' + preparation_name), current.index('      - name: ' + runtime_name))
+        for old, replacement in (("verify/desktop-macos-removal-lifecycle", "verify/desktop-macos-removal-other"),
+                                 ('"removal_case":"abrupt"', '"removal_case":"ordinary"'),
+                                 ('--features macos-installed-removal-observer', '--features macos-installed-installer-fixture'),
+                                 ('prepare-removal-observers --target', 'package-install --target'),
+                                 ('package-removal-fixture --target', 'package-remove --target'),
+                                 ('${MRK_MACOS_INSTALLER_P12_BASE64+x}', '${MRK_MACOS_UNRELATED+x}'),
+                                 ('preparation_status_saved" == 0', 'preparation_status_saved" == 1'),
+                                 (preparation_name, preparation_name + " altered")):
+            self.assertIn(old, current)
+            with self.subTest(removal_workflow=old), self.assertRaises(AssertionError):
+                without_removal_lifecycle_workflow(current.replace(old, replacement, 1))
+        current = without_removal_lifecycle_workflow(current)
+        self.assertEqual(hashlib.sha256(current.encode()).hexdigest(), "d89f5e09a105d2dc485d4c35db80f7ed7fefe4fd77d1b000a6939326af114238")
+        self.assertEqual(without_removal_lifecycle_workflow(current), current)
         product_name = "Build fixed Installer presentation then sign and notarize the completed outer package before final P"
         component = workflow_step(current, "Build the fixed one-shot root Installer and scripts-only package")
         product = workflow_step(current, product_name)
@@ -5797,6 +6182,13 @@ class MacInstalledData(unittest.TestCase):
             self.assertNotIn('sudo', block)
             if label == "package-fixture":
                 self.assertLess(audit, workflow.index('/usr/sbin/installer -pkg "' + final + '"'))
+
+        # Bind the990s contract to the actual helper expression, not a workflow comment.
+        removal_owner = methods["package_removal_fixture"]
+        endpoint = 'self.package_endpoint = self.package_started + 990_000_000_000'
+        self.assertEqual(removal_owner.count(endpoint), 1)
+        self.assertLess(removal_owner.index(endpoint), removal_owner.index('self.removal_preload()'))
+        self.assertIn('self.package_started <= self.package_observed <= now < self.package_endpoint', methods["package_clock"])
 
     def test_package_refusals_are_closed_literals_without_exception_reflection(self):
         class NoReflection:
@@ -7032,6 +7424,278 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                     with self.assertRaisesRegex(TOOL.Refused, "installation-record-total-bound"):
                         TOOL.installation_record_data(*arguments)
 
+        # Removal exports remain pending DATA, not an original wait or owner close.
+        selection = TOOL.BuildSelection(TOOL.ARM_TARGET, "1.2.3", "macos26-arm64-removal-data-01")
+        binding = {"sourceCommit": "a" * 40, "target": TOOL.ARM_TARGET, "release": selection.release,
+                   "inventorySha256": "b" * 64, "packageSha256": "c" * 64,
+                   "removeDescriptorSha256": "d" * 64, "removeSignatureSha256": "e" * 64}
+        self.assertIs(TOOL.removal_fixture_binding_data(binding, selection=selection), binding)
+        for key, value in (("sourceCommit", "0" * 40), ("target", "x86_64-apple-darwin"),
+                           ("release", "macos26-arm64-other-01"), ("inventorySha256", "F" * 64), ("extra", 1)):
+            with self.subTest(removal_binding=key), self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_binding_data({**binding, key: value}, selection=selection)
+        effects = {**binding, "schemaVersion": 1, "kind": "removal-fixture-effects-v1",
+                   "transportState": "pending-original-child-exit", "requestId": "1" * 32, "rootNonce": "2" * 32,
+                   "genesisSnapshotSha256": "3" * 64, "previousTipSha256": "4" * 64,
+                   "prefix": 4, "returnedUnlinks": 4, "appRootUnlinkOrdinal": 4}
+        self.assertEqual(len(effects), 17)
+        def export(value, kind, role=None):
+            return TOOL.removal_fixture_export_data(TOOL.canonical(value) + b"\n", kind, binding,
+                                                    role=role, selection=selection)
+        self.assertEqual(export(effects, "effects"), effects)
+        for role, status, effect_hash in (("live", 86, None), ("resume", 0, TOOL.digest(TOOL.canonical(effects) + b"\n"))):
+            supervisor = {**binding, "schemaVersion": 1, "kind": "removal-fixture-supervisor-v1",
+                          "transportState": "pending-original-installer-exit", "role": role,
+                          "actualChildReturncode": status, "originalChildWaitObserved": True, "effectsSha256": effect_hash}
+            self.assertEqual(len(supervisor), 14)
+            self.assertEqual(export(supervisor, "supervisor", role), supervisor)
+            for key, value in (("role", "resume" if role == "live" else "live"), ("actualChildReturncode", True),
+                               ("actualChildReturncode", 1), ("originalChildWaitObserved", 1),
+                               ("originalChildWaitObserved", False), ("effectsSha256", "f" * 64 if role == "live" else None)):
+                with self.subTest(supervisor=role, field=key, value=value), self.assertRaises(TOOL.Refused):
+                    export({**supervisor, key: value}, "supervisor", role)
+            with self.assertRaises(TOOL.Refused): export(supervisor, "effects")
+            with self.assertRaises(TOOL.Refused): export(effects, "supervisor", role)
+            for document, kind, selected_role in ((effects, "effects", None), (supervisor, "supervisor", role)):
+                for key in document:
+                    missing = dict(document); del missing[key]
+                    with self.subTest(export=kind, missing=key), self.assertRaises(TOOL.Refused):
+                        export(missing, kind, selected_role)
+                for key, value in [("schemaVersion", True), ("extra", False), ("transportState", "closed")
+                                   ] + [(key, "f" * len(binding[key])) for key in binding]:
+                    with self.subTest(export=kind, mismatch=key), self.assertRaises(TOOL.Refused):
+                        export({**document, key: value}, kind, selected_role)
+                for body in (TOOL.canonical(document), b"x" * 4097 + b"\n",
+                             TOOL.canonical(document)[:-1] + b',"schemaVersion":1}\n'):
+                    with self.subTest(export=kind, malformed_bytes=len(body)), self.assertRaises(TOOL.Refused):
+                        TOOL.removal_fixture_export_data(body, kind, binding, role=selected_role, selection=selection)
+        for key, value in (("prefix", True), ("prefix", 3), ("returnedUnlinks", True), ("returnedUnlinks", 0),
+                           ("returnedUnlinks", 4097), ("appRootUnlinkOrdinal", 3), ("appRootUnlinkOrdinal", True),
+                           ("requestId", "0" * 32), ("rootNonce", "x" * 32), ("previousTipSha256", None)):
+            with self.subTest(effects_field=key, value=value), self.assertRaises(TOOL.Refused):
+                export({**effects, key: value}, "effects")
+        for case, roles in (("ordinary", (("live-cancel", 1), ("live-continue", 0))),
+                            ("abrupt", (("live-cut", 1), ("resume", 0)))):
+            for role, status in roles:
+                facts = {"entered": True, "returned": True, "captures_settled": True}
+                self.assertEqual(TOOL.removal_fixture_original_data(case, role, status, **facts), status)
+                self.assertTrue(ANDROID_HELPER.removal_native_result_data(case, "removal-" + role, status))
+                for wrong in (86, -9, 2):
+                    self.assertFalse(ANDROID_HELPER.removal_native_result_data(case, "removal-" + role, wrong))
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.removal_fixture_original_data(case, role, wrong, **facts)
+                for key in facts:
+                    for value in (False, None, 1):
+                        with self.subTest(original=role, fact=key, value=value), self.assertRaises(TOOL.Refused):
+                            TOOL.removal_fixture_original_data(case, role, status, **{**facts, key: value})
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_original_data(case, role, bool(status), **facts)
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_original_data("abrupt" if case == "ordinary" else "ordinary", role, status, **facts)
+
+        # Actual INPUT6 arithmetic, including two simultaneous copies, before any read.
+        sizes = dict(package=1, observer=2, installedProgram=3, inventory=4, installed=5, signature=6)
+        self.assertEqual(TOOL.removal_observer_copy_quote_data(sizes),
+                         2 * (21 + TOOL.REMOVE_DESCRIPTOR_BYTES) + 16 * 1024 * 1024)
+        edge = {**sizes, "package": (TOOL.MAX_BYTES - 16 * 1024 * 1024) // 2
+                - TOOL.REMOVE_DESCRIPTOR_BYTES - sum(value for key, value in sizes.items() if key != "package")}
+        self.assertEqual(TOOL.removal_observer_copy_quote_data(edge), TOOL.MAX_BYTES)
+        for bad in ({**edge, "package": edge["package"] + 1}, {**sizes, "extra": 1},
+                    {key: value for key, value in sizes.items() if key != "installedProgram"}):
+            with self.assertRaises(TOOL.Refused): TOOL.removal_observer_copy_quote_data(bad)
+        caps = (TOOL.MAX_BYTES, TOOL.REMOVER_BYTES, TOOL.REMOVER_BYTES, 1048576,
+                TOOL.PRODUCER_DESCRIPTOR_BYTES, TOOL.PRODUCER_SIGNATURE_BYTES)
+        for key, cap in zip(sizes, caps):
+            for value in (True, 0, -1, cap + 1):
+                with self.subTest(copy_input=key, value=value), self.assertRaises(TOOL.Refused):
+                    TOOL.removal_observer_copy_quote_data({**sizes, key: value})
+
+        # The retained credential rows have one exact158-role prefix, not158 arbitrary roles.
+        application = ANDROID_HELPER.CREDENTIAL_ROLES[:17] + ("search-final", "default-after")
+        expected_roles = (application + ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
+                          + (ANDROID_HELPER.INSTALLER_CREDENTIAL_ROSTER + application) * 3 + application)
+        self.assertEqual(len(expected_roles), 158)
+        self.assertEqual(ANDROID_HELPER.removal_credential_roster_data(), expected_roles)
+        rows = [dict(role=role, entered=True, returned=True, settled=True, status=0) for role in expected_roles]
+        receiver = SimpleNamespace(phase="prepare-removal-observers", credential_calls=rows,
+            removal_credential_reserved=ANDROID_HELPER.removal_credential_quote_data(), removal_control_reserved=16 * 1024 * 1024)
+        post = ANDROID_HELPER.Operation.removal_credential_records_post
+        post(receiver)
+        for count in (0, 64, 157):
+            post(SimpleNamespace(**{**vars(receiver), "credential_calls": rows[:count]}))
+        pending = [{**rows[0], "returned": False, "settled": False, "status": None}]
+        post(SimpleNamespace(**{**vars(receiver), "credential_calls": pending}))  # Shape is not finality.
+        for bad in ([rows[1], rows[0]] + rows[2:], rows + [rows[0]], [{**rows[0], "extra": 1}],
+                    [{**rows[0], "entered": 1}], [{**rows[0], "status": True}], [{**rows[0], "status": 65536}]):
+            with self.assertRaises(ANDROID_HELPER.Refused):
+                post(SimpleNamespace(**{**vars(receiver), "credential_calls": bad}))
+        for key, value in (("removal_credential_reserved", 0), ("removal_control_reserved", 16 * 1024 * 1024 + 1)):
+            with self.assertRaises(ANDROID_HELPER.Refused): post(SimpleNamespace(**{**vars(receiver), key: value}))
+        # Call only the existing admission guard: neither receiver has a clock/IO owner.
+        context = {"pending": None}
+        for phase, count in (("finalize-package", 64), ("prepare-removal-observers", 158)):
+            guarded = SimpleNamespace(phase=phase, credential_active=context, credential_known=lambda: True,
+                                      credential_calls=[None] * count)
+            with self.assertRaisesRegex(ANDROID_HELPER.Refused, "credential-fixed-original"):
+                ANDROID_HELPER.Operation.credential_call(guarded, context, expected_roles[0], ())
+
+        # One finite fake iterator exercises the real bounded-reader lifecycle;
+        # no actual FD, Operation constructor, directory, or native call exists.
+        class RemovalScanData:
+            def __init__(self, names, iteration_error=None, close_error=None):
+                self.names, self.iteration_error, self.close_error = names, iteration_error, close_error
+                self.position, self.close_calls = 0, 0
+            def __iter__(self):
+                return self
+            def __next__(self):
+                if self.iteration_error is not None:
+                    raise self.iteration_error
+                if self.position == len(self.names):
+                    raise StopIteration
+                name = self.names[self.position]
+                self.position += 1
+                return SimpleNamespace(name=name)
+            def close(self):
+                self.close_calls += 1
+                if self.close_error is not None:
+                    raise self.close_error
+        def removal_reader_data(scan, *, acquire_error=None, clock_failure=None):
+            directory = {"fd": 91, "closed": False}
+            receiver = SimpleNamespace(entries=[directory], entry_registry={id(directory): directory},
+                removal_unknown=False, removal_scan_state="closed", clocks=0, reservations=[])
+            def clock():
+                receiver.clocks += 1
+                if clock_failure is not None and receiver.clocks == clock_failure[0]:
+                    raise clock_failure[1]
+            def reserve(count):
+                self.assertEqual(count, 1)
+                self.assertEqual(receiver.removal_scan_state, "closed")
+                receiver.reservations.append(count)
+            def register(*args):
+                self.assertEqual(args, (None, "removal-roster-reader", "removal-iterator", 91, None))
+                self.assertEqual(receiver.reservations, [1])
+                row = {"fd": None, "closed": False}
+                receiver.entries.append(row); receiver.entry_registry[id(row)] = row
+                return row
+            def acquire(fd):
+                self.assertEqual(fd, 91)
+                self.assertEqual(receiver.removal_scan_state, "acquiring")
+                self.assertEqual(len(receiver.entries), 2)
+                self.assertIsNone(receiver.entries[-1]["iterator"])
+                self.assertFalse(receiver.entries[-1]["closed"])
+                if acquire_error is not None:
+                    raise acquire_error
+                return scan
+            receiver.package_clock, receiver.removal_reserve, receiver.register = clock, reserve, register
+            return receiver, directory, acquire
+        read_names = ANDROID_HELPER.Operation.removal_names
+        scan = RemovalScanData(["z", "a"])
+        receiver, directory, acquire = removal_reader_data(scan)
+        with mock.patch.object(ANDROID_HELPER.os, "scandir", side_effect=acquire) as opened:
+            self.assertEqual(read_names(receiver, directory, 2), ["a", "z"])
+        opened.assert_called_once_with(91)
+        self.assertEqual((scan.position, scan.close_calls, receiver.clocks), (2, 1, 5))
+        self.assertEqual(receiver.removal_scan_state, "closed")
+        self.assertFalse(receiver.removal_unknown)
+        self.assertTrue(receiver.entries[-1]["closed"])
+        self.assertIsNone(receiver.entries[-1]["iterator"])
+        for names, cap, consumed in ((["a", "b", "never-read"], 1, 2), (["a", "a", "never-read"], 2, 2), (["a"], 0, 1)):
+            scan = RemovalScanData(names)
+            receiver, directory, acquire = removal_reader_data(scan)
+            with mock.patch.object(ANDROID_HELPER.os, "scandir", side_effect=acquire) as opened:
+                with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-bounded-roster"):
+                    read_names(receiver, directory, cap)
+            self.assertEqual((opened.call_count, scan.position, scan.close_calls), (1, consumed, 1))
+            self.assertTrue(receiver.entries[-1]["closed"])
+            self.assertFalse(receiver.removal_unknown)
+        for failure in (OSError("acquisition"), KeyboardInterrupt("unknown-acquisition")):
+            scan = RemovalScanData([])
+            receiver, directory, acquire = removal_reader_data(scan, acquire_error=failure)
+            with mock.patch.object(ANDROID_HELPER.os, "scandir", side_effect=acquire) as opened:
+                with self.assertRaises(type(failure)) as caught: read_names(receiver, directory, 0)
+                self.assertIs(caught.exception, failure)
+                known = isinstance(failure, OSError)
+                self.assertEqual(receiver.entries[-1]["closed"], known)
+                self.assertEqual(receiver.removal_unknown, not known)
+                self.assertEqual(receiver.removal_scan_state, "closed" if known else "unknown")
+                self.assertIsNone(receiver.entries[-1]["iterator"])
+                if not known:
+                    with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-roster-previous-unknown"):
+                        read_names(receiver, directory, 0)
+                self.assertEqual((opened.call_count, scan.close_calls), (1, 0))
+        for first in (ValueError("first-iteration"), None):
+            close_error = OSError("consuming-close")
+            scan = RemovalScanData([], iteration_error=first, close_error=close_error)
+            receiver, directory, acquire = removal_reader_data(scan)
+            with mock.patch.object(ANDROID_HELPER.os, "scandir", side_effect=acquire) as opened:
+                with self.assertRaises(type(first if first is not None else close_error)) as caught:
+                    read_names(receiver, directory, 0)
+                self.assertIs(caught.exception, first if first is not None else close_error)
+                self.assertTrue(receiver.removal_unknown)
+                self.assertFalse(receiver.entries[-1]["closed"])
+                self.assertIs(receiver.entries[-1]["iterator"], scan)
+                with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-roster-previous-unknown"):
+                    read_names(receiver, directory, 0)
+                self.assertEqual((opened.call_count, scan.close_calls), (1, 1))
+        for at in (2, 3):  # Post-acquire refusal, or final clock after a known consuming close.
+            failure = ANDROID_HELPER.Refused("same-clock")
+            scan = RemovalScanData([])
+            receiver, directory, acquire = removal_reader_data(scan, clock_failure=(at, failure))
+            with mock.patch.object(ANDROID_HELPER.os, "scandir", side_effect=acquire) as opened:
+                with self.assertRaises(ANDROID_HELPER.Refused) as caught: read_names(receiver, directory, 0)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual((opened.call_count, scan.close_calls, receiver.clocks), (1, 1, 3))
+            self.assertFalse(receiver.removal_unknown)
+            self.assertTrue(receiver.entries[-1]["closed"])
+            self.assertIsNone(receiver.entries[-1]["iterator"])
+            self.assertEqual(receiver.removal_scan_state, "closed")
+
+        # The actual metadata preflight keeps the same lifetime/live/control
+        # limits. These DATA receivers own no real descriptors or clock.
+        storage = ANDROID_HELPER.removal_original_storage_data
+        rows, registry = [], {}
+        empty_quote = storage(rows, registry, 0)
+        self.assertEqual(empty_quote, 2 * (sys.getsizeof(rows) + sys.getsizeof(registry)) + 64 * 16384)
+        self.assertEqual(storage(rows, registry, 1), empty_quote + 16384)
+        for additional in (True, -1, 129):
+            with self.assertRaises(ANDROID_HELPER.Refused): storage(rows, registry, additional)
+        for row in ({"fd": None, "name": "x" * 4097}, {"fd": None, "unsupported": object()}):
+            with self.assertRaises(ANDROID_HELPER.Refused): storage([row], {id(row): row}, 0)
+        reserve = ANDROID_HELPER.Operation.removal_reserve
+        def original_reservation_data(rows, *, state="closed", work=8 * 1024 * 1024):
+            return SimpleNamespace(entries=rows, entry_registry={id(row): row for row in rows},
+                removal_scan_state=state, removal_control_reserved=work, removal_original_reserved=0,
+                package_clock=lambda: None)
+        row = {"fd": 91, "name": "x" * 255, "closed": False}
+        receiver = original_reservation_data([row])
+        reserve(receiver, 0)
+        quoted = receiver.removal_original_reserved
+        self.assertEqual(quoted, storage(receiver.entries, receiver.entry_registry, 0))
+        reserve(receiver, 0)
+        self.assertEqual(receiver.removal_original_reserved, quoted)
+        row.update(fd=None, name="x", closed=True)
+        reserve(receiver, 0)
+        self.assertEqual(receiver.removal_original_reserved, quoted)  # No close/storage credit.
+        receiver = original_reservation_data([], work=16 * 1024 * 1024 - empty_quote)
+        reserve(receiver, 0)
+        self.assertEqual(receiver.removal_control_reserved + receiver.removal_original_reserved, 16 * 1024 * 1024)
+        receiver.removal_control_reserved += 1
+        with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-original-control-pool"):
+            reserve(receiver, 0)
+        self.assertEqual(receiver.removal_original_reserved, empty_quote)
+        live = [{"fd": index, "closed": False} for index in range(95)]
+        reserve(original_reservation_data(live), 1)  # 95 held + one prospective original.
+        for state in ("acquiring", "owned", "closing", "unknown"):
+            receiver = original_reservation_data(live, state=state)
+            reserve(receiver, 0)  # The same pending iterator consumes live slot96.
+            with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-original-headroom"):
+                reserve(receiver, 1)
+        # Closed rows are still lifetime originals; the headroom check refuses
+        # before measuring another row or granting another filesystem call.
+        receiver = original_reservation_data([{"fd": None, "closed": True}] * 24576)
+        with self.assertRaisesRegex(ANDROID_HELPER.Refused, "removal-original-headroom"):
+            reserve(receiver, 1)
+
 
     def test_fixture_result_exact_eight_cases_never_promotes_actual_uncertainty(self):
         self.assertEqual(tuple(TOOL.FIXTURE_CASES), ("occupied-app", "occupied-release", "runtime-publication-collision", "staging-file-collision",
@@ -7183,6 +7847,141 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                 with self.assertRaisesRegex(TOOL.Refused, "synthetic-original-not-returned-zero"):
                     TOOL.fixture_observation_command(args)
                 self.assertEqual(events, [])  # Original refusal precedes every installed directory read.
+
+        # Real removal parsers/comparisons on literal DATA: no protected observer,
+        # signature, original process, consent, or cleanup is manufactured here.
+        selection = TOOL.BuildSelection(TOOL.ARM_TARGET, "1.2.3", "macos26-arm64-removal-data-01")
+        binding = {"sourceCommit": "a" * 40, "target": TOOL.ARM_TARGET, "release": selection.release,
+                   "inventorySha256": "b" * 64, "packageSha256": "c" * 64,
+                   "removeDescriptorSha256": "d" * 64, "removeSignatureSha256": "e" * 64}
+        own = {"packageSha256": "1" * 64, "descriptorSha256": "2" * 64, "signatureSha256": "3" * 64}
+        root_identity = ["1", "9007199254740993", str(stat.S_IFDIR | 0o755), "2", "0", "0", "96", "7", "8"]
+        old = {"invocation": "1" * 32, "snapshotSha256": "4" * 64, "tipSha256": "5" * 64,
+               "prefix": 3, "requestId": "6" * 32, "rootNonce": "1" * 32, "previousTipSha256": None,
+               "genesisSnapshotSha256": "4" * 64, "immutableControlsSha256": "7" * 64}
+        new = {"invocation": "2" * 32, "snapshotSha256": None, "tipSha256": "8" * 64,
+               "prefix": 4, "requestId": "9" * 32, "rootNonce": "2" * 32, "previousTipSha256": old["tipSha256"],
+               "genesisSnapshotSha256": old["genesisSnapshotSha256"], "immutableControlsSha256": "a" * 64}
+        self.assertEqual(len(old), 9)
+        def observer(phase, **updates):
+            return {"schemaVersion": 1, "kind": "removal-observer-v1", "phase": phase,
+                    "ownPackageSha256": own["packageSha256"], "ownDescriptorSha256": own["descriptorSha256"],
+                    "ownSignatureSha256": own["signatureSha256"], "binding": dict(binding), "rootIdentity": list(root_identity),
+                    "installationStateSha256": "b" * 64, "installedProducerSha256": "c" * 64,
+                    "installedSignatureSha256": "d" * 64, "payloadCommitmentSha256": "e" * 64,
+                    "expectedFiles": 3, "expectedDirectories": 2, "presentFiles": 3, "presentDirectories": 2,
+                    "appPresent": True, "firstEligibleAbsent": False, "allPayloadAbsent": False,
+                    "lockMode": "shared-readonly" if phase == "after-cancel" else "exclusive", "archives": [],
+                    "transportState": "pending-original-installer-exit", **updates}
+        def parsed(value):
+            return TOOL.removal_fixture_observer_data(TOOL.canonical(value) + b"\n", binding, own,
+                                                     value["phase"], selection=selection)
+        def exported(value, kind, role=None):
+            return TOOL.removal_fixture_export_data(TOOL.canonical(value) + b"\n", kind, binding,
+                                                    role=role, selection=selection)
+        before, cancelled = parsed(observer("before")), parsed(observer("after-cancel"))
+        cut = parsed(observer("after-cut", presentFiles=2, firstEligibleAbsent=True, archives=[old]))
+        terminal = observer("terminal", presentFiles=0, presentDirectories=0, appPresent=False,
+                            firstEligibleAbsent=True, allPayloadAbsent=True, archives=[old, new])
+        ordinary = parsed({**terminal, "archives": [{**old, "prefix": 4}]})
+        terminal = parsed(terminal)
+        effects = {**binding, "schemaVersion": 1, "kind": "removal-fixture-effects-v1",
+                   "transportState": "pending-original-child-exit", "requestId": new["requestId"], "rootNonce": new["rootNonce"],
+                   "genesisSnapshotSha256": new["genesisSnapshotSha256"], "previousTipSha256": old["tipSha256"],
+                   "prefix": 4, "returnedUnlinks": 4, "appRootUnlinkOrdinal": 4}
+        effects_sha = TOOL.digest(TOOL.canonical(effects) + b"\n")
+        effects = exported(effects, "effects")
+        supervisor = exported({**binding, "schemaVersion": 1, "kind": "removal-fixture-supervisor-v1",
+            "transportState": "pending-original-installer-exit", "role": "resume", "actualChildReturncode": 0,
+            "originalChildWaitObserved": True, "effectsSha256": effects_sha}, "supervisor", "resume")
+        abrupt_args = dict(supervisor=supervisor, effects=effects, effects_sha=effects_sha)
+        def effects_arguments(value):
+            raw_sha = TOOL.digest(TOOL.canonical(value) + b"\n")
+            return dict(effects=exported(value, "effects"), effects_sha=raw_sha,
+                        supervisor=exported({**supervisor, "effectsSha256": raw_sha}, "supervisor", "resume"))
+        for case, middle, final, arguments in (("ordinary", cancelled, ordinary, {}), ("abrupt", cut, terminal, abrupt_args)):
+            result = TOOL.removal_fixture_terminal_data(case, before, middle, final, **arguments)
+            self.assertEqual(result, {"schemaVersion": 1, "case": case, "targetBinding": binding,
+                "archives": 1 if case == "ordinary" else 2, "allPayloadAbsent": True,
+                "abruptProcessCutObserved": case == "abrupt", "samePackageLinkedResumeObserved": case == "abrupt",
+                "appRootLastReturnedEffectObserved": case == "abrupt", "powerLossQualified": False,
+                "ordinaryOriginalFinalityRequired": True, "qualification": "pending-original-owner-finality"})
+        for value in (before, cancelled, cut, terminal):
+            phase = value["phase"]
+            self.assertEqual(len(value), 22)
+            for key in value:
+                missing = dict(value); del missing[key]
+                with self.subTest(observer_phase=phase, missing=key), self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_observer_data(TOOL.canonical(missing) + b"\n", binding, own, phase, selection=selection)
+            for key, replacement in (("schemaVersion", True), ("extra", 0), ("transportState", "closed"),
+                                     ("appPresent", 1), ("firstEligibleAbsent", None), ("allPayloadAbsent", "unknown"),
+                                     ("expectedFiles", True), ("presentDirectories", -1), ("lockMode", "unlocked")):
+                with self.subTest(observer_phase=phase, field=key), self.assertRaises(TOOL.Refused):
+                    parsed({**value, key: replacement})
+            for key in binding:
+                with self.subTest(observer_phase=phase, binding=key), self.assertRaises(TOOL.Refused):
+                    parsed({**value, "binding": {**binding, key: "f" * len(binding[key])}})
+            for key in ("ownPackageSha256", "ownDescriptorSha256", "ownSignatureSha256"):
+                with self.subTest(observer_phase=phase, observer_original=key), self.assertRaises(TOOL.Refused):
+                    parsed({**value, key: "f" * 64})
+            for key in ("installationStateSha256", "installedProducerSha256", "installedSignatureSha256", "payloadCommitmentSha256"):
+                changed = parsed({**value, key: "f" * 64})
+                with self.subTest(observer_phase=phase, original_hash=key), self.assertRaises(TOOL.Refused):
+                    if phase == "before":
+                        TOOL.removal_fixture_observation_pair(changed, cancelled, phase="after-cancel")
+                    else:
+                        TOOL.removal_fixture_observation_pair(before, changed, phase=phase)
+        for body in (TOOL.canonical(before), b"x" * 65536 + b"\n",
+                     TOOL.canonical(before)[:-1] + b',"schemaVersion":1}\n'):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_observer_data(body, binding, own, "before", selection=selection)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_fixture_observer_data(TOOL.canonical(before) + b"\n", binding, own, "after-cut", selection=selection)
+        for identity in ([1] + root_identity[1:], root_identity[:2] + [str(stat.S_IFDIR | 0o777)] + root_identity[3:],
+                         root_identity[:4] + ["501"] + root_identity[5:], root_identity[:-1]):
+            with self.assertRaises(TOOL.Refused): parsed({**before, "rootIdentity": identity})
+        for value in (cancelled, cut, terminal):
+            for index in (0, 1):
+                identity = list(root_identity); identity[index] = str(int(identity[index]) + 1)
+                changed = parsed({**value, "rootIdentity": identity})
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.removal_fixture_observation_pair(before, changed, phase=value["phase"])
+        # Cancel is byte/fact unchanged; after a real cut only one SOURCE entry is absent and app remains.
+        for value, updates in ((cancelled, {"rootIdentity": root_identity[:-1] + ["9"]}),
+                               (cancelled, {"archives": [old]}), (cancelled, {"presentFiles": 2}),
+                               (cut, {"appPresent": False}), (cut, {"firstEligibleAbsent": False}),
+                               (cut, {"presentFiles": 1}), (cut, {"archives": [{**old, "prefix": 2}]}),
+                               (terminal, {"firstEligibleAbsent": False})):
+            changed = parsed({**value, **updates})
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_observation_pair(before, changed, phase=value["phase"])
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_fixture_observation_pair(parsed({**before, "archives": [old]}), cancelled, phase="after-cancel")
+        # Closed archive grammar precedes terminal comparison; no duplicate, sorted-latest, or fresh-genesis fallback.
+        for archives in ([new, old], [old, old], [old] * 65, [{**old, "extra": 1}], [{**old, "prefix": True}],
+                         [{**old, "snapshotSha256": "f" * 64}], [{**new, "previousTipSha256": None}],
+                         [old, {**new, "requestId": old["requestId"]}], [old, {**new, "rootNonce": old["rootNonce"]}]):
+            with self.assertRaises(TOOL.Refused): parsed({**terminal, "archives": archives})
+        for archives in ([{**old, "tipSha256": "f" * 64}, new], [{**old, "immutableControlsSha256": "f" * 64}, new],
+                         [old, {**new, "previousTipSha256": "f" * 64}], [old, {**new, "genesisSnapshotSha256": "f" * 64}],
+                         [old, {**new, "snapshotSha256": new["genesisSnapshotSha256"], "previousTipSha256": None}]):
+            changed = parsed({**terminal, "archives": archives})
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_terminal_data("abrupt", before, cut, changed, **abrupt_args)
+        for key in ("requestId", "rootNonce", "previousTipSha256", "genesisSnapshotSha256"):
+            changed = effects_arguments({**effects, key: "f" * len(effects[key])})
+            with self.subTest(resume_effect=key), self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_terminal_data("abrupt", before, cut, terminal, **changed)
+        changed = effects_arguments({**effects, "returnedUnlinks": 3, "appRootUnlinkOrdinal": 3})
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_fixture_terminal_data("abrupt", before, cut, terminal, **changed)
+        for updates in ({"supervisor": None}, {"effects": None}, {"effects_sha": "f" * 64}):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_fixture_terminal_data("abrupt", before, cut, terminal, **{**abrupt_args, **updates})
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_fixture_terminal_data("ordinary", before, cancelled, ordinary, **abrupt_args)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.removal_fixture_terminal_data("ordinary", before, cancelled, terminal)
 
 
 def installation_record_fixture(*, fixture=False, selection=None):
@@ -8171,13 +8970,45 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertEqual(block.count(fragment), 1, fragment)
         for subcommand in ("runtime ", "describe-runtime", "describe-current-runtime"):
             self.assertNotIn("desktop/tools/stage_macos_installed.py " + subcommand, workflow)
-        command = "desktop/tools/stage_macos_installed.py input"
+        # The reviewed notary owner, not a direct input CLI, now creates the
+        # final Installer DATA from the same configured current runtime.
+        command = "desktop/tools/macos_android_helper_package.py notarize-payload"
         self.assertEqual(workflow.count(command), 1)
-        inputs = workflow.split(command, 1)[1].split('inventory=$', 1)[0]
-        self.assertEqual(inputs.count("--current-runtime"), 1)
-        self.assertIn('--runtime "$MRK_MACOS_WORK/runtime"', inputs)
-        self.assertIn('--expected-manifest "$MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"', inputs)
-        self.assertIn('--output "$MRK_MACOS_WORK/input"', inputs)
+        input_name = "Bind this completed signed app and current-source runtime into fresh Installer DATA"
+        inputs = workflow_step(workflow, input_name)
+        self.assertEqual(inputs.count(command + ' --target "$MRK_MACOS_TARGET"'), 1)
+        self.assertEqual(inputs.count('> "$MRK_MACOS_WORK/input-result.json"'), 1)
+        self.assertNotIn("desktop/tools/stage_macos_installed.py input ", workflow)
+        self.assertLess(workflow.index("      - name: " + runtime_name + "\n"),
+                        workflow.index("      - name: " + input_name + "\n"))
+        # This exact helper is already in the readonly SOURCE closure. Inspect
+        # its real caller without importing or invoking any operation owner.
+        with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
+            helper_raw = original.read(512 * 1024 + 1)
+        self.assertLessEqual(len(helper_raw), 512 * 1024)
+        helper_source = helper_raw.decode("utf-8", "strict")
+        operations = [node for node in ast.parse(helper_source).body
+                      if isinstance(node, ast.ClassDef) and node.name == "Operation"]
+        self.assertEqual(len(operations), 1)
+        payloads = [node for node in operations[0].body
+                    if isinstance(node, ast.FunctionDef) and node.name == "notarize_payload"]
+        self.assertEqual(len(payloads), 1)
+        payload = ast.get_source_segment(helper_source, payloads[0])
+        self.assertIsNotNone(payload)
+        for fragment in (
+                'self.stager.signed_runtime_binding_data(nomination_body, self.producer_profile, self.service_profile, target=self.target)',
+                '("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", "runtimeManifestSha256")',
+                '("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "sourceInputsSha256")',
+                'need(self.environment.get(variable) == selected[key], "notary-configured-runtime-binding")',
+                'runtime_files.get("manifest.json", (None, None))[1] == selected["runtimeManifestSha256"]',
+                'arguments = argparse.Namespace(target=self.target,', 'current_runtime=True,',
+                'expected_manifest=selected["runtimeManifestSha256"], app=app_path, runtime=self.work / "runtime",',
+                'arguments.output = self.work / "input"'):
+            self.assertEqual(payload.count(fragment), 1, fragment)
+        final_input = 'self.notary_io("notary-final-input", self.stager.input_command, arguments, ticket_expectations=tickets)'
+        self.assertEqual(payload.count(final_input), 1)
+        self.assertIn('result = ' + final_input + '\n        self.notary_post()', payload)
+        self.assertLess(payload.index('arguments.output = self.work / "input"'), payload.index(final_input))
 
         # Exactly two selected native jobs; the same target must reach every
         # current package consumer, not merely its artifact label.
@@ -8196,7 +9027,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                           '"$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-' + machine):
                 self.assertIn(exact, branch)
         self.assertIn("*) exit 1 ;;", admission)
-        for command in ("current-runtime", "packaging-selection", "app", "input", "scripts", "prepare-package", "audit-package",
+        for command in ("current-runtime", "packaging-selection", "app", "scripts", "prepare-package", "audit-package",
                         "check-installer-result-absent", "observe-installer-fixture", "preview"):
             lines = workflow.replace('\\\n', ' ').splitlines()
             callers = [line for line in lines if "stage_macos_installed.py " + command + " " in line]
