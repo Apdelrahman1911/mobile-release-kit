@@ -1526,7 +1526,7 @@ mod lookup_memory {
             for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
         }
         fn artifact_inputs(&mut self)->Result<(),Problem>{
-            let Some(document)=self.current.document.upgrade()else{return Ok(());};
+            let Some(document)=self.current.gui.document.upgrade()else{return Ok(());};
             // DATA-only snapshots may have no containing Document. The real
             // enter below separately requires its live, bound original slot.
             let snapshot=document.bridge.artifact_inspection.artifact_census().map_err(|_|Problem::Capacity)?;
@@ -1675,7 +1675,7 @@ mod lookup_memory {
         if coordinator.receipt != JoinReceipt::Pending || coordinator.handle.is_none() || !child_joined(&child)
             || !(source.not_started() || source.settled()) || owner.large_work_started.load(Ordering::SeqCst)
             || owner.installation.is_some() || !book.can_begin() { return Err(Problem::CleanupUnknown); }
-        let _document=owner.document.upgrade().ok_or(Problem::Unavailable)?;
+        let _document=owner.gui.document.upgrade().ok_or(Problem::Unavailable)?;
         if !state.lifetime.original_bound()||state.slot.as_ref().is_none_or(|slot|!Arc::ptr_eq(&slot.owner,owner)){
             return Err(Problem::Unavailable);
         }

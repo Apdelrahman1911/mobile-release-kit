@@ -192,7 +192,7 @@ pub(super) fn request(owner:&Session,book:&Resources,context:&wire::Context,prof
     let count=book.artifact_installed.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.try_lock().map_err(|_|BridgeError::cleanup_unknown())?
         .retained_original_count().ok_or_else(BridgeError::cleanup_unknown)?;
     let parent=count.checked_add(8).filter(|n|*n<192).and_then(|n|u32::try_from(n).ok()).ok_or_else(wire::invalid)?;
-    let binding=owner.artifact_binding.lock().map_err(|_|BridgeError::cleanup_unknown)?;
+    let binding=owner.artifact_binding.lock().map_err(|_|BridgeError::cleanup_unknown())?;
     if owner.artifact_tools.is_some()!=binding.is_some()||owner.artifact_tools.as_ref().is_some_and(|v|!v.current()){return Err(BridgeError::cleanup_unknown());}
     wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&loan.wire_originals()?,binding.as_ref(),context.format==wire::Format::Ipa,parent)
 }
