@@ -60,10 +60,10 @@ HELPER_PINS = {
     'Cargo.lock': (141, 'bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3'),
     'Cargo.toml': (476, '7917d02fe12b37f2c5ea502bdf1315d7ce6aa6df04a69431aaf71df3c6c3c2fe'),
     'LICENSE.libsodium': (823, '508a76d186356c0dd807a670ef510964f8724557024796a2c426c6c0e19ab683'),
-    'README.md': (6643, '281c91e237f6a1047a5169a9bd3da651a7e117ee249faf11a76714631c48465f'),
-    'abi-check.c': (2147, 'a7bdc8dcf1cdeb9fcc230399e86149ca1dc15ea40c02257e03799236f9728bf3'),
+    'README.md': (7528, '20a97cc2ca92f1d11eb35f8b404e7ea6002db1c1e8b9f2c8f711aed8f772ed09'),
+    'abi-check.c': (2489, '27c123f6e433b6608d2989add703cb7602b16d22d06938c552003b7eb1335868'),
     'src/macos.rs': (9898, 'a50d8977991a273ccaf1c50a8d6629361a5b05fcff32aac97121ef165258dc62'),
-    'src/macos_tests.rs': (2850, 'b5315f5dcd3a1c7fa66be9ef75822e2f531dff05f54cf03a0fab837eaa1f6767'),
+    'src/macos_tests.rs': (15612, '8c8b9092e1aa8fbdc4d6ab9e772c2a5c4ed6fcb680d8b51247905ac00c2c7d4b'),
     'src/main.rs': (1344, '14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310'),
     'src/protocol.rs': (3239, '5441b4fd3d1eae80cb7f8d70ee79341eb8a47123177d8a72e152c6f7109b0c71'),
     'src/protocol_tests.rs': (5602, 'a87b33d4743c1db9e8209baf171dae12a7ac6a8fa017896ef43498e6810be47d'),
@@ -1194,10 +1194,15 @@ class SealBuild:
         lines = [line for line in text.split("\n") if line]
         B.need(test.stderr == b"" and "\r" not in text and len(lines) == 3 and lines[0] == "running 1 test"
                and lines[1] == "test " + NATIVE_TEST + " ... ok"
-               and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in [0-9]+\.[0-9]+s", lines[2]),
+               and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in [0-9]+\.[0-9]+s", lines[2]),
                "helper-exact-native-test")
-        self.native["helperNativeTest"] = {"passed": 1, "failed": 0, "ignored": 0, "filteredUncredited": 3,
-            "returnedWipePaths": True, "framedParentRoundTrip": False, "entropyFailureInjected": False}
+        self.native["helperNativeTest"] = {"passed": 1, "failed": 0, "ignored": 0, "filteredUncredited": 4,
+            "returnedWipePaths": True, "framedParentRoundTrip": False,
+            "framedBuildParentRoundTrip": True, "nestedOriginalsClosed": 8,
+            "positiveFrameSizes": [0, 3, 49152], "actualFrameRefusals": 2,
+            "entropyDeviceControlOriginals": 2, "entropyDeviceDenialObserved": True,
+            "entropyHelperSignal": 6, "abortReturnedWipeClaim": False,
+            "installedDesktopParentQualified": False, "entropyFailureInjected": True}
 
     def final_sources(self):
         self.phase = "source-and-native-final-post"

@@ -8484,6 +8484,41 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             # Pin the complete existing strict result-validation block: no
             # stderr filtering, symbol-count weakening or fallback option.
             self.assertIn('        B.need(symbols.stderr == b"", "static-symbol-query")\n        lines = symbols.stdout.decode("ascii", "strict").splitlines()\n        for name in ("_sodium_init", "_crypto_box_seal", "_sodium_memzero", "_randombytes_close"):\n            B.need(sum(bool(re.fullmatch(r"[0-9a-fA-F]+ [A-Z] " + re.escape(name), line.strip())) for line in lines) == 1,\n                   "canonical-four-symbol-definition")\n', source_text)
+            # New checks are SOURCE-only here; actual process/entropy/crypto
+            # evidence requires the same selected native1 original on each Mac.
+            helper_root = ROOT / "desktop/helpers/macos-github-seal"
+            for helper_leaf, expected_pin in seal.HELPER_PINS.items():
+                helper_body = (helper_root / helper_leaf).read_bytes()
+                self.assertEqual((len(helper_body), hashlib.sha256(helper_body).hexdigest()), expected_pin)
+            self.assertEqual(len(seal.ROLE_LIMITS), 22)
+            self.assertEqual(seal.ROLE_LIMITS[-1], ("helper-native-test", 10, seal.QUERY_LIMIT))
+            self.assertEqual(seal.NATIVE_TEST, "macos::tests::canonical_return_paths_wipe_input_and_refuse_low_order_key")
+            native_source = (helper_root / "src/macos_tests.rs").read_text()
+            self.assertEqual(native_source.count("#[test]"), 2)
+            self.assertIn("framed_build_parent_and_entropy_denial();", native_source)
+            self.assertIn("Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT)", native_source)
+            self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl, Case::DeviceDenied, Case::EntropyDenied", native_source)
+            self.assertIn("assert_eq!(closed_originals, 8);", native_source)
+            self.assertIn("assert_eq!(captured.status.signal(), Some(6));", native_source)
+            self.assertIn("matches!(error.raw_os_error(), Some(1 | 13))", native_source)
+            self.assertIn('command.env_clear().env("LANG", "C").env("LC_ALL", "C");', native_source)
+            self.assertIn('"/dev/urandom", "/dev/random"', native_source)
+            self.assertIn("let closed = original.consume_close();", native_source)
+            self.assertIn("crypto_box_seal_open", native_source)
+            self.assertLess(native_source.index('Err("input-close")'), native_source.index("read_bounded(pipe, &mut output"))
+            self.assertLess(native_source.index('Err("error-close")'), native_source.index("match child.wait()"))
+            for forbidden in ("randombytes_set_implementation", "sodium_set_misuse_handler", "Command::output", "read_to_end", "setsid", "setpgid"):
+                self.assertNotIn(forbidden, native_source)
+            self.assertIn('"framedBuildParentRoundTrip": True', source_text)
+            self.assertIn('"installedDesktopParentQualified": False', source_text)
+            self.assertIn('"abortReturnedWipeClaim": False', source_text)
+            # Production helper and binary wire source remain exactly unchanged.
+            for fixed, fixed_digest in {
+                "src/main.rs": "14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310",
+                "src/macos.rs": "a50d8977991a273ccaf1c50a8d6629361a5b05fcff32aac97121ef165258dc62",
+                "src/protocol.rs": "5441b4fd3d1eae80cb7f8d70ee79341eb8a47123177d8a72e152c6f7109b0c71",
+            }.items():
+                self.assertEqual(hashlib.sha256((helper_root / fixed).read_bytes()).hexdigest(), fixed_digest)
             for mode in ("ordinary", "wrong-target", "same-target-replaced", "post-target-changed", "unknown-child", "unknown-data", "other-name"):
                 with self.subTest(mode=mode), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
                     parent = root / "build/src/libsodium/.libs"
