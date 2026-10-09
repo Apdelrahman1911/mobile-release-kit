@@ -270,6 +270,7 @@ fn main() {
             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
             "github_release_reconcile", "github_release_pending", "github_release_cancel",
             "github_remote_setup_status", "github_remote_setup_prepare", "github_remote_setup_apply", "github_remote_setup_discard", "github_remote_setup_cancel",
+            "github_history_status", "github_history_start", "github_history_cancel",
             "vault_status", "vault_open", "vault_prepare_initialize", "vault_unlock", "asset_context", "asset_choose", "credential_prepare",
             "vault_prepare_delete", "vault_commit", "vault_bind", "vault_discard", "vault_lock",
         ];

@@ -360,6 +360,20 @@ class DefaultCancellation:
         from ._desktop_saved_command_control import SavedCommandDomain
         return source if source.domain is SavedCommandDomain.ArtifactInspection else None
 
+    @property
+    def _github_history_source(self) -> Any:
+        source = self._saved_command_input()
+        if source is None:
+            return None
+        from ._desktop_saved_command_control import SavedCommandDomain
+        return source if source.domain is SavedCommandDomain.GitHubHistory else None
+
+    def _install_github_history_source(self, source: Any) -> None:
+        from ._desktop_github_history_control import HistoryInput
+        if type(source) is not HistoryInput:
+            raise self.restore_error("invalid history cancellation source ownership")
+        self._install_saved_command_source(source)
+
     def _install_artifact_inspection_source(self, source: Any) -> None:
         from ._desktop_artifact_inspection_control import ArtifactInspectionInput
         if type(source) is not ArtifactInspectionInput:

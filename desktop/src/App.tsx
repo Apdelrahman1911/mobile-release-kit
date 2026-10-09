@@ -37,6 +37,7 @@ import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
 import { GitHubConnectionController } from './githubConnectionController.ts';
 import { GitHubPreflightController, githubPreflightOwnerReason } from './githubPreflightController.ts';
 import { GitHubReleaseController, githubReleaseOwnerReason } from './githubReleaseController.ts';
+import { GitHubHistoryController, githubHistoryOwnerReason } from './githubHistoryController.ts';
 import { connectionRepository } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionObservationPort, GitHubConnectionTokenHandoff } from './githubConnectionTypes.ts';
 import { workflowOwnerReason, workflowRetainsDraft } from './githubWorkflowEdit.ts';
@@ -58,6 +59,7 @@ import { GitHubWorkflowApply } from './components/GitHubWorkflowApply.tsx';
 import { GitHubConnection } from './components/GitHubConnection.tsx';
 import { GitHubPreflight } from './components/GitHubPreflight.tsx';
 import { GitHubRelease } from './components/GitHubRelease.tsx';
+import { GitHubHistory } from './components/GitHubHistory.tsx';
 import { MetadataTextEditor, MetadataTextSave } from './components/MetadataTextEditor.tsx';
 import { MetadataImagesEditor, MetadataImagesOperation } from './components/MetadataImagesEditor.tsx';
 import { ReleaseVersionEditor, ReleaseVersionSave } from './components/ReleaseVersionEditor.tsx';
@@ -131,6 +133,7 @@ export function App() {
   const githubRemoteSetupControllerRef = useRef<GitHubRemoteSetupController | null>(null);
   const githubPreflightControllerRef = useRef<GitHubPreflightController | null>(null);
   const githubReleaseControllerRef = useRef<GitHubReleaseController | null>(null);
+  const githubHistoryControllerRef = useRef<GitHubHistoryController | null>(null);
   const connectionHelpGeneration = useRef<object>({});
   const initializationControllerRef = useRef<ProjectInitializationController | null>(null);
   const workflowControllerRef = useRef<GitHubWorkflowEditController | null>(null);
@@ -151,15 +154,17 @@ export function App() {
   const androidBusy = useCallback(() => androidBuildControllerRef.current ? androidBuildOwnerReason(androidBuildControllerRef.current.getSnapshot()) : null, []);
   const iosBusy = useCallback(() => iosArchiveControllerRef.current ? iosArchiveOwnerReason(iosArchiveControllerRef.current.getSnapshot()) : null, []);
   const recoveryBusy = useCallback(() => projectRecoveryControllerRef.current ? projectRecoveryOwnerReason(projectRecoveryControllerRef.current.getSnapshot()) : null, []);
+  const historyBusy = useCallback(() => githubHistoryControllerRef.current ? githubHistoryOwnerReason(githubHistoryControllerRef.current.getSnapshot()) : null, []);
   // Existing reciprocal admission callbacks also retain the original path
   // picker, even after its display eligibility was retired by a local edit.
-  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false) => artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+  const savedCommandBusy = useCallback((excludeVersion = false, excludeGitHubPreflight = false, excludeGitHubRelease = false, excludeImages = false, excludeInitialization = false, excludeRemoteSetup = false, excludeHistory = false) => artifactBusy() ?? preflightBusy() ?? androidBusy() ?? iosBusy() ?? recoveryBusy() ??
+    (excludeHistory ? null : historyBusy()) ??
     (!excludeRemoteSetup && githubRemoteSetupControllerRef.current ? githubRemoteSetupOwnerReason(githubRemoteSetupControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubPreflight && githubPreflightControllerRef.current ? githubPreflightOwnerReason(githubPreflightControllerRef.current.getSnapshot()) : null) ??
     (!excludeGitHubRelease && githubReleaseControllerRef.current ? githubReleaseOwnerReason(githubReleaseControllerRef.current.getSnapshot()) : null) ?? projectPathOwnerReason(pathPickerRef.current) ??
     (!excludeInitialization && initializationControllerRef.current ? initializationOwnerReason(initializationControllerRef.current.getSnapshot(),workspaceRef.current.selectedId??'') : null) ??
     (!excludeVersion && versionEditControllerRef.current ? versionOwnerReason(versionEditControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null) ??
-    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy]);
+    (!excludeImages && imageControllerRef.current ? metadataImagesOwnerReason(imageControllerRef.current.getSnapshot(), workspaceRef.current.selectedId ?? '') : null), [artifactBusy, preflightBusy, androidBusy, recoveryBusy, iosBusy, historyBusy]);
   const syncConnectionContext = useCallback(() => {
     const selected = workspaceRef.current.selectedId;
     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
@@ -182,6 +187,7 @@ export function App() {
     // failed refresh and unchanged/older saves need not advance generations.
     retirePathPicker();
     githubRemoteSetupControllerRef.current?.beforeWorkspaceAction();
+    githubHistoryControllerRef.current?.beforeWorkspaceAction();
     artifactInspectionControllerRef.current?.beforeWorkspaceAction(action);
     offlinePreflightControllerRef.current?.beforeWorkspaceAction(action);
     androidBuildControllerRef.current?.beforeWorkspaceAction(action);
@@ -227,6 +233,7 @@ export function App() {
     initializationControllerRef.current?.syncContext();
     editControllerRef.current?.syncDraft();
     syncConnectionContext();
+    githubHistoryControllerRef.current?.syncContext();
   }, [syncConnectionContext, retirePathPicker]);
   const [configEdit] = useState(() => new ConfigEditController({
     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
@@ -295,7 +302,7 @@ export function App() {
     return savedCommandBusy(false, false, false, false, false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
-  }));
+  }, () => assetControllerRef.current?.getSnapshot() ?? null));
   githubRemoteSetupControllerRef.current = githubRemoteSetup;
   const githubRemoteSetupState = useSyncExternalStore(githubRemoteSetup.subscribe, githubRemoteSetup.getSnapshot, githubRemoteSetup.getSnapshot);
   const [githubPreflight] = useState(() => new GitHubPreflightController(githubConnection.getSnapshot, () => {
@@ -314,6 +321,19 @@ export function App() {
   }));
   githubReleaseControllerRef.current = githubRelease;
   const githubReleaseState = useSyncExternalStore(githubRelease.subscribe, githubRelease.getSnapshot, githubRelease.getSnapshot);
+  const [githubHistory] = useState(() => new GitHubHistoryController({
+    connection: githubConnection.getSnapshot,
+    selectedProject: () => {
+      const current = workspaceRef.current;
+      return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+    },
+    // Exclude only this owner and the idle connected session it requires.
+    // The unchanged controller and native owner both admit that actual context.
+    otherOperationReason: () => savedCommandBusy(false, false, false, false, false, false, true) ??
+      savedCommandPrerequisiteReason(false, false, undefined, false, true),
+  }));
+  githubHistoryControllerRef.current = githubHistory;
+  const githubHistoryState = useSyncExternalStore(githubHistory.subscribe, githubHistory.getSnapshot, githubHistory.getSnapshot);
   const [workflowEdit] = useState(() => new GitHubWorkflowEditController({
     selectedProject: () => {
       const current = workspaceRef.current;
@@ -395,11 +415,11 @@ export function App() {
   // Evidence selection has deliberately no source-project or draft callback.
   const [releaseEvidence] = useState(() => new LifecycleEvidenceController(savedCommandBusy));
   const evidenceState = useSyncExternalStore(releaseEvidence.subscribe, releaseEvidence.getSnapshot, releaseEvidence.getSnapshot);
-  const savedCommandPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false): string | null => {
+  const savedCommandPrerequisiteReason = (excludeVersion = false, excludeImages = false, imageStep?: 'open-held-selection', excludeInitialization = false, forHistoryRead = false): string | null => {
     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
     const projectId = workspaceRef.current.selectedId ?? '';
-    const owned = (excludeInitialization?null:initializationOwnerReason(initialization.getSnapshot(),projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
+    const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initializationOwnerReason(initialization.getSnapshot(),projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
       metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ??
       (excludeVersion ? null : versionOwnerReason(versionEdit.getSnapshot(), projectId)) ??
       (excludeImages ? null : metadataImagesOwnerReason(metadataImages.getSnapshot(), projectId));
@@ -414,7 +434,9 @@ export function App() {
     const remoteSetupReason = githubRemoteSetupOwnerReason(githubRemoteSetup.getSnapshot());
     if (remoteSetupReason) return remoteSetupReason;
     const connection = githubConnection.getSnapshot();
-    if (connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || (connection.status ?? connection.retained)?.session)
+    // History is read-only work inside this original connected session, not a
+    // saved-code grant. Busy/unknown/retirement checks are never exempted.
+    if (connection.blocked || connection.uncertain || connection.busy || connection.retirementPending || !forHistoryRead && (connection.status ?? connection.retained)?.session)
       return 'Finish or disconnect the original GitHub session before starting saved project code.';
     if (passivePending.current > 0 || Object.values(workspaceRef.current.projects).some((project) => project.snapshotRequest !== null || project.validationRequest || project.reviewRequest || project.suggestionRequest) ||
         environment.getSnapshot().pending || environment.passiveBusyReason() || releaseVersion.getSnapshot().pending || releaseVersion.passiveBusyReason() ||
@@ -518,6 +540,7 @@ export function App() {
     void githubRemoteSetup.connect(null);
     void githubPreflight.connect(null);
     void githubRelease.connect(null);
+    void githubHistory.connect(null);
     githubSetup.beginConnection();
     environment.beginConnection();
     releaseVersion.beginConnection();
@@ -555,6 +578,7 @@ export function App() {
       void githubRemoteSetup.connect(connection);
       void githubPreflight.connect(connection);
       void githubRelease.connect(connection);
+      void githubHistory.connect(connection);
       const appInfo = await connection.appInfo();
       if (generation !== bootGeneration.current) return;
       pathService.current = { api: connection, info: appInfo };
@@ -590,23 +614,29 @@ export function App() {
       if (generation === bootGeneration.current) {
         pathService.current = { api: null, info: null };
         connectionHandoffRef.current = null; connectionPortRef.current = null;
-        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null);
+        githubConnection.setHelp(null); githubConnection.setContext(null); void githubConnection.attach(null); void githubRemoteSetup.connect(null); void githubPreflight.connect(null); void githubRelease.connect(null); void githubHistory.connect(null);
         setInfo(null); setCatalog(null); versionEdit.setHelp(null); githubSetup.connectionUnavailable(); environment.connectionUnavailable(); releaseVersion.connectionUnavailable(); releaseInputs.connectionUnavailable(); setBootError(apiError(error));
       }
     } finally {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); }
     }
-  }, [githubSetup, githubConnection, githubRemoteSetup, githubPreflight, githubRelease, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
+  }, [githubSetup, githubConnection, githubRemoteSetup, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, androidBuild, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker]);
 
   // Subscribe before bootstrap. A version read/replacement retires consent
   // synchronously, before React publishes another frame of the review.
   useEffect(() => releaseVersion.subscribe(() => androidBuild.syncReleaseVersion()), [releaseVersion, androidBuild]);
   useEffect(() => githubConnection.subscribe(githubRemoteSetup.syncContext), [githubConnection, githubRemoteSetup]);
   useEffect(() => githubConnection.subscribe(githubPreflight.syncContext), [githubConnection, githubPreflight]);
+  useEffect(() => githubConnection.subscribe(githubHistory.syncContext), [githubConnection, githubHistory]);
   useEffect(() => releaseVersion.subscribe(() => iosArchive.syncReleaseVersion()), [releaseVersion, iosArchive]);
   // Exact assignment/context changes retire signed consent before a new render;
   // idle retained records remain available to the existing native borrower.
+  useEffect(() => {
+    const unsubscribe = assetSession.subscribe(githubRemoteSetup.syncAssetSession);
+    githubRemoteSetup.syncAssetSession();
+    return unsubscribe;
+  }, [assetSession, githubRemoteSetup]);
   useEffect(() => assetSession.subscribe(() => iosArchive.syncAssetSession()), [assetSession, iosArchive]);
   useEffect(() => assetSession.subscribe(() => androidBuild.syncAssetSession()), [assetSession, androidBuild]);
   // Subscribe before bootstrap; a generic asset-only event must recheck the
@@ -640,6 +670,7 @@ export function App() {
   useEffect(() => () => githubRemoteSetup.dispose(), [githubRemoteSetup]);
   useEffect(() => () => githubPreflight.dispose(), [githubPreflight]);
   useEffect(() => () => githubRelease.dispose(), [githubRelease]);
+  useEffect(() => () => githubHistory.dispose(), [githubHistory]);
   useEffect(() => { if(api)void initialization.connect(api); },[api,initialization]);
   useEffect(() => ()=>initialization.dispose(),[initialization]);
   useEffect(() => { if (api) void workflowEdit.connect(api); }, [api, workflowEdit]);
@@ -664,6 +695,7 @@ export function App() {
       versionEditControllerRef.current?.shutdownIntent();
       metadataControllerRef.current?.shutdownIntent();
       imageControllerRef.current?.shutdownIntent();
+      githubHistoryControllerRef.current?.beforeWorkspaceAction();
       if (Object.values(workspaceRef.current.projects).some(isDirty) ||
           versionEditControllerRef.current && versionProjectDirty(versionEditControllerRef.current.getSnapshot()) || metadataControllerRef.current && metadataProjectDirty(metadataControllerRef.current.getSnapshot().entries) ||
           diagnosticsControllerRef.current && diagnosticsOwnerReason(diagnosticsControllerRef.current.getSnapshot()) || savedCommandBusy()) {
@@ -691,6 +723,7 @@ export function App() {
   const chooseDisabled = chooseReason !== null;
 
   const loadSnapshot = async (projectId: string, recoveryReload = false) => {
+    githubHistory.beforeWorkspaceAction();
     initialization.snapshotIntent();
     configEdit.snapshotIntent(projectId);
     metadataImages.snapshotIntent(projectId);
@@ -715,6 +748,7 @@ export function App() {
   };
 
   const chooseProject = async () => {
+    githubHistory.beforeWorkspaceAction();
     initialization.selectionIntent();
     configEdit.selectionIntent();
     metadataImages.selectionIntent();
@@ -921,6 +955,7 @@ export function App() {
         {page !== 'environment' && <EnvironmentDiagnostics state={diagnosticsState} controller={diagnostics} compact onShow={() => navigate('environment')} />}
         {page !== 'github' && <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
+        {page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
           onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
@@ -950,8 +985,9 @@ export function App() {
             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
             handoff={connectionHandoffRef.current} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
-            <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} onHelp={setHelp} />
-            <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} /></>} />}
+            <GitHubRemoteSetup state={githubRemoteSetupState} controller={githubRemoteSetup} assets={assetState} projectId={workspace.selectedId ?? null} onCredentials={() => navigate('credentials')} onHelp={setHelp} />
+            <GitHubPreflight state={githubPreflightState} controller={githubPreflight} onHelp={setHelp} />
+            <GitHubHistory state={githubHistoryState} controller={githubHistory} onHelp={setHelp} /></>} />}
         {page === 'releases' && <Releases info={info} protectedWorkflows={<GitHubRelease state={githubReleaseState} controller={githubRelease} onHelp={setHelp} onGitHub={() => navigate('github')} />} evidence={<ReleaseEvidence state={evidenceState} controller={releaseEvidence} projectName={session?.project.name ?? null} onHelp={setHelp} />} offlineChecks={<OfflinePreflight state={offlinePreflightState} controller={offlinePreflight}
           projectName={session?.project.name ?? null} operationProjectName={offlinePreflightState.status?.operation ? workspace.projects[offlinePreflightState.status.operation.context.projectId]?.project.name ?? null : null}
           onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason} />}

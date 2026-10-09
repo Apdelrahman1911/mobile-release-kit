@@ -471,6 +471,26 @@ def entry_macho_fixture(*extra, library=b"/usr/lib/libSystem.B.dylib", target="a
                        sum(map(len, commands)), 0x200084, 0) + b"".join(commands)
 
 
+def history_provider_macho_fixture(*extra, target="aarch64-apple-darwin", minimum=12, sdk=12,
+                                   tools=0, libraries=None, load_command=0xC):
+    """Tiny thin/load-command DATA only; no executable/signature/native proof."""
+    cpu, subtype = {"aarch64-apple-darwin": (0x0100000C, 0), "x86_64-apple-darwin": (0x01000007, 3)}[target]
+    if libraries is None:
+        libraries = (b"/usr/lib/libSystem.B.dylib", b"/usr/lib/libresolv.9.dylib",
+                     b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                     b"/System/Library/Frameworks/Security.framework/Versions/A/Security")
+    def named(command, value, prefix):
+        data = value + b"\0"
+        length = (prefix + len(data) + 7) // 8 * 8
+        header = struct.pack("<III", command, length, prefix)
+        return header + bytes(prefix - len(header)) + data + bytes(length - prefix - len(data))
+    commands = (struct.pack("<6I", 0x32, 24, 1, minimum << 16, sdk << 16, tools),
+                named(0xE, b"/usr/lib/dyld", 12),
+                *(named(load_command, name, 24) for name in libraries), *extra)
+    return struct.pack("<8I", 0xFEEDFACF, cpu, subtype, 2, len(commands),
+                       sum(map(len, commands)), 0, 0) + b"".join(commands)
+
+
 def image_macho_fixture(role="desktop", *extra, install_name=None, library=b"/usr/lib/libSystem.B.dylib", kind=6, target="aarch64-apple-darwin"):
     """Actual MH_DYLIB-shaped inert DATA, never a renamed executable/native pass."""
     cpu, subtype = {"aarch64-apple-darwin": (0x0100000C, 0), "x86_64-apple-darwin": (0x01000007, 3)}[target]
@@ -5465,7 +5485,7 @@ class MacInstalledData(unittest.TestCase):
         self.assertEqual(set(rows), {row["path"] for row in files})
         self.assertNotIn("project_recovery_bootstrap.py", rows)  # Historical supplier roster is unchanged.
         current_only = {"project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-                        "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py"}
+                        "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py"}
         self.assertEqual(TOOL.CURRENT_BOOTSTRAPS, TOOL.BOOTSTRAPS | current_only)
         self.assertEqual(len(TOOL.BOOTSTRAPS), 6)
         self.assertEqual(TOOL.PROTOCOL, "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e")
@@ -7305,6 +7325,65 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                 with self.subTest(target=target), self.assertRaises(TOOL.Refused): TOOL.macho(body, target=target)
             with self.assertRaises(TOOL.Refused): TOOL.macho(header + build, target=other)
             with self.assertRaises(TOOL.Refused): TOOL.entry_macho(entry_macho_fixture(target=other), target=target)
+        # Only the fixed history dependency admits its actual12/12 loader
+        # DATA; no old application/entry predicate is relaxed to that minimum.
+        for target, other in ((TOOL.ARM_TARGET, TOOL.INTEL_TARGET), (TOOL.INTEL_TARGET, TOOL.ARM_TARGET)):
+            image = history_provider_macho_fixture(target=target)
+            TOOL.history_provider_macho(image, target=target)
+            # Signature-command presence alone is deliberately not validity.
+            TOOL.history_provider_macho(history_provider_macho_fixture(
+                struct.pack("<4I", 0x1D, 16, 0, 0), target=target), target=target)
+            with self.assertRaisesRegex(TOOL.Refused, "macho-minimum"):
+                TOOL.macho(image, target=target)
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_macho(image, target=other)
+            libraries = (b"/usr/lib/libSystem.B.dylib", b"/usr/lib/libresolv.9.dylib",
+                         b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                         b"/System/Library/Frameworks/Security.framework/Versions/A/Security")
+            invalid = [history_provider_macho_fixture(target=target, minimum=26, sdk=26),
+                       history_provider_macho_fixture(target=target, sdk=13),
+                       history_provider_macho_fixture(target=target, tools=1),
+                       history_provider_macho_fixture(target=target, libraries=libraries[:-1]),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], libraries[0])),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], b"/usr/lib/other.dylib")),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], b"@rpath/libbad.dylib")),
+                       history_provider_macho_fixture(struct.pack("<II", 0x8000001C, 8), target=target),
+                       image[:-1], b"\xca\xfe\xba\xbe" + image[4:]]
+            invalid.extend(history_provider_macho_fixture(target=target, load_command=command)
+                           for command in (0x80000018, 0x8000001F, 0x20, 0x80000023))
+            for body in invalid:
+                with self.subTest(provider_target=target, bytes=len(body)), self.assertRaises(TOOL.Refused):
+                    TOOL.history_provider_macho(body, target=target)
+
+        profile = {"schemaVersion": 1, "version": "2.88.1", "sourceManifestSha256": None,
+                   "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}
+        self.assertIsNone(TOOL.history_provider_profile_data(TOOL.canonical(profile)))
+        configured = copy.deepcopy(profile)
+        configured["sourceManifestSha256"] = "1" * 64
+        configured["targets"] = {TOOL.ARM_TARGET: "2" * 64, TOOL.INTEL_TARGET: "3" * 64}
+        for target in (TOOL.ARM_TARGET, TOOL.INTEL_TARGET):
+            self.assertEqual(TOOL.history_provider_profile_data(TOOL.canonical(configured), target=target),
+                {"version": "2.88.1", "target": target, "sourceManifestSha256": "1" * 64,
+                 "sha256": configured["targets"][target]})
+        for candidate in ({**profile, "sourceManifestSha256": "1" * 64},
+                          {**configured, "targets": {TOOL.ARM_TARGET: "2" * 64}},
+                          {**configured, "targets": {**configured["targets"], "other": "4" * 64}},
+                          {**configured, "version": "2.88.2"}, {**configured, "schemaVersion": True},
+                          {**configured, "extra": None}, {**configured, "sourceManifestSha256": "A" * 64}):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_profile_data(TOOL.canonical(candidate))
+        for body in (b"", b" " * 2049, TOOL.canonical(configured)[:-1] + b',"version":"2.88.1"}'):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_profile_data(body)
+        generated = TOOL.CURRENT_CORE_BYTES + TOOL.MAX_FILES * 2048 + 1024 * 1024 + 17
+        self.assertEqual(TOOL.history_provider_capacity(supplier_bytes=0, supplier_files=2, fixed_bytes=17),
+                         128 * 1024 * 1024)
+        self.assertEqual(TOOL.history_provider_capacity(
+            supplier_bytes=TOOL.MAX_BYTES - generated - 1, supplier_files=2, fixed_bytes=17), 1)
+        for values in ({"supplier_bytes": TOOL.MAX_BYTES - generated, "supplier_files": 2, "fixed_bytes": 17},
+                       {"supplier_bytes": 0, "supplier_files": TOOL.MAX_FILES, "fixed_bytes": 17},
+                       {"supplier_bytes": True, "supplier_files": 2, "fixed_bytes": 17}):
+            with self.assertRaises(TOOL.Refused): TOOL.history_provider_capacity(**values)
 
     def test_archive_pins_are_the_existing_M_not_new_interpreter_inputs(self):
         self.assertEqual(TOOL.ZIP_SHA, "42a6abab90f9641ba1b8c4aa9bb4202b153d676cc6d135b8227d8690e18275be")
@@ -8583,6 +8662,12 @@ def current_data_fixture():
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as stream:
                 stream.write(body)
+        # Fixed unconfigured public SOURCE for the current command only. It
+        # is not an enabled source-projection member or a provider nomination.
+        provider_profile = checkout / TOOL.HISTORY_PROVIDER_PROFILE
+        provider_profile.parent.mkdir(parents=True)
+        provider_profile.write_bytes(TOOL.canonical({"schemaVersion": 1, "version": "2.88.1",
+            "sourceManifestSha256": None, "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}))
         archive = root / "supplier.zip"
         archive.write_bytes(b"No actual archive; supplier decoder is mocked.\n")
         supplier = {"python/bin/python3": b"INERT SUPPLIER DATA; NEVER EXECUTED\n",
@@ -8735,6 +8820,223 @@ class MacCurrentRuntimeData(unittest.TestCase):
                                (b"x" * len(projection["src/mobile_release/_desktop_engine.py"][0]), 0o444)}):
                 with self.assertRaises(TOOL.Refused):
                     TOOL.current_core_matches(files["core.zip"][0], candidate)
+            # Real tiny provider/profile originals and canonical preparation;
+            # neither these loader bytes nor the synthetic nomination is a
+            # signed/native provider or a Python signing receipt.
+            profile_path = fixture.checkout / TOOL.HISTORY_PROVIDER_PROFILE
+            profile_path.unlink()
+            with self.assertRaises(FileNotFoundError): TOOL.history_provider_source()
+            null_profile = {"schemaVersion": 1, "version": "2.88.1", "sourceManifestSha256": None,
+                            "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}
+            profile_path.write_bytes(TOOL.canonical(null_profile))
+            absent = SimpleNamespace(history_provider=None, command="describe-current-runtime")
+            self.assertIsNone(TOOL.history_provider_selection(absent, "fresh-public-source")[0])
+            provider_input = fixture.root / "provider-input"
+            provider_input.mkdir(mode=0o700)
+            provider_path = provider_input / "gh"
+            provider_body = history_provider_macho_fixture()
+            provider_path.write_bytes(provider_body)
+            provider_path.chmod(0o555)
+            supplied = SimpleNamespace(history_provider=provider_path, command="describe-current-runtime")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-input-required"):
+                TOOL.history_provider_selection(supplied, "fresh-public-source")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-fresh-only"):
+                TOOL.history_provider_selection(supplied, "historical")
+            configured = {**null_profile, "sourceManifestSha256": "1" * 64,
+                "targets": {TOOL.ARM_TARGET: TOOL.digest(provider_body),
+                            TOOL.INTEL_TARGET: TOOL.digest(history_provider_macho_fixture(target=TOOL.INTEL_TARGET))}}
+            profile_body = TOOL.canonical(configured)
+            profile_path.write_bytes(profile_body)
+            with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-roster"):
+                TOOL.runtime_tree(args.work / "runtime", TOOL.digest(files["manifest.json"][0]), current=True)
+            overlap = self.args(fixture, suffix="provider-overlap")
+            overlap.history_provider = overlap.work / "gh"
+            with self.assertRaisesRegex(TOOL.Refused, "current-path-overlap"):
+                TOOL.current_paths(overlap)
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-fresh-only"):
+                TOOL.history_provider_selection(absent, "historical")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-input-required"):
+                TOOL.history_provider_selection(absent, "fresh-public-source")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-signed-input-required"):
+                TOOL.history_provider_selection(supplied, "fresh-public-source")
+            # Shape admission alone below does not call the genuine subsequent
+            # signed-Python receipt/source reader or claim its authority.
+            selected = SimpleNamespace(**vars(supplied), archive=None, python_root=fixture.root / "python-input",
+                signed_python=fixture.root / "signed-python", signing_receipt=fixture.root / "signing-receipt",
+                expected_signed_python="2" * 64, expected_signing_receipt="3" * 64,
+                expected_signing_source="4" * 40, expected_signing_run="5", expected_signing_attempt="1")
+            nomination, profile_snapshot = TOOL.history_provider_selection(selected, "fresh-public-source")
+            self.assertEqual(nomination["sha256"], TOOL.digest(provider_body))
+            selected.command = "current-runtime"
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-final-required"):
+                TOOL.history_provider_selection(selected, "fresh-public-source")
+            selected.configured_signing = True
+            self.assertEqual(TOOL.history_provider_selection(selected, "fresh-public-source"),
+                             (nomination, profile_snapshot))
+            captured, provider_projection, provider_source_digest = TOOL.current_source(history_provider=True)
+            self.assertEqual(captured[TOOL.HISTORY_PROVIDER_PROFILE][0], profile_body)
+            self.assertEqual(provider_projection[TOOL.HISTORY_PROVIDER_PROFILE], (profile_body, 0o444))
+            self.assertNotEqual(provider_source_digest, TOOL.current_source()[2])
+            capacity = TOOL.history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
+                supplier_files=len(supplier), fixed_bytes=sum(len(provider_projection["desktop/" + name][0])
+                    for name in TOOL.CURRENT_BOOTSTRAPS | {"github-ca.pem"}))
+            provider_work = fixture.root / "provider-work"
+            provider_work.mkdir(mode=0o700)
+            provider_runtime, provider_source = provider_work / "runtime", provider_work / "source"
+            final_runtime = fixture.root / "provider-final"
+            with TOOL.history_provider_original(provider_path, nomination, capacity) as (actual, post):
+                self.assertEqual(actual, provider_body)
+                self.assertEqual(post(), provider_body)
+                TOOL.write_tree(provider_source, provider_projection, current_owned=True)
+                TOOL.write_tree(provider_runtime, {**supplier, "tools/gh": (actual, 0o555)},
+                                root_mode=0o700, current_owned=True)
+                preparer = TOOL.current_preparer(captured)
+                old_mask = os.umask(0o077)
+                try:
+                    prepared = preparer.prepare_current(provider_source, provider_runtime, TOOL.ARM_TARGET,
+                                                         history_provider=True)
+                finally:
+                    os.umask(old_mask)
+                runtime_files, manifest = TOOL.current_runtime_files(provider_runtime, provider_projection,
+                    supplier, history_provider=actual)
+                self.assertEqual(runtime_files["tools/gh"], (provider_body, 0o555))
+                rows = [row for row in manifest["files"] if row["path"] == "tools/gh"]
+                self.assertEqual(rows, [{"path": "tools/gh", "sha256": TOOL.digest(provider_body),
+                                        "size": len(provider_body)}])
+                self.assertNotIn("tools/gh", supplier)
+                self.assertEqual(set(runtime_files), set(supplier) | TOOL.CURRENT_BOOTSTRAPS |
+                                 {"tools/gh", "core.zip", "github-ca.pem", "manifest.json"})
+                with self.assertRaisesRegex(TOOL.Refused, "current-runtime-complete-roster"):
+                    TOOL.current_runtime_files(provider_runtime, provider_projection, supplier)
+                normalized = {name: (body, TOOL.current_runtime_mode(name, body, nomination))
+                              for name, (body, _) in runtime_files.items()}
+                TOOL.write_tree(final_runtime, normalized, current_owned=True)
+                self.assertEqual(TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True), normalized)
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-nomination-required"):
+                    TOOL.current_runtime_mode("tools/gh", provider_body, None)
+                self.assertEqual(TOOL.history_provider_source(), (nomination, profile_snapshot))
+                self.assertEqual(post(), provider_body)
+            self.assertEqual(provider_path.read_bytes(), provider_body)
+
+            for path in (final_runtime / "tools/gh", final_runtime / "github-ca.pem"):
+                original_mode = stat.S_IMODE(path.stat().st_mode)
+                path.chmod(0o444 if original_mode == 0o555 else 0o555)
+                try:
+                    with self.assertRaisesRegex(TOOL.Refused, "runtime-mode"):
+                        TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+                finally:
+                    path.chmod(original_mode)
+            output_gh = final_runtime / "tools/gh"
+            output_gh.chmod(0o755)
+            output_gh.write_bytes(provider_body + b"changed")
+            output_gh.chmod(0o555)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-product-binding"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                output_gh.chmod(0o755)
+                output_gh.write_bytes(provider_body)
+                output_gh.chmod(0o555)
+            tools_dir = final_runtime / "tools"
+            tools_dir.chmod(0o755)
+            unknown = tools_dir / "other"
+            unknown.write_bytes(b"INERT extra payload")
+            unknown.chmod(0o444)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "runtime-complete-roster"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                unknown.unlink()
+                tools_dir.chmod(0o555)
+
+            # The SOURCE profile's same-byte named replacement is not adopted
+            # at POST after a genuine complete payload read.
+            original_tree = TOOL.tree
+            old_profile = profile_path.with_name("old-profile")
+            def swap_profile(root, **options):
+                value = original_tree(root, **options)
+                profile_path.rename(old_profile)
+                profile_path.write_bytes(profile_body)
+                return value
+            try:
+                with mock.patch.object(TOOL, "tree", side_effect=swap_profile):
+                    with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-profile-post-changed"):
+                        TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                profile_path.unlink()
+                old_profile.rename(profile_path)
+            profile_path.rename(old_profile)
+            try:
+                with self.assertRaises(FileNotFoundError):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                old_profile.rename(profile_path)
+            profile_path.write_bytes(TOOL.canonical(null_profile))
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-roster"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                profile_path.write_bytes(profile_body)
+
+            provider_path.chmod(0o444)
+            try:
+                with mock.patch.object(TOOL, "read_at") as reader:
+                    with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-mode-bound"):
+                        with TOOL.history_provider_original(provider_path, nomination, capacity): pass
+                    reader.assert_not_called()
+            finally:
+                provider_path.chmod(0o555)
+            with mock.patch.object(TOOL, "read_at") as reader:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-mode-bound"):
+                    with TOOL.history_provider_original(provider_path, nomination, len(provider_body) - 1): pass
+                reader.assert_not_called()
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-product-binding"):
+                with TOOL.history_provider_original(provider_path, {**nomination, "sha256": "f" * 64}, capacity): pass
+            retained = provider_input / "old-gh"
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-changed"):
+                    with TOOL.history_provider_original(provider_path, nomination, capacity):
+                        provider_path.rename(retained)
+                        provider_path.write_bytes(provider_body)
+                        provider_path.chmod(0o555)
+            finally:
+                provider_path.unlink()
+                retained.rename(provider_path)
+            self.assertEqual(provider_path.read_bytes(), provider_body)
+
+            # Same-byte leaf preservation is insufficient after a directory is
+            # detached: check both an immediate and higher named ancestor, at
+            # explicit caller POST and the context's final publication POST.
+            for level in ("immediate", "higher"):
+                for checkpoint in ("caller", "final"):
+                    with self.subTest(provider_ancestor=level, checkpoint=checkpoint):
+                        top = fixture.root / ("provider-ancestor-" + level + "-" + checkpoint)
+                        top.mkdir(mode=0o700)
+                        named_parent = top / "nested"
+                        named_parent.mkdir(mode=0o700)
+                        named_provider = named_parent / "gh"
+                        named_provider.write_bytes(provider_body)
+                        named_provider.chmod(0o555)
+                        renamed = named_parent if level == "immediate" else top
+                        parked = renamed.with_name(renamed.name + "-retained")
+                        try:
+                            with self.assertRaisesRegex(TOOL.Refused, "^history-provider-parent-path-changed$"):
+                                with TOOL.history_provider_original(named_provider, nomination, capacity) as (actual, post):
+                                    self.assertEqual(actual, provider_body)
+                                    renamed.rename(parked)
+                                    if level == "higher": top.mkdir(mode=0o700)
+                                    named_parent.mkdir(mode=0o700)
+                                    named_provider.write_bytes(provider_body)
+                                    named_provider.chmod(0o555)
+                                    self.assertEqual(named_provider.read_bytes(), actual)
+                                    if checkpoint == "caller": post()
+                        finally:
+                            if parked.exists():
+                                named_provider.unlink()
+                                named_parent.rmdir()
+                                if level == "higher": top.rmdir()
+                                parked.rename(renamed)
+                        self.assertEqual(named_provider.read_bytes(), provider_body)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
     def test_manifest_mismatch_preserves_preparation_but_never_creates_final(self):

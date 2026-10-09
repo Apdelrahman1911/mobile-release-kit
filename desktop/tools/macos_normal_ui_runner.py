@@ -1255,7 +1255,7 @@ SAVED_VERSION_MARKER = ("MRK_MACOS_NORMAL_SAVED_VERSION_RECOVERY_UI="
 SAVED_VERSION_CONTROLS = ("header.json", "plan.json", "commit.pending", "rollback.pending", "old-0", "new-0")
 SAVED_VERSION_BOOTSTRAPS = ("engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
     "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
-    "project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py")
+    "project_recovery_bootstrap.py", "github_preflight_bootstrap.py", "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py")
 
 
 def saved_version_facts(value):

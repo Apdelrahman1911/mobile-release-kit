@@ -126,7 +126,7 @@ BOOTSTRAPS = {"engine_bootstrap.py", "config_edit_bootstrap.py", "github_connect
 # composed payloads include every fixed current domain without rewriting them.
 CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py",
+    "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py",
 }
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
@@ -342,7 +342,7 @@ def close_once(fd):
 
 
 @contextlib.contextmanager
-def parent(path):
+def _parent_originals(path):
     path = Path(path)
     spelling = os.fspath(path)
     need(path.is_absolute() and len(os.fsencode(spelling)) <= 4096, "absolute-path-required")
@@ -357,7 +357,7 @@ def parent(path):
             opened = os.open(name, READ_FLAGS | os.O_DIRECTORY, dir_fd=originals[-1])
             originals.append(opened)
             need(signature(os.fstat(opened)) == signature(before), "ancestor-changed")
-        yield originals[-1], parts[-1]
+        yield tuple(originals), tuple(parts)
     finally:
         unknown = False
         for fd in reversed(originals):
@@ -366,6 +366,14 @@ def parent(path):
             except Refused:
                 unknown = True
         need(not unknown, "ancestor-close-unknown")
+
+
+@contextlib.contextmanager
+def parent(path):
+    # Existing callers keep the same last-parent/leaf interface and the same
+    # acquisition and consuming-close path.
+    with _parent_originals(path) as (originals, parts):
+        yield originals[-1], parts[-1]
 
 
 def no_xattrs(fd):
@@ -1019,8 +1027,144 @@ def configured_current_binding(args, target):
     return binding
 
 
-def current_source():
+# Current-only SOURCE nomination and one passive signed-product input. None of
+# these DATA checks proves codesign, loader execution or a native provider loan.
+HISTORY_PROVIDER_PROFILE = "desktop/packaging/macos-history-provider.profile"
+HISTORY_PROVIDER_PATH = "tools/gh"
+HISTORY_PROVIDER_VERSION = "2.88.1"
+HISTORY_PROVIDER_LIMIT = 128 * 1024 * 1024
+HISTORY_PROVIDER_PROFILE_LIMIT = 2048
+HISTORY_PROVIDER_LOADS = (
+    b"/usr/lib/libSystem.B.dylib",
+    b"/usr/lib/libresolv.9.dylib",
+    b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    b"/System/Library/Frameworks/Security.framework/Versions/A/Security",
+)
+
+
+def history_provider_profile_data(body, *, target=ARM_TARGET):
+    target = mac_target(target)
+    need(type(body) is bytes and 0 < len(body) <= HISTORY_PROVIDER_PROFILE_LIMIT,
+         "history-provider-profile-bound")
+    value = decode(body.decode("utf-8", "strict"))
+    need(type(value) is dict and set(value) == {"schemaVersion", "version", "sourceManifestSha256", "targets"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["version"] == HISTORY_PROVIDER_VERSION
+         and type(value["targets"]) is dict and set(value["targets"]) == set(MAC_TARGETS),
+         "history-provider-profile-shape")
+    hashes = (value["sourceManifestSha256"], *(value["targets"][name] for name in MAC_TARGETS))
+    if all(item is None for item in hashes):
+        return None
+    need(all(sha(item) for item in hashes), "history-provider-profile-partial")
+    return {"version": HISTORY_PROVIDER_VERSION, "target": target,
+            "sourceManifestSha256": hashes[0], "sha256": value["targets"][target]}
+
+
+def history_provider_source(*, target=ARM_TARGET):
+    # Fixed public SOURCE only. The returned identities belong to actual
+    # completed nofollow reads; repeated POST is not native/signature authority.
+    with parent(DESKTOP.parent / HISTORY_PROVIDER_PROFILE) as (fd, leaf):
+        before = signature(os.fstat(fd))
+        body, info = read_at(fd, leaf, HISTORY_PROVIDER_PROFILE_LIMIT)
+        need(signature(os.fstat(fd)) == before, "history-provider-profile-parent-changed")
+        snapshot = (body, signature(info), before)
+    return history_provider_profile_data(body, target=target), snapshot
+
+
+def history_provider_selection(args, origin, *, target=ARM_TARGET):
+    path = getattr(args, "history_provider", None)
+    if origin != "fresh-public-source":
+        need(path is None, "history-provider-fresh-only")
+    nomination, snapshot = history_provider_source(target=target)
+    if origin != "fresh-public-source":
+        # This is still the current command, even when reusing only old Python
+        # supplier bytes. A configured current provider cannot be omitted.
+        need(nomination is None, "history-provider-fresh-only")
+        return None, snapshot
+    need((path is None) == (nomination is None), "history-provider-configured-input-required")
+    if path is not None:
+        need(isinstance(path, Path) and path.is_absolute() and signed_python_options(args),
+             "history-provider-signed-input-required")
+        need(args.command == "describe-current-runtime" or getattr(args, "configured_signing", False) is True,
+             "history-provider-configured-final-required")
+    return nomination, snapshot
+
+
+def history_provider_capacity(*, supplier_bytes, supplier_files, fixed_bytes):
+    # A file-payload reservation, not a process RSS promise. Refuse the maximum
+    # supplier+provider combination if it cannot fit the existing total cap.
+    need(all(type(value) is int and value >= 0 for value in (supplier_bytes, supplier_files, fixed_bytes)),
+         "history-provider-capacity-shape")
+    need(supplier_files + len(CURRENT_BOOTSTRAPS) + 4 <= MAX_FILES, "history-provider-file-capacity")
+    generated = CURRENT_CORE_BYTES + MAX_FILES * 2048 + 1024 * 1024 + fixed_bytes
+    available = MAX_BYTES - supplier_bytes - generated
+    need(available > 0, "history-provider-byte-capacity")
+    return min(HISTORY_PROVIDER_LIMIT, available)
+
+
+def history_provider_payload(body, nomination, *, target=ARM_TARGET):
+    target = mac_target(target)
+    need(type(nomination) is dict and set(nomination) == {"version", "target", "sourceManifestSha256", "sha256"}
+         and nomination["version"] == HISTORY_PROVIDER_VERSION and nomination["target"] == target
+         and sha(nomination["sourceManifestSha256"]) and sha(nomination["sha256"]),
+         "history-provider-nomination-required")
+    need(type(body) is bytes and 0 < len(body) <= HISTORY_PROVIDER_LIMIT
+         and digest(body) == nomination["sha256"], "history-provider-product-binding")
+    history_provider_macho(body, target=target)
+
+
+@contextlib.contextmanager
+def history_provider_original(path, nomination, limit, *, target=ARM_TARGET):
+    # Retain this one actual leaf FD and its entire parent chain through
+    # preparation and output POST. Every named edge must still designate the
+    # same held original; a detached old directory is not caller-path custody.
+    need(type(limit) is int and 0 < limit <= HISTORY_PROVIDER_LIMIT, "history-provider-input-bound")
+    owner = packager_ids()
+    with _parent_originals(path) as (parents, parts):
+        fd, leaf = parents[-1], parts[-1]
+        before = os.stat(leaf, dir_fd=fd, follow_symlinks=False)
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit
+             and (before.st_uid, before.st_gid) == owner and stat.S_IMODE(before.st_mode) == 0o555,
+             "history-provider-original-mode-bound")
+        identity = signature(before)
+        parent_identities = tuple(current_directory_identity(os.fstat(held)) for held in parents)
+        original = os.open(leaf, READ_FLAGS, dir_fd=fd)
+        try:
+            need(signature(os.fstat(original)) == identity, "history-provider-original-open-changed")
+            no_xattrs(original)
+            def parents_post():
+                for index, held in enumerate(parents):
+                    named = (os.stat("/", follow_symlinks=False) if index == 0 else
+                             os.stat(parts[index - 1], dir_fd=parents[index - 1], follow_symlinks=False))
+                    need(current_directory_identity(os.fstat(held)) == parent_identities[index]
+                         and current_directory_identity(named) == parent_identities[index],
+                         "history-provider-parent-path-changed")
+            def post():
+                parents_post()
+                need(signature(os.fstat(original)) == identity, "history-provider-original-changed")
+                body, info = read_at(fd, leaf, limit)
+                parents_post()
+                need(signature(info) == identity and signature(os.fstat(original)) == identity,
+                     "history-provider-original-changed")
+                return body
+            body = post()
+            history_provider_payload(body, nomination, target=target)
+            yield body, post
+            need(post() == body, "history-provider-publication-post-changed")
+        finally:
+            close_once(original)
+
+
+def current_runtime_mode(name, body, nomination, *, target=ARM_TARGET):
+    if name == HISTORY_PROVIDER_PATH:
+        history_provider_payload(body, nomination, target=target)
+        return 0o555
+    return 0o555 if name == SIGNED_PYTHON_PATH else 0o444
+
+
+def current_source(*, history_provider=False):
     """Capture DATA, including the committed CA's one explicit projection map."""
+    need(type(history_provider) is bool, "current-history-provider-profile")
     source = DESKTOP.parent
     core = tree(source / "src/mobile_release", max_bytes=CURRENT_CORE_BYTES)
     need(core and all(Path(name).suffix in {".py", ".json", ".pem"} for name in core), "current-core-inputs")
@@ -1030,6 +1174,8 @@ def current_source():
     fixed = {"desktop/" + name: 64 * 1024 for name in CURRENT_BOOTSTRAPS}
     fixed[CURRENT_CA_SOURCE] = 512 * 1024
     fixed[CURRENT_HELPER_SOURCE] = 64 * 1024
+    if history_provider:
+        fixed[HISTORY_PROVIDER_PROFILE] = HISTORY_PROVIDER_PROFILE_LIMIT
     for name, limit in sorted(fixed.items()):
         with parent(source / name) as (fd, leaf):
             body, info = read_at(fd, leaf, limit)
@@ -1076,6 +1222,8 @@ def current_paths(args):
                                 else [args.python_root, args.supplier_receipt])
     if signed_python_options(args):
         inputs.extend((args.signed_python, args.signing_receipt))
+    if getattr(args, "history_provider", None) is not None:
+        inputs.append(args.history_provider)
     # Components are later admitted without following links. Case folding also
     # refuses an alias on default case-insensitive Mac filesystems.
     folded = lambda path: tuple(part.casefold() for part in path.parts)
@@ -1150,14 +1298,19 @@ def current_core_matches(body, projection):
                 need(stream.read(len(content) + 1) == content, "current-core-byte-correspondence")
 
 
-def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET):
+def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None):
     target = mac_target(target)
     files = tree(runtime, current_root_mode=0o700)
-    required = set(supplier) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
+    preadmitted = supplier
+    if history_provider is not None:
+        need(type(history_provider) is bytes and 0 < len(history_provider) <= HISTORY_PROVIDER_LIMIT
+             and HISTORY_PROVIDER_PATH not in supplier, "current-history-provider-overlay")
+        preadmitted = {**supplier, HISTORY_PROVIDER_PATH: (history_provider, 0o555)}
+    required = set(preadmitted) | CURRENT_BOOTSTRAPS | {"core.zip", "github-ca.pem", "manifest.json"}
     need(set(files) == required, "current-runtime-complete-roster")
-    for name, value in supplier.items():
+    for name, value in preadmitted.items():
         need(files[name] == value, "current-supplier-changed")
-    for name in required - set(supplier):
+    for name in required - set(preadmitted):
         need(files[name][1] == 0o600, "current-generated-mode")
     manifest_body = files["manifest.json"][0]
     manifest, rows = manifest_files(manifest_body, digest(manifest_body), current=True, target=target)
@@ -1177,6 +1330,8 @@ def current_runtime_command(args):
     need(type(configured) is bool, "configured-signing-option")
     configured_inputs = configured_current_binding(args, target) if configured else None
     origin = current_supplier_origin(args)
+    provider_nomination, provider_source = history_provider_selection(args, origin, target=target)
+    provider_enabled = provider_nomination is not None
     need(origin == "fresh-public-source" or target == ARM_TARGET, "unqualified-intel-route")
     selection = source_build_selection(target)
     packager_ids()
@@ -1185,7 +1340,9 @@ def current_runtime_command(args):
     if final:
         need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
     parents = current_paths(args)
-    captured, projection, source_digest = current_source()
+    captured, projection, source_digest = (current_source(history_provider=True) if provider_enabled else current_source())
+    if provider_enabled:
+        need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
     if final:
         need(source_digest == args.expected_source, "current-reviewed-source-mismatch")
     fresh_inputs = None
@@ -1213,70 +1370,94 @@ def current_runtime_command(args):
         supplier[SIGNED_PYTHON_PATH] = (signed_inputs[0], 0o555)
         provenance.update(signedPythonSha256=args.expected_signed_python, signingReceiptSha256=args.expected_signing_receipt,
                           signingPurpose="configured-shipping-derivation-DATA-not-install-authority")
-    preparer = current_preparer(captured)
-    with current_work_root(args.work, parents[args.work]):
-        source, runtime = args.work / "source", args.work / "runtime"
-        write_tree(source, projection, current_owned=True)
-        write_tree(runtime, supplier, root_mode=0o700, current_owned=True)
-        old_mask = os.umask(0o077)
-        try:
-            prepared = preparer.prepare_current(source, runtime, target)
-        finally:
-            os.umask(old_mask)
-        files, manifest = current_runtime_files(runtime, projection, supplier, target=target)
-        manifest_digest = digest(files["manifest.json"][0])
-        need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
-                          "qualification": "prepared-not-native-verified"}, "current-preparer-result")
-        need(tree(source, current_root_mode=0o555) == projection and current_source() == (captured, projection, source_digest),
-             "current-source-post-changed")
-        if fresh_inputs is not None:
-            need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
-        if signed_inputs is not None:
-            need(read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs, "signed-python-post-changed")
-        if configured_inputs is not None:
-            need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-source-post-changed")
-        core = [body for name, (body, _) in captured.items() if name.startswith("src/mobile_release/")]
-        result = {"schemaVersion": 1, "release": selection.release, "target": target,
-                  **provenance,
-                  "successorManifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
-                  "inventorySha256": manifest["inventorySha256"], "coreSha256": manifest["coreSha256"],
-                  "sourceInputsSha256": source_digest, "sourceInputCount": len(captured),
-                  "supplierInventorySha256": digest(canonical(supplier_rows)), "supplierFileCount": len(supplier),
-                  "currentCoreFileCount": len(core), "currentCoreBytes": sum(map(len, core)),
-                  "qualification": "current-source-description-only-not-build-or-install-authority"}
-        if configured_inputs is not None:
-            chosen, snapshot = configured_inputs
-            result.update(signedRuntimeBindingSha256=digest(snapshot[0][0]),
-                          signingSourceCommit=chosen["signingSourceCommit"], signingRunId=chosen["signingRunId"],
-                          signingRunAttempt=chosen["signingRunAttempt"], signingArtifactId=chosen["signingArtifactId"])
-        if final:
-            need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
-            current_output_absent(args.output, parents[args.output])
-            normalized = {name: (body, 0o555 if name == "python/bin/python3" else 0o444)
-                          for name, (body, _) in files.items()}
-            write_tree(args.output, normalized, current_owned=True)
-            result["qualification"] = "current-source-staged-no-native-execution"
-        if signed_inputs is not None:
-            need(fresh_supplier(args) == fresh_inputs
-                 and read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs,
-                 "signed-python-publication-post-changed")
-        if configured_inputs is not None:
-            need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-publication-post-changed")
-        return result
+    provider_scope = contextlib.nullcontext(None)
+    if provider_enabled:
+        capacity = history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
+            supplier_files=len(supplier), fixed_bytes=sum(len(projection["desktop/" + name][0])
+                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"}))
+        provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
+    with provider_scope as provider:
+        provider_body, provider_post = (None, None) if provider is None else provider
+        runtime_inputs = supplier if provider_body is None else {**supplier, HISTORY_PROVIDER_PATH: (provider_body, 0o555)}
+        preparer = current_preparer(captured)
+        with current_work_root(args.work, parents[args.work]):
+            source, runtime = args.work / "source", args.work / "runtime"
+            write_tree(source, projection, current_owned=True)
+            write_tree(runtime, runtime_inputs, root_mode=0o700, current_owned=True)
+            old_mask = os.umask(0o077)
+            try:
+                prepared = (preparer.prepare_current(source, runtime, target, history_provider=True) if provider_enabled
+                            else preparer.prepare_current(source, runtime, target))
+            finally:
+                os.umask(old_mask)
+            files, manifest = current_runtime_files(runtime, projection, supplier, target=target, history_provider=provider_body)
+            manifest_digest = digest(files["manifest.json"][0])
+            need(prepared == {"manifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
+                              "qualification": "prepared-not-native-verified"}, "current-preparer-result")
+            need(tree(source, current_root_mode=0o555) == projection
+                 and (current_source(history_provider=True) if provider_enabled else current_source()) == (captured, projection, source_digest),
+                 "current-source-post-changed")
+            if fresh_inputs is not None:
+                need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")
+            if signed_inputs is not None:
+                need(read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs, "signed-python-post-changed")
+            if configured_inputs is not None:
+                need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-source-post-changed")
+            if provider_body is not None:
+                need(provider_post() == provider_body, "history-provider-preparation-post-changed")
+            if provider_source is not None:
+                need(history_provider_source(target=target) == (provider_nomination, provider_source),
+                     "history-provider-profile-post-changed")
+            core = [body for name, (body, _) in captured.items() if name.startswith("src/mobile_release/")]
+            result = {"schemaVersion": 1, "release": selection.release, "target": target,
+                      **provenance,
+                      "successorManifestSha256": manifest_digest, "protocolSha256": CURRENT_PROTOCOL,
+                      "inventorySha256": manifest["inventorySha256"], "coreSha256": manifest["coreSha256"],
+                      "sourceInputsSha256": source_digest, "sourceInputCount": len(captured),
+                      "supplierInventorySha256": digest(canonical(supplier_rows)), "supplierFileCount": len(supplier),
+                      "currentCoreFileCount": len(core), "currentCoreBytes": sum(map(len, core)),
+                      "qualification": "current-source-description-only-not-build-or-install-authority"}
+            if configured_inputs is not None:
+                chosen, snapshot = configured_inputs
+                result.update(signedRuntimeBindingSha256=digest(snapshot[0][0]),
+                              signingSourceCommit=chosen["signingSourceCommit"], signingRunId=chosen["signingRunId"],
+                              signingRunAttempt=chosen["signingRunAttempt"], signingArtifactId=chosen["signingArtifactId"])
+            if provider_enabled:
+                result["historyProvider"] = {**provider_nomination, "bytes": len(provider_body),
+                    "profileSha256": digest(provider_source[0]), "nativeAuthority": False}
+            if final:
+                need(manifest_digest == args.expected_manifest, "current-reviewed-manifest-mismatch")
+                current_output_absent(args.output, parents[args.output])
+                normalized = {name: (body, current_runtime_mode(name, body, provider_nomination, target=target))
+                              for name, (body, _) in files.items()}
+                write_tree(args.output, normalized, current_owned=True)
+                result["qualification"] = "current-source-staged-no-native-execution"
+            if signed_inputs is not None:
+                need(fresh_supplier(args) == fresh_inputs
+                     and read_signed_python(args, fresh_inputs[0], fresh_inputs[3])[0] == signed_inputs,
+                     "signed-python-publication-post-changed")
+            if configured_inputs is not None:
+                need(signed_runtime_inputs(target) == configured_inputs, "configured-signing-publication-post-changed")
+            if provider_source is not None:
+                need(history_provider_source(target=target) == (provider_nomination, provider_source),
+                     "history-provider-profile-publication-post-changed")
+            return result
 
 
-def macho(body, *, system_only=False, target=ARM_TARGET):
+def _macho_commands(body, *, system_only=False, target=ARM_TARGET):
     expected_cpu, expected_subtype = target_machine(target)
     need(len(body) >= 32, "macho-header")
     magic, cpu, subtype, kind, count, size, flags, reserved = struct.unpack_from("<8I", body)
     need(magic == 0xFEEDFACF and cpu == expected_cpu and subtype == expected_subtype and kind == 2 and count <= 128
          and size <= 65536 and 32 + size <= len(body), "macho-target")
     offset = 32
-    minimum = []
+    minimum, records = [], []
     for _ in range(count):
         need(offset + 8 <= 32 + size, "macho-command")
         command, length = struct.unpack_from("<II", body, offset)
         need(length >= 8 and length % 8 == 0 and offset + length <= 32 + size, "macho-command-bound")
+        text = None
+        build = None
         if system_only and command in (0x8000001C, 0x27, 0x6, 0x7, 0xD, 0xF, 0x10, 0x12, 0x13, 0x14, 0x15):
             need(False, "helper-loader-override-refused")
         if system_only and command == 0xE:
@@ -1286,6 +1467,7 @@ def macho(body, *, system_only=False, target=ARM_TARGET):
             raw = body[offset + start:offset + length]
             need(b"\0" in raw, "helper-dyld-terminated")
             name, padding = raw.split(b"\0", 1)
+            text = name
             need(name == b"/usr/lib/dyld" and not any(padding), "helper-system-dyld-only")
         if system_only and command in (0xC, 0x80000018, 0x8000001F, 0x20, 0x80000023):
             need(length >= 24, "helper-dylib-command")
@@ -1294,6 +1476,7 @@ def macho(body, *, system_only=False, target=ARM_TARGET):
             raw = body[offset + start:offset + length]
             need(b"\0" in raw, "helper-dylib-terminated")
             name, padding = raw.split(b"\0", 1)
+            text = name
             need(name.startswith((b"/System/Library/", b"/usr/lib/"))
                  and all(32 < b < 127 for b in name) and all(part not in (b"", b".", b"..") for part in name.split(b"/")[1:])
                  and not any(padding), "helper-absolute-apple-system-dependency")
@@ -1301,8 +1484,35 @@ def macho(body, *, system_only=False, target=ARM_TARGET):
             need(length >= 24, "macho-build-version")
             platform, version = struct.unpack_from("<II", body, offset + 8)
             minimum.append((platform, version))
+            build = struct.unpack_from("<4I", body, offset + 8)
+        records.append((command, length, text, build))
         offset += length
-    need(offset == 32 + size and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
+    return offset == 32 + size, minimum, records
+
+
+
+def macho(body, *, system_only=False, target=ARM_TARGET):
+    complete, minimum, _ = _macho_commands(body, system_only=system_only, target=target)
+    need(complete and minimum == [(1, 26 << 16)], "macho-minimum-macos26")
+
+
+def history_provider_macho(body, *, target=ARM_TARGET):
+    complete, minimum, records = _macho_commands(body, system_only=True, target=target)
+    need(complete and minimum == [(1, 12 << 16)], "history-provider-minimum")
+    loads, dyld = [], []
+    for command, length, text, build in records:
+        need(command not in {0x1C, 0x18, 0x80000018, 0x1F, 0x8000001F, 0x20, 0x23, 0x80000023},
+             "history-provider-loader-override")
+        if command == 0x32:
+            need(length == 24 and build == (1, 12 << 16, 12 << 16, 0), "history-provider-build-version")
+        if command == 0xE:
+            dyld.append(text)
+        if command == 0xC:
+            loads.append(text)
+    need(dyld == [b"/usr/lib/dyld"] and len(loads) == len(HISTORY_PROVIDER_LOADS)
+         and set(loads) == set(HISTORY_PROVIDER_LOADS), "history-provider-system-loads")
+    # LC_CODE_SIGNATURE is not a signature verifier. Enrollment requires the
+    # separately owned real Developer-ID derivation; signed bytes may add it.
 
 
 def entry_macho(body, *, target=ARM_TARGET):
@@ -2210,14 +2420,22 @@ def runtime_tree(root, expected, *, current=False, target=ARM_TARGET):
     target = mac_target(target)
     need(type(current) is bool, "runtime-manifest-profile")
     need(current or target == ARM_TARGET, "unqualified-intel-route")
+    provider_nomination, provider_source = history_provider_source(target=target) if current else (None, None)
     files = tree(root)
     need("manifest.json" in files, "runtime-manifest-missing")
     _, rows = manifest_files(files["manifest.json"][0], expected, current=current, target=target)
     need(set(files) == set(rows) | {"manifest.json"}, "runtime-complete-roster")
+    if current:
+        need((HISTORY_PROVIDER_PATH in files) == (provider_nomination is not None), "runtime-provider-roster")
     for name, (body, mode) in files.items():
-        need(mode == (0o555 if name == "python/bin/python3" else 0o444), "runtime-mode")
+        expected_mode = (current_runtime_mode(name, body, provider_nomination, target=target) if current else
+                         (0o555 if name == "python/bin/python3" else 0o444))
+        need(mode == expected_mode, "runtime-mode")
         if name != "manifest.json":
             need(len(body) == rows[name]["size"] and digest(body) == rows[name]["sha256"], "runtime-byte-correspondence")
+    if current:
+        need(history_provider_source(target=target) == (provider_nomination, provider_source),
+             "runtime-provider-profile-post-changed")
     return files
 
 
@@ -4700,6 +4918,7 @@ def main(argv=None):
         command.add_argument("--supplier-receipt", type=Path, help="Fresh supplier receipt, outside its python-only root")
         command.add_argument("--expected-supplier", help="Independently reviewed SHA256 of the fresh supplier receipt")
         command.add_argument("--signed-python", type=Path, help="Explicit configured-signing capsule executable; never fallback")
+        command.add_argument("--history-provider", type=Path, help="Current fixed SOURCE-nominated signed tools/gh; no unconfigured fallback")
         command.add_argument("--signing-receipt", type=Path)
         for option in ("signed-python", "signing-receipt", "signing-source", "signing-run", "signing-attempt"):
             command.add_argument("--expected-" + option)

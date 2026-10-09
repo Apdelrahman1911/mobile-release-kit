@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Sequence
 
 from .build_inputs import (
@@ -148,7 +149,32 @@ def _safe_path(path: Path) -> Path:
     return result
 
 
-def _read_json(path: Path, maximum: int = MAX_JSON) -> dict[str, Any]:
+def _history_origin(value, cancellation=None):
+    if value is None:
+        return None
+    from .desktop_github_history import HistoryOperation
+    _require(type(value) is HistoryOperation, "History source is not its original operation")
+    value.require_owner(cancellation)
+    return value
+
+
+def _history_load(loader, path: Path, history):
+    if history is None:
+        return loader(path)
+    return _history_origin(history).load(loader, path)
+
+
+def _history_sha(path: Path, history):
+    return sha256_file(path) if history is None else _history_origin(history).file_sha(path)
+
+
+def _history_stat(path: Path, history):
+    return path.stat() if history is None else _history_origin(history).file_stat(path)
+
+
+def _read_json(path: Path, maximum: int = MAX_JSON, *, history=None) -> dict[str, Any]:
+    if history is not None:
+        return _history_origin(history).read_json(path, min(maximum, 1024 * 1024))
     path = _safe_path(path)
     _require(path.is_file() and path.stat().st_size <= maximum, "workflow JSON is missing or exceeds its size limit")
     try:
@@ -206,7 +232,9 @@ def _new_directory(path: Path, *, app_root: Path | None = None,
     return path
 
 
-def _files(root: Path, *, maximum: int = MAX_EVIDENCE) -> dict[str, Path]:
+def _files(root: Path, *, maximum: int = MAX_EVIDENCE, history=None) -> dict[str, Path]:
+    if history is not None:
+        return _history_origin(history).files(root, min(maximum, MAX_EVIDENCE))[0]
     root = _safe_path(root)
     _require(root.is_dir(), "workflow payload directory is missing")
     files: dict[str, Path] = {}
@@ -250,14 +278,15 @@ def _layout(stage: str, phase: str, prefix: str = "") -> dict[str, str]:
     return evidence_layout(stage, phase, prefix)
 
 
-def _inventory(root: Path, layout: Mapping[str, str], *, omitted: str | None = None) -> list[dict[str, Any]]:
+def _inventory(root: Path, layout: Mapping[str, str], *, omitted: str | None = None, history=None) -> list[dict[str, Any]]:
     expected = set(layout) - ({omitted} if omitted else set())
-    found = _files(root)
+    found = _files(root, history=history)
     _require(set(found) == expected, "evidence bundle contains missing or unexpected files")
     expected_directories = {str(parent) for name in expected for parent in PurePosixPath(name).parents if str(parent) != "."}
-    actual_directories = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir()}
+    actual_directories = ({path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_dir()}
+                          if history is None else _history_origin(history).files(root, MAX_EVIDENCE)[1])
     _require(actual_directories == expected_directories, "evidence bundle contains unexpected directories")
-    return [{"path": name, "role": layout[name], "size": found[name].stat().st_size, "sha256": sha256_file(found[name])} for name in sorted(found)]
+    return [{"path": name, "role": layout[name], "size": _history_stat(found[name], history).st_size, "sha256": _history_sha(found[name], history)} for name in sorted(found)]
 
 
 def _inventory_shape(value: object, *, roles: bool) -> None:
@@ -537,8 +566,9 @@ def _transport_no_cleanup() -> None:
 class _TransportProcess:
     """One gh spawn and its fixed local cleanup, sharing the caller's guard."""
 
-    def __init__(self, guard: DefaultCancellation) -> None:
+    def __init__(self, guard: DefaultCancellation, *, history=None) -> None:
         self.guard = guard
+        self.history = _history_origin(history, guard)
         self.output = _FD(guard)
         self.process = self.stdout = self.selector = None
         self.child_pid: int | None = None
@@ -556,7 +586,7 @@ class _TransportProcess:
         self.wait_callback = self._wait_cleanup
         self.selector_callback = self._close_selector
         self.stdout_callback = self._close_stdout
-        self.output_callback = self.output.close
+        self.output_callback = self.output.close if self.history is None else self._close_history_output
 
     def reserve(self) -> None:
         self.guard.check()
@@ -697,7 +727,15 @@ class _TransportProcess:
             return
         _require(self.spawn_state == "PUBLISHED" and self.wait_state == "OPEN",
                  "GitHub original child wait is unresolved")
-        self.wait(time.monotonic() + _TRANSPORT_CLEANUP_SECONDS, cleanup=True)
+        self.wait(time.monotonic() + _TRANSPORT_CLEANUP_SECONDS if self.history is None
+                  else self.history.cleanup_end(), cleanup=True)
+
+    def _close_history_output(self) -> None:
+        try:
+            if self.history._output_record is not None and self.output.number is not None:
+                self.history.finish_output(self.output)
+        finally:
+            self.output.close()
 
     def _close_selector(self) -> None:
         if self.selector_state == "NEW":
@@ -826,17 +864,20 @@ class Transport:
     """The only gh boundary: bounded bytes/time, original child and guard custody."""
 
     def run(self, arguments: Sequence[str], *, maximum: int = MAX_JSON, timeout: int = 120,
-            output: Path | None = None, cancellation: DefaultCancellation | None = None) -> bytes:
+            output: Path | None = None, cancellation: DefaultCancellation | None = None, history=None) -> bytes:
+        history = _history_origin(history, cancellation)
         _require(arguments and arguments[0] == "gh", "workflow transport only permits the GitHub CLI")
         env = {name: os.environ[name] for name in ("PATH", "HOME", "GH_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "SYSTEMROOT") if os.environ.get(name)}
         env.update({"GH_HOST": "github.com", "GH_PROMPT_DISABLED": "1", "GH_PAGER": "cat", "GH_NO_UPDATE_NOTIFIER": "1", "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1", "NO_COLOR": "1"})
+        if history is not None:
+            arguments, env, maximum, timeout = history.command(arguments, output, maximum, timeout)
         guard, owns = cancellation_owner(cancellation, ProcessCleanupError,
                                          "GitHub transport cancellation ownership did not settle")
-        owner = _TransportProcess(guard)
+        owner = _TransportProcess(guard, history=history)
         scope = _TransportScope(owner)
         restoration = CleanupScope(guard, _transport_no_cleanup, owns_cancellation=owns, first_primary=True)
         result, total = bytearray(), 0
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout if history is None else min(time.monotonic() + timeout, history.source.work_end)
         try:
             try:
                 with restoration:
@@ -845,9 +886,14 @@ class Transport:
                             if owns:
                                 guard.install()
                                 guard.activate()
+                            if history is not None:
+                                history.bind_child(owner)
                             owner.reserve()  # Before descriptor acquisition or Popen.
                             if output is not None:
-                                owner.output.open(_safe_path(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                                if history is None:
+                                    owner.output.open(_safe_path(output), os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                                else:
+                                    history.open_output(owner.output, output)
                             owner.spawn(arguments, env)
                             owner.open_selector()
                             while owner.selector.get_map():
@@ -859,6 +905,8 @@ class Transport:
                                     if not data:
                                         owner.selector.unregister(key.fileobj)
                                         continue
+                                    if history is not None:
+                                        history.capture_block(len(data), output is None)
                                     total += len(data)
                                     _require(total <= maximum, "GitHub response exceeded its size limit")
                                     if output is None:
@@ -873,6 +921,8 @@ class Transport:
                             _require(owner.wait(deadline) == 0, "GitHub retrieval or attestation verification failed; no fallback is permitted")
                             if output is not None:
                                 os.fsync(owner.output.number)
+                                if history is not None:
+                                    history.finish_output(owner.output)
                             guard.check()
                     finally:
                         try:
@@ -880,6 +930,8 @@ class Transport:
                         finally:
                             try:
                                 owner.release_settled()
+                                if history is not None and history.current_child is owner:
+                                    history.finish_child(owner)
                             except BaseException as release_error:
                                 try:
                                     scope._record_failure(release_error)
@@ -910,6 +962,17 @@ class Context:
     confirmation: str = ""
     selected_platform: str = ""
 
+    @property
+    def trusted_tooling_repository(self) -> str:
+        return self.authority["reusableRepository"]
+
+    @property
+    def trusted_tooling_commit(self) -> str:
+        return self.authority["reusableCommit"]
+
+    def is_current_job(self, authority: Mapping[str, Any], key: str) -> bool:
+        return authority == self.authority and key == self.current_job
+
     @classmethod
     def current(cls, stage: str, platform: str) -> "Context":
         _require(stage in STAGES and platform in PLATFORMS, "workflow stage/platform is invalid")
@@ -925,10 +988,52 @@ class Context:
         return cls(stage, platform, {"fullName": repository, "id": _number(os.environ.get("GITHUB_REPOSITORY_ID"), "repository ID")}, authority, current_job, os.environ.get("MOBILE_RELEASE_CONFIRMATION", ""), os.environ.get("MOBILE_RELEASE_SELECTED_PLATFORM", ""))
 
 
+@dataclass(frozen=True)
+class ReadOnlyEvidenceContext:
+    """Grammar-only trusted-input view; no current job or mutation authority.
+
+    The caller must independently admit the repository and publisher pin. This
+    type does not authenticate values merely because they pass its constructor.
+    """
+    repository: Mapping[str, str]
+    platform: str
+    tooling_repository: str
+    tooling_commit: str
+
+    def __post_init__(self) -> None:
+        _require(isinstance(self.repository, Mapping) and len(self.repository) == 2
+                 and set(self.repository) == {"id", "fullName"}, "history repository fields differ")
+        name, number = self.repository["fullName"], self.repository["id"]
+        _require(isinstance(name, str) and len(name) <= 255
+                 and bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", name)), "history repository is invalid")
+        _require(isinstance(number, str) and len(number) <= 20
+                 and bool(NUMBER.fullmatch(number)) and int(number) <= (1 << 64) - 1,
+                 "history repository ID is invalid")
+        _require(isinstance(self.platform, str) and self.platform in PLATFORMS, "history platform is invalid")
+        _require(isinstance(self.tooling_repository, str) and len(self.tooling_repository) <= 255
+                 and bool(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.tooling_repository)),
+                 "history trusted tooling repository is invalid")
+        _require(isinstance(self.tooling_commit, str) and bool(SHA.fullmatch(self.tooling_commit)),
+                 "history trusted tooling commit is invalid")
+        object.__setattr__(self, "repository", MappingProxyType({"id": number, "fullName": name}))
+
+    @property
+    def trusted_tooling_repository(self) -> str:
+        return self.tooling_repository
+
+    @property
+    def trusted_tooling_commit(self) -> str:
+        return self.tooling_commit
+
+    def is_current_job(self, authority: Mapping[str, Any], key: str) -> bool:
+        return False
+
+
 class GitHub:
-    def __init__(self, context: Context, transport: Transport | None = None, *,
-                 cancellation: DefaultCancellation | None = None):
+    def __init__(self, context: Context | ReadOnlyEvidenceContext, transport: Transport | None = None, *,
+                 cancellation: DefaultCancellation | None = None, history=None):
         self.context = context
+        self.history = _history_origin(history, cancellation)
         self.transport = transport or Transport()
         self._cancellation = cancellation
         self._attempts: dict[tuple[str, int], dict[str, Any]] = {}
@@ -948,7 +1053,7 @@ class GitHub:
                                          "GitHub cancellation owner cannot be borrowed")
         _require(not owns and guard is cancellation, "GitHub needs the original live cancellation owner")
         guard.check()
-        view = GitHub(self.context, self.transport, cancellation=guard)
+        view = GitHub(self.context, self.transport, cancellation=guard, history=self.history)
         view._attempts, view._artifacts, view._trees, view._comparisons = (
             self._attempts, self._artifacts, self._trees, self._comparisons)
         return view
@@ -957,7 +1062,9 @@ class GitHub:
         prefix = f"repos/{self.context.repository['fullName']}/"
         compare = bool(re.fullmatch(re.escape(prefix) + r"compare/[0-9a-f]{40}\.\.\.[0-9a-f]{40}", endpoint))
         _require(endpoint.startswith(prefix) and (".." not in endpoint or compare) and "#" not in endpoint and "\\" not in endpoint, "GitHub endpoint is outside the application repository")
-        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint], cancellation=self.cancellation)
+        data = self.transport.run(["gh", "api", "--hostname", "github.com", "--method", "GET", "-H", "Accept: application/vnd.github+json", "-H", "X-GitHub-Api-Version: 2022-11-28", endpoint], cancellation=self.cancellation, **({"history": self.history} if self.history is not None else {}))
+        if self.history is not None:
+            return self.history.decode(data)
         try:
             return json.loads(data, object_pairs_hook=_reject_duplicate_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         except (ValueError, UnicodeError, RecursionError):
@@ -1010,7 +1117,7 @@ class GitHub:
         return self.pages(f"actions/runs/{authority['runId']}/attempts/{authority['attempt']}/jobs", "jobs")
 
     def job(self, authority: Mapping[str, Any], stage: str, key: str, job_id: str | None = None, *, constructing: bool = False, allow_current: bool = False) -> dict[str, Any]:
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 60 if self.history is None else min(time.monotonic() + 60, self.history.source.work_end)
         while True:
             matches = [job for job in self.jobs(authority, stage) if _job_name(job.get("name"), key)]
             _require(len(matches) == 1, "producer job is missing or ambiguous in its exact workflow attempt")
@@ -1018,7 +1125,7 @@ class GitHub:
             _require(type(job.get("id")) is int and job["id"] > 0 and type(job.get("run_id")) is int and job["run_id"] == int(authority["runId"]) and type(job.get("run_attempt")) is int and job["run_attempt"] == authority["attempt"] and job.get("head_sha") == authority["headSha"], "producer job run, attempt, or source is inconsistent")
             if job_id is not None:
                 _require(str(job["id"]) == job_id, "producer job ID differs from its attested sidecar")
-            current = authority == self.context.authority and key == self.context.current_job
+            current = self.context.is_current_job(authority, key)
             if constructing:
                 _require(current and job.get("status") == "in_progress" and job.get("completed_at") is None, "sidecars must be created in the actual active protected Store job")
                 _date(job.get("started_at"))
@@ -1030,7 +1137,10 @@ class GitHub:
                 _date(job.get("started_at"))
                 return job
             _require(job.get("status") in {"queued", "in_progress", "waiting", "pending"} and time.monotonic() < deadline, "producer job has no completed interval; retry read-only verification after it finishes")
-            time.sleep(2)
+            if self.history is None:
+                time.sleep(2)
+            else:
+                self.history.pause(min(2.0, max(0.0, deadline - time.monotonic())))
 
     def tree(self, commit: str) -> str:
         _require(bool(SHA.fullmatch(commit)), "application source must be a full Git commit")
@@ -1094,6 +1204,9 @@ class GitHub:
         return value
 
     def download(self, artifact: Mapping[str, Any], destination: Path, *, handoff: bool = False) -> Path:
+        if self.history is not None:
+            _require(not handoff, "History never downloads binary handoff packages")
+            return self.history.download(self, artifact, destination)
         limit = MAX_HANDOFF if handoff else MAX_EVIDENCE
         _require(0 < artifact["size_in_bytes"] <= limit, "artifact exceeds the supported package size")
         destination = _new_directory(destination)
@@ -1108,9 +1221,10 @@ class GitHub:
         authority = proof["producer"]
         repo = self.context.repository["fullName"]
         reusable = f"{authority['reusableRepository']}/{authority['reusablePath']}"
-        result = self.transport.run(["gh", "attestation", "verify", str(path), "--hostname", "github.com", "--repo", repo, "--signer-workflow", reusable, "--signer-digest", authority["reusableCommit"], "--source-digest", authority["headSha"], "--source-ref", authority["ref"], "--deny-self-hosted-runners", "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json", "--limit", "100"], cancellation=self.cancellation)
+        result = self.transport.run(["gh", "attestation", "verify", str(path), "--hostname", "github.com", "--repo", repo, "--signer-workflow", reusable, "--signer-digest", authority["reusableCommit"], "--source-digest", authority["headSha"], "--source-ref", authority["ref"], "--deny-self-hosted-runners", "--predicate-type", "https://slsa.dev/provenance/v1", "--format", "json", "--limit", "100"], cancellation=self.cancellation, **({"history": self.history} if self.history is not None else {}))
         try:
-            values = json.loads(result, object_pairs_hook=_reject_duplicate_pairs)
+            values = (json.loads(result, object_pairs_hook=_reject_duplicate_pairs) if self.history is None
+                      else self.history.decode(result))
         except (ValueError, UnicodeError, RecursionError):
             raise WorkflowError("attestation verifier returned malformed JSON") from None
         _require(isinstance(values, list) and 1 <= len(values) <= 100, "attestation verifier returned no bounded verified result")
@@ -1139,7 +1253,7 @@ class GitHub:
         _require(statement["_type"] == "https://in-toto.io/Statement/v1" and statement["predicateType"] == "https://slsa.dev/provenance/v1", "unsupported attestation statement")
         subjects = statement["subject"]
         _require(isinstance(subjects, list) and 1 <= len(subjects) <= 1024, "attestation subjects are invalid")
-        matching = [subject for subject in subjects if isinstance(subject, dict) and subject.get("name") == path.name and subject.get("digest") == {"sha256": sha256_file(path)}]
+        matching = [subject for subject in subjects if isinstance(subject, dict) and subject.get("name") == path.name and subject.get("digest") == {"sha256": _history_sha(path, self.history)}]
         _require(len(matching) == 1, "attestation subject differs")
         definition = statement["predicate"]["buildDefinition"]
         _require(definition["buildType"] == "https://actions.github.io/buildtypes/workflow/v1", "unsupported GitHub provenance build type")
@@ -1188,7 +1302,7 @@ def _zip_entry_offset(header: tuple[Any, ...], extra: bytes) -> int:
     return offset
 
 
-def _validate_zip_directory(archive: Path) -> int:
+def _validate_zip_directory(archive: Path, *, history=None) -> int:
     """Bound the directory *before* stdlib's unbounded ZipInfo allocation.
 
     This is an allocation/layout gate, not a substitute for ZipFile's member
@@ -1197,94 +1311,104 @@ def _validate_zip_directory(archive: Path) -> int:
     56-byte ZIP64 end records. Payload bytes (including sparse >4GiB handoffs)
     are never read here.
     """
-    with archive.open("rb") as source:
-        size = os.fstat(source.fileno()).st_size
-        _require(size >= 22, "artifact ZIP end record is missing")
-        tail_size = min(size, 22 + 65535)
-        source.seek(size - tail_size)
-        tail = source.read(tail_size)
-        # Match the exact EOCD selection used by ZipFile. A signature embedded
-        # after the real EOCD must not let the two parsers disagree.
-        # Match ZipFile's ordinary no-comment fast path. The offset/size fields
-        # of a valid EOCD can themselves contain its signature byte sequence.
-        end_index = (
-            len(tail) - 22
-            if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\0\0"
-            else tail.rfind(b"PK\x05\x06")
-        )
-        _require(end_index >= 0 and end_index + 22 <= len(tail), "artifact ZIP end record is truncated")
-        end = struct.unpack_from("<4s4H2IH", tail, end_index)
-        _require(end_index + 22 + end[7] == len(tail), "artifact ZIP has trailing or ambiguous end data")
-        end_offset = size - tail_size + end_index
-        _require(end[1] == end[2] == 0 and end[3] == end[4], "artifact ZIP must be single-disk with consistent counts")
-        count, directory_size, directory_offset = end[4:7]
-        directory_end = end_offset
-        source.seek(max(0, end_offset - 20))
-        locator = source.read(20)
-        if len(locator) == 20 and locator[:4] == b"PK\x06\x07":
-            _, disk, zip64_offset, disks = struct.unpack("<4sIQI", locator)
-            _require(disk == 0 and disks == 1 and zip64_offset + 56 == end_offset - 20, "artifact ZIP64 locator has an unsupported extent or disk")
-            source.seek(zip64_offset)
-            prefix = source.read(12)
-            _require(len(prefix) == 12 and prefix[:4] == b"PK\x06\x06", "artifact ZIP64 end record is missing")
-            # This toolkit's bounded service profile deliberately excludes
-            # extended records, even where ZipFile can support them. Never
-            # allocate/read an extension from its untrusted 64-bit length.
-            _require(struct.unpack_from("<Q", prefix, 4)[0] == 44, "artifact ZIP64 extended end records are unsupported")
-            body = source.read(44)
-            _require(len(body) == 44, "artifact ZIP64 end record is truncated")
-            large = struct.unpack("<2H2I4Q", body)
-            _require(large[2] == large[3] == 0 and large[4] == large[5], "artifact ZIP64 must be single-disk with consistent counts")
-            for declared, actual, sentinel in zip((count, directory_size, directory_offset), large[5:8], (0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF)):
-                _require(declared == sentinel or declared == actual, "artifact ZIP and ZIP64 directory records disagree")
-            count, directory_size, directory_offset = large[5:8]
-            directory_end = zip64_offset
-        else:
-            _require(count != 0xFFFF and directory_size != 0xFFFFFFFF and directory_offset != 0xFFFFFFFF, "artifact ZIP64 locator is missing")
-        _require(0 < count <= MAX_FILES, "artifact ZIP member count is invalid")
-        _require(46 * count <= directory_size <= MAX_ZIP_DIRECTORY, "artifact ZIP central directory exceeds its bounded size")
-        _require(0 < directory_offset < directory_end and directory_offset + directory_size == directory_end, "artifact ZIP central directory extent is invalid")
-        source.seek(0)
-        _require(source.read(4) == b"PK\x03\x04", "artifact ZIP prefixes are unsupported")
-        position, actual_count, first_local = directory_offset, 0, directory_offset
-        while position < directory_end:
-            _require(actual_count < MAX_FILES and position + 46 <= directory_end, "artifact ZIP central directory has excess or truncated entries")
-            source.seek(position)
-            fixed = source.read(46)
-            _require(len(fixed) == 46 and fixed[:4] == b"PK\x01\x02", "artifact ZIP central directory record is invalid")
-            header = struct.unpack("<4s6H3I5H2I", fixed)
-            name_size, extra_size, comment_size = header[10:13]
-            _require(0 < name_size <= MAX_ZIP_NAME_BYTES, "artifact ZIP filename exceeds its bounded size")
-            following = position + 46 + name_size + extra_size + comment_size
-            _require(following <= directory_end, "artifact ZIP central directory record exceeds its extent")
-            source.seek(position + 46 + name_size)
-            extra = source.read(extra_size)
-            _require(len(extra) == extra_size, "artifact ZIP central directory extra field is truncated")
-            local_offset = _zip_entry_offset(header, extra)
-            _require(0 <= local_offset < directory_offset, "artifact ZIP local header offset is outside the payload")
-            first_local = min(first_local, local_offset)
-            actual_count += 1
-            position = following
-        _require(actual_count == count and first_local == 0, "artifact ZIP directory count or first header disagrees")
-        return count
+    with (archive.open("rb") if history is None else _history_origin(history).reader(archive)) as source:
+        return _validate_zip_source(source)
+
+
+def _validate_zip_source(source) -> int:
+    size = os.fstat(source.fileno()).st_size
+    _require(size >= 22, "artifact ZIP end record is missing")
+    tail_size = min(size, 22 + 65535)
+    source.seek(size - tail_size)
+    tail = source.read(tail_size)
+    # Match the exact EOCD selection used by ZipFile. A signature embedded
+    # after the real EOCD must not let the two parsers disagree.
+    # Match ZipFile's ordinary no-comment fast path. The offset/size fields
+    # of a valid EOCD can themselves contain its signature byte sequence.
+    end_index = (
+        len(tail) - 22
+        if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\0\0"
+        else tail.rfind(b"PK\x05\x06")
+    )
+    _require(end_index >= 0 and end_index + 22 <= len(tail), "artifact ZIP end record is truncated")
+    end = struct.unpack_from("<4s4H2IH", tail, end_index)
+    _require(end_index + 22 + end[7] == len(tail), "artifact ZIP has trailing or ambiguous end data")
+    end_offset = size - tail_size + end_index
+    _require(end[1] == end[2] == 0 and end[3] == end[4], "artifact ZIP must be single-disk with consistent counts")
+    count, directory_size, directory_offset = end[4:7]
+    directory_end = end_offset
+    source.seek(max(0, end_offset - 20))
+    locator = source.read(20)
+    if len(locator) == 20 and locator[:4] == b"PK\x06\x07":
+        _, disk, zip64_offset, disks = struct.unpack("<4sIQI", locator)
+        _require(disk == 0 and disks == 1 and zip64_offset + 56 == end_offset - 20, "artifact ZIP64 locator has an unsupported extent or disk")
+        source.seek(zip64_offset)
+        prefix = source.read(12)
+        _require(len(prefix) == 12 and prefix[:4] == b"PK\x06\x06", "artifact ZIP64 end record is missing")
+        # This toolkit's bounded service profile deliberately excludes
+        # extended records, even where ZipFile can support them. Never
+        # allocate/read an extension from its untrusted 64-bit length.
+        _require(struct.unpack_from("<Q", prefix, 4)[0] == 44, "artifact ZIP64 extended end records are unsupported")
+        body = source.read(44)
+        _require(len(body) == 44, "artifact ZIP64 end record is truncated")
+        large = struct.unpack("<2H2I4Q", body)
+        _require(large[2] == large[3] == 0 and large[4] == large[5], "artifact ZIP64 must be single-disk with consistent counts")
+        for declared, actual, sentinel in zip((count, directory_size, directory_offset), large[5:8], (0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF)):
+            _require(declared == sentinel or declared == actual, "artifact ZIP and ZIP64 directory records disagree")
+        count, directory_size, directory_offset = large[5:8]
+        directory_end = zip64_offset
+    else:
+        _require(count != 0xFFFF and directory_size != 0xFFFFFFFF and directory_offset != 0xFFFFFFFF, "artifact ZIP64 locator is missing")
+    _require(0 < count <= MAX_FILES, "artifact ZIP member count is invalid")
+    _require(46 * count <= directory_size <= MAX_ZIP_DIRECTORY, "artifact ZIP central directory exceeds its bounded size")
+    _require(0 < directory_offset < directory_end and directory_offset + directory_size == directory_end, "artifact ZIP central directory extent is invalid")
+    source.seek(0)
+    _require(source.read(4) == b"PK\x03\x04", "artifact ZIP prefixes are unsupported")
+    position, actual_count, first_local = directory_offset, 0, directory_offset
+    while position < directory_end:
+        _require(actual_count < MAX_FILES and position + 46 <= directory_end, "artifact ZIP central directory has excess or truncated entries")
+        source.seek(position)
+        fixed = source.read(46)
+        _require(len(fixed) == 46 and fixed[:4] == b"PK\x01\x02", "artifact ZIP central directory record is invalid")
+        header = struct.unpack("<4s6H3I5H2I", fixed)
+        name_size, extra_size, comment_size = header[10:13]
+        _require(0 < name_size <= MAX_ZIP_NAME_BYTES, "artifact ZIP filename exceeds its bounded size")
+        following = position + 46 + name_size + extra_size + comment_size
+        _require(following <= directory_end, "artifact ZIP central directory record exceeds its extent")
+        source.seek(position + 46 + name_size)
+        extra = source.read(extra_size)
+        _require(len(extra) == extra_size, "artifact ZIP central directory extra field is truncated")
+        local_offset = _zip_entry_offset(header, extra)
+        _require(0 <= local_offset < directory_offset, "artifact ZIP local header offset is outside the payload")
+        first_local = min(first_local, local_offset)
+        actual_count += 1
+        position = following
+    _require(actual_count == count and first_local == 0, "artifact ZIP directory count or first header disagrees")
+    return count
 
 
 def _extract_zip(archive: Path, destination: Path, maximum: int, *,
-                 app_root: Path | None = None, cancellation: DefaultCancellation | None = None) -> None:
-    destination = _safe_path(destination)
-    app_root = _safe_path(app_root) if app_root is not None else None
+                 app_root: Path | None = None, cancellation: DefaultCancellation | None = None, history=None) -> None:
+    if history is None:
+        destination = _safe_path(destination)
+        app_root = _safe_path(app_root) if app_root is not None else None
+    else:
+        _require(app_root is None, "History cannot borrow another private output owner")
+        destination = _history_origin(history, cancellation)._allowed(destination)
     with _app_private_directory(destination, app_root=app_root, cancellation=cancellation) as owner:
         guard = owner.cancellation if owner is not None else cancellation
         try:
-            count = _validate_zip_directory(archive)
-            with zipfile.ZipFile(archive) as stream:
+            count = _validate_zip_directory(archive) if history is None else None
+            with (history.zip_file(archive) if history is not None else zipfile.ZipFile(archive)) as opened:
+                stream, count = opened if history is not None else (opened, count)
                 members = stream.infolist()
                 _require(len(members) == count, "artifact ZIP member count differs from its bounded directory")
                 seen: set[str] = set()
                 spellings: dict[str, str] = {}
                 regular: set[str] = set()
                 total = 0
-                deadline = time.monotonic() + (900 if maximum > MAX_EVIDENCE else 120)
+                deadline = (time.monotonic() + (900 if maximum > MAX_EVIDENCE else 120)
+                            if history is None else history.source.work_end)
                 for member in members:
                     name = member.filename
                     clean = name[:-1] if member.is_dir() else name
@@ -1305,11 +1429,15 @@ def _extract_zip(archive: Path, destination: Path, maximum: int, *,
                     _require(0 <= member.file_size <= MAX_FILE and total <= maximum, "artifact ZIP exceeds the expanded size limit")
                 _require(all(not any(str(parent).casefold() in regular for parent in PurePosixPath(path).parents) for path in seen), "artifact ZIP uses a regular file as a directory")
                 for member in members:
-                    path = _safe_path(destination / member.filename)
+                    path = (_safe_path(destination / member.filename) if history is None
+                            else history._allowed(destination / member.filename))
                     directory = path if member.is_dir() else path.parent
                     with _app_private_directory(directory, app_root=app_root, cancellation=guard) as parent:
                         if parent is None:
-                            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                            if history is None:
+                                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                            else:
+                                history.ensure_directory(directory)
                         if member.is_dir():
                             if parent is not None:
                                 parent.check()
@@ -1328,6 +1456,8 @@ def _extract_zip(archive: Path, destination: Path, maximum: int, *,
                             if parent is not None:
                                 _publish_private_file(parent, path.name, blocks())
                                 parent.check()
+                            elif history is not None:
+                                history.write_file(path, blocks())
                             else:
                                 with path.open("xb") as target:
                                     os.chmod(path, 0o600)
@@ -1343,17 +1473,18 @@ def _extract_zip(archive: Path, destination: Path, maximum: int, *,
 class Verifier:
     def __init__(self, github: GitHub, *, allow_current: bool = False):
         self.github = github
+        self.history = github.history
         self.context = github.context
         self.allow_current = allow_current
         self._standalone: dict[tuple[str, str], dict[str, str] | None] = {}
 
     def proof(self, root: Path, stage: str, phase: str, *, artifact: Mapping[str, Any] | None = None) -> dict[str, Any]:
         name = "intent-provenance.json" if phase == "intent" else "workflow-provenance.json"
-        proof = _read_json(root / name)
+        proof = _read_json(root / name, history=self.history)
         _keys(proof, {"documentType", "schemaVersion", "phase", "stage", "platform", "artifactName", "repository", "producer", "jobKey", "jobId", "createdAt", "files"}, "workflow provenance")
         _require(proof["documentType"] == PROOF_TYPE and type(proof["schemaVersion"]) is int and proof["schemaVersion"] == PROOF_VERSION and proof["phase"] == phase and proof["stage"] == stage and proof["platform"] == self.context.platform and proof["repository"] == self.context.repository, "workflow provenance scope differs")
         authority = _authority_for_stage(proof["producer"], stage, "sidecar producer")
-        _require(authority["reusableRepository"] == self.context.authority["reusableRepository"] and authority["reusableCommit"] == self.context.authority["reusableCommit"], "evidence was produced by different pinned release tooling")
+        _require(authority["reusableRepository"] == self.context.trusted_tooling_repository and authority["reusableCommit"] == self.context.trusted_tooling_commit, "evidence was produced by different pinned release tooling")
         expected_artifact = artifact_name(stage, self.context.platform, "intent" if phase == "intent" else "evidence")
         _require(proof["artifactName"] == expected_artifact and proof["jobKey"] == job_key(stage, self.context.platform), "sidecar names a different artifact or protected job")
         _number(proof["jobId"], "producer job ID")
@@ -1366,30 +1497,30 @@ class Verifier:
         self.github.verify_attestation(root / name, proof, job)
         _inventory_shape(proof["files"], roles=True)
         expected = _layout(stage, phase)
-        found = _files(root)
+        found = _files(root, history=self.history)
         _require(set(found) == set(expected), "evidence bundle has an incomplete or unexpected layout")
-        inventory = [{"path": path, "role": expected[path], "size": found[path].stat().st_size, "sha256": sha256_file(found[path])} for path in sorted(found) if path != name]
+        inventory = [{"path": path, "role": expected[path], "size": _history_stat(found[path], self.history).st_size, "sha256": _history_sha(found[path], self.history)} for path in sorted(found) if path != name]
         _require(proof["files"] == inventory, "signed complete evidence inventory differs from package contents")
         # Include directories in the check; an ignored extra directory is not a
         # permissible covert payload or extraction target.
-        _inventory(root, expected)
+        _inventory(root, expected, history=self.history)
         return proof
 
     def intent(self, root: Path, stage: str, *, artifact: Mapping[str, Any] | None = None) -> dict[str, Any]:
         proof = self.proof(root, stage, "intent", artifact=artifact)
-        intent = load_operation_intent(root / f"{stage}-operation-intent.json")
+        intent = _history_load(load_operation_intent, root / f"{stage}-operation-intent.json", self.history)
         _require(intent["stage"] == stage and intent["platform"] == self.context.platform and intent["repository"] == self.context.repository and intent["authorizedBy"] == proof["producer"], "intent differs from its authenticated preparation job")
-        _require(intent["tooling"]["commit"] == self.context.authority["reusableCommit"], "intent tooling differs from the selected trusted toolkit")
+        _require(intent["tooling"]["commit"] == self.context.trusted_tooling_commit, "intent tooling differs from the selected trusted toolkit")
         for source in (intent["candidateSource"], intent["operationSource"]):
             _require(self.github.tree(source["commit"]) == source["tree"], "intent application commit/tree identity differs")
         self.github.source_policy(stage, intent["candidateSource"], intent["operationSource"])
         if stage == "candidate":
-            _metadata_binding(root / "store-metadata.zip", intent)
+            _metadata_binding(root / "store-metadata.zip", intent, history=self.history)
         if stage != "candidate":
             self.final(root / "candidate", "candidate")
         if stage == "production-submit":
             self.final(root / "external", "external-testing")
-            _require(_tree_digests(root / "candidate") == _tree_digests(root / "external" / "operation" / "candidate"), "production and external operation retain different candidate packages")
+            _require(_tree_digests(root / "candidate", history=self.history) == _tree_digests(root / "external" / "operation" / "candidate", history=self.history), "production and external operation retain different candidate packages")
         self._chain(root, stage, own_intent=intent)
         if artifact is None:
             key = (stage, intent["authorizedBy"]["runId"])
@@ -1397,12 +1528,13 @@ class Verifier:
                 standalone = self.github.artifact(key[1], artifact_name(stage, self.context.platform, "intent"), redundant=True)
                 self._standalone[key] = None
                 if standalone is not None:
-                    with tempfile.TemporaryDirectory(prefix="mrk-original-intent-") as temporary:
+                    with (tempfile.TemporaryDirectory(prefix="mrk-original-intent-") if self.history is None
+                          else self.history.comparison()) as temporary:
                         original = self.github.download(standalone, Path(temporary) / "operation")
                         self.intent(original, stage, artifact=standalone)
-                        self._standalone[key] = _tree_digests(original)
+                        self._standalone[key] = _tree_digests(original, history=self.history)
             if self._standalone[key] is not None:
-                _require(self._standalone[key] == _tree_digests(root), "standalone and embedded original intent bundles conflict")
+                _require(self._standalone[key] == _tree_digests(root, history=self.history), "standalone and embedded original intent bundles conflict")
         return intent
 
     def _chain(self, root: Path, stage: str, *, own_intent: Mapping[str, Any], own_final: Path | None = None) -> None:
@@ -1410,12 +1542,12 @@ class Verifier:
             return
         candidate_root = own_final if stage == "candidate" else root / "candidate"
         assert candidate_root is not None
-        arguments: dict[str, Any] = {"candidate_manifest": load_candidate_manifest(candidate_root / "candidate-manifest.json"), "candidate_receipt": load_release_receipt(candidate_root / "candidate-receipt.json"), "candidate_intent": own_intent if stage == "candidate" else load_operation_intent(candidate_root / "operation" / "candidate-operation-intent.json"), "platform": self.context.platform}
+        arguments: dict[str, Any] = {"candidate_manifest": _history_load(load_candidate_manifest, candidate_root / "candidate-manifest.json", self.history), "candidate_receipt": _history_load(load_release_receipt, candidate_root / "candidate-receipt.json", self.history), "candidate_intent": own_intent if stage == "candidate" else _history_load(load_operation_intent, candidate_root / "operation" / "candidate-operation-intent.json", self.history), "platform": self.context.platform}
         if stage == "production-submit":
             external = root / "external"
-            arguments.update(external_receipt=load_release_receipt(external / "external-testing-receipt.json"), external_intent=load_operation_intent(external / "operation" / "external-testing-operation-intent.json"), require_production_eligible_external=True)
+            arguments.update(external_receipt=_history_load(load_release_receipt, external / "external-testing-receipt.json", self.history), external_intent=_history_load(load_operation_intent, external / "operation" / "external-testing-operation-intent.json", self.history), require_production_eligible_external=True)
         if own_final is not None and stage != "candidate":
-            arguments["external_receipt" if stage == "external-testing" else "production_receipt"] = load_release_receipt(own_final / f"{stage}-receipt.json")
+            arguments["external_receipt" if stage == "external-testing" else "production_receipt"] = _history_load(load_release_receipt, own_final / f"{stage}-receipt.json", self.history)
             arguments["external_intent" if stage == "external-testing" else "production_intent"] = own_intent
         validate_receipt_chain(**arguments)
         if stage != "candidate":
@@ -1435,17 +1567,19 @@ class Verifier:
     def final(self, root: Path, stage: str, *, artifact: Mapping[str, Any] | None = None) -> dict[str, Any]:
         proof = self.proof(root, stage, "final", artifact=artifact)
         intent = self.intent(root / "operation", stage)
-        receipt = load_release_receipt(root / f"{stage}-receipt.json")
+        receipt = _history_load(load_release_receipt, root / f"{stage}-receipt.json", self.history)
         _require(receipt["producedBy"] == proof["producer"], "final receipt is attributed to a different producer job")
         candidate_root = root if stage == "candidate" else root / "operation" / "candidate"
-        candidate = load_candidate_manifest(candidate_root / "candidate-manifest.json")
-        validate_receipt_raw_binding(receipt, store_receipt=load_store_receipt(root / "store-receipt.json"), operation_intent=intent, candidate_manifest=candidate)
+        candidate = _history_load(load_candidate_manifest, candidate_root / "candidate-manifest.json", self.history)
+        validate_receipt_raw_binding(receipt, store_receipt=_history_load(load_store_receipt, root / "store-receipt.json", self.history), operation_intent=intent, candidate_manifest=candidate)
         self._chain(root / "operation", stage, own_intent=intent, own_final=root)
+        if self.history is not None and artifact is not None:
+            self.history.capture_final(root, stage, artifact, proof, intent, receipt, candidate)
         return intent
 
 
-def _tree_digests(root: Path) -> dict[str, str]:
-    return {name: sha256_file(path) for name, path in _files(root).items()}
+def _tree_digests(root: Path, *, history=None) -> dict[str, str]:
+    return {name: _history_sha(path, history) for name, path in _files(root, history=history).items()}
 
 
 def _create_proof(root: Path, context: Context, phase: str, github: GitHub, *,
@@ -1485,12 +1619,13 @@ def _validate_handoff(root: Path, platform: str, intent: Mapping[str, Any] | Non
             _require(record["fileName"] == name and record["sha256"] == checksums[name] and record["size"] == files[name].stat().st_size, "candidate handoff replaced an intent-authorized artifact")
 
 
-def _metadata_binding(path: Path, intent: Mapping[str, Any]) -> None:
-    path = _safe_path(path)
+def _metadata_binding(path: Path, intent: Mapping[str, Any], *, history=None) -> None:
+    path = _safe_path(path) if history is None else _history_origin(history)._allowed(path)
     records = [item for item in intent["artifacts"] if item["logicalName"] == "store-metadata"]
-    _require(len(records) == 1 and path.is_file(), "candidate-bound metadata archive is missing")
+    _require(len(records) == 1 and (path.is_file() if history is None
+             else stat.S_ISREG(history.file_stat(path).st_mode)), "candidate-bound metadata archive is missing")
     record = records[0]
-    _require(record["fileName"] == "store-metadata.zip" and path.stat().st_size == record["size"] and sha256_file(path) == record["sha256"] == intent["configuration"]["metadataSha256"], "retained Store metadata differs from the exact original candidate bytes")
+    _require(record["fileName"] == "store-metadata.zip" and _history_stat(path, history).st_size == record["size"] and _history_sha(path, history) == record["sha256"] == intent["configuration"]["metadataSha256"], "retained Store metadata differs from the exact original candidate bytes")
 
 
 class Resolver:

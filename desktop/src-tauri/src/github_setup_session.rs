@@ -1,5 +1,5 @@
-//! One finite nonsecret Setup state in the original GitHub ConnectionState.
-//! No credential, independent child, renewed deadline or retry owner.
+//! One finite Setup state in the original GitHub ConnectionState.
+//! Secret material is an opaque same-Arc loan; no independent owner or renewed deadline.
 use std::time::Instant;
 use crate::{asset_source::RegisteredRoot, edit_owner::SavedEditStamp, error::BridgeError,
     github_setup_protocol as wire, supervisor::{GitHubSetupReceipt, GitHubSetupTicket}};
@@ -43,6 +43,17 @@ pub(crate) fn outcome_reason(value: &BridgeError) -> wire::Reason { match value.
     "cleanup_unknown" => wire::Reason::CleanupUnknown, "protocol_error" => wire::Reason::ResponseInvalid,
     "output_limit" | "stdout_limit" | "stderr_limit" => wire::Reason::ResponseLimit,
     "cancelled" | "shutting_down" => wire::Reason::Cancelled, "runtime_unavailable" => wire::Reason::RuntimeUnavailable,
+    "github_sealing_failed" => wire::Reason::SealingFailed,
+    "github_remote_setup_refused_resources_unavailable" => wire::Reason::ResourcesUnavailable,
+    "github_remote_setup_refused_material_unavailable" => wire::Reason::MaterialUnavailable,
+    "github_remote_setup_refused_material_changed" => wire::Reason::MaterialChanged,
+    "github_remote_setup_refused_material_too_large" => wire::Reason::MaterialTooLarge,
+    "github_remote_setup_refused_requirement_unsupported" => wire::Reason::RequirementUnsupported,
+    "github_remote_setup_refused_configuration_changed" => wire::Reason::ConfigurationChanged,
+    "github_remote_setup_refused_target_changed" => wire::Reason::TargetChanged,
+    "github_remote_setup_refused_cancelled" => wire::Reason::Cancelled,
+    "github_remote_setup_refused_expired" => wire::Reason::Expired,
+    "github_remote_setup_refused_cleanup_unknown" => wire::Reason::CleanupUnknown,
     _ => wire::Reason::NetworkUnavailable,
 } }
 
@@ -52,10 +63,33 @@ pub(crate) struct Active {
     pub(crate) root: RegisteredRoot, pub(crate) edit_stamp: SavedEditStamp,
     pub(crate) consent_id: String, pub(crate) consent_end: Option<Instant>,
 }
+// One closed retained authority. Variables carry the original field Arc, not
+// a lookalike SecretSealed or another optional consent beside the real one.
+pub(crate) enum ConsentMaterial {
+    Secret(crate::supervisor::SecretSealed),
+    Variable(std::sync::Arc<crate::asset_session::GitHubVariableMaterial>),
+}
+impl ConsentMaterial {
+    fn retained_heap_bytes(&self)->Option<usize>{match self {
+        Self::Secret(value)=>value.retained_heap_bytes(),
+        // The same document census charges this Arc's unique material backing
+        // and deduplicates its actual NativeContext/Payload with other loans.
+        Self::Variable(_)=>Some(0),
+    }}
+    pub(crate) fn secret(&self)->Option<&crate::supervisor::SecretSealed>{match self{Self::Secret(v)=>Some(v),Self::Variable(_)=>None}}
+    pub(crate) fn variable(&self)->Option<&std::sync::Arc<crate::asset_session::GitHubVariableMaterial>>{match self{Self::Variable(v)=>Some(v),Self::Secret(_)=>None}}
+}
 pub(crate) struct Consent {
+    pub(crate) material: Option<ConsentMaterial>,
     pub(crate) id: String, pub(crate) prepared: wire::Prepared, pub(crate) end: Instant,
     pub(crate) session_id: String, pub(crate) project_id: String, pub(crate) generation: u32,
     pub(crate) root: RegisteredRoot, pub(crate) edit_stamp: SavedEditStamp,
+}
+impl Consent {
+    pub(crate) fn retained_heap_bytes(&self)->Option<usize>{self.id.capacity()
+        .checked_add(self.prepared.retained_heap_bytes()?)?.checked_add(self.session_id.capacity())?
+        .checked_add(self.project_id.capacity())?.checked_add(self.root.path.capacity())?
+        .checked_add(self.material.as_ref().map_or(Some(0),|v|v.retained_heap_bytes())?)}
 }
 pub(crate) struct State {
     pub(crate) view: wire::Status, pub(crate) active: Option<Active>, pub(crate) consent: Option<Consent>,
@@ -139,7 +173,8 @@ impl State {
         let mut bytes = self.view.retained_heap_bytes()?;
         if let Some(v) = &self.consent { bytes = bytes.checked_add(v.id.capacity())?
             .checked_add(v.prepared.retained_heap_bytes()?)?.checked_add(v.session_id.capacity())?
-            .checked_add(v.project_id.capacity())?.checked_add(v.root.path.capacity())?; }
+            .checked_add(v.project_id.capacity())?.checked_add(v.root.path.capacity())?
+            .checked_add(v.material.as_ref().map_or(Some(0),|material|material.retained_heap_bytes())?)?; }
         Some(bytes)
     }
 }
@@ -195,7 +230,7 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
         after:wire::EnvironmentPolicy {wait_timer_minutes:10,protected_branches:false,required_reviewers:None},reviewer:None,
         observed_at:"2026-10-09T00:00:00Z".into(),confirmation:wire::ENVIRONMENT_CONFIRMATION.into()});
     assert!(expiry_prepared.valid());
-    state.consent=Some(Consent {id:"a".repeat(32),prepared,end:now+std::time::Duration::from_secs(10),
+    state.consent=Some(Consent {material:None,id:"a".repeat(32),prepared,end:now+std::time::Duration::from_secs(10),
         session_id:"session-1".into(),project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-correlation-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
         edit_stamp:stamp});
@@ -209,7 +244,7 @@ pub(crate) fn consent_data_checks(stamp: SavedEditStamp, expiry_stamp: SavedEdit
     assert!(state.discard(&args).is_err());
     let end=now+std::time::Duration::from_secs(10);
     state.view.consent=Some(wire::ConsentView {id:"b".repeat(32),expires_at:"2026-10-09T00:00:10Z".into(),prepared:expiry_prepared.clone()});
-    state.consent=Some(Consent {id:"b".repeat(32),prepared:expiry_prepared,end,session_id:"session-1".into(),
+    state.consent=Some(Consent {material:None,id:"b".repeat(32),prepared:expiry_prepared,end,session_id:"session-1".into(),
         project_id:"unregistered-data-only".into(),generation:1,
         root:RegisteredRoot {path:"/never-opened-expiry-data".into(),identity:crate::asset_source::ProjectIdentity::Windows {volume:0,file_id:[0;16]}},
         edit_stamp:expiry_stamp});
