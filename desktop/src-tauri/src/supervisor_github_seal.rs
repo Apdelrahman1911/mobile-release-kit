@@ -80,6 +80,8 @@ impl SecretSealed {
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod original {
 use super::*;
+use std::process::Stdio;
+use tokio::process::Command;
 #[derive(Clone,Copy)]
 struct ReadReceipt {waited:bool,writer:bool,stdout:bool,stderr:bool,native:bool,timely:bool}
 impl ReadReceipt {
