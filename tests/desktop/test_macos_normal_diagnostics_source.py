@@ -744,7 +744,118 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
 
 APP_SIGNATURE_WORKFLOW_INVERSE = ((273, 43, '7fce308b4a7080ff7750eac96f2d9b4cffbb3783b4122ba8cba542498acb5bfd', ''), (711, 65, '41559436d557d14e00f7d258f8c4e12dbe18d63c9fa21299122ea4ef10cecc72', ''), (1535, 196, '19f9ce6b7d1ec6a940317d1ab55b2a8098cd4c1dc4888103cf0534954547c57f', 'timeout-minutes: 350'), (8496, 346, '007ec8dc2b6263d463042cde185b2b11532cd97452239be023a87962e7dec487', ') ]] || exit 1'), (22387, 392, '140f1114a37be725631dc52ff0d6e6d7bc70c25a2643c3ede69bcadaa9f7435d', ''), (28064, 404, 'f02b9ddfefd341e9b719b357cfefbd9e153c83ca836d04b6e334969e895d37ce', ''), (6090, 106, 'e2d105aeb112cfd2bd59cf0647c033334694eb6acce215f761c44f7138231cc7', ''), (12337, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (12803, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (16823, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (17177, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (25310, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (46887, 22, '7c17228c1639da37cc0cb9c729e8fa369e145457f66dbca110e45efa0b5b819a', ''), (47906, 24, '4bd7d18a6ab921647f28b9f705afce990e7be141983b0261a1bd78a2027b46cd', ''), (49834, 569, '0cb195b9032334ab1fde6250bd5a506aa55210401354052606487836d0941e5d', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (56371, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (59904, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (73979, 26, '597f8c7b070b180f75b720d5e0ed56c9d8516121f2362472835a8d2ca9f62a3f', ''), (77317, 22, '1ff00fb090aa18879ebc52e6139b586ab4df0a1f8ae2bf554349f760fd5d4971', ''), (81724, 22, '26477eb4b9b1e9f4e33d895f3a8078a3c0dd77bf259f688adef6a71076ccc3d6', ''), (86995, 25, '77ab554b279f18d90fa1e1c00e32cc72ccd74339ab1691df1db5c4813a45c27f', ''), (91240, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (91584, 25, '5cc48d8e6d98662ab3c2aab2df255eae1e5ec11f1feda55fd65b35debb50f20d', ''), (99092, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (101598, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (109317, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (113961, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (116948, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (117883, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (122676, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (125088, 74, 'bad463f354b2a866e9cf26c7a6d2e05a0a489eec8c9f6e744e83f2a8efb2b615', ''), (127216, 308, 'ab9cdf74283bafd177c5d7f4f3f00fecc8d0e2e1afd617e17e6dec40263465c8', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (130098, 314, 'ed4d8df25865bb2efa1affa1aae5e6735d5fdcc45207f0f28dd32b27e8979442', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'"), (132865, 315, 'c7db2067611ed9836dea7e55cd0efdbcdca216304f6aef8d00395619e34bf015', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'"), (157373, 366, 'eea4d991941793cc3ff538b64e95b890df2522d3461df258b3bccc68b244918f', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (160117, 415, 'b91605221b6e03330e1de20fec73ff21c41bf31c8851e403dc87eaec309db3d6', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (162951, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (164606, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (168336, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (170714, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (172776, 213, '43ed53d5845b014b6ed81e99151694b3ecd71ce09e89d25f19f2aa373b92db13', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (175646, 215, 'f90633631773d375f84c5b8e75e7e2f4a4a0125844ec4e11a37514f56b489aeb', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (177434, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (179130, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (180189, 149, 'c9f8c1b898ebe47511fc19a92d4779c383cf0fd9bdd3add2fe114ea267529845', "== 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'"), (181255, 202, '80a104c2c0efbbebaecb3357f952d702096bd2ec9274733a50e9889e055086bc', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'"), (185986, 156, '04803e48fbef0bb42a74922ce1f3f1d52ed0d93229d52140c613b22c3aa02bbd', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'"), (200721, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (205582, 164, 'ec40c206029f6e512ed2542530214ccd1c2b27ae228b6eb636c4a5edb22d50aa', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'"), (221342, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (229607, 168, 'e84aa7b7c1c39bcca3049d9454603cbdb2f1329bec45cc9c04d7a74bdbb41aab', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'"), (248219, 170, 'd1cf60824d1d2edbaada6b17cc0cb4b260eaa273653bd503a4b1ea9b8827f85f', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'"), (256538, 168, '04d55d596e2237f5bb1673b6f5eca44367d66a3a05b8595d55d127d7f5a2b3f2', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'"), (275763, 227, 'af714bbb5dd50503c6e50c46cad8b225faa61d5b41d5009163553cfe33a05429', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (284537, 169, '8a205d64a41a2fb50e9668e96d3f1dc3cf06cfd29505d360f916c4781c664ce7', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'"), (306585, 354, '98d0f1fff12aee1fdc4d912ff203420fb5ecbaaba63381407e1992308e8fe322', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (310167, 363, 'b77a50fe6b42263b79e7c5c58bbcc09478e6af96e7f7acc5158cc2d0e6942dfb', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (328621, 108, '5c417bb5e050744e16fefbeb795e9f68f08a699c1f2e2e4245c922c3e43f96f8', "always() && steps.work.outputs.root != ''"), (348311, 802, '4a646c829e8f95a14c43b2abf5d5ad076e9284d64a7a10f1f330002887c0482c', "always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'"), (99000, 6360, '1fd61cebe258aef7e40106cf2093ea57d052bf385053c294bbd41d23ef25faac', ''))
 
+# Exact recent SOURCE deltas only; the historical tables and their final
+# predecessor hashes below remain authoritative for every other byte.
+RECENT_APP_SIGNATURE_WORKFLOW_INVERSE = (('prebuild',
+  ('Check fixed optional-array argv before native preparation',
+   'tests/desktop/test_macos_optional_arrays.py',
+   '# App-signature:82 timed preparation +14 bounded setup'),
+  (('    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+    '    # App-signature:82 timed preparation +13 bounded setup +7 summary/cleanup/upload;8 overhead.\n'),
+   ('      - name: Check fixed optional-array argv before native preparation\n'
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$MRK_PYTHON" -I -S -B \\\n'
+    '            tests/desktop/test_macos_optional_arrays.py \\\n'
+    '            MacOSOptionalArraysTests.test_optional_arrays_preserve_empty_and_quoted_argv_under_nounset '
+    '-v\n',
+    ''))),
+ ('optional arrays',
+  ('${history_provider_arguments[@]+', '${removal_arguments[@]+', '${github_seal_arguments[@]+'),
+  (('            --target "$MRK_MACOS_TARGET" '
+    '${history_provider_arguments[@]+"${history_provider_arguments[@]}"} \\\n',
+    '            --target "$MRK_MACOS_TARGET" "${history_provider_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '${removal_arguments[@]+"${removal_arguments[@]}"} '
+    '${github_seal_arguments[@]+"${github_seal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+    '"${removal_arguments[@]}" "${github_seal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py remove-scripts --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'),
+   ('          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" ${removal_arguments[@]+"${removal_arguments[@]}"} --expected-remover '
+    '"$MRK_MACOS_REMOVER_SHA256" \\\n',
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-remove-package --target '
+    '"$MRK_MACOS_TARGET" "${removal_arguments[@]}" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \\\n'))),
+ ('confidential diagnostics',
+  ('confidential_compiler',
+   'macos_resident_confidential_capture.py',
+   'Encrypt only the settled failed ARM compiler captures',
+   'Retain ciphertext and finite transport receipt only',
+   'confidential-resident-compiler-'),
+  (('      # TEMPORARY verification-only diagnostic. Never copy to product workflows.\n'
+    '      - name: Encrypt only the settled failed ARM compiler captures\n'
+    '        id: confidential_compiler\n'
+    "        if: failure() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target "
+    "== 'aarch64-apple-darwin' && steps.work.outcome == 'success' && steps.android_helper.outcome == "
+    "'failure'\n"
+    '        timeout-minutes: 2\n'
+    '        shell: bash\n'
+    '        env:\n'
+    '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+    '        run: |\n'
+    '          set +x\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          ulimit -c 0\n'
+    '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_resident_confidential_capture.py\n'
+    '      - name: Retain ciphertext and finite transport receipt only\n'
+    "        if: always() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && matrix.target == "
+    "'aarch64-apple-darwin' && steps.confidential_compiler.outcome == 'success'\n"
+    '        timeout-minutes: 2\n'
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: confidential-resident-compiler-${{ github.sha }}-${{ github.run_id }}-${{ '
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/cargo-capture.cms\n'
+    '            ${{ steps.work.outputs.root }}/resident-compiler-confidential/receipt.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 1\n'
+    '          compression-level: 0\n',
+    ''),)))
+
+
+def without_recent_app_signature_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("recent app signature workflow source bound differs")
+    for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+        if not any(marker in source for marker in markers):
+            continue
+        if any(source.count(current) != 1 or source.count("\n" + current) != 1
+               or (previous and previous in source) for current, previous in replacements):
+            raise AssertionError("recent app signature workflow " + label + " exact delta differs")
+        for current, previous in replacements:
+            source = source.replace("\n" + current, "\n" + previous, 1)
+        if any(marker in source for marker in markers):
+            raise AssertionError("recent app signature workflow " + label + " partial delta remains")
+    return source
+
+
+def without_enrolled_runtime_source_pin(source):
+    # The configured gh profile adds one real SOURCE row. Undo only the
+    # installed workflow's new two-site pin before its exact app-scope inverse.
+    # Unchanged Aqua still uses the old 177-row pin and bypasses this layer.
+    enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    if enrolled in source:
+        configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + enrolled + "\n"
+        guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + enrolled + ' ]] || exit 1\n'
+        if (source.count(enrolled) != 2 or preceding in source
+                or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+            raise AssertionError("current runtime source pin exact two-site delta differs")
+        for line in (configured, guard):
+            source = source.replace("\n" + line, "\n" + line.replace(enrolled, preceding), 1)
+    return source
+
+
 def without_app_signature_workflow(source):
+    source = without_recent_app_signature_workflow(source)
+    source = without_enrolled_runtime_source_pin(source)
     if "verify/desktop-macos-app-signature" not in source:
         return source
     value = source.encode()
@@ -760,19 +871,6 @@ def without_app_signature_workflow(source):
 # This exact current two-site pin delta is independent of the historical
 # workflow additions below. Preserve their complete predecessor hash checks.
 def without_current_runtime_source_pin(source):
-    # The configured gh profile adds one real SOURCE row. Undo only the
-    # installed workflow's new two-site pin before its exact app-scope inverse.
-    # Unchanged Aqua still uses the old 177-row pin and bypasses this layer.
-    enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
-    preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
-    if enrolled in source:
-        configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + enrolled + "\n"
-        guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + enrolled + ' ]] || exit 1\n'
-        if (source.count(enrolled) != 2 or preceding in source
-                or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
-            raise AssertionError("current runtime source pin exact two-site delta differs")
-        for line in (configured, guard):
-            source = source.replace("\n" + line, "\n" + line.replace(enrolled, preceding), 1)
     source = without_app_signature_workflow(source)
     current = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
     previous = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
@@ -1301,6 +1399,58 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def test_exact_recent_app_workflow_projection_preserves_historical_hashes(self):
+        # Bounded SOURCE DATA only; never import a stager or execute a workflow.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        projected = without_recent_app_signature_workflow(source)
+        # Exact e1e4b36 bytes, not a refreshed historical app-predecessor hash.
+        self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
+                         "22ce8c9e9f53b9e5e7fd25c0cb11dc305c3780c204305cc326ec4df07b68033b")
+        self.assertEqual(without_recent_app_signature_workflow(projected), projected)
+        self.assertEqual(without_recent_app_signature_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        app_prior = without_app_signature_workflow(source)
+        self.assertEqual(hashlib.sha256(app_prior.encode()).hexdigest(),
+                         "fdbe8fcc6595ce90cb5cab397b4050cf53c164132198252d6b6ada4be4b83081")
+        self.assertEqual(without_app_signature_workflow(app_prior), app_prior)
+        self.assertEqual(without_current_runtime_source_pin(source), app_prior.replace(
+            "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2",
+            "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"))
+        for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
+            with self.subTest(delta=label):
+                self.assertTrue(any(marker in source for marker in markers))
+                for current, previous in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    # Keep recognized text while breaking a complete line/block.
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        broken = source.replace(current, altered, 1)
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(broken)
+                    if len(replacements) > 1:
+                        with self.assertRaises(AssertionError):
+                            without_recent_app_signature_workflow(source.replace(current, previous, 1))
+                # Exact older intermediate groups remain admissible, not partial groups.
+                intermediate = source
+                for current, previous in replacements:
+                    intermediate = intermediate.replace(current, previous, 1)
+                self.assertEqual(without_recent_app_signature_workflow(intermediate), projected)
+        enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+        for broken in (source.replace(enrolled, preceding, 1),
+                       preceding.join(source.rsplit(enrolled, 1))):
+            for normalize in (without_app_signature_workflow, without_current_runtime_source_pin):
+                with self.assertRaisesRegex(AssertionError, "^current runtime source pin exact two-site delta differs$"):
+                    normalize(broken)
+        # An unrelated change survives companion projection and the old hash refuses it.
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_recent_app_signature_workflow(unrelated), projected + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+
     def restored_android_output_and_xml(self, swift: str) -> str:
         # Exact reviewed insertions only; never broaden historical owner hashes.
         # The separate existing native DATA case exercises the real Swift DFS.

@@ -986,10 +986,11 @@ The ordinary Installer and packaging Aqua routes now call the existing
 `macos_android_helper_package.py notarize-payload --target <fixed-target>`
 phase instead of calling the stager's `input` CLI directly. This is a
 **configured shipping prerequisite**, not an engineering/ad-hoc success path.
-The public `desktop/packaging/macos-notary-service.json` deliberately starts
-as `{"schemaVersion":1,"mode":"unconfigured"}`. Configuring it requires the
-reviewed Developer ID Application team plus a public App Store Connect team
-API `keyId` and canonical `issuerId`; it never contains a private key. The
+The public `desktop/packaging/macos-notary-service.json` now nominates the
+reviewed Developer ID Application team and the owner's public App Store Connect
+team API `keyId` and canonical `issuerId`; it never contains a private key.
+This public enrollment is not proof of authentication, API permission, accepted
+notarization or native stapler compatibility; those remain unverified here. The
 only configured shape has the five fields `schemaVersion`, `mode`
 (`app-store-connect-team-key`), `teamId`, `keyId`, and `issuerId`.
 
@@ -1082,10 +1083,26 @@ Developer ID Installer common name, leaf SHA1 and distinct leaf/issuer/root
 SHA256 values, plus the three public DER originals under
 `macos-installer-certificates/`. These must match the Application team, but the
 Installer leaf must be different. No sample certificates, key or future pins
-are provided. The protected `macos-developer-id` environment supplies the
+are provided. The named `macos-developer-id` environment supplies the
 separate `MRK_MACOS_INSTALLER_P12_BASE64` / `MRK_MACOS_INSTALLER_P12_PASSWORD`
 pair and the existing team P8 API-key secret only to this fixed helper call.
 The Application P12 is not supplied to this phase or substituted for it.
+
+The separate one-time `desktop-macos-installer-certificate-enrollment.yml`
+workflow is restricted to `verify/desktop-macos-installer-certificate-enrollment`
+and the named `macos-developer-id` environment. That name does not establish
+reviewer or branch protection. It uses only the two Installer secret names to
+extract the single public DER leaf nominated by SHA1
+`2176c921a318fd50510672b92022813c4e617fbd`; the Application nomination is unchanged.
+The fixed helper extracts certificates only, performs an exact DER roundtrip,
+and completes private-file cleanup before retaining only `leaf.der` for one day.
+It never imports a keychain identity, extracts a private key, signs, or submits
+to Apple. Bootstrap success is not Team/Installer-role/chain/private-key proof.
+The profile remains unconfigured until the genuine run-bound public leaf and
+its Team, Installer role, validity, and exact Apple chain are independently
+validated. Public profile nomination still cannot replace later actual
+`productsign` and `pkgutil --check-signature` signing, system-trust, and timestamp
+qualification, notarization, or final-package verification.
 
 An exclusive task-private keychain admits only the fixed `productsign` and
 Security clients, the single selected private-key identity and exact public

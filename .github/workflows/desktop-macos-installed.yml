@@ -30,7 +30,7 @@ jobs:
     # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
     # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
     # then one removal owner990 (fixed segment sum963); no budget restart.
-    # App-signature:82 timed preparation +13 bounded setup +7 summary/cleanup/upload;8 overhead.
+    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.
     timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
@@ -383,6 +383,14 @@ jobs:
             [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
             printf 'app-signature-source-inventory-sha256=%s\n' "$inventory_sha" >> "$GITHUB_OUTPUT"
           fi
+      - name: Check fixed optional-array argv before native preparation
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$MRK_PYTHON" -I -S -B \
+            tests/desktop/test_macos_optional_arrays.py \
+            MacOSOptionalArraysTests.test_optional_arrays_preserve_empty_and_quoted_argv_under_nounset -v
       - name: Admit the fixed image Rust tools without installing a distribution
         timeout-minutes: 4
         shell: bash
