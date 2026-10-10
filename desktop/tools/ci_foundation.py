@@ -799,6 +799,8 @@ MAC_HISTORY_CHECKS = {
 MAC_APP_MODE = "app-only"
 # The existing observer graph only: no test execution or installed authority.
 MAC_OBSERVER_MODE = "observer-only"
+# Match the installed DATA compiler stdout budget; other capture roles stay fixed.
+MAC_OBSERVER_STDOUT_LIMIT = 4 * 1024 * 1024
 MAC_OBSERVER_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
                 "node-version", "npm-locked-no-scripts"),
@@ -8970,18 +8972,20 @@ def source_slots_writer(path: Path, stream: TextIO) -> tuple:
     return source_slots_identity(observed)
 
 
-def source_slots_capture_admission(value) -> dict | None:
+def source_slots_capture_admission(value, *, observer: bool = False) -> dict | None:
     """Closed, partial refusal facts only; never a receipt or cleanup grant."""
     try:
-        if type(value) is not dict or set(value) != {
+        if type(observer) is not bool or type(value) is not dict or set(value) != {
                 "schemaVersion", "output", "limitBytes", "writerBytes", "openedBytes",
                 "failedCheck", "readerClosed", "partialObservation"}:
             return None
         limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
-                  "source-slots-compile.stdout": 2 * 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+                  "source-slots-compile.stdout": MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024,
+                  "source-slots-compile.stderr": 1024 * 1024,
                   "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
         if (type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
                 or type(value["output"]) is not str or value["output"] not in limits
+                or observer and value["output"] not in {"source-slots-compile.stdout", "source-slots-compile.stderr"}
                 or type(value["limitBytes"]) is not int or value["limitBytes"] != limits[value["output"]]
                 or any(type(value[key]) is not int or not 0 <= value[key] <= (1 << 63) - 1
                        for key in ("writerBytes", "openedBytes"))
@@ -8996,13 +9000,16 @@ def source_slots_capture_admission(value) -> dict | None:
         return None
 
 
-def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> bytes:
+def source_slots_read(path: Path, expected: tuple, *, retain: bool = False, observer: bool = False) -> bytes:
     # Only the fixed stdout/stderr originals just returned by run() are read.
     # This is bounded post-original admission, not a new streaming IO owner.
+    require(type(observer) is bool, "Unexpected SourceSlots private output")
     limits = {"metadata.json": 16 * 1024 * 1024, "source-slots-metadata.stderr": 1024 * 1024,
-              "source-slots-compile.stdout": 2 * 1024 * 1024, "source-slots-compile.stderr": 1024 * 1024,
+              "source-slots-compile.stdout": MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024,
+              "source-slots-compile.stderr": 1024 * 1024,
               "source-slots-test.stdout": 1024 * 1024, "source-slots-test.stderr": 1024 * 1024}
     require(path.name in limits and type(expected) is tuple and len(expected) == 9
+            and (not observer or path.name in {"source-slots-compile.stdout", "source-slots-compile.stderr"})
             and type(retain) is bool and (not retain or path.name in {
                 "source-slots-compile.stdout", "source-slots-compile.stderr"}),
             "Unexpected SourceSlots private output")
@@ -9050,7 +9057,7 @@ def source_slots_read(path: Path, expected: tuple, *, retain: bool = False) -> b
                 facts = source_slots_capture_admission({
                     "schemaVersion": 1, "output": path.name, "limitBytes": limits[path.name],
                     "writerBytes": expected[6], "openedBytes": observed.st_size,
-                    "failedCheck": failed_check, "readerClosed": True, "partialObservation": True})
+                    "failedCheck": failed_check, "readerClosed": True, "partialObservation": True}, observer=observer)
                 if facts is not None:
                     admission_failure._source_slots_capture_admission = facts
             except BaseException:
@@ -9069,7 +9076,7 @@ def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
 def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str, *, observer: bool = False) -> list[dict]:
     """Only bounded Cargo error DATA; no raw message or foreign path escapes."""
     require(type(observer) is bool, "Observer diagnostic selector must be boolean")
-    require(type(raw) is bytes and 0 < len(raw) <= 2 * 1024 * 1024
+    require(type(raw) is bytes and 0 < len(raw) <= (MAC_OBSERVER_STDOUT_LIMIT if observer else 2 * 1024 * 1024)
             and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
             "SourceSlots diagnostic captures exceed their fixed stdout/stderr bounds")
     packages = (("mobile-release-kit-desktop", "0.1.1", "desktop/src-tauri"),
@@ -9657,8 +9664,8 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
                 compiler_diagnostic = source_slots_diagnostic_unavailable(returned_code, "capture-unavailable")
                 try:
                     remaining(30)
-                    raw = source_slots_read(output_path, originals[0], retain=True)
-                    stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    raw = source_slots_read(output_path, originals[0], retain=True, observer=True)
+                    stderr = source_slots_read(stderr_path, originals[1], retain=True, observer=True)
                     compiler_diagnostic = source_slots_compiler_diagnostic(context, raw, stderr, returned_code,
                                                                           timeout_for=remaining)
                 except BaseException as diagnostic_error:
@@ -9667,8 +9674,8 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
                     # Optional explanation must not replace this original.
             raise primary
         remaining(30)
-        source_slots_read(output_path, originals[0])
-        source_slots_read(stderr_path, originals[1])
+        source_slots_read(output_path, originals[0], observer=True)
+        source_slots_read(stderr_path, originals[1], observer=True)
         remaining(30)
     except BaseException as error:
         first = primary if primary is not None else error
@@ -9682,7 +9689,7 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
         failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
             returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
         try:
-            facts = source_slots_capture_admission(capture_admission)
+            facts = source_slots_capture_admission(capture_admission, observer=True)
             if facts is not None and facts["output"] in {"source-slots-compile.stdout", "source-slots-compile.stderr"}:
                 explained = {**failure, "captureAdmission": facts}
                 if len(json.dumps(explained, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384:

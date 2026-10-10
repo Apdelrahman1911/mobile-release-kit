@@ -3149,6 +3149,51 @@ class ShellCompileContractTests(unittest.TestCase):
                         helper.source_slots_writer(ReadPath("/inert/source-slots-test.stdout"), Writer())
             self.assertFalse(original.closes)  # The surrounding original stream owns close, not this check.
 
+        # Observer-only stdout uses the installed DATA graph's four-MiB budget.
+        # Default stdout and observer stderr stay at two/one MiB respectively.
+        observer_limit = 4 * 1024 * 1024
+        self.assertEqual(helper.MAC_OBSERVER_STDOUT_LIMIT, observer_limit)
+        for observer_mode, name, cap in ((False, "source-slots-compile.stdout", 2 * 1024 * 1024),
+                                         (True, "source-slots-compile.stdout", observer_limit),
+                                         (True, "source-slots-compile.stderr", 1024 * 1024)):
+            for extra in (0, 1):
+                original = OriginalOS(b"x" * (cap + extra), None)
+                expected = helper.source_slots_identity(original.info)
+                path = ReadPath("/inert/target") / name
+                with self.subTest(observer_budget=observer_mode, output=name, extra=extra), patch.object(helper, "os", original):
+                    if extra:
+                        with self.assertRaises(helper.CheckFailure) as refused:
+                            helper.source_slots_read(path, expected, observer=observer_mode)
+                        facts = refused.exception.__dict__["_source_slots_capture_admission"]
+                        self.assertEqual(facts, {"schemaVersion": 1, "output": name, "limitBytes": cap,
+                            "writerBytes": cap + 1, "openedBytes": cap + 1, "failedCheck": "byte-bound",
+                            "readerClosed": True, "partialObservation": True})
+                        self.assertEqual(original.position, 0)
+                        self.assertEqual(helper.source_slots_capture_admission(facts, observer=observer_mode), facts)
+                        if observer_mode and name.endswith("stdout"):
+                            self.assertIsNone(helper.source_slots_capture_admission(facts))
+                    else:
+                        self.assertEqual(helper.source_slots_read(path, expected, observer=observer_mode), b"")
+                        self.assertEqual(original.position, cap)
+                        self.assertEqual(original.fstats, 2)
+                self.assertEqual(original.closes, [77])
+                self.assertEqual(original.opened, [(str(path), actual_os.O_RDONLY | actual_os.O_NOFOLLOW | actual_os.O_CLOEXEC | actual_os.O_NONBLOCK)])
+        original = OriginalOS(b"x" * observer_limit, None)
+        with patch.object(helper, "os", original):
+            retained = helper.source_slots_read(ReadPath("/inert/source-slots-compile.stdout"),
+                helper.source_slots_identity(original.info), retain=True, observer=True)
+        self.assertEqual(retained, original.body)
+        self.assertEqual(original.position, observer_limit)
+        self.assertEqual(original.closes, [77])
+        for mode, name in ((1, "source-slots-compile.stdout"), (None, "source-slots-compile.stdout"),
+                           ("true", "source-slots-compile.stdout"), (True, "metadata.json"),
+                           (True, "source-slots-test.stdout")):
+            original = OriginalOS(b"inert", None)
+            with self.subTest(invalid_observer=mode, output=name), patch.object(helper, "os", original), self.assertRaises(helper.CheckFailure):
+                helper.source_slots_read(ReadPath("/inert") / name, helper.source_slots_identity(original.info), observer=mode)
+            self.assertEqual(original.opened, [])
+            self.assertEqual(original.closes, [])
+
         # Failed Cargo JSON is optional DATA, not a new success/cleanup path.
         # All path names below are inert; only a fixed Git metadata double is
         # consulted, never a SOURCE body, compiler, dependency or native API.
@@ -3577,6 +3622,25 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(helper.source_slots_diagnostic_records(full_frames, b"", source),
                          helper.source_slots_diagnostic_records(short_frames, b"", source))
         self.assertEqual(helper.source_slots_diagnostic_records(short_frames, b"", source)[0]["code"], "E0433")
+        padded_warning = deepcopy(warning)
+        padded_warning["message"]["rendered"] = ""
+        padding = observer_limit - len(cargo_bytes([padded_warning, short_error, terminal]))
+        self.assertGreater(padding, 0)
+        padded_warning["message"]["rendered"] = "x" * padding
+        observer_frames = cargo_bytes([padded_warning, short_error, terminal])
+        self.assertEqual(len(observer_frames), observer_limit)
+        self.assertIn(b'"level":"warning"', observer_frames)
+        self.assertEqual(helper.source_slots_diagnostic_records(observer_frames, b"", source, observer=True),
+                         helper.source_slots_diagnostic_records(short_frames, b"", source, observer=True))
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(observer_frames, b"", source)
+        padded_warning["message"]["rendered"] += "x"
+        over_observer_frames = cargo_bytes([padded_warning, short_error, terminal])
+        self.assertEqual(len(over_observer_frames), observer_limit + 1)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(over_observer_frames, b"", source, observer=True)
+        with self.assertRaises(helper.CheckFailure):
+            helper.source_slots_diagnostic_records(short_frames, b"x" * (1024 * 1024 + 1), source, observer=True)
 
         # Each actual reader predicate is distinguished without an extra lstat,
         # owner query, payload read or close. The original rejection stays identical.
@@ -3621,6 +3685,11 @@ class ShellCompileContractTests(unittest.TestCase):
             "readerClosed": True, "partialObservation": True}
         self.assertEqual(helper.source_slots_capture_admission(valid_facts), valid_facts)
         self.assertIsNot(helper.source_slots_capture_admission(valid_facts), valid_facts)
+        self.assertIsNone(helper.source_slots_capture_admission(valid_facts, observer=True))
+        for mode in (1, None, "true"):
+            self.assertIsNone(helper.source_slots_capture_admission(valid_facts, observer=mode))
+        self.assertIsNone(helper.source_slots_capture_admission(
+            {**valid_facts, "output": "metadata.json", "limitBytes": 16 * 1024 * 1024}, observer=True))
         for key, value in (("schemaVersion", True), ("output", "/private/unselected"), ("limitBytes", True),
                            ("limitBytes", 1024 * 1024), ("limitBytes", 16 * 1024 * 1024), ("writerBytes", True), ("writerBytes", -1),
                            ("openedBytes", 1 << 63), ("openedBytes", 1.0), ("failedCheck", "arbitrary-text"),
@@ -3740,11 +3809,12 @@ class ShellCompileContractTests(unittest.TestCase):
                     events, captures, calls, publications, run_failures, read_failures, closed = [], {}, [], [], [], [], []
                     SlotsPath, writer, memory_read = source_slots_paths(events, captures)
                     admission_calls = []
-                    def optional_interruption(value):
+                    def optional_interruption(value, *, observer=False):
+                        self.assertIs(observer, False)
                         admission_calls.append(value)
                         if len(admission_calls) == interruption_at:
                             raise secondary("inert secondary decoration interrupt")
-                        return actual_admission(value)
+                        return actual_admission(value, observer=observer)
                     with self.subTest(returned_code=code, secondary=secondary.__name__, optional_stage=interruption_at), contextlib.redirect_stdout(io.StringIO()), \
                             patch.object(helper, "Path", SlotsPath), patch.object(helper, "tools", return_value=("/fixed/cargo", None)), \
                             patch.object(helper, "source_unchanged"), patch.object(helper, "source_slots_source_guard"), \
@@ -4045,14 +4115,16 @@ class ShellCompileContractTests(unittest.TestCase):
                 if check == "source-slots-diagnostic-source":
                     return "100644 blob " + "a" * 40 + "\tdesktop/src-tauri/src/bridge.rs\0"
                 return helper.NODE if check == "node-version" else ""
-            def read_observer(path, expected, *, retain=False):
+            bound_observer = observer
+            def read_observer(path, expected, *, retain=False, observer=False):
+                self.assertIs(observer, True)
                 self.assertIn(("closed", str(path)), events)
-                self.assertIn(("closed", observer["root"] + "/target/source-slots-compile.stdout"), events)
-                self.assertIn(("closed", observer["root"] + "/target/source-slots-compile.stderr"), events)
+                self.assertIn(("closed", bound_observer["root"] + "/target/source-slots-compile.stdout"), events)
+                self.assertIn(("closed", bound_observer["root"] + "/target/source-slots-compile.stderr"), events)
                 if fault in ("reader", "overflow"):
                     raise helper.CheckFailure("synthetic " + fault + " original admission")
                 if fault in admission_faults and (fault != "admission-stderr" or path.name == "source-slots-compile.stderr"):
-                    cap = 1024 * 1024 if path.name.endswith("stderr") else 2 * 1024 * 1024
+                    cap = 1024 * 1024 if path.name.endswith("stderr") else observer_limit
                     facts = {"schemaVersion": 1, "output": path.name, "limitBytes": cap,
                         "writerBytes": expected[6] if fault == "admission-stderr" else cap + 1,
                         "openedBytes": expected[6] if fault == "admission-stderr" else cap + 1,
