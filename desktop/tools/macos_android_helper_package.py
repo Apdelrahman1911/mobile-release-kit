@@ -4627,7 +4627,7 @@ class Operation:
                            "--locked", "--release", "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
-                           cwd=self.checkout / WORKSPACE, timeout=480, limit=4 * 1024 * 1024)
+                           cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 480, limit=4 * 1024 * 1024)
         artifact(result.stdout, self.checkout, self.work / self.target_name, build_target=self.target)
         self.stage = "compiler-original-copy"
         release = self.descend(self.target_entry, (self.target, "release"))

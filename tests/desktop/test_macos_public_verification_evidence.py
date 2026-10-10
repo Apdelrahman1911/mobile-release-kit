@@ -1121,12 +1121,24 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             original = write(root, "android-helper-finalize-image.json", value)
             before = original.read_bytes()
             write(root, "image-finalization.status", b"13\n")
+            fixed_statuses = (
+                ("normal-ui/workflow-refusal-test.status", b"0\n", {"receiptState": "observed", "returncode": 0}),
+                ("normal-ui/workflow-refusal-summary.status", b"13\n", {"receiptState": "observed", "returncode": 13}),
+                ("normal-ui/release-evidence-test.status", b"-15\n", {"receiptState": "observed", "returncode": -15}),
+                ("normal-ui/release-evidence-summary.status", b"unavailable\n", {"receiptState": "refused"}),
+            )
+            fixed_names = tuple(name for name, _, _ in fixed_statuses)
+            self.assertEqual(tuple(name for name in DATA.STATUS_FILES if name in fixed_names), fixed_names)
+            fixed_originals = [(write(root, name, body), body) for name, body, _ in fixed_statuses]
             result = project(root)
             phase = result["phases"]["finalize-image"]
             self.assertEqual(phase["receiptState"], "refused")
             self.assertNotIn("recordedPassed", phase)
             self.assertEqual(phase["callerStatus"], {"receiptState": "observed", "returncode": 13})
             self.assertEqual(result["statuses"]["package-install.status"], {"receiptState": "absent"})
+            for (name, _, expected), (path, body) in zip(fixed_statuses, fixed_originals, strict=True):
+                self.assertEqual(result["statuses"][name], expected)
+                self.assertEqual(path.read_bytes(), body)
             self.assertEqual(original.read_bytes(), before)
             self.assertEqual(private.read_bytes(), SENTINEL.encode())
             self.assertEqual(raw_log.read_bytes(), SENTINEL.encode())

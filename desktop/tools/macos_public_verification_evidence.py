@@ -43,6 +43,8 @@ STATUS_FILES = (
     "normal-ui/ios-unsigned-archive-test.status", "normal-ui/ios-unsigned-archive-summary.status",
     *("normal-ui/" + role + suffix for role in ("project", "persistence", "diagnostics", "saved-checks",
       "saved-version-recovery", "github-local-bundle", "removal-ordinary") for suffix in ("-test.status", "-summary.status")),
+    "normal-ui/workflow-refusal-test.status", "normal-ui/workflow-refusal-summary.status",
+    "normal-ui/release-evidence-test.status", "normal-ui/release-evidence-summary.status",
     *("aqua-" + role + ".status" for role in ("project-fields", "android-inputs", "local-edits3", "doctor-preflight2",
       "vault-helper", "installation-inspection", "project-recovery", "ios-account")), "aqua.status",
     "headless-build.status", "headless-tests.status", "headless-native-tests.status",
