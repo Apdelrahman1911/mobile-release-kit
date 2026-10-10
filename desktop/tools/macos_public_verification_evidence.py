@@ -547,7 +547,7 @@ def project_data_contract_failure(value, context, statuses, inventory_paths):
         "originalReturncode", "originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow",
         "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256", "guardCode", "python", "cargo",
         "diagnosticOnly", "productReady"}
-    need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
+    need(type(value) is dict and set(value) in (fields, fields | {"rustPanic"}) and type(value["schemaVersion"]) is int
          and value["schemaVersion"] == 1 and value["kind"] == "mrk-native-data-contract-failure-diagnostics-v1"
          and value["diagnosticOnly"] is True and value["productReady"] is False
          and all(value[name] == context[name] for name in ("source", "workflowSource", "runId", "runAttempt", "target"))
@@ -621,6 +621,19 @@ def project_data_contract_failure(value, context, statuses, inventory_paths):
             projected.append({"code": row["code"], "source": source, "line": line, "column": column})
         # Distinct original rows may project equally; do not invent count changes.
         result["cargo"] = {**cargo, "errors": projected}
+    panic = value.get("rustPanic")  # Legacy absence remains an unknown site.
+    result["rustPanic"] = None
+    if panic is not None:
+        need(closed and value["phase"] == "rust" and code == 101 and value["stderrBytes"] > 0
+             and type(panic) is dict and set(panic) == {"source", "line", "column"})
+        source = panic["source"]
+        need(type(source) is str and 0 < len(source) <= 240 and re.fullmatch(r"[A-Za-z0-9_./-]+", source)
+             and source.endswith(".rs") and all(part not in ("", ".", "..") for part in source.split("/"))
+             and (source.startswith("desktop/src-tauri/src/")
+                  or source == "desktop/src-tauri/tests/installed_shell_observation.rs"))
+        integer(panic["line"], 1000000, 1); integer(panic["column"], 1000000, 1)
+        if source in inventory_paths:
+            result["rustPanic"] = dict(panic)
     return {**result, "receiptState": "observed", "binding": "same-source-run-target-context",
             "callerStatus": dict(caller), "statusMatched": matched, "nativeSuccessInferred": False}
 

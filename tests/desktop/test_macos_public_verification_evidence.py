@@ -213,7 +213,7 @@ def data_contract_diagnostics():
     source = path.read_text().split("<<'PY_DATA_CONTRACTS'\n", 1)[1].rsplit("\nPY_DATA_CONTRACTS", 1)[0]
     tree = ast.parse(source)
     wanted = {"DATA_FAILURE_GUARDS", "data_failure_guard", "data_failure_json", "data_failure_python",
-              "data_failure_cargo", "data_failure_document"}
+              "data_failure_cargo", "data_failure_rust_panic", "data_failure_document"}
     nodes, found, assignments = [], set(), {}
     for node in tree.body:
         name = node.name if isinstance(node, ast.FunctionDef) else (
@@ -237,7 +237,7 @@ def data_contract_diagnostics():
 
 
 def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flags=None,
-                          guard="command-not-complete", source_paths=(), failed_names=None):
+                          guard="command-not-complete", source_paths=(), failed_names=None, stderr=None):
     if raw is None:
         if phase == "python":
             selected = [names[0]] if failed_names is None else failed_names
@@ -252,7 +252,7 @@ def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flag
                    captureClosed=True, timedOut=False, outputOverflow=False)
     command.update(flags or {})
     context = {key: CONTEXT[key] for key in ("source", "workflowSource", "runId", "runAttempt", "target")}
-    return json.loads(data["data_failure_document"](command, {"stdout": raw, "stderr": SENTINEL.encode()},
+    return json.loads(data["data_failure_document"](command, {"stdout": raw, "stderr": SENTINEL.encode() if stderr is None else stderr},
         guard, context, names, source_paths, "/public/checkout"))
 
 
@@ -1289,10 +1289,46 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         with self.assertRaises(DATA.Refused):
             DATA.project_data_contract_failure(value, CONTEXT, {}, set())
 
+    def test_data_contract_failure_rust_site_is_inventory_bound_observation(self):
+        data, names = data_contract_diagnostics()
+        site = "desktop/src-tauri/src/shell/installed_observation.rs"
+        stderr = ("thread 'main' (123) panicked at tests/../src/shell/installed_observation.rs:12:7:\n" + SENTINEL).encode()
+        value = data_contract_failure(data, names, phase="rust", code=101, stderr=stderr, source_paths={site})
+        statuses = {"data-contracts/rust.status": {"receiptState": "observed", "returncode": 101}}
+        row = DATA.project_data_contract_failure(value, CONTEXT, statuses, {site})
+        self.assertEqual(row["rustPanic"], {"source": site, "line": 12, "column": 7})
+        self.assertEqual(row["receiptState"], "observed")
+        self.assertIs(row["statusMatched"], True)
+        self.assertIs(row["nativeSuccessInferred"], False)
+        self.assertNotIn(SENTINEL, json.dumps(row))
+        self.assertIsNone(DATA.project_data_contract_failure(value, CONTEXT, statuses, set())["rustPanic"])
+        for bad in ({}, {"source": site, "line": True, "column": 7},
+                    {"source": site, "line": 0, "column": 7}, {"source": site, "line": 12, "column": 1000001},
+                    {"source": site, "line": 12, "column": 7, "message": SENTINEL},
+                    {"source": "tests/../src/shell/installed_observation.rs", "line": 12, "column": 7},
+                    {"source": "desktop/src-tauri/src/../shell.rs", "line": 12, "column": 7},
+                    {"source": "/private/file.rs", "line": 12, "column": 7},
+                    {"source": "desktop/src-tauri/src/file name.rs", "line": 12, "column": 7},
+                    {"source": "desktop/src-tauri/src/file.py", "line": 12, "column": 7}):
+            broken = copy.deepcopy(value); broken["rustPanic"] = bad
+            with self.subTest(site=bad), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(broken, CONTEXT, {}, {site})
+        for key, bad in (("phase", "python"), ("originalReturncode", 0), ("originalReturncode", 1),
+                         ("stderrBytes", 0), ("originalReturned", False), ("outputComplete", False),
+                         ("captureClosed", False), ("timedOut", True), ("outputOverflow", True)):
+            broken = copy.deepcopy(value); broken[key] = bad
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(broken, CONTEXT, {}, {site})
+        legacy = copy.deepcopy(value); del legacy["rustPanic"]
+        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, statuses, {site})["rustPanic"])
+
     def test_data_contract_failure_closed_schema_and_bounds(self):
         data, names = data_contract_diagnostics()
         base = data_contract_failure(data, names)
-        for key in base:
+        self.assertIsNone(base["rustPanic"])
+        legacy = copy.deepcopy(base); del legacy["rustPanic"]
+        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, {}, set())["rustPanic"])
+        for key in base.keys() - {"rustPanic"}:
             value = copy.deepcopy(base); del value[key]
             with self.subTest(missing=key), self.assertRaises(DATA.Refused):
                 DATA.project_data_contract_failure(value, CONTEXT, {}, set())
@@ -1350,6 +1386,26 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertIs(row["statusMatched"], True)
             self.assertIs(row["nativeSuccessInferred"], False)
             self.assertEqual([path.read_bytes() for path in [sidecar] + raw], before)
+            self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+        site = "desktop/src-tauri/src/shell/installed_observation.rs"
+        stderr = ("thread 'main' panicked at tests/../src/shell/installed_observation.rs:12:7:\n" + SENTINEL).encode()
+        rust = data_contract_failure(data, names, phase="rust", code=101, stderr=stderr, source_paths={site})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sidecar = write(root, "data-contracts/failure-diagnostics.json", rust)
+            inventory = write(root, "source-inventory.json", {"source": CONTEXT["source"], "tree": "2" * 40,
+                "files": [{"path": site, "gitMode": "100644", "blob": "3" * 40, "size": 1, "sha256": "4" * 64}]})
+            originals = [sidecar, inventory] + [write(root, name, body) for name, body in (
+                ("data-contracts/rust.stdout", b""), ("data-contracts/rust.stderr", stderr),
+                ("data-contracts/result.json", SENTINEL.encode()))]
+            before = [path.read_bytes() for path in originals]
+            write(root, "data-contracts/rust.status", b"101\n")
+            row = project(root)["dataContractFailure"]
+            self.assertEqual(row["receiptState"], "observed")
+            self.assertEqual(row["rustPanic"], {"source": site, "line": 12, "column": 7})
+            self.assertIs(row["statusMatched"], True)
+            self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertEqual([path.read_bytes() for path in originals], before)
             self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
         for raw in (b"{}", b"x" * 16385, b'{"schemaVersion":1,"schemaVersion":1}'):
             with tempfile.TemporaryDirectory() as directory:

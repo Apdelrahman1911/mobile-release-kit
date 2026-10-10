@@ -18,7 +18,7 @@ def reducers():
     source = shell.split("<<'PY_DATA_CONTRACTS'\n", 1)[1].rsplit("\nPY_DATA_CONTRACTS", 1)[0]
     tree = ast.parse(source)
     wanted = {"DATA_FAILURE_GUARDS", "data_failure_guard", "data_failure_json", "data_failure_python",
-              "data_failure_cargo", "data_failure_document"}
+              "data_failure_cargo", "data_failure_rust_panic", "data_failure_document"}
     nodes, found = [], set()
     for node in tree.body:
         name = node.name if isinstance(node, ast.FunctionDef) else (
@@ -139,6 +139,49 @@ class MacDataContractFailureDiagnostics(unittest.TestCase):
                      b" " * 65537, encoded(rows[0]) + b"\ntruncated", b"[]", b"x" * (4 * 1024 * 1024 + 1)):
             self.assertIsNone(parse(body, {}, "/public/checkout"))
 
+    def test_rust_panic_location_uses_only_closed_inventory_site(self):
+        data, _, _, _ = reducers(); parse = data["data_failure_rust_panic"]
+        site = "desktop/src-tauri/src/shell/installed_observation.rs"
+        observer = "desktop/src-tauri/tests/installed_shell_observation.rs"
+        paths = {site: {}, observer: {}}
+        def capture(path=site, coordinates="12:7", thread="'main' (123)"):
+            return ("\nthread " + thread + " panicked at " + path + ":" + coordinates + ":\n" + SENTINEL + "\n").encode()
+        expected = {"source": site, "line": 12, "column": 7}
+        for path in (site, "/public/checkout/" + site, "tests/../src/shell/installed_observation.rs",
+                     "desktop/src-tauri/tests/../src/shell/installed_observation.rs",
+                     "/public/checkout/desktop/src-tauri/tests/../src/shell/installed_observation.rs"):
+            for thread in ("'main'", "'main' (123)", "'<unnamed>' (1)"):
+                with self.subTest(path=path, thread=thread):
+                    self.assertEqual(parse(capture(path, thread=thread), paths, "/public/checkout"), expected)
+        self.assertEqual(parse(capture("tests/installed_shell_observation.rs"), paths, "/public/checkout"),
+                         {"source": observer, "line": 12, "column": 7})
+        self.assertEqual(parse(capture(coordinates="1000000:1000000"), paths, "/public/checkout"),
+                         {"source": site, "line": 1000000, "column": 1000000})
+        self.assertNotIn(SENTINEL, json.dumps(parse(capture(), paths, "/public/checkout")))
+        self.assertIsNone(parse(capture(), {}, "/public/checkout"))
+        for path in ("/foreign/" + site, "src/shell/installed_observation.rs", "tests/../src/../shell.rs",
+                     "desktop/src-tauri/src/./shell.rs", "desktop/src-tauri/src//shell.rs",
+                     site + "/../other.rs", "desktop/src-tauri/src/file name.rs", site + "\x1b", site + "é",
+                     "desktop/src-tauri/tests/../../src/shell.rs", "tests/../src/.hidden/../shell.rs"):
+            with self.subTest(path=path):
+                self.assertIsNone(parse(capture(path), paths, "/public/checkout"))
+        for coordinates in ("0:1", "1:0", "1000001:1", "1:1000001", "True:7", "-1:7", "1:7:8"):
+            self.assertIsNone(parse(capture(coordinates=coordinates), paths, "/public/checkout"))
+        header = capture().split(b"\n")[1]
+        for raw in (b"", b"\xff", header[:-1], header + b" inline payload", capture() + header + b"\n",
+                    capture(thread="'" + "x" * 129 + "'"), capture(thread="'ma\tin'"), b"x" * 1025,
+                    b"unrelated first line\n" + header, header.replace(b"thread", b"\xffthread", 1)):
+            self.assertIsNone(parse(raw, paths, "/public/checkout"))
+        exact = header + b"\n" + b"x" * (65536 - len(header) - 1)
+        self.assertEqual(parse(exact, paths, "/public/checkout"), expected)
+        self.assertIsNone(parse(exact + b"x", paths, "/public/checkout"))
+        lines = header + b"\n" + b"x\n" * 254
+        self.assertEqual(len(lines.split(b"\n")), 256)
+        self.assertEqual(parse(lines, paths, "/public/checkout"), expected)
+        self.assertIsNone(parse(lines + b"x\n", paths, "/public/checkout"))
+        # Payload bytes are not decoded or copied, even if they are not UTF-8.
+        self.assertEqual(parse(header + b"\n\xff", paths, "/public/checkout"), expected)
+
     def test_guard_mapping_uses_only_current_exact_builtin_errors(self):
         data, _, source, _ = reducers()
         guard = data["data_failure_guard"]
@@ -176,6 +219,21 @@ class MacDataContractFailureDiagnostics(unittest.TestCase):
         row = call(dict(command, returnCode=0), "source-post")
         self.assertEqual(row["originalReturncode"], 0); self.assertFalse(row["productReady"])
         self.assertLessEqual(len(encoded(row)), 16384)
+        site = "desktop/src-tauri/src/shell/installed_observation.rs"
+        stderr = ("thread 'main' panicked at tests/../src/shell/installed_observation.rs:12:7:\n" + SENTINEL).encode()
+        rust = dict(command, phase="rust", returnCode=101)
+        rust_call = lambda c: json.loads(data["data_failure_document"](c, {"stdout": b"", "stderr": stderr},
+            "command-not-complete", context, names, {site}, "/public/checkout"))
+        self.assertEqual(rust_call(rust)["rustPanic"], {"source": site, "line": 12, "column": 7})
+        self.assertIsNone(result["rustPanic"])
+        for flag in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow"):
+            changed = dict(rust); changed[flag] = not changed[flag]
+            self.assertIsNone(rust_call(changed)["rustPanic"])
+        for phase in ("mount", "apfs", "build", "python"):
+            self.assertIsNone(rust_call(dict(rust, phase=phase))["rustPanic"])
+        for code in (0, 1, -9, None):
+            self.assertIsNone(rust_call(dict(rust, returnCode=code))["rustPanic"])
+        self.assertNotIn(SENTINEL, json.dumps(rust_call(rust)))
         with self.assertRaises(ValueError):
             data["data_failure_document"](dict(command, returnCode=True), output, "source-post", context, names, {}, "/public/checkout")
 
@@ -184,6 +242,7 @@ class MacDataContractFailureDiagnostics(unittest.TestCase):
         self.assertEqual(source.count('subprocess.Popen('), 1)
         self.assertEqual(source.count('for phase in ("mount", "apfs", "build", "rust", "python"):'), 1)
         self.assertEqual(source.count('put("failure-diagnostics.json", supplement)'), 1)
+        self.assertIn('rustPanic=data_failure_rust_panic(captures["stderr"], source_paths, checkout) if classified and phase == "rust" and code == 101 else None', source)
         self.assertIn('if failure is not None and diagnostic_output is not None:', source)
         self.assertIn('        except BaseException:\n            pass\n    put("result.json",', source)
         self.assertIn('if failure is not None: raise SystemExit(1)', source)

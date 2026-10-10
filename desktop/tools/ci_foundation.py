@@ -17,6 +17,7 @@ else:
     _OFFLINE_CLI11_STARTED_NS = None
 
 import argparse
+import ast
 from contextlib import contextmanager
 import hashlib
 import json
@@ -800,12 +801,30 @@ MAC_APP_MODE = "app-only"
 # The existing observer graph only: no test execution or installed authority.
 MAC_OBSERVER_MODE = "observer-only"
 # Match the installed DATA compiler stdout budget; other capture roles stay fixed.
+MAC_OBSERVER_DATA_MODE = "observer-data"
+MAC_OBSERVER_DATA_EVIDENCE = "desktop-macos-observer-data-v1"
+MAC_OBSERVER_DATA_SCRIPT = "desktop/tools/macos_installed_data_contracts.sh"
+MAC_OBSERVER_DATA_SELECTION_SHA256 = "0fd968d2c78e233df8cc344ae3ff27d417bd3c76fb5bde42b3ea8d393f8e7a94"
+MAC_OBSERVER_DATA_PHASES = ("mount", "apfs", "build", "rust", "python")
+# The exact 21 distinct SOURCE producer codes plus its existing unknown code.
+MAC_OBSERVER_DATA_GUARDS = (
+    "command-not-complete", "filesystem-header", "filesystem-row", "filesystem-volume", "filesystem-native-volume",
+    "cargo-build-finished", "cargo-debug-artifact", "cargo-artifact-path", "cargo-artifact-shape",
+    "cargo-artifact-original", "cargo-artifact-eof", "cargo-artifact-postimage", "rust-aggregate-marker",
+    "python-counts", "source-post", "temporary-post", "temporary-nonempty", "fixed-input-shape",
+    "fixed-input-changed", "output-bound", "output-changed", "unclassified",
+)
+MAC_OBSERVER_DATA_GRAPH = ("mac-observer-fixed-data", *MAC_COMPILE_GRAPHS[1][1:])
 MAC_OBSERVER_STDOUT_LIMIT = 4 * 1024 * 1024
 MAC_OBSERVER_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
                 "node-version", "npm-locked-no-scripts"),
     "compile": ("rust-version-target", "mac-cargo-version", "node-version",
                 "typescript-no-emit", "vite-assets", "mac-observer-compile-only"),
+}
+MAC_OBSERVER_DATA_CHECKS = {
+    "acquire": MAC_OBSERVER_CHECKS["acquire"],
+    "compile": (*MAC_OBSERVER_CHECKS["compile"][:-1], "mac-observer-fixed-data"),
 }
 MAC_APP_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
@@ -2808,7 +2827,7 @@ VERSION_NATIVE_SOURCES = tuple(sorted({
 TOOL_CHECKS = frozenset({
     "mac-cargo-version", "mac-normal-locked-metadata", "mac-image-locked-metadata",
     "mac-vault-locked-metadata", "mac-vault-bin-compile-only",
-    "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only",
+    "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-observer-fixed-data", "mac-image-compile-only",
     "source-head", "source-tree", "source-clean", "rust-toolchain-install",
     "cargo-selection", "rustc-selection", "rust-version-target", "locked-platform-metadata",
     "mac-source-slots-locked-metadata", "mac-source-slots-data-test", "source-slots-diagnostic-source",
@@ -2909,8 +2928,10 @@ def mac_compile_graphs(target: str, mode: str) -> tuple:
     """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
     require(target in MAC_COMPILE_HOSTS and type(mode) is str
             and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE)
-                 or mode in ("vault-only", MAC_OBSERVER_MODE) and target == "aarch64-apple-darwin"),
+                 or mode in ("vault-only", MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) and target == "aarch64-apple-darwin"),
             "Normal Mac compiler graph mode differs")
+    if mode == MAC_OBSERVER_DATA_MODE:
+        return (MAC_OBSERVER_DATA_GRAPH,)
     if mode == MAC_OBSERVER_MODE:
         return MAC_COMPILE_GRAPHS[1:2]
     if mode == MAC_APP_MODE:
@@ -2925,11 +2946,13 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
     selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
     mac_compile_graphs(target, mode)
     require(environment.get("MRK_MACOS_TARGET") == target
-            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE)
+            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE)
             and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                  or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
             "Normal Mac compiler selection differs")
-    require((selection == MAC_OBSERVER_MODE and mode == MAC_OBSERVER_MODE
+    require((selection == MAC_OBSERVER_DATA_MODE and mode == MAC_OBSERVER_DATA_MODE
+              and target == "aarch64-apple-darwin" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_OBSERVER_MODE and mode == MAC_OBSERVER_MODE
              and target == "aarch64-apple-darwin" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
             or (selection == MAC_APP_MODE and mode == MAC_APP_MODE
              and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
@@ -2941,11 +2964,17 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
             or (selection == "remaining" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                 and mode == ("vault-only" if target == "aarch64-apple-darwin" else "full4")),
             "Normal Mac compiler selected row differs")
+    if mode == MAC_OBSERVER_DATA_MODE:
+        require(all(type(environment.get(key)) is str and re.fullmatch(r"[1-9][0-9]{0,15}", environment[key]) is not None
+                    and int(environment[key]) <= 9007199254740991 for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
+                "Observer DATA run identity differs")
     return mode
 
 
 def mac_compile_checks(target: str, mode: str) -> dict:
     mac_compile_graphs(target, mode)
+    if mode == MAC_OBSERVER_DATA_MODE:
+        return MAC_OBSERVER_DATA_CHECKS
     if mode == MAC_OBSERVER_MODE:
         return MAC_OBSERVER_CHECKS
     if mode == MAC_APP_MODE:
@@ -3023,7 +3052,8 @@ def mac_compile_inputs(source: Path, target: str, mode: str) -> dict:
     return {"target": target, "mode": mode, "release": release, "sources": rows,
             "graphs": [list(row) for row in graphs],
             **({"execution": "compile-and-selected-data", "tests": list(MAC_HISTORY_TESTS)}
-               if mode == MAC_HISTORY_MODE else {"execution": "compile-only"})}
+               if mode == MAC_HISTORY_MODE else {"execution": "compile-and-fixed-data", "data": mac_observer_data_inputs(source)[0]}
+                if mode == MAC_OBSERVER_DATA_MODE else {"execution": "compile-only"})}
 
 
 def mac_compile_source_guard(source: Path, root: Path) -> None:
@@ -3186,7 +3216,7 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
                 "Normal Mac compiler receipt graphs differ")
         selected = mac_compile_checks(mac["target"], mac["mode"])
         expected.update(sourceTree=context["sourceTree"], macCompile=mac,
-                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE) else None,
+                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else None,
                         checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
         if mac["mode"] == MAC_HISTORY_MODE:
             require(mac.get("execution") == "compile-and-selected-data" and type(mac.get("tests")) is list
@@ -3194,6 +3224,14 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
             expected["scope"] = MAC_HISTORY_EVIDENCE
             if phase == "compile":
                 expected["testResult"] = validate_mac_history_result(value.get("testResult"))
+        if mac["mode"] == MAC_OBSERVER_DATA_MODE:
+            require(mac.get("execution") == "compile-and-fixed-data", "Observer DATA receipt execution differs")
+            selected_data = mac_observer_data_binding(mac.get("data"))
+            expected["scope"] = MAC_OBSERVER_DATA_EVIDENCE
+            if phase == "compile":
+                expected["dataResult"] = validate_mac_observer_data_result(value.get("dataResult"))
+                require(expected["dataResult"]["sourceInventorySha256"] == selected_data["sourceInventorySha256"],
+                        "Observer DATA receipt source differs")
     if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if phase == "compile":
@@ -3310,7 +3348,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
-        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test", "mac-observer-compile-only",
+        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test", "mac-observer-compile-only", "mac-observer-fixed-data",
         "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
@@ -3335,8 +3373,10 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
         # local paths or captured output. These labels come only from fixed code.
         failure = CheckFailure(f"Fixed check {check} exited {error.returncode}")
         # Private acknowledgement of this subprocess.run return, not a native
-        # finality/cleanup grant. Unknown, timeout and signal returns lack it.
-        if type(error.returncode) is int and 0 < error.returncode <= 255:
+        # finality/cleanup grant. The fixed full-DATA wrapper also preserves a
+        # returned signal code; it never grants its inner originals finality.
+        if type(error.returncode) is int and (0 < error.returncode <= 255
+                or check == "mac-observer-fixed-data" and -255 <= error.returncode < 0):
             failure._returned_command = (check, error.returncode)
         raise failure from None
     except subprocess.TimeoutExpired:
@@ -7307,7 +7347,7 @@ def clean_github_tls(context: dict) -> None:
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
                   scope: str = "passive-development-foundation-only", compiled: dict | None = None,
                   main_compiled: dict | None = None, source_slots_result: dict | None = None,
-                  mac_history_result: dict | None = None) -> None:
+                  mac_history_result: dict | None = None, mac_observer_result: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
@@ -7322,6 +7362,12 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                 and node == NODE and compiled is None and main_compiled is None and source_slots_result is None,
                 "Unexpected Mac History DATA result")
         value["testResult"] = validate_mac_history_result(mac_history_result)
+    if mac_observer_result is not None:
+        require(context.get("executionScope") == MAC_COMPILE_SCOPE and name == "compile"
+                and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE and node == NODE
+                and compiled is None and main_compiled is None and source_slots_result is None and mac_history_result is None,
+                "Unexpected observer DATA result")
+        value["dataResult"] = validate_mac_observer_data_result(mac_observer_result)
     if source_slots_result is not None:
         require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
                 and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
@@ -7351,6 +7397,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
             value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
             if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
                 value["scope"] = MAC_HISTORY_EVIDENCE
+            if context["macCompile"]["mode"] == MAC_OBSERVER_DATA_MODE:
+                value["scope"] = MAC_OBSERVER_DATA_EVIDENCE
         if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if context["executionScope"] == SOURCE_SLOTS_SCOPE:
@@ -7871,7 +7919,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         }
     if profile:
         public.update(binding)
-        if scope != SOURCE_SLOTS_SCOPE and not (scope == MAC_COMPILE_SCOPE and mac_mode == MAC_HISTORY_MODE):
+        if scope != SOURCE_SLOTS_SCOPE and not (scope == MAC_COMPILE_SCOPE and mac_mode in (MAC_HISTORY_MODE, MAC_OBSERVER_DATA_MODE)):
             public["notQualified"].append("test-execution")
     if scope == SOURCE_SLOTS_SCOPE:
         compiler = compiler_binding(context)
@@ -7894,6 +7942,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
             public["scope"] = MAC_HISTORY_EVIDENCE
             public["notQualified"].extend(("other-tests", "live-History", "remote-Apply", "provider-deployment"))
+        if context["macCompile"]["mode"] == MAC_OBSERVER_DATA_MODE:
+            public["scope"] = MAC_OBSERVER_DATA_EVIDENCE
+            public["notQualified"].extend(("other-tests", "installed-effective-toolchain", "installed-runtime", "native-TLS", "vault-tests", "all-worker-finality"))
         public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
     if scope == ENGINEERING_COMPILE_SCOPE:
         compiler = compiler_binding(context)
@@ -9618,6 +9669,392 @@ def mac_history_data_checks(cargo: str, root: Path, source: Path, target: str, e
     return validate_mac_history_result(result)
 
 
+def mac_observer_data_selection(raw: bytes) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Only the one SOURCE heredoc and its existing fixed DATA rosters."""
+    require(type(raw) is bytes and 0 < len(raw) <= 128 * 1024,
+            "Observer DATA SOURCE exceeds its bound")
+    text = raw.decode("utf-8", "strict")
+    opening, closing = "<<'PY_DATA_CONTRACTS'\n", "\nPY_DATA_CONTRACTS\n"
+    require(text.count(opening) == 1 and text.count(closing) == 1 and text.endswith(closing),
+            "Observer DATA SOURCE heredoc differs")
+    body = text.split(opening, 1)[1][:-len(closing)] + "\n"
+    module = ast.parse(body)
+    assignments = {}
+    for node in module.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in {"source_names", "names"}:
+                require(name not in assignments, "Observer DATA SOURCE roster is repeated")
+                assignments[name] = ast.literal_eval(node.value)
+    sources, tests = assignments.get("source_names"), assignments.get("names")
+    require(type(sources) is tuple and len(sources) == 78
+            and all(type(name) is str and len(name) <= 240
+                    and re.fullmatch(r"[A-Za-z0-9_./+-]+", name) is not None
+                    and not name.startswith("/") and not any(part in {"", ".", ".."} for part in name.split("/"))
+                    for name in sources) and len(set(sources)) == 78
+            and MAC_OBSERVER_DATA_SCRIPT in sources,
+            "Observer DATA SOURCE roster differs")
+    require(type(tests) is list and len(tests) == 84 and all(type(name) is str for name in tests)
+            and len(set(tests)) == 84
+            and hashlib.sha256(json.dumps(tests, separators=(",", ":")).encode()).hexdigest()
+                == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA fixed selection differs")
+    return body, sources, tuple(tests)
+
+
+def mac_observer_data_read(path: Path, limit: int, *, private: bool = False) -> bytes:
+    """Bounded original SOURCE/context/result read; never compiler captures."""
+    require(type(private) is bool and type(limit) is int and limit in {16384, 128 * 1024, 4 * 1024 * 1024},
+            "Observer DATA input bound differs")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info = os.fstat(descriptor)
+        before = source_slots_identity(info)
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1
+                and 0 < info.st_size <= limit and before == source_slots_identity(path.lstat())
+                and (stat.S_IMODE(info.st_mode) == 0o600 if private else not info.st_mode & 0o022),
+                "Observer DATA input is not an original bounded file")
+        chunks, left = [], info.st_size
+        while left:
+            block = os.read(descriptor, min(left, 65536))
+            require(bool(block), "Observer DATA original input ended early")
+            chunks.append(block)
+            left -= len(block)
+        require(os.read(descriptor, 1) == b"" and source_slots_identity(os.fstat(descriptor)) == before
+                and source_slots_identity(path.lstat()) == before,
+                "Observer DATA original input changed")
+        body = b"".join(chunks)
+        del chunks
+        # Two bounded observations of this SAME original descriptor, including
+        # persistent same-size rewrites within one filesystem timestamp tick.
+        # This is not an atomic snapshot or a continuous/ABA exclusion claim.
+        offset = 0
+        while offset < len(body):
+            block = os.pread(descriptor, min(len(body) - offset, 65536), offset)
+            require(bool(block) and block == body[offset:offset + len(block)],
+                    "Observer DATA original input bytes changed")
+            offset += len(block)
+        require(os.pread(descriptor, 1, offset) == b""
+                and source_slots_identity(os.fstat(descriptor)) == before
+                and source_slots_identity(path.lstat()) == before,
+                "Observer DATA original input changed after byte revalidation")
+        return body
+    finally:
+        os.close(descriptor)
+
+
+def mac_observer_data_inputs(source: Path) -> tuple[dict, bytes, list[dict], tuple[str, ...]]:
+    raw = mac_observer_data_read(source / MAC_OBSERVER_DATA_SCRIPT, 128 * 1024)
+    body, names, tests = mac_observer_data_selection(raw)
+    total = 0
+    for name in names:
+        path = source / name
+        ordinary(path)
+        size = path.stat().st_size
+        require(0 < size <= 2 * 1024 * 1024, "Observer DATA selected SOURCE exceeds its bound")
+        total += size
+    require(total <= 32 * 1024 * 1024, "Observer DATA SOURCE aggregate exceeds its bound")
+    rows = fixed_file_inventory(source, tuple(sorted(names)))
+    require(all(0 < row["size"] <= 2 * 1024 * 1024 for row in rows)
+            and sum(row["size"] for row in rows) <= 32 * 1024 * 1024,
+            "Observer DATA selected SOURCE changed its bound")
+    inventory = canonical_json({"files": rows}) + b"\n"
+    require(len(inventory) <= 128 * 1024, "Observer DATA inventory exceeds its bound")
+    selected = {"sourceCount": 78, "sourceInventorySha256": hashlib.sha256(inventory).hexdigest(),
+                "scriptSha256": hashlib.sha256(raw).hexdigest(), "pythonCount": 84,
+                "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256}
+    require(next(row for row in rows if row["path"] == MAC_OBSERVER_DATA_SCRIPT)["sha256"] == selected["scriptSha256"],
+            "Observer DATA original script changed")
+    return selected, body.encode("utf-8"), rows, tests
+
+
+def mac_observer_data_binding(value: object) -> dict:
+    closed_object(value, {"sourceCount", "sourceInventorySha256", "scriptSha256", "pythonCount", "selectionSha256"},
+                  "Observer DATA input binding shape differs")
+    require(type(value["sourceCount"]) is int and value["sourceCount"] == 78
+            and type(value["pythonCount"]) is int and value["pythonCount"] == 84
+            and sha256_value(value["sourceInventorySha256"]) and sha256_value(value["scriptSha256"])
+            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA input binding differs")
+    return value
+
+
+def validate_mac_observer_data_result(value: object) -> dict:
+    """Only complete fixed DATA can join a positive compiler cleanup receipt."""
+    keys = {"schemaVersion", "wrapperReturnCode", "sourceInventorySha256", "sourceCount", "selectionSha256",
+            "pythonExpectedCount", "commands", "artifact", "aggregatePassed", "pythonCounts", "sourcePost",
+            "temporaryEmpty", "rustPanic", "guardCode", "pythonFailure", "nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified",
+            "allWorkerFinalityEstablished"}
+    closed_object(value, keys, "Observer DATA public result shape differs")
+    require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+            and type(value["wrapperReturnCode"]) is int and value["wrapperReturnCode"] == 0
+            and sha256_value(value["sourceInventorySha256"])
+            and type(value["sourceCount"]) is int and value["sourceCount"] == 78
+            and value["selectionSha256"] == MAC_OBSERVER_DATA_SELECTION_SHA256
+            and type(value["pythonExpectedCount"]) is int and value["pythonExpectedCount"] == 84,
+            "Observer DATA source/selection/original return differs")
+    require(type(value["commands"]) is list and len(value["commands"]) == 5,
+            "Observer DATA original command roster differs")
+    for phase, row in zip(MAC_OBSERVER_DATA_PHASES, value["commands"]):
+        closed_object(row, {"phase", "originalReturned", "returnCode", "outputComplete", "captureClosed", "timedOut", "outputOverflow"},
+                      "Observer DATA original command shape differs")
+        require(row["phase"] == phase and type(row["returnCode"]) is int and row["returnCode"] == 0
+                and all(row[key] is True for key in ("originalReturned", "outputComplete", "captureClosed"))
+                and row["timedOut"] is False and row["outputOverflow"] is False,
+                "Observer DATA original command did not pass")
+    artifact = closed_object(value["artifact"], {"sha256", "bytes", "unchangedAfterRun", "originalClosed"},
+                             "Observer DATA artifact shape differs")
+    require(sha256_value(artifact["sha256"]) and integer_between(artifact["bytes"], 1, 1024 * 1024 * 1024)
+            and artifact["unchangedAfterRun"] is True and artifact["originalClosed"] is True,
+            "Observer DATA artifact did not settle")
+    counts = closed_object(value["pythonCounts"], {"testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"},
+                           "Observer DATA Python counts differ")
+    require(type(counts["testsRun"]) is int and counts["testsRun"] == 84
+            and all(type(counts[key]) is int and counts[key] == 0 for key in counts if key != "testsRun")
+            and value["aggregatePassed"] is True and value["sourcePost"] is True and value["temporaryEmpty"] is True
+            and value["rustPanic"] is None and value["guardCode"] is None and value["pythonFailure"] is None
+            and all(value[key] is False for key in ("nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified", "allWorkerFinalityEstablished")),
+            "Observer DATA original counts/finality differ")
+    return value
+
+
+def mac_observer_data_result(value: object, context: dict, wrapper_returncode: int, *, failure: object = None) -> dict:
+    """Copy only finite original facts; no private receipt/path/message export."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin"
+            and integer_between(wrapper_returncode, -255, 255), "Observer DATA result admission differs")
+    selected = mac_observer_data_binding(context["macCompile"]["data"])
+    require(type(value) is dict and value.get("scope") == "ci-observer-fixed-data-and-selected-host-python-regressions"
+            and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+            and value.get("sourceCommit") == context["sourceSha"] and value.get("sourceTree") == context["sourceTree"]
+            and value.get("sourceInventorySha256") == selected["sourceInventorySha256"]
+            and value.get("frozenSelectionSha256") == MAC_OBSERVER_DATA_SELECTION_SHA256
+            and type(value.get("pythonExpectedCount")) is int and value["pythonExpectedCount"] == 84
+            and value.get("ciContext") == {key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")},
+            "Observer DATA private result context differs")
+    source_rows = value.get("sourceRows")
+    require(type(source_rows) is list and len(source_rows) == 78,
+            "Observer DATA private SOURCE roster differs")
+    source_names = []
+    for row in source_rows:
+        closed_object(row, {"path", "size", "sha256"}, "Observer DATA private SOURCE row differs")
+        require(type(row["path"]) is str and 0 < len(row["path"]) <= 240
+                and re.fullmatch(r"[A-Za-z0-9_./+-]+", row["path"]) is not None
+                and not row["path"].startswith("/") and not any(part in {"", ".", ".."} for part in row["path"].split("/"))
+                and integer_between(row["size"], 1, 2 * 1024 * 1024) and sha256_value(row["sha256"]),
+                "Observer DATA private SOURCE row differs")
+        source_names.append(row["path"])
+    require(len(set(source_names)) == 78 and sum(row["size"] for row in source_rows) <= 32 * 1024 * 1024
+            and hashlib.sha256(canonical_json({"files": sorted(source_rows, key=lambda row: row["path"])}) + b"\n").hexdigest()
+                == selected["sourceInventorySha256"], "Observer DATA private SOURCE inventory differs")
+    names = value.get("pythonTestIds")
+    require(type(names) is list and len(names) == 84 and all(type(name) is str for name in names)
+            and len(set(names)) == 84
+            and hashlib.sha256(json.dumps(names, separators=(",", ":")).encode()).hexdigest() == MAC_OBSERVER_DATA_SELECTION_SHA256,
+            "Observer DATA private Python selection differs")
+    commands = value.get("commands")
+    require(type(commands) is list and 0 <= len(commands) <= 5, "Observer DATA private command roster differs")
+    result = {"schemaVersion": 1, "wrapperReturnCode": wrapper_returncode,
+              "sourceInventorySha256": selected["sourceInventorySha256"], "sourceCount": 78,
+              "selectionSha256": MAC_OBSERVER_DATA_SELECTION_SHA256, "pythonExpectedCount": 84,
+              "commands": [], "artifact": None, "aggregatePassed": None, "pythonCounts": None,
+              "sourcePost": None, "temporaryEmpty": None, "rustPanic": None, "guardCode": None, "pythonFailure": None,
+              "nativeVaultTestsExecuted": False, "uiExecutedByThisBatch": False,
+              "nativeTlsQualified": False, "allWorkerFinalityEstablished": False}
+    for phase, row in zip(MAC_OBSERVER_DATA_PHASES, commands):
+        require(type(row) is dict and row.get("phase") == phase, "Observer DATA private command order differs")
+        copied = {"phase": phase}
+        for key in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow"):
+            item = row.get(key)
+            require(item is None or type(item) is bool, "Observer DATA original flag differs")
+            copied[key] = item
+        code = row.get("returnCode")
+        require(code is None or integer_between(code, -255, 255), "Observer DATA original code differs")
+        copied["returnCode"] = code
+        result["commands"].append(copied)
+    artifact = value.get("artifact")
+    if artifact is not None:
+        require(type(artifact) is dict and sha256_value(artifact.get("sha256"))
+                and type(artifact.get("identity")) is list and len(artifact["identity"]) == 9
+                and integer_between(artifact["identity"][6], 1, 1024 * 1024 * 1024)
+                and type(artifact.get("unchangedAfterRun")) is bool and type(artifact.get("originalClosed")) is bool,
+                "Observer DATA private artifact differs")
+        result["artifact"] = {"sha256": artifact["sha256"], "bytes": artifact["identity"][6],
+                              "unchangedAfterRun": artifact["unchangedAfterRun"], "originalClosed": artifact["originalClosed"]}
+    counts = value.get("pythonCounts")
+    if counts is not None:
+        require(type(counts) is dict and counts.get("testIds") == names and counts.get("actualHostBeforeAndAfter") is True,
+                "Observer DATA private Python counts differ")
+        result["pythonCounts"] = {}
+        for key in ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses"):
+            require(integer_between(counts.get(key), 0, 84), "Observer DATA private Python count differs")
+            result["pythonCounts"][key] = counts[key]
+    for old, new in (("ciAggregatePassed", "aggregatePassed"), ("ciSourcePost", "sourcePost"), ("ciTemporaryEmpty", "temporaryEmpty")):
+        item = value.get(old)
+        require(item is None or type(item) is bool, "Observer DATA private finality differs")
+        result[new] = item
+    # The existing SOURCE producer already reduces private captures. This is
+    # only a closed-field projection of its same-original sidecar, not a new
+    # capture parser or an additional success/cleanup authority.
+    if failure is not None:
+        require(type(failure) is dict and bool(result["commands"]), "Observer DATA diagnostic shape differs")
+        row = result["commands"][-1]
+        flags = ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")
+        require(all(type(failure.get(key)) is bool and failure[key] is row[key] for key in flags)
+                and failure.get("kind") == "mrk-native-data-contract-failure-diagnostics-v1"
+                and type(failure.get("schemaVersion")) is int and failure["schemaVersion"] == 1
+                and (failure.get("originalReturncode") is None or type(failure["originalReturncode"]) is int)
+                and failure.get("originalReturncode") == row["returnCode"]
+                and failure.get("diagnosticOnly") is True and failure.get("productReady") is False
+                and failure.get("phase") == row["phase"]
+                and failure.get("source") == context["sourceSha"] and failure.get("workflowSource") == context["workflowSha"]
+                and failure.get("runId") == context["runId"] and failure.get("runAttempt") == context["attempt"]
+                and failure.get("target") == context["macCompile"]["target"],
+                "Observer DATA diagnostic original context differs")
+        guard = failure.get("guardCode")
+        require(type(guard) is str and guard in MAC_OBSERVER_DATA_GUARDS, "Observer DATA diagnostic guard differs")
+        result["guardCode"] = guard
+        classified = (all(row[key] is True for key in ("originalReturned", "outputComplete", "captureClosed"))
+                      and row["timedOut"] is False and row["outputOverflow"] is False)
+        panic = failure.get("rustPanic")
+        if panic is not None:
+            require(classified and row["phase"] == "rust" and row["returnCode"] == 101,
+                    "Observer DATA panic original differs")
+            closed_object(panic, {"source", "line", "column"}, "Observer DATA panic shape differs")
+            require(type(panic["source"]) is str and len(panic["source"]) <= 240
+                    and re.fullmatch(r"[A-Za-z0-9_./+-]+\.rs", panic["source"]) is not None
+                    and not panic["source"].startswith("/") and not any(part in {"", ".", ".."} for part in panic["source"].split("/"))
+                    and panic["source"] in source_names
+                    and (panic["source"].startswith("desktop/src-tauri/src/")
+                         or panic["source"] == "desktop/src-tauri/tests/installed_shell_observation.rs")
+                    and integer_between(panic["line"], 1, 1000000) and integer_between(panic["column"], 1, 1000000),
+                    "Observer DATA panic location differs")
+            result["rustPanic"] = {key: panic[key] for key in ("source", "line", "column")}
+        python = failure.get("python")
+        if python is not None:
+            require(classified and row["phase"] == "python", "Observer DATA Python diagnostic original differs")
+            count_keys = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+            extra = ("actualHostBeforeAndAfter", "failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
+            closed_object(python, set(count_keys + extra), "Observer DATA Python diagnostic shape differs")
+            require(all(integer_between(python[key], 0, 84 if key == "testsRun" else 65535) for key in count_keys)
+                    and type(python["actualHostBeforeAndAfter"]) is bool
+                    and type(python["failureTests"]) is list and len(python["failureTests"]) <= 16,
+                    "Observer DATA Python diagnostic counts differ")
+            pairs, copied_rows = [], []
+            for item in python["failureTests"]:
+                closed_object(item, {"kind", "id"}, "Observer DATA failing test shape differs")
+                require(type(item["id"]) is str and item["id"] in names
+                        and type(item["kind"]) is str and item["kind"] in ("failure", "error"),
+                        "Observer DATA failing test differs")
+                pairs.append((item["kind"], item["id"]))
+                copied_rows.append({key: item[key] for key in ("kind", "id")})
+            expected = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in pairs]
+            classified_count, omitted, unknown = (python[key] for key in extra[2:])
+            require(pairs == expected and len(set(pairs)) == len(pairs)
+                    and integer_between(classified_count, 0, 168) and integer_between(omitted, 0, 152)
+                    and integer_between(unknown, 0, 65535) and classified_count == len(pairs) + omitted
+                    and classified_count + unknown <= python["failures"] + python["errors"]
+                    and all(sum(item["kind"] == kind for item in copied_rows) <= python[key]
+                            for kind, key in (("failure", "failures"), ("error", "errors"))),
+                    "Observer DATA failing test order/counts differ")
+            result["pythonFailure"] = {key: python[key] for key in count_keys + extra if key != "failureTests"}
+            result["pythonFailure"]["failureTests"] = copied_rows
+    require(type(value.get("passed")) is bool, "Observer DATA private status differs")
+    if wrapper_returncode == 0:
+        require(value["passed"] is True and value.get("failure") is None,
+                "Observer DATA wrapper returned zero without a positive original result")
+        validate_mac_observer_data_result(result)
+    return result
+
+
+def mac_observer_data_checks(cargo, root, source, environment, remaining, context) -> dict:
+    """One exact SOURCE Python body owns the existing five bounded originals."""
+    check, returned_code, primary, projected = "mac-observer-fixed-data", None, None, None
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos"
+            and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_DATA_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin"
+            and context.get("workflowPath") == MAC_COMPILE_WORKFLOW
+            and Path(context["root"]) == root and Path(context["source"]) == source,
+            "Observer DATA requires its exact original CI context")
+    try:
+        selected, body, rows, _ = mac_observer_data_inputs(source)
+        require(same_compile_json(selected, context["macCompile"].get("data")), "Observer DATA source binding changed")
+        context_raw = mac_observer_data_read(root / "context.json", 128 * 1024, private=True)
+        require(same_compile_json(bounded_json(context_raw, 128 * 1024), context), "Observer DATA original context changed")
+        binary = Path("/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin")
+        require(cargo == str(binary / "cargo") and environment.get("RUSTC") == str(binary / "rustc")
+                and environment.get("RUSTUP_AUTO_INSTALL") == "0", "Observer DATA selected compiler differs")
+        observed = root.lstat()
+        require(stat.S_ISDIR(observed.st_mode) and observed.st_uid == os.geteuid()
+                and not observed.st_mode & 0o077, "Observer DATA original root differs")
+        allowance = remaining(1680)
+        require(type(allowance) is int and allowance > 30, "Observer DATA has no containing settlement reserve")
+        request = {"schemaVersion": 1, "admission": "ci-observer-data-v1",
+                   "contextSha256": hashlib.sha256(context_raw).hexdigest(),
+                   "rootIdentity": [observed.st_dev, observed.st_ino, observed.st_uid],
+                   "compiler": {**compiler_binding(context), "cargo": cargo, "rustc": str(binary / "rustc")},
+                   "inventory": {"files": rows},
+                   "deadlineMonotonicNs": time.monotonic_ns() + (allowance - 30) * 1000000000}
+        require(len(canonical_json(request)) + 1 <= 65536, "Observer DATA private request exceeds its bound")
+        write_json(root / "target/observer-data-request.json", request)
+        # Build from the fixed clean policy again, not any arbitrary extra key
+        # a caller placed in the already-checked compiler environment.
+        child_environment = clean_environment(root)
+        child_environment.update(PATH=str(binary) + os.pathsep + child_environment["PATH"],
+            RUSTC=str(binary / "rustc"), RUSTUP_AUTO_INSTALL="0", CARGO_TARGET_DIR=str(root / "target"), CARGO_BUILD_JOBS="1",
+            MRK_MACOS_DATA_MODE="ci-observer-data-v1", MRK_DESKTOP_CI_ROOT=str(root), MRK_MACOS_TARGET="aarch64-apple-darwin",
+            GITHUB_WORKSPACE=str(source), GITHUB_SHA=context["sourceSha"], GITHUB_WORKFLOW_SHA=context["workflowSha"],
+            GITHUB_WORKFLOW_REF=context["workflowRef"], GITHUB_RUN_ID=context["runId"], GITHUB_RUN_ATTEMPT=context["attempt"],
+            GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF=MAC_COMPILE_REF, MRK_EXPECTED_SHA=context["sourceSha"],
+            MRK_MACOS_INSTALL_SOURCE_COMMIT=context["sourceSha"], MRK_IMAGE_RELEASE_ID=context["macCompile"]["release"])
+        try:
+            run([sys.executable, "-I", "-S", "-B", "-c", body.decode("utf-8")], check=check, cwd=root,
+                env=child_environment, timeout=allowance, output=subprocess.DEVNULL, diagnostics=subprocess.DEVNULL)
+            returned_code = 0
+        except BaseException as error:
+            primary = error
+            if type(error) is CheckFailure:
+                witness = error.__dict__.get("_returned_command")
+                if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                        and integer_between(witness[1], -255, 255) and witness[1] != 0):
+                    returned_code = witness[1]
+        # Never read a growing child result after an unknown return/timeout.
+        if returned_code is not None:
+            remaining(30)
+            private = bounded_json(mac_observer_data_read(root / "target/data-contracts/result.json", 4 * 1024 * 1024, private=True),
+                                   4 * 1024 * 1024)
+            projected = mac_observer_data_result(private, context, returned_code)
+            if returned_code != 0:
+                try:
+                    remaining(15)
+                    supplement = bounded_json(mac_observer_data_read(root / "target/data-contracts/failure-diagnostics.json", 16384, private=True), 16384)
+                    projected = mac_observer_data_result(private, context, returned_code, failure=supplement)
+                except BaseException:
+                    pass  # Optional diagnostics never replace the original or fixed phase facts.
+        if primary is not None:
+            raise primary
+        require(returned_code == 0 and projected is not None, "Observer DATA original result unavailable")
+        remaining(30)
+        require(same_compile_json(mac_observer_data_inputs(source)[0], selected), "Observer DATA SOURCE changed after originals")
+        return validate_mac_observer_data_result(projected)
+    except BaseException as error:
+        first = primary if primary is not None else error
+        failure = {"schemaVersion": 1, "scope": MAC_OBSERVER_DATA_EVIDENCE, "phase": "compile",
+                   "status": "failed-or-unknown", "lastFixedStage": check,
+                   "originalCommandReturnCode": returned_code, "dataResult": projected, "macCompile": context["macCompile"],
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")}}
+        try:
+            for optional in ("pythonFailure", "guardCode", "rustPanic"):
+                if len(canonical_json(failure)) + 1 > 16384 and projected is not None:
+                    projected = {**projected, optional: None}
+                    failure["dataResult"] = projected
+            require(len(canonical_json(failure)) + 1 <= 16384, "Observer DATA public receipt exceeds its bound")
+            write_json(root / "compile-checks.json", failure)
+        except BaseException:
+            pass
+        raise first from None
+
+
 def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict, remaining, context: dict) -> None:
     """One fixed no-run original through run(); no installed receipt or new owner."""
     require(context.get("executionScope") == MAC_COMPILE_SCOPE
@@ -9734,7 +10171,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     started = time.monotonic()
     # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
     # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
-    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE) else 1500
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else 1500
     deadline = started + budget
     previous = started
     def remaining(cap: int) -> int:
@@ -9758,7 +10195,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     desktop, manifest = source / "desktop", source / "desktop/src-tauri/Cargo.toml"
     image_manifest = source / "desktop/helpers/macos-desktop-image/Cargo.toml"
     vault_manifest = source / MAC_COMPILE_VAULT_GRAPH[1]
-    history_result = None
+    history_result = observer_result = None
     if name == "acquire":
         # Distinct locked graphs never unify their incompatible native roles.
         # The actual vault metadata supplies the existing root slot when alone.
@@ -9774,9 +10211,9 @@ def phase_mac_compile(name: str, context: dict) -> None:
                 ("mac-source-slots-locked-metadata", manifest, ["--features", "development-runtime"], root / "target/mac-history-metadata.json"),
                 ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json"),
             ]
-        if mode in (MAC_APP_MODE, MAC_OBSERVER_MODE):
+        if mode in (MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
             metadata = [("mac-normal-locked-metadata", manifest,
-                         ["--features", MAC_COMPILE_GRAPHS[1 if mode == MAC_OBSERVER_MODE else 0][3]], root / "metadata.json")]
+                         ["--features", MAC_COMPILE_GRAPHS[1 if mode in (MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else 0][3]], root / "metadata.json")]
         for check, cargo_manifest, features, output_path in metadata:
             with output_path.open("x", encoding="utf-8") as output:
                 run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -9790,12 +10227,12 @@ def phase_mac_compile(name: str, context: dict) -> None:
         # Fail fast on the small separate helper BEFORE frontend or app linkage.
         if mode == MAC_HISTORY_MODE:
             history_result = mac_history_data_checks(cargo, root, source, target, environment, remaining, context)
-        elif mode not in (MAC_APP_MODE, MAC_OBSERVER_MODE):
+        elif mode not in (MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
             run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
                 check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
         remaining(30)
     observed = None
-    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE):
+    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE):
         node = shutil.which("node")
         require(node is not None, "Selected Node unavailable")
         observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
@@ -9815,7 +10252,9 @@ def phase_mac_compile(name: str, context: dict) -> None:
                 check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
             if mode == MAC_OBSERVER_MODE:
                 mac_observer_compile(cargo, root, source, environment, remaining, context)
-            for check, relative, profile, features, artifact in (() if mode == MAC_OBSERVER_MODE else
+            if mode == MAC_OBSERVER_DATA_MODE:
+                observer_result = mac_observer_data_checks(cargo, root, source, environment, remaining, context)
+            for check, relative, profile, features, artifact in (() if mode in (MAC_OBSERVER_MODE, MAC_OBSERVER_DATA_MODE) else
                     MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
                 argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
                 if profile == "test":
@@ -9835,6 +10274,8 @@ def phase_mac_compile(name: str, context: dict) -> None:
     remaining(30)
     if mode == MAC_HISTORY_MODE:
         phase_receipt(context, name, list(selected_checks[name]), node=observed, mac_history_result=history_result)
+    elif mode == MAC_OBSERVER_DATA_MODE:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed, mac_observer_result=observer_result)
     else:
         phase_receipt(context, name, list(selected_checks[name]), node=observed)
     # Retained receipt bytes never override a late original phase failure.

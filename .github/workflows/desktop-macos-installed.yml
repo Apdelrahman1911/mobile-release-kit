@@ -4578,6 +4578,114 @@ jobs:
               if not value: raise ValueError(reason)
 
 
+          def compile_public_data(value, source, run_id, run_attempt):
+              """Closed prior compile observations, never receipt-publication authority."""
+              def check(ok):
+                  need(ok, 'compile-public-data')
+
+              def digest(item):
+                  check(type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item) is not None)
+                  return item
+
+              def integer(item, low, high):
+                  check(type(item) is int and low <= item <= high)
+                  return item
+
+              def nullable_bool(item):
+                  check(item is None or type(item) is bool)
+                  return item
+
+              roles = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
+                       'npm-ci', 'frontend-build', 'shipping-image-build')
+              fact_names = ('originalPending', 'sourcePost', 'toolsPost', 'frontendGenerated',
+                            'facadeArtifactVerified', 'inputOriginalsKnown', 'toolOriginalsClosed',
+                            'generatedOutputsRetired', 'shippingGraphCompiled', 'installedQualified',
+                            'runtimeQualified', 'launched', 'signed', 'pythonControllerPrepared',
+                            'pythonControllerPost', 'pythonControllerRetired')
+              conditions = ('controller-record', 'controller-base', 'controller-row', 'controller-roster',
+                            'controller-file', 'controller-config', 'controller-runtime', 'controller-original-changed',
+                            'controller-total', 'controller-directory', 'controller-short-read', 'controller-deadline',
+                            'controller-unexpected-process', 'controller-work-root', 'controller-template',
+                            'controller-publication', 'controller-source-copy', 'controller-operation',
+                            'cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
+                            'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
+                            'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
+              owner_reasons = ('incomplete-output', 'output-bound', 'protocol-or-ownership',
+                               'command-failed-or-incomplete', 'cleanup-unconfirmed', 'exec-rejected',
+                               'stopped-before-exec', 'parent-ended', 'observer-ended', 'fence-collision', 'unknown')
+              check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
+                    and source != '0' * 40 and all(type(item) is str and re.fullmatch(r'[1-9][0-9]{0,19}', item)
+                                                 for item in (run_id, run_attempt)))
+              fixed = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target='aarch64-apple-darwin')
+              check(type(value.get('schemaVersion')) is int and all(value.get(key) == item for key, item in fixed.items()))
+              facts = {}
+              for name in fact_names:
+                  check(name not in value or type(value[name]) is bool)
+                  facts[name] = value.get(name)
+              check(type(facts['shippingGraphCompiled']) is bool
+                    and all(facts[name] is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed')))
+              rows = value.get('commands')
+              check(type(rows) is list and len(rows) <= len(roles))
+              commands = []
+              for index, row in enumerate(rows):
+                  check(type(row) is dict and row.get('role') == roles[index]
+                        and type(row.get('returned')) is bool and type(row.get('capturesSettled')) is bool)
+                  out = integer(row.get('stdoutBytes'), 0, 4096 if index < 4 else 4 * 1024 * 1024)
+                  err = integer(row.get('stderrBytes'), 0, 4096 if index < 4 else 4 * 1024 * 1024)
+                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))
+                  commands.append(dict(role=roles[index], returned=row['returned'], capturesSettled=row['capturesSettled'],
+                                       returncode=integer(row.get('returncode'), -(2**31), 2**31 - 1),
+                                       stdoutBytes=out, stderrBytes=err,
+                                       stdoutSha256=digest(row.get('stdoutSha256')), stderrSha256=digest(row.get('stderrSha256'))))
+              inventory = None
+              if 'sourceInventoryBytes' in value or 'sourceInventorySha256' in value:
+                  inventory = dict(bytes=integer(value.get('sourceInventoryBytes'), 1, 2 * 1024 * 1024),
+                                   sha256=digest(value.get('sourceInventorySha256')))
+              facade = None
+              if 'facadeArtifact' in value:
+                  item = value['facadeArtifact']
+                  check(type(item) is dict)
+                  facade = dict(bytes=integer(item.get('bytes'), 1, 256 * 1024 * 1024), sha256=digest(item.get('sha256')))
+              failure = None
+              if value.get('failure') is not None:
+                  item = value['failure']
+                  check(type(item) is dict)
+                  stages = ('python-base', 'python-create', 'python-census', 'python-publication', 'admission',
+                            'source-tool-post', 'generated-cleanup', 'tool-close', 'public-capture') + roles
+                  stage, condition = item.get('stage'), item.get('condition')
+                  check(type(stage) is str and (condition is None or type(condition) is str))
+                  failure = dict(stage=stage if stage in stages else 'other',
+                                 condition=condition if condition in conditions else None if condition is None else 'unclassified',
+                                 ownerDiagnostic=None)
+                  if 'ownerDiagnostic' in item:
+                      observed = item['ownerDiagnostic']
+                      check(type(observed) is dict and type(observed.get('available')) is bool)
+                      typed = observed.get('typedFacts', [])
+                      check(type(typed) is list and len(typed) <= 16
+                            and (observed['available'] or not typed))
+                      projected = []
+                      for row in typed:
+                          check(type(row) is dict and type(row.get('kind')) is str and row['kind'] in ('process-error', 'interrupted')
+                                and type(row.get('reason')) is str and row['reason'] in owner_reasons)
+                          mask = row.get('ownerFailureMask')
+                          check(mask is None or type(mask) is int and 1 <= mask <= 63)
+                          projected.append(dict(kind=row['kind'], reason=row['reason'], ownerFailureMask=mask,
+                                                **{key: nullable_bool(row.get(key)) for key in ('dispatched', 'contained', 'cleanupComplete')}))
+                      failure['ownerDiagnostic'] = dict(available=observed['available'], typedFacts=projected,
+                                                        chainTruncated=nullable_bool(observed.get('chainTruncated')))
+              if facts['shippingGraphCompiled']:
+                  check(len(commands) == len(roles) and all(row['returned'] and row['capturesSettled'] and row['returncode'] == 0 for row in commands)
+                        and facts['originalPending'] is False and failure is None and inventory is not None and facade is not None
+                        and all(facts[name] is True for name in ('sourcePost', 'toolsPost', 'frontendGenerated', 'facadeArtifactVerified',
+                            'inputOriginalsKnown', 'toolOriginalsClosed', 'generatedOutputsRetired', 'pythonControllerPrepared',
+                            'pythonControllerPost', 'pythonControllerRetired')))
+              result = dict(kind='mrk-public-shipping-compile-evidence-v1', **fixed, facts=facts,
+                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)
+              check(len((json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')) <= 16384)
+              return result
+
+
           prep_start = time.monotonic()
           prep_work_end, prep_hard_end = prep_start + 45, prep_start + 60
 
@@ -4918,7 +5026,7 @@ jobs:
                              pythonControllerPost=False, pythonControllerRetired=False,
                              inputOriginalsKnown=originals_known, shippingGraphCompiled=False,
                              installedQualified=False, runtimeQualified=False, launched=False, signed=False)
-              try: publish_preparation('compile-receipt.json', failure, cleanup=True)
+              try: publish_preparation('compile-receipt.json', compile_public_data(failure, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), cleanup=True)
               except BaseException: pass  # Never overwrite/retry a partial public original.
               raise SystemExit(1)
           PY_SHIPPING_COMPILE_ADMIT
@@ -4942,6 +5050,114 @@ jobs:
           "$MRK_PYTHON" -I -S -B - <<'PY_SHIPPING_IMAGE_COMPILE'
           import hashlib, importlib.util, json, math, os, re, shutil, stat, subprocess, sys, time, tomllib
           from pathlib import Path
+
+          def compile_public_data(value, source, run_id, run_attempt):
+              """Closed prior compile observations, never receipt-publication authority."""
+              def check(ok):
+                  need(ok, 'compile-public-data')
+
+              def digest(item):
+                  check(type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item) is not None)
+                  return item
+
+              def integer(item, low, high):
+                  check(type(item) is int and low <= item <= high)
+                  return item
+
+              def nullable_bool(item):
+                  check(item is None or type(item) is bool)
+                  return item
+
+              roles = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
+                       'npm-ci', 'frontend-build', 'shipping-image-build')
+              fact_names = ('originalPending', 'sourcePost', 'toolsPost', 'frontendGenerated',
+                            'facadeArtifactVerified', 'inputOriginalsKnown', 'toolOriginalsClosed',
+                            'generatedOutputsRetired', 'shippingGraphCompiled', 'installedQualified',
+                            'runtimeQualified', 'launched', 'signed', 'pythonControllerPrepared',
+                            'pythonControllerPost', 'pythonControllerRetired')
+              conditions = ('controller-record', 'controller-base', 'controller-row', 'controller-roster',
+                            'controller-file', 'controller-config', 'controller-runtime', 'controller-original-changed',
+                            'controller-total', 'controller-directory', 'controller-short-read', 'controller-deadline',
+                            'controller-unexpected-process', 'controller-work-root', 'controller-template',
+                            'controller-publication', 'controller-source-copy', 'controller-operation',
+                            'cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
+                            'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
+                            'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
+              owner_reasons = ('incomplete-output', 'output-bound', 'protocol-or-ownership',
+                               'command-failed-or-incomplete', 'cleanup-unconfirmed', 'exec-rejected',
+                               'stopped-before-exec', 'parent-ended', 'observer-ended', 'fence-collision', 'unknown')
+              check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
+                    and source != '0' * 40 and all(type(item) is str and re.fullmatch(r'[1-9][0-9]{0,19}', item)
+                                                 for item in (run_id, run_attempt)))
+              fixed = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+                           workflowSource=source, runId=run_id, runAttempt=run_attempt, target='aarch64-apple-darwin')
+              check(type(value.get('schemaVersion')) is int and all(value.get(key) == item for key, item in fixed.items()))
+              facts = {}
+              for name in fact_names:
+                  check(name not in value or type(value[name]) is bool)
+                  facts[name] = value.get(name)
+              check(type(facts['shippingGraphCompiled']) is bool
+                    and all(facts[name] is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed')))
+              rows = value.get('commands')
+              check(type(rows) is list and len(rows) <= len(roles))
+              commands = []
+              for index, row in enumerate(rows):
+                  check(type(row) is dict and row.get('role') == roles[index]
+                        and type(row.get('returned')) is bool and type(row.get('capturesSettled')) is bool)
+                  out = integer(row.get('stdoutBytes'), 0, 4096 if index < 4 else 4 * 1024 * 1024)
+                  err = integer(row.get('stderrBytes'), 0, 4096 if index < 4 else 4 * 1024 * 1024)
+                  check(out + err <= (4096 if index < 4 else 4 * 1024 * 1024))
+                  commands.append(dict(role=roles[index], returned=row['returned'], capturesSettled=row['capturesSettled'],
+                                       returncode=integer(row.get('returncode'), -(2**31), 2**31 - 1),
+                                       stdoutBytes=out, stderrBytes=err,
+                                       stdoutSha256=digest(row.get('stdoutSha256')), stderrSha256=digest(row.get('stderrSha256'))))
+              inventory = None
+              if 'sourceInventoryBytes' in value or 'sourceInventorySha256' in value:
+                  inventory = dict(bytes=integer(value.get('sourceInventoryBytes'), 1, 2 * 1024 * 1024),
+                                   sha256=digest(value.get('sourceInventorySha256')))
+              facade = None
+              if 'facadeArtifact' in value:
+                  item = value['facadeArtifact']
+                  check(type(item) is dict)
+                  facade = dict(bytes=integer(item.get('bytes'), 1, 256 * 1024 * 1024), sha256=digest(item.get('sha256')))
+              failure = None
+              if value.get('failure') is not None:
+                  item = value['failure']
+                  check(type(item) is dict)
+                  stages = ('python-base', 'python-create', 'python-census', 'python-publication', 'admission',
+                            'source-tool-post', 'generated-cleanup', 'tool-close', 'public-capture') + roles
+                  stage, condition = item.get('stage'), item.get('condition')
+                  check(type(stage) is str and (condition is None or type(condition) is str))
+                  failure = dict(stage=stage if stage in stages else 'other',
+                                 condition=condition if condition in conditions else None if condition is None else 'unclassified',
+                                 ownerDiagnostic=None)
+                  if 'ownerDiagnostic' in item:
+                      observed = item['ownerDiagnostic']
+                      check(type(observed) is dict and type(observed.get('available')) is bool)
+                      typed = observed.get('typedFacts', [])
+                      check(type(typed) is list and len(typed) <= 16
+                            and (observed['available'] or not typed))
+                      projected = []
+                      for row in typed:
+                          check(type(row) is dict and type(row.get('kind')) is str and row['kind'] in ('process-error', 'interrupted')
+                                and type(row.get('reason')) is str and row['reason'] in owner_reasons)
+                          mask = row.get('ownerFailureMask')
+                          check(mask is None or type(mask) is int and 1 <= mask <= 63)
+                          projected.append(dict(kind=row['kind'], reason=row['reason'], ownerFailureMask=mask,
+                                                **{key: nullable_bool(row.get(key)) for key in ('dispatched', 'contained', 'cleanupComplete')}))
+                      failure['ownerDiagnostic'] = dict(available=observed['available'], typedFacts=projected,
+                                                        chainTruncated=nullable_bool(observed.get('chainTruncated')))
+              if facts['shippingGraphCompiled']:
+                  check(len(commands) == len(roles) and all(row['returned'] and row['capturesSettled'] and row['returncode'] == 0 for row in commands)
+                        and facts['originalPending'] is False and failure is None and inventory is not None and facade is not None
+                        and all(facts[name] is True for name in ('sourcePost', 'toolsPost', 'frontendGenerated', 'facadeArtifactVerified',
+                            'inputOriginalsKnown', 'toolOriginalsClosed', 'generatedOutputsRetired', 'pythonControllerPrepared',
+                            'pythonControllerPost', 'pythonControllerRetired')))
+              result = dict(kind='mrk-public-shipping-compile-evidence-v1', **fixed, facts=facts,
+                            commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)
+              check(len((json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')) <= 16384)
+              return result
+
 
           TARGET = 'aarch64-apple-darwin'
           RUST_RELEASE = '1.98.1'
@@ -5612,7 +5828,7 @@ jobs:
                   receipt['toolOriginals'] = [dict(path=str(row['path']), identity=row['identity'], sha256=row['sha256'],
                                                   observedShape=row['observedShape']) for row in tools]
                   receipt['inputOriginalsKnown'] = input_originals_known
-                  # Public fixed-source compiler output only; no binary/cache/runtime/signing upload.
+                  # Local captured compiler originals only; never included in the artifact.
                   try:
                       for name, raw in outputs.items(): publish(name, raw, CAPTURE)
                   except BaseException as error:
@@ -5620,7 +5836,7 @@ jobs:
                   receipt['inputOriginalsKnown'] = input_originals_known
                   receipt['shippingGraphCompiled'] = passed_data(receipt)
                   try:
-                      publish('compile-receipt.json', (json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii'), 65536)
+                      publish('compile-receipt.json', (json.dumps(compile_public_data(receipt, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii'), 65536)
                       cut(True); root_post()
                   except BaseException:
                       # Never replace an original child failure or retry a partial public file.
@@ -5639,11 +5855,4 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           path: |
-            ${{ steps.compile_work.outputs.root }}/source-inventory.json
             ${{ steps.compile_work.outputs.root }}/compile-receipt.json
-            ${{ steps.compile_work.outputs.root }}/npm-ci.stdout
-            ${{ steps.compile_work.outputs.root }}/npm-ci.stderr
-            ${{ steps.compile_work.outputs.root }}/frontend-build.stdout
-            ${{ steps.compile_work.outputs.root }}/frontend-build.stderr
-            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stdout
-            ${{ steps.compile_work.outputs.root }}/shipping-image-build.stderr
