@@ -23,14 +23,15 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
-    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.
-    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.
-    # Remove preview adds90 nominal step maxima; this sum establishes no fit.
-    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.
+    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.
+    # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
+    # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.
+    # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.
     # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
     # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
     # then one removal owner990 (fixed segment sum963); no budget restart.
-    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.
+    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup
+    # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.
     timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
@@ -1202,7 +1203,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Build the ordinary selected-target desktop image and embedded frontend
         id: app_build
-        timeout-minutes: 24
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}
         shell: bash
         env:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
@@ -1232,7 +1233,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
             remover_features=macos-installed-removal-abrupt-fixture
           fi
-          # Same24-minute app-build budget; no independent timeout entitlement.
+          # Same architecture-selected app-build budget; no independent timeout entitlement.
           # This current SOURCE role cannot embed its not-yet-created inventory.
           set +e
           PATH="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 "/Users/runner/.rustup/toolchains/stable-$MRK_MACOS_TARGET/bin/cargo" build \

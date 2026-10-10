@@ -9,9 +9,11 @@ Rust, Node.js or the CLI to try the application.
 
 ## Before installing
 
-- **Supported preview machine:** Apple Silicon (ARM64), macOS 26.
-  Intel Macs, older macOS releases, upgrades and moving the installation are
-  not qualified by this package.
+- **Verification targets:** Apple Silicon (ARM64) and Intel (x86_64), macOS 26.
+  The workflow checks separate architecture-specific packages; a configured
+  target or running job is not a supported-delivery claim. Use only the exact
+  target whose required completed checks and distribution evidence are accepted.
+  Older macOS releases, upgrades and moving the installation remain unqualified.
 - Use a disposable/synthetic mobile project. Do not provide production signing
   material, live Store credentials or private release data for this early test.
 - **Ordinary V2 installation requires the configured, SOURCE-selected producer
@@ -55,7 +57,9 @@ checks into native notarization, downloaded-install or Gatekeeper evidence.
 ## Retrieve the matching temporary artifacts
 
 In GitHub Actions, open the exact reviewed run and attempt, then its **Artifacts**.
-For this supported ARM64 preview, `<target>` is `aarch64-apple-darwin`.
+Use `<target>` = `aarch64-apple-darwin` for Apple Silicon or
+`x86_64-apple-darwin` for Intel, matching the actual package and reviewed job.
+Neither target is qualified merely because its artifact exists.
 Download the two separate artifacts with the same target, full source commit,
 run ID and run attempt:
 
@@ -122,20 +126,24 @@ Subject to the existing per-request runtime, document and ownership checks:
   release-version editing through the existing scoped transaction owners.
 - Evidence-folder selection and session-only GitHub read-only integration.
 - Supported session-only signing-input selection/assessment.
-- The unsigned iOS archive path, which still needs a compatible Xcode/build
-  environment and all existing admission checks.
+- The Android build/source-selection and unsigned iOS archive paths. Android
+  still requires its admitted external toolchain, license acknowledgments and
+  signing inputs; iOS requires a compatible Xcode/build environment. All existing
+  admission checks and journey-specific native qualification remain required.
 
 This is source-selected scope, **not acceptance of those journeys on this new
 normal binary**. External Android/iOS build tools are not bundled; tool
 requirements and native qualification still apply.
 
-The newly integrated edit/evidence/GitHub paths above still need real normal-app
-journey verification; source integration and Linux checks are not Mac acceptance.
-Still unavailable or not qualified here: project-relative field-picker journeys;
-image selection/import; persistent credentials; authenticated release dispatch;
-active doctor; offline preflight; project recovery; signed iOS export and iOS
-recovery. No Store mutation, public release, promotion, complete Android/iOS
-lifecycle or full feature parity is claimed.
+The paths above still need real normal-app journey verification; source
+integration and Linux checks are not Mac acceptance. Source also contains gated
+candidates for project-relative field-picker journeys, image selection/import,
+persistent credentials, build-tool diagnostics, offline preflight and project
+recovery. These implemented paths remain unqualified for this delivery; their
+presence does not establish an accepted UI journey or permission to bypass a refusal.
+Authenticated release dispatch, signed iOS export and iOS recovery are not
+claimed by this preview. No Store mutation, public release, promotion, complete
+Android/iOS lifecycle or full feature parity is claimed.
 
 ## Small manual acceptance checklist
 

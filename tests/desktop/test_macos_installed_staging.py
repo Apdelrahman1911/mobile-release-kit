@@ -1193,6 +1193,50 @@ PUBLIC_VERIFICATION_WORKFLOW_MARKERS = ('public_evidence',
  '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n')
 
 
+# Exact Intel-only app-build allocation, before every historical workflow layer.
+# Marker-free old intermediates stay unchanged; whole-predecessor hashes remain authoritative.
+INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE = (('    # Raw timed-step union535min; disjoint scopes retain the350min hard job cap.\n'
+  '    # Pre-Remove baseline preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; this sum establishes no fit.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; no native qualification claimed.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature:82 timed preparation +14 bounded setup +7 summary/cleanup/upload;7 overhead.\n',
+  '    # Raw timed-step union535min (ARM) /559min (Intel); no job fit is established.\n'
+  '    # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.\n'
+  '    # Remove preview adds90 nominal step maxima; Intel app-build adds24 to the old allocation.\n'
+  '    # Dormant Android272 / iOS248 include5 overhead; historical baselines, not fit proofs.\n'
+  '    # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,\n'
+  '    # separate baseline Install/UI-build preparation, O3 work1740/hard1800,\n'
+  '    # then one removal owner990 (fixed segment sum963); no budget restart.\n'
+  '    # App-signature: ARM82 / Intel106 timed preparation +14 bounded setup\n'
+  '    # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.\n'),
+ ('        id: app_build\n        timeout-minutes: 24\n',
+  '        id: app_build\n'
+  "        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}\n"),
+ ('          # Same24-minute app-build budget; no independent timeout entitlement.\n',
+  '          # Same architecture-selected app-build budget; no independent timeout entitlement.\n'))
+INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS = ('Raw timed-step union535min (ARM) /559min (Intel)', "matrix.target == 'x86_64-apple-darwin' && 48 || 24", 'Same architecture-selected app-build budget')
+
+
+def without_intel_app_build_budget_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel app-build budget workflow source bound differs")
+    if not any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        return source
+    if not source.startswith("name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"):
+        raise AssertionError("Intel app-build budget workflow route differs")
+    for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count("\n" + current) != 1 or previous in source:
+            raise AssertionError("Intel app-build budget workflow exact delta differs")
+    for previous, current in reversed(INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE):
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in INTEL_APP_BUILD_BUDGET_WORKFLOW_MARKERS):
+        raise AssertionError("Intel app-build budget workflow partial delta remains")
+    return source
+
+
 # One exact optional removal-case CLI suffix, before the original privacy inverse.
 # This is SOURCE normalization only, never removal or original-finality evidence.
 REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE = ('            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n', '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n            --removal-case "$MRK_MACOS_REMOVAL_CASE"\n')
@@ -1201,6 +1245,9 @@ REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE = ('            --profile installed
 def without_removal_public_verification_workflow(source):
     if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
         raise AssertionError("removal public verification workflow source bound differs")
+    source = without_intel_app_build_budget_workflow(source)
+    # Retire the independent outer shipping-privacy delta before historical hashes.
+    source = without_shipping_compile_privacy_workflow(source)
     installed = "name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"
     if "desktop/tools/macos_public_verification_evidence.py" not in source or not source.startswith(installed):
         if "--removal-case" in source:
@@ -10544,6 +10591,72 @@ def current_data_fixture():
 
 @unittest.skipUnless(sys.platform in ("darwin", "linux"), "POSIX DATA stager")
 class MacCurrentRuntimeData(unittest.TestCase):
+    def test_current_intel_app_build_budget_precedes_historical_projection(self):
+        # Current SOURCE only: a larger finite allocation is not native completion.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            self.assertEqual(source.count(current), 1)
+            self.assertNotIn(previous, source)
+        expression = "${{ matrix.target == 'x86_64-apple-darwin' && 48 || 24 }}"
+        name = "      - name: Build the ordinary selected-target desktop image and embedded frontend\n"
+        self.assertEqual(source.count(name), 1)
+        app = source.split(name, 1)[1].split("      - name:", 1)[0]
+        self.assertEqual(re.findall(r"^        timeout-minutes: (.+)$", app, re.M), [expression])
+        self.assertEqual(source.count(expression), 1)
+        containing = "    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}\n"
+        self.assertEqual(source.count(containing), 1)
+        self.assertIn("        id: shipping_compile\n        timeout-minutes: 24\n",
+                      source.split("  shipping-image-compile:\n", 1)[1])
+        matrix = re.findall(r"^        include: (.+)$", source, re.M)
+        self.assertEqual(len(matrix), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'", matrix[0])
+        branches = re.findall(r"'(\[\{.*?\}\])'", matrix[0])
+        self.assertEqual(len(branches), 2)
+        self.assertEqual([(row["target"], row["removal_case"]) for row in json.loads(branches[0])],
+                         [("aarch64-apple-darwin", "ordinary"), ("aarch64-apple-darwin", "abrupt")])
+        self.assertEqual([(row["target"], row["runner"]) for row in json.loads(branches[1])],
+                         [("aarch64-apple-darwin", "macos-26"), ("x86_64-apple-darwin", "macos-26-intel")])
+        prior = without_intel_app_build_budget_workflow(source)
+        self.assertEqual(len(prior.encode()), 434739)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "1dc04737ea6298f34196adb7f71e4fb0f6b25b50dde30b4c95292d29efec4514")
+        self.assertEqual(without_intel_app_build_budget_workflow(prior), prior)
+        self.assertEqual(matrix, re.findall(r"^        include: (.+)$", prior, re.M))
+        old_app = prior.split(name, 1)[1].split("      - name:", 1)[0]
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE[1:]:
+            app = app.replace(current, previous, 1)
+        self.assertEqual(app, old_app)  # Commands, environment and original status writes are unchanged.
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            for altered in ("", previous, current + current, previous + current,
+                            current[:-1], current.replace(" ", "  ", 1)):
+                with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                    without_intel_app_build_budget_workflow(source.replace(current, altered, 1))
+        for altered in (expression.replace("48", "49"), expression.replace("24", "25"),
+                        expression.replace("x86_64-apple-darwin", "aarch64-apple-darwin")):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(source.replace(expression, altered, 1))
+        for old in ("unchanged historical DATA\n", "name: Historical Aqua qualification\n"):
+            self.assertEqual(without_intel_app_build_budget_workflow(old), old)
+        unrelated = source + "# unrelated mutation\n"
+        self.assertEqual(without_intel_app_build_budget_workflow(unrelated), prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(unrelated)
+        # Erasing all new markers cannot bypass the unchanged whole-workflow hash.
+        erased = source
+        for previous, current in INTEL_APP_BUILD_BUDGET_WORKFLOW_INVERSE:
+            erased = erased.replace(current, "", 1)
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(erased)
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1),
+                        source.replace(source.splitlines()[0], "name: Historical Aqua qualification", 1)):
+            with self.assertRaises(AssertionError):
+                without_intel_app_build_budget_workflow(invalid)
+
     def test_removal_public_evidence_case_is_current_before_historical_projection(self):
         # Read actual current SOURCE, not the inverse view or a raw artifact.
         root = Path(__file__).absolute().parents[2]
@@ -10647,6 +10760,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             body = stream.read(512 * 1024 + 1)
         self.assertLessEqual(len(body), 512 * 1024)
         source = body.decode("utf-8", "strict")
+        source = without_intel_app_build_budget_workflow(source)
         projected = without_recent_app_signature_workflow(source)
         # Exact e1e4b36 bytes, not a refreshed historical app-predecessor hash.
         self.assertEqual(hashlib.sha256(projected.encode()).hexdigest(),
