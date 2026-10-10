@@ -13562,10 +13562,19 @@ class MacNormalPreviewData(unittest.TestCase):
                          "project-field Aqua observer failure is preserved and unresolved"):
             self.assertIn(required, guide)
 
-        for required in ("Ordinary V2 installation requires", "Developer ID Application certificate/key", "shipping profiles are currently unconfigured",
+        for required in ("Ordinary V2 installation requires", "Developer ID Application certificate/key",
+                         "public Application, Installer and notary configurations are enrolled",
+                         "Current-package Installer-key, notarization and installed-preview verification remain pending",
+                         "configuration is not native qualification",
                          "Credential-free engineering fixtures do **not** satisfy", "Downloaded-image/Installer interaction and Gatekeeper qualification remain",
-                         "producer.json", "producer.sig", "standalone package copied to writable Downloads is unsupported"):
+                         "producer.json", "producer.sig", "standalone package copied to writable Downloads is unsupported",
+                         "no old-version pruning is provided", "separate removal disk image and its accompanying guide",
+                         "its execution and recovery remain unqualified here",
+                         "carrier's execution/recovery remain separate obligations"):
             self.assertIn(required, guide)
+        for stale in ("shipping profiles are currently unconfigured", "no old-version pruning or uninstall is provided",
+                      "any future uninstall"):
+            self.assertNotIn(stale, guide)
 
         image_name = "Notarize, staple and verify only the final user image"
         image_step = workflow_step(workflow, image_name)

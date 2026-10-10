@@ -58,6 +58,206 @@ def digest_original(fd, path, before):
         raise ValueError("original test artifact changed")
     return digest.hexdigest()
 
+# Optional failure DATA only; no subprocess, input read or acceptance authority.
+DATA_FAILURE_GUARDS = {
+    **{"original fixed command did not completely pass: " + phase: "command-not-complete"
+       for phase in ("mount", "apfs", "build", "rust", "python")},
+    "one fixed df header and filesystem row required": "filesystem-header",
+    "one local disk device and bounded mountpoint required": "filesystem-row",
+    "one diskutil volume dictionary required": "filesystem-volume",
+    "actual writable ownership-aware local APFS volume required": "filesystem-volume",
+    "actual writable ownership-aware local APFS required": "filesystem-native-volume",
+    "original Cargo build-finished": "cargo-build-finished",
+    "one original debug actual-main test artifact": "cargo-debug-artifact",
+    "fixed original test artifact path": "cargo-artifact-path",
+    "original artifact type/owner/bound": "cargo-artifact-shape",
+    "original test artifact changed": "cargo-artifact-original",
+    "artifact EOF": "cargo-artifact-eof",
+    "original artifact postimage": "cargo-artifact-postimage",
+    "one closed aggregate success marker required": "rust-aggregate-marker",
+    "exact native Python original counts required": "python-counts",
+    "selected source changed during batch": "source-post",
+    "original temporary root changed": "temporary-post",
+    "selected tests did not retire disposable fixtures": "temporary-nonempty",
+    "fixed DATA input shape": "fixed-input-shape",
+    "original DATA input changed": "fixed-input-changed",
+    "fixed output bound": "output-bound",
+    "output original changed": "output-changed",
+}
+
+
+def data_failure_guard(error):
+    if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str:
+        return DATA_FAILURE_GUARDS.get(error.args[0], "unclassified")
+    return "unclassified"
+
+
+def data_failure_json(raw):
+    if type(raw) is not bytes or not 0 < len(raw) <= 65536:
+        raise ValueError("failure-data-json-bound")
+    text = raw.decode("utf-8", "strict")
+    depth, nodes, quoted, escaped = 0, 1, False, False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1; nodes += 1
+        elif character in "]}":
+            depth -= 1
+        elif character in ",:":
+            nodes += 1
+        if not 0 <= depth <= 32 or nodes > 8192:
+            raise ValueError("failure-data-json-structure")
+    if quoted or depth:
+        raise ValueError("failure-data-json-structure")
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("failure-data-json-duplicate")
+            result[key] = value
+        return result
+    def constant(value):
+        raise ValueError("failure-data-json-nonfinite")
+    def number(value):
+        result = float(value)
+        if not -1.7976931348623157e308 <= result <= 1.7976931348623157e308:
+            raise ValueError("failure-data-json-nonfinite")
+        return result
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant, parse_float=number)
+
+
+def data_failure_python(raw, names):
+    try:
+        value = data_failure_json(raw)
+        counts = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+        extra = ("failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount")
+        if (type(value) is not dict or set(value) != set(counts + extra + ("testIds", "actualHostBeforeAndAfter"))
+                or value["testIds"] != names or len(names) != 84 or len(set(names)) != 84
+                or type(value["actualHostBeforeAndAfter"]) is not bool):
+            return None
+        if any(type(value[key]) is not int or not 0 <= value[key] <= (84 if key == "testsRun" else 65535) for key in counts):
+            return None
+        rows = value["failureTests"]
+        if type(rows) is not list or len(rows) > 16:
+            return None
+        keys = []
+        for row in rows:
+            if (type(row) is not dict or set(row) != {"kind", "id"} or type(row["id"]) is not str
+                    or row["id"] not in names or row["kind"] not in ("failure", "error")):
+                return None
+            keys.append((row["kind"], row["id"]))
+        expected = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in keys]
+        if keys != expected or len(set(keys)) != len(keys):
+            return None
+        classified, omitted, unknown = (value[key] for key in extra[1:])
+        if (type(classified) is not int or not 0 <= classified <= 168
+                or type(omitted) is not int or not 0 <= omitted <= 152
+                or type(unknown) is not int or not 0 <= unknown <= 65535
+                or classified != len(rows) + omitted
+                or classified + unknown > value["failures"] + value["errors"]
+                or any(sum(row["kind"] == kind for row in rows) > value[field]
+                       for kind, field in (("failure", "failures"), ("error", "errors")))):
+            return None
+        return {key: value[key] for key in counts + ("actualHostBeforeAndAfter",) + extra}
+    except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        return None
+
+
+def data_failure_cargo(raw, source_paths, checkout):
+    try:
+        if type(raw) is not bytes or not 0 < len(raw) <= 4 * 1024 * 1024:
+            return None
+        lines = raw.splitlines()
+        if not lines or len(lines) > 4096:
+            return None
+        errors, seen, unknown, omitted = [], set(), 0, 0
+        for line in lines:
+            row = data_failure_json(line)
+            if type(row) is not dict:
+                return None
+            if row.get("reason") != "compiler-message":
+                continue
+            message = row.get("message")
+            if type(message) is not dict:
+                return None
+            if message.get("level") != "error":
+                continue
+            code = message.get("code")
+            if type(code) is not dict or type(code.get("code")) is not str or re.fullmatch(r"E[0-9]{4}", code["code"]) is None:
+                unknown += 1
+                continue
+            source, line_number, column = None, None, None
+            spans = message.get("spans")
+            primary = [span for span in spans if type(span) is dict and span.get("is_primary") is True] if type(spans) is list and len(spans) <= 128 else []
+            if len(primary) == 1:
+                span = primary[0]; filename = span.get("file_name")
+                if type(filename) is str:
+                    relative = filename[len(checkout) + 1:] if filename.startswith(checkout + "/") else filename
+                    if relative not in source_paths and row.get("manifest_path") == checkout + "/desktop/src-tauri/Cargo.toml":
+                        relative = "desktop/src-tauri/" + filename
+                    if (relative in source_paths and len(relative) <= 240 and re.fullmatch(r"[A-Za-z0-9_./-]+", relative)
+                            and all(part not in ("", ".", "..") for part in relative.split("/"))
+                            and type(span.get("line_start")) is int and 1 <= span["line_start"] <= 1000000
+                            and type(span.get("column_start")) is int and 1 <= span["column_start"] <= 1000000):
+                        source, line_number, column = relative, span["line_start"], span["column_start"]
+            key = (code["code"], source, line_number, column)
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(errors) < 8:
+                errors.append(dict(code=key[0], source=source, line=line_number, column=column))
+            else:
+                omitted += 1
+        return dict(errors=errors, unclassifiedErrors=unknown, omittedErrors=omitted)
+    except (ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        return None
+
+
+def data_failure_document(command, output, guard, context, names, source_paths, checkout):
+    if (type(context) is not dict or set(context) != {"source", "workflowSource", "runId", "runAttempt", "target"}
+            or context["source"] != context["workflowSource"]
+            or any(type(context[key]) is not str or re.fullmatch(r"[0-9a-f]{40}", context[key]) is None for key in ("source", "workflowSource"))
+            or any(type(context[key]) is not str or re.fullmatch(r"[1-9][0-9]{0,15}", context[key]) is None
+                   or int(context[key]) > 9007199254740991 for key in ("runId", "runAttempt"))
+            or context["target"] not in ("aarch64-apple-darwin", "x86_64-apple-darwin")
+            or guard not in set(DATA_FAILURE_GUARDS.values()) | {"unclassified"}
+            or type(command) is not dict or command.get("phase") not in ("mount", "apfs", "build", "rust", "python")
+            or type(output) is not dict or set(output) != {"stdout", "stderr"}):
+        raise ValueError("failure-data-context")
+    flags = ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")
+    if any(type(command.get(key)) is not bool for key in flags):
+        raise ValueError("failure-data-flags")
+    code = command.get("returnCode")
+    if code is not None and (type(code) is not int or not -65536 <= code <= 65535):
+        raise ValueError("failure-data-status")
+    captures = {}
+    for key in ("stdout", "stderr"):
+        if type(output[key]) not in (bytes, bytearray) or len(output[key]) > 4 * 1024 * 1024:
+            raise ValueError("failure-data-capture-bound")
+        captures[key] = bytes(output[key])
+    phase = command["phase"]
+    classified = command["originalReturned"] and command["outputComplete"] and command["captureClosed"] and not command["timedOut"] and not command["outputOverflow"]
+    value = dict(schemaVersion=1, kind="mrk-native-data-contract-failure-diagnostics-v1", **context,
+        phase=phase, originalReturncode=code, **{key: command[key] for key in flags},
+        stdoutBytes=len(captures["stdout"]), stdoutSha256=hashlib.sha256(captures["stdout"]).hexdigest(),
+        stderrBytes=len(captures["stderr"]), stderrSha256=hashlib.sha256(captures["stderr"]).hexdigest(),
+        guardCode=guard, python=data_failure_python(captures["stdout"], names) if classified and phase == "python" else None,
+        cargo=data_failure_cargo(captures["stdout"], source_paths, checkout) if classified and phase == "build" else None,
+        diagnosticOnly=True, productReady=False)
+    body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(body) > 16384:
+        raise ValueError("failure-data-output-bound")
+    return body
+
+
 if (sys.platform != "darwin" or os.name != "posix" or os.uname().sysname != "Darwin"
         or os.uname().machine != native_machine or os.getuid() == 0 or os.geteuid() != os.getuid()
         or sys.version_info[:3] != (3, 14, 7) or not sys.flags.isolated or not sys.flags.no_site or not sys.dont_write_bytecode):
@@ -299,10 +499,31 @@ for name in NAMES:
     suite.addTest(getattr(importlib.import_module(module), cls)(method))
 if suite.countTestCases() != 84 or [case.id() for case in suite] != NAMES:
     raise ValueError("exact original test IDs/count required")
+def data_failed_test_rows(failures, errors, names):
+    # Only exact roster IDs; subtest labels/tracebacks never enter public DATA.
+    classified, unknown = set(), 0
+    for kind, rows in (("failure", failures), ("error", errors)):
+        for test, ignored_traceback in rows:
+            try: name = test.id()
+            except Exception: name = None
+            if type(name) is str and name in names:
+                classified.add((kind, name))
+            else:
+                unknown += 1
+    ordered = [(kind, name) for name in names for kind in ("failure", "error") if (kind, name) in classified]
+    return {"failureTests": [dict(kind=kind, id=name) for kind, name in ordered[:16]],
+            "classifiedTestCount": len(ordered), "omittedTestCount": max(0, len(ordered) - 16),
+            "unclassifiedTestCount": unknown}
+
+
 result = unittest.TextTestRunner(verbosity=2, failfast=False).run(suite)
 facts = {"testsRun": result.testsRun, "failures": len(result.failures), "errors": len(result.errors),
          "skipped": len(result.skipped), "expectedFailures": len(result.expectedFailures),
          "unexpectedSuccesses": len(result.unexpectedSuccesses), "testIds": NAMES, "actualHostBeforeAndAfter": bool(original_host())}
+try:
+    facts.update(data_failed_test_rows(result.failures, result.errors, NAMES))
+except BaseException:
+    pass
 print(json.dumps(facts, sort_keys=True, separators=(",", ":")), flush=True)
 raise SystemExit(0 if result.wasSuccessful() and facts["testsRun"] == 84 and facts["actualHostBeforeAndAfter"]
                  and not any(facts[key] for key in ("failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")) else 1)
@@ -326,6 +547,8 @@ receipt = {"schemaVersion": 1, "scope": "fixed-native-data-contracts-and-selecte
            "nativeTlsQualified": False, "allWorkerFinalityEstablished": False}
 artifact_fd = None
 failure = None
+failure_guard = "unclassified"
+diagnostic_output = None
 def filesystem_device(raw):
     # Apple df(path) resolves the containing filesystem. diskutil info
     # accepts its device/mountpoint, not an arbitrary subdirectory.
@@ -360,6 +583,7 @@ def filesystem_volume(raw, selected):
 try:
     # A closed five-command batch, not a configurable execution helper.
     for phase in ("mount", "apfs", "build", "rust", "python"):
+        diagnostic_output = None
         if phase == "mount":
             # -P alone does not suppress inode columns in modern Darwin
             # mode. Explicit -k and -I fix units and the documented shape.
@@ -388,6 +612,7 @@ try:
         process = None
         selector = selectors.DefaultSelector()
         output = {"stdout": bytearray(), "stderr": bytearray()}
+        diagnostic_output = output
         capture_error = None
         deadline = time.monotonic() + seconds
         stop_at = None
@@ -502,6 +727,7 @@ try:
         if next(children, None) is not None: raise ValueError("selected tests did not retire disposable fixtures")
     receipt["temporaryAfter"] = temporary_after
 except BaseException as exc:
+    failure_guard = data_failure_guard(exc)
     failure = type(exc).__name__ + ": " + str(exc)[:200]
 finally:
     if artifact_fd is not None:
@@ -512,6 +738,16 @@ finally:
     except BaseException as exc: failure = failure or "temporary-close-" + type(exc).__name__
     receipt["passed"] = failure is None
     receipt["failure"] = failure
+    if failure is not None and diagnostic_output is not None:
+        try:
+            # Optional DATA from the same buffers; failure remains the original.
+            supplement = data_failure_document(receipt["commands"][-1], diagnostic_output, failure_guard,
+                {"source": binding["source"], "workflowSource": binding["workflowSource"],
+                 "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"], "target": build_target},
+                names, source_rows, str(checkout))
+            put("failure-diagnostics.json", supplement)
+        except BaseException:
+            pass
     put("result.json", (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"))
 if failure is not None: raise SystemExit(1)
 print("One native aggregate and 84 exact host-Python tests passed; no UI, TLS or ignored vault-test qualification.")

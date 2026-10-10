@@ -64,7 +64,8 @@ def normal_diagnostic_data(*, removal=False):
     """
     path = ROOT / "desktop/tools/macos_normal_ui_runner.py"
     names = {"Refused", "need", "sha", "pairs", "document", "encoded", "failure_base",
-        "normal_failure_diagnostics", "classify_normal_admission_failure", "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
+        "normal_failure_diagnostics", "normal_admission_failure", "classify_normal_admission_failure", "ADMISSION_OWNER_REASONS",
+        "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
         "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
         "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES"}
     if removal:
@@ -78,7 +79,7 @@ def normal_diagnostic_data(*, removal=False):
             nodes.append(node); found.add(name)
     if found != names:
         raise AssertionError("finite-normal-diagnostic-DATA-dependencies")
-    namespace = {"hashlib": hashlib, "json": json, "re": re, "Path": Path,
+    namespace = {"hashlib": hashlib, "json": json, "re": re, "Path": Path, "__file__": str(path),
                  "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
     return namespace
@@ -168,6 +169,55 @@ def removal_receipt(case, stager, helper, normal):
         outputsSha256="c" * 64, requestsDirectoryNamedOnly=True, mountedInputsDetached=True,
         sourcePrePostMatched=True, firstOriginalErrorPreserved=True, productReady=False)
     return value
+
+
+def data_contract_diagnostics():
+    """Only genuine inline DATA reducers/constants; never execute the shell/owner."""
+    path = ROOT / "desktop/tools/macos_installed_data_contracts.sh"
+    source = path.read_text().split("<<'PY_DATA_CONTRACTS'\n", 1)[1].rsplit("\nPY_DATA_CONTRACTS", 1)[0]
+    tree = ast.parse(source)
+    wanted = {"DATA_FAILURE_GUARDS", "data_failure_guard", "data_failure_json", "data_failure_python",
+              "data_failure_cargo", "data_failure_document"}
+    nodes, found, assignments = [], set(), {}
+    for node in tree.body:
+        name = node.name if isinstance(node, ast.FunctionDef) else (
+            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) else None)
+        if name in wanted:
+            nodes.append(node); found.add(name)
+        if isinstance(node, ast.Assign) and name is not None:
+            assignments[name] = node.value
+    if found != wanted:
+        raise AssertionError("finite-data-contract-diagnostic-closure")
+    names = ast.literal_eval(assignments["names"])
+    child = ast.literal_eval(assignments["child_code"].right)
+    functions = [node for node in ast.parse(child).body
+                 if isinstance(node, ast.FunctionDef) and node.name == "data_failed_test_rows"]
+    if len(functions) != 1:
+        raise AssertionError("finite-child-failure-ID-reducer")
+    namespace = {"json": json, "hashlib": hashlib, "re": re}
+    exec(compile(ast.Module(body=nodes + functions, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace, names
+
+
+def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flags=None,
+                          guard="command-not-complete", source_paths=(), failed_names=None):
+    if raw is None:
+        if phase == "python":
+            selected = [names[0]] if failed_names is None else failed_names
+            failures = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in selected]
+            value = dict(testsRun=84, failures=len(failures), errors=0, skipped=0, expectedFailures=0,
+                unexpectedSuccesses=0, testIds=names, actualHostBeforeAndAfter=True,
+                **data["data_failed_test_rows"](failures, [], names))
+            raw = json.dumps(value).encode()
+        else:
+            raw = b""
+    command = dict(phase=phase, returnCode=code, originalReturned=True, outputComplete=True,
+                   captureClosed=True, timedOut=False, outputOverflow=False)
+    command.update(flags or {})
+    context = {key: CONTEXT[key] for key in ("source", "workflowSource", "runId", "runAttempt", "target")}
+    return json.loads(data["data_failure_document"](command, {"stdout": raw, "stderr": SENTINEL.encode()},
+        guard, context, names, source_paths, "/public/checkout"))
 
 
 class PublicVerificationEvidenceData(unittest.TestCase):
@@ -377,6 +427,52 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertEqual(DATA.project_ui_diagnostic(unavailable, "admission",
             {"receiptState": "observed", "returncode": 70})["status"], "unavailable")
         self.assertNotIn(SENTINEL, json.dumps(row))
+
+    def test_owner_predicates_and_frame_omission_are_closed_optional_observations(self):
+        normal = normal_diagnostic_data()
+        self.assertEqual(DATA.UI_OWNER_REASONS, frozenset((*normal["ADMISSION_OWNER_REASONS"].values(), "unknown")))
+        class OwnerError(Exception):
+            dispatched = contained = cleanup_complete = True
+            owner_failure_mask = 63
+            def __str__(self):
+                raise AssertionError("private-owner-text-must-not-be-read")
+        owner = SimpleNamespace(ProcessError=OwnerError, ProcessInterrupted=KeyboardInterrupt,
+            ProcessCleanupError=type("CleanupError", (OwnerError,), {}),
+            ProcessOutcomeUnknown=type("OutcomeUnknown", (OwnerError,), {}))
+        raw = normal["normal_admission_failure"]("execute",
+            OwnerError("owned command produced incomplete output"), owner, [])
+        raw["sourceFrames"] = [{"source": "_command_process.py", "line": 1000000}]
+        raw["sourceFramesTruncated"] = True
+        value = normal["classify_normal_admission_failure"](normal["encoded"](raw))
+        status = {"receiptState": "observed", "returncode": 1}
+        for mask in (None, 32, *range(48, 64)):
+            value["ownerDiagnostic"]["failureMask"] = mask
+            row = DATA.project_ui_diagnostic(value, "admission", status)
+            self.assertEqual(row["ownerDiagnostic"], {"reason": "incomplete-output", "failureMask": mask})
+            self.assertEqual(row["sourceFrames"], raw["sourceFrames"])
+            self.assertIs(row["sourceFramesTruncated"], True)
+            self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertEqual(row["binding"], "same-work-root-parent-context-only")
+        legacy = admission_diagnostic(normal)
+        self.assertNotIn("ownerDiagnostic", DATA.project_ui_diagnostic(legacy, "admission", status))
+        value.update(ownerDiagnostic=None, sourceFramesTruncated=False)
+        self.assertIsNone(DATA.project_ui_diagnostic(value, "admission", status)["ownerDiagnostic"])
+        self.assertIs(DATA.project_ui_diagnostic(value, "admission", status)["sourceFramesTruncated"], False)
+        good = {"reason": "incomplete-output", "failureMask": 63}
+        for bad in (True, [], {}, {**good, "message": SENTINEL}, {**good, "reason": SENTINEL},
+                    *({**good, "failureMask": mask} for mask in (True, False, 0, 1, 31, 33, 47, 64, "63"))):
+            with self.subTest(bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic({**value, "ownerDiagnostic": bad}, "admission", status)
+        for broken in ({**value, "ownerDiagnostic": good, "exceptionClass": "Refused"},
+                       {**value, "sourceFramesTruncated": None}, {**value, "sourceFramesTruncated": 1},
+                       {**value, "sourceFrames": [{"source": SENTINEL, "line": 1}]},
+                       {**value, "sourceFrames": [{"source": "_command_process.py", "line": True}]}):
+            with self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(broken, "admission", status)
+        unavailable = normal["classify_normal_admission_failure"](b"{}")
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic({**unavailable, "ownerDiagnostic": None}, "admission", status)
+        self.assertNotIn(SENTINEL, json.dumps(value))
 
     def test_optional_build_destination_reasons_are_closed_and_backward_compatible(self):
         normal = normal_diagnostic_data()
@@ -657,6 +753,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                     diagnostic = admission_diagnostic(normal)
                     diagnostic["sourceFrames"] *= 4
                     diagnostic["commands"] *= 16
+                    diagnostic["ownerDiagnostic"] = {"reason": "command-failed-or-incomplete", "failureMask": 63}
+                    diagnostic["sourceFramesTruncated"] = True
                 else:
                     diagnostic = build_diagnostic(normal, "build" if role == "build" else "query")
                     diagnostic["errorCodes"] = [{"stream": "stderr", "domain": "IDETestOperationsObserverErrorDomain",
@@ -676,7 +774,15 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             stager, helper = removal_data()
             removal = removal_receipt("ordinary", stager, helper, normal_diagnostic_data(removal=True))
             write(root, "android-helper-package-removal-fixture.json", removal)
+            diagnostic_data, diagnostic_names = data_contract_diagnostics()
+            longest = sorted(diagnostic_names, key=len, reverse=True)[:16]
+            failure = data_contract_failure(diagnostic_data, diagnostic_names, failed_names=longest)
+            self.assertEqual(len(failure["python"]["failureTests"]), 16)
+            write(root, "data-contracts/failure-diagnostics.json", failure)
+            write(root, "data-contracts/python.status", b"1\n")
             result = project(root, removal_case="ordinary")
+            self.assertEqual(result["dataContractFailure"]["receiptState"], "observed")
+            self.assertEqual(len(result["dataContractFailure"]["python"]["failureTests"]), 16)
             for phase in roster:
                 self.assertEqual(result["phases"][phase]["receiptState"], "observed", phase)
                 self.assertIs(result["phases"][phase]["recordedPassed"], True, phase)
@@ -826,6 +932,170 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(path.read_bytes(), before)
             self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
             self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+
+
+    def test_data_contract_failure_genuine_python_rows_and_context(self):
+        data, names = data_contract_diagnostics()
+        self.assertEqual(DATA.DATA_CONTRACT_TEST_IDS, tuple(names))
+        self.assertEqual(DATA.DATA_CONTRACT_GUARDS, set(data["DATA_FAILURE_GUARDS"].values()) | {"unclassified"})
+        failures = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in names]
+        errors = [(SimpleNamespace(id=lambda name=name: name), SENTINEL) for name in names]
+        unknown = (SimpleNamespace(id=lambda: names[0] + " (private=" + SENTINEL + ")"), SENTINEL)
+        facts = dict(testsRun=84, failures=85, errors=84, skipped=0, expectedFailures=0, unexpectedSuccesses=0,
+            actualHostBeforeAndAfter=False, testIds=names,
+            **data["data_failed_test_rows"](failures + [unknown], errors, names))
+        value = data_contract_failure(data, names, raw=json.dumps(facts).encode())
+        row = DATA.project_data_contract_failure(value, CONTEXT, {
+            "data-contracts/python.status": {"receiptState": "observed", "returncode": 1}}, set())
+        self.assertEqual(row["python"], value["python"])
+        self.assertEqual((len(row["python"]["failureTests"]), row["python"]["classifiedTestCount"],
+                          row["python"]["omittedTestCount"], row["python"]["unclassifiedTestCount"]), (16, 168, 152, 1))
+        self.assertIs(row["python"]["actualHostBeforeAndAfter"], False)
+        self.assertIs(row["statusMatched"], True)
+        self.assertIs(row["nativeSuccessInferred"], False)
+        self.assertEqual(row["binding"], "same-source-run-target-context")
+        self.assertNotIn(SENTINEL, json.dumps(row))
+        for key in ("source", "workflowSource", "runId", "runAttempt", "target"):
+            broken = copy.deepcopy(value); broken[key] = "2" * 40 if key.endswith("ource") else "wrong"
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(broken, CONTEXT, {}, set())
+
+    def test_data_contract_failure_phase_capture_and_scalar_observations(self):
+        data, names = data_contract_diagnostics()
+        for phase in DATA.DATA_CONTRACT_PHASES:
+            for code in (-15, 0, 1):
+                value = data_contract_failure(data, names, phase=phase, code=code, guard="source-post", failed_names=[])
+                status_name = "data-contracts/" + phase + ".status"
+                for state in ("observed", "absent", "refused"):
+                    status = {"receiptState": state, **({"returncode": code} if state == "observed" else {})}
+                    row = DATA.project_data_contract_failure(value, CONTEXT, {status_name: status}, set())
+                    self.assertEqual(row["originalReturncode"], code)
+                    self.assertEqual(row["callerStatus"], status)
+                    self.assertIs(row["statusMatched"], True if state == "observed" else None)
+                    self.assertIs(row["nativeSuccessInferred"], False)
+                with self.assertRaises(DATA.Refused):
+                    DATA.project_data_contract_failure(value, CONTEXT, {
+                        status_name: {"receiptState": "observed", "returncode": code + 1}}, set())
+        complete = data_contract_failure(data, names)
+        for flag, observed in (("originalReturned", False), ("outputComplete", False), ("captureClosed", False),
+                               ("timedOut", True), ("outputOverflow", True)):
+            value = data_contract_failure(data, names, code=None if flag == "originalReturned" else 1, flags={flag: observed})
+            row = DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+            self.assertIsNone(row["python"])
+            self.assertIs(row[flag], observed)
+            self.assertIsNone(row["statusMatched"])
+            value["python"] = complete["python"]
+            with self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+
+    def test_data_contract_failure_cargo_sources_require_validated_inventory(self):
+        data, names = data_contract_diagnostics()
+        path = "desktop/src-tauri/src/bin/macos_install.rs"
+        def message(name, code="E0123", line=12):
+            return {"reason": "compiler-message", "manifest_path": "/public/checkout/desktop/src-tauri/Cargo.toml",
+                "message": {"level": "error", "message": SENTINEL, "rendered": SENTINEL, "code": {"code": code},
+                    "spans": [{"is_primary": True, "file_name": name, "line_start": line, "column_start": 7}]}}
+        raw = b"\n".join(json.dumps(message("src/bin/macos_install.rs", "E%04d" % index)).encode() for index in range(8))
+        value = data_contract_failure(data, names, phase="build", raw=raw, source_paths={path})
+        inventory = {"source": CONTEXT["source"], "tree": "2" * 40, "files": [
+            {"path": path, "gitMode": "100644", "blob": "3" * 40, "size": 1, "sha256": "4" * 64}]}
+        paths = set()
+        DATA.project_inventory(inventory, json.dumps(inventory).encode(), CONTEXT, collect_paths=paths)
+        row = DATA.project_data_contract_failure(value, CONTEXT, {}, paths)
+        self.assertEqual(len(row["cargo"]["errors"]), 8)
+        self.assertTrue(all(error["source"] == path for error in row["cargo"]["errors"]))
+        self.assertNotIn(SENTINEL, json.dumps(row))
+        redacted = DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        self.assertTrue(all(error["source"] is error["line"] is error["column"] is None for error in redacted["cargo"]["errors"]))
+        self.assertEqual([error["code"] for error in redacted["cargo"]["errors"]], ["E%04d" % n for n in range(8)])
+        broken_inventory = copy.deepcopy(inventory)
+        broken_inventory["files"].append({**inventory["files"][0], "path": "other", "sha256": SENTINEL})
+        paths = set()
+        with self.assertRaises(DATA.Refused):
+            DATA.project_inventory(broken_inventory, b"synthetic", CONTEXT, collect_paths=paths)
+        self.assertEqual(paths, set())  # Earlier valid row cannot escape failed whole-inventory validation.
+        other = "desktop/src-tauri/src/other.rs"
+        raw = b"\n".join(json.dumps(message(name)).encode() for name in (path, other))
+        value = data_contract_failure(data, names, phase="build", raw=raw, source_paths={path, other})
+        row = DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        self.assertEqual(len(row["cargo"]["errors"]), 2)
+        self.assertEqual(row["cargo"]["errors"][0], row["cargo"]["errors"][1])  # No post-redaction dedup/count invention.
+        value["cargo"]["errors"][1] = copy.deepcopy(value["cargo"]["errors"][0])
+        with self.assertRaises(DATA.Refused):
+            DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+
+    def test_data_contract_failure_closed_schema_and_bounds(self):
+        data, names = data_contract_diagnostics()
+        base = data_contract_failure(data, names)
+        for key in base:
+            value = copy.deepcopy(base); del value[key]
+            with self.subTest(missing=key), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        for key, bad in (("schemaVersion", True), ("kind", SENTINEL), ("phase", None), ("phase", "other"),
+                         ("originalReturncode", True), ("originalReturncode", 65536), ("originalReturncode", None),
+                         ("originalReturned", 1), ("outputComplete", None), ("captureClosed", 0), ("timedOut", 1),
+                         ("outputOverflow", 1), ("stdoutBytes", True), ("stderrBytes", 4194305),
+                         ("stdoutSha256", SENTINEL), ("guardCode", SENTINEL), ("diagnosticOnly", False),
+                         ("productReady", True), ("message", SENTINEL), ("cargo", {})):
+            value = copy.deepcopy(base); value[key] = bad
+            with self.subTest(key=key, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        for key, bad in (("testsRun", 85), ("errors", True), ("actualHostBeforeAndAfter", 1),
+                         ("classifiedTestCount", 169), ("omittedTestCount", 153), ("unclassifiedTestCount", 65536),
+                         ("classifiedTestCount", 0), ("failures", 0), ("extra", SENTINEL),
+                         ("failureTests", [{"kind": "failure", "id": SENTINEL}]),
+                         ("failureTests", [{"kind": "other", "id": names[0]}]),
+                         ("failureTests", base["python"]["failureTests"] * 17),
+                         ("failureTests", base["python"]["failureTests"] * 2)):
+            value = copy.deepcopy(base); value["python"][key] = bad
+            with self.subTest(python=key, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        value = copy.deepcopy(base); value["python"] = None
+        self.assertIsNone(DATA.project_data_contract_failure(value, CONTEXT, {}, set())["python"])
+        value["python"] = {}
+        with self.assertRaises(DATA.Refused):
+            DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+        cargo = data_contract_failure(data, names, phase="build")
+        good = {"code": "E0001", "source": None, "line": None, "column": None}
+        cargo["cargo"] = {"errors": [good], "unclassifiedErrors": 0, "omittedErrors": 0}
+        for bad in ({"errors": [good] * 9, "unclassifiedErrors": 0, "omittedErrors": 0},
+                    {"errors": [good], "unclassifiedErrors": 4097, "omittedErrors": 0},
+                    {"errors": [{**good, "code": SENTINEL}], "unclassifiedErrors": 0, "omittedErrors": 0},
+                    {"errors": [{**good, "line": 1}], "unclassifiedErrors": 0, "omittedErrors": 0},
+                    {"errors": [{**good, "source": "/private/file", "line": 1, "column": 1}], "unclassifiedErrors": 0, "omittedErrors": 0},
+                    {"errors": [{**good, "source": "public/file", "line": True, "column": 1}], "unclassifiedErrors": 0, "omittedErrors": 0}):
+            value = copy.deepcopy(cargo); value["cargo"] = bad
+            with self.subTest(cargo=bad), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(value, CONTEXT, {}, set())
+
+    def test_data_contract_failure_fixed_files_preserve_originals(self):
+        data, names = data_contract_diagnostics()
+        value = data_contract_failure(data, names, code=0, guard="source-post", failed_names=[])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sidecar = write(root, "data-contracts/failure-diagnostics.json", value)
+            raw = [write(root, name, SENTINEL.encode()) for name in
+                   ("data-contracts/result.json", "data-contracts/python.stdout", "data-contracts/python.stderr")]
+            before = [path.read_bytes() for path in [sidecar] + raw]
+            write(root, "data-contracts/python.status", b"0\n")
+            result = project(root)
+            row = result["dataContractFailure"]
+            self.assertEqual(row["receiptState"], "observed")
+            self.assertEqual(row["originalReturncode"], 0)
+            self.assertIs(row["statusMatched"], True)
+            self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertEqual([path.read_bytes() for path in [sidecar] + raw], before)
+            self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+        for raw in (b"{}", b"x" * 16385, b'{"schemaVersion":1,"schemaVersion":1}'):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); write(root, "data-contracts/failure-diagnostics.json", raw)
+                self.assertEqual(project(root)["dataContractFailure"], {"receiptState": "refused"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); path = write(root, "data-contracts/failure-diagnostics.json", SENTINEL.encode())
+            result = DATA.project(str(root), profile="aqua", source=CONTEXT["source"], workflow_source=CONTEXT["workflowSource"],
+                run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"])
+            self.assertIsNone(result["dataContractFailure"])
+            self.assertEqual(path.read_bytes(), SENTINEL.encode())
 
 
 

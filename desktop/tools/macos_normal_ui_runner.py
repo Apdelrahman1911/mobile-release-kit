@@ -2853,7 +2853,20 @@ ADMISSION_EXCEPTION_TYPES = (Refused, AttributeError, TypeError, ValueError, Imp
 ADMISSION_EXCEPTION_LABELS = tuple(kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES) + (
     "ProcessError", "ProcessInterrupted", "other")
 ADMISSION_SOURCE_FILES = ("desktop/tools/macos_normal_ui_runner.py", LOADER,
-                          "src/mobile_release/owned_process.py")
+                          "src/mobile_release/owned_process.py", "src/mobile_release/_command_process.py")
+# Exact existing owner labels only, never an exception message or capture export.
+ADMISSION_OWNER_REASONS = {
+    "owned command produced incomplete output": "incomplete-output",
+    "owned command output exceeds its bound": "output-bound",
+    "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+    "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
+    "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+    "owned command executable could not be started": "exec-rejected",
+    "owned command was stopped before execution": "stopped-before-exec",
+    "owned command original parent ended": "parent-ended",
+    "owned command original observer ended": "observer-ended",
+    "owned command fence name already exists": "fence-collision",
+}
 ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
     "saved-version-source-roster", "saved-version-core-interrupt",
     "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test", "normal-ui-test-tree",
@@ -2864,25 +2877,40 @@ def normal_admission_failure(stage, error, owner, records):
     """Closed exception facts only: no messages, locals, paths or native output."""
     label = next((kind.__name__ for kind in ADMISSION_EXCEPTION_TYPES if type(error) is kind), "other")
     owner_failure = dict(dispatched=None, contained=None, cleanupComplete=None)
+    owner_diagnostic = None
     if owner is not None and isinstance(error, (owner.ProcessError, owner.ProcessInterrupted)):
         label = "ProcessInterrupted" if isinstance(error, owner.ProcessInterrupted) else "ProcessError"
         owner_failure = {name: value if type(value := getattr(error, attribute, None)) is bool else None
             for name, attribute in (("dispatched", "dispatched"), ("contained", "contained"),
                                     ("cleanupComplete", "cleanup_complete"))}
+        if type(error) in tuple(getattr(owner, name, None) for name in (
+                "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown")):
+            args = BaseException.args.__get__(error)
+            reason = (ADMISSION_OWNER_REASONS.get(args[0], "unknown") if len(args) == 1
+                      and type(args[0]) is str and len(args[0]) <= 128 else "unknown")
+            mask = getattr(error, "owner_failure_mask", None)
+            # Existing simultaneous terminal predicates, not a cause/finality claim.
+            owner_diagnostic = {"reason": reason, "failureMask": mask if type(mask) is int
+                                and (mask == 32 or 48 <= mask <= 63) else None}
     root = Path(__file__).absolute().parents[2]
     allowed = {str(root / name): Path(name).name for name in ADMISSION_SOURCE_FILES}
-    frames = []
+    frames, omitted = [], False
     current = error.__traceback__
     for _ in range(64):
-        if current is None or len(frames) == 4:
+        if current is None:
             break
         filename, line = current.tb_frame.f_code.co_filename, current.tb_lineno
         if filename in allowed and type(line) is int and 1 <= line <= 1_000_000:
+            if len(frames) == 4:
+                del frames[1]  # First caller plus last three observed fixed-source frames.
+                omitted = True
             frames.append({"source": allowed[filename], "line": line})
         current = current.tb_next
     result = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
         "error": "runner-admission-or-owner-error", "stage": stage, "exceptionClass": label,
-        "sourceFrames": frames, "commands": records, "ownerFailure": owner_failure, "unknownStateRetained": True}
+        "sourceFrames": frames, "sourceFramesTruncated": omitted or current is not None,
+        "commands": records, "ownerFailure": owner_failure, "ownerDiagnostic": owner_diagnostic,
+        "unknownStateRetained": True}
     if stage == "execute" and type(error) is Refused and error.args == ("output-data-result-post",):
         try:
             result["resultPost"] = admit_output_data_result_post(
@@ -2901,7 +2929,8 @@ def classify_normal_admission_failure(body):
         value = document(body)
         fields = {"schemaVersion", "scope", "productReady", "error", "stage", "exceptionClass",
                   "sourceFrames", "commands", "ownerFailure", "unknownStateRetained"}
-        need(set(value) in (fields, fields | {"resultPost"}), "admission-fields")
+        need(fields <= set(value) <= fields | {"resultPost", "ownerDiagnostic", "sourceFramesTruncated"},
+             "admission-fields")
         need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
              and value["scope"] == "generated-ui-runner-refused" and value["productReady"] is False
              and value["error"] == "runner-admission-or-owner-error" and value["unknownStateRetained"] is True
@@ -2916,6 +2945,16 @@ def classify_normal_admission_failure(body):
         owner = value["ownerFailure"]
         need(type(owner) is dict and set(owner) == {"dispatched", "contained", "cleanupComplete"}
              and all(item is None or type(item) is bool for item in owner.values()), "admission-owner")
+        if "ownerDiagnostic" in value and (diagnostic := value["ownerDiagnostic"]) is not None:
+            need(value["exceptionClass"] == "ProcessError" and type(diagnostic) is dict
+                 and set(diagnostic) == {"reason", "failureMask"}
+                 and type(diagnostic["reason"]) is str
+                 and diagnostic["reason"] in (*ADMISSION_OWNER_REASONS.values(), "unknown")
+                 and (diagnostic["failureMask"] is None or type(diagnostic["failureMask"]) is int
+                      and (diagnostic["failureMask"] == 32 or 48 <= diagnostic["failureMask"] <= 63)),
+                 "admission-owner-diagnostic")
+        if "sourceFramesTruncated" in value:
+            need(type(value["sourceFramesTruncated"]) is bool, "admission-frames-truncated")
         commands = value["commands"]
         need(type(commands) is list and len(commands) <= 16, "admission-commands")
         projected = []
@@ -2936,10 +2975,17 @@ def classify_normal_admission_failure(body):
             projected.append({key: command[key] for key in ("role", "returncode", "stdoutBytes", "stderrBytes")})
         result = dict(unavailable, status="observed-exception-only", stage=value["stage"],
             exceptionClass=value["exceptionClass"], sourceFrames=frames, ownerFailure=owner, commands=projected)
+        for key in ("ownerDiagnostic", "sourceFramesTruncated"):
+            if key in value:
+                result[key] = value[key]
         if "resultPost" in value:
             need(value["stage"] == "execute" and value["exceptionClass"] == "Refused",
                  "output-data-post-exception-context")
             result["resultPost"] = admit_output_data_result_post(value["resultPost"], commands)
+        if len(encoded(result)) + 1 > 4096:
+            # Optional diagnostics never displace an otherwise admitted old record.
+            result.pop("ownerDiagnostic", None)
+            result.pop("sourceFramesTruncated", None)
         need(len(encoded(result)) + 1 <= 4096, "admission-projection-bound")
         return result
     except Exception:

@@ -30,6 +30,39 @@ def reducers():
     return namespace
 
 
+def admission_reducers():
+    """Genuine finite DATA only; no native runner/core import or owner command."""
+    names = {"Refused", "need", "pairs", "document", "encoded", "normal_admission_failure",
+        "classify_normal_admission_failure", "admit_output_data_result_post", "LOADER", "TOOLCHAIN_QUERIES",
+        "ADMISSION_STAGES", "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES",
+        "ADMISSION_COMMAND_ROLES", "ADMISSION_OWNER_REASONS"}
+    nodes, found = [], set()
+    for node in ast.parse(RUNNER.read_bytes()).body:
+        name = node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else (
+            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) else None)
+        if name in names:
+            nodes.append(node); found.add(name)
+    assert found == names and len(nodes) == len(names)
+    namespace = dict(json=json, re=re, Path=Path, __file__=str(RUNNER))
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(RUNNER), "exec"), namespace)
+    class Owner:
+        class ProcessError(Exception):
+            def __init__(self, message, mask=None):
+                super().__init__(message)
+                self.owner_failure_mask = mask
+                self.dispatched = self.contained = self.cleanup_complete = True
+            def __str__(self):
+                raise AssertionError("exception-text-must-not-be-read")
+        class ProcessCleanupError(ProcessError):
+            pass
+        class ProcessOutcomeUnknown(ProcessError):
+            pass
+        class ProcessInterrupted(KeyboardInterrupt):
+            pass
+    return namespace, Owner
+
+
 class NormalBuildFailureDataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -191,6 +224,118 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         self.assertIs(observed["findingsTruncated"], False)
         self.assertEqual(len(observed["destinationTable"]["rows"]), 8)
         self.assertNotIn(b'PRIVATE-SENTINEL', self.data["encoded"](observed))
+
+    def test_admission_exact_owner_reasons_masks_and_unknowns_are_passive(self):
+        data, owner = admission_reducers()
+        encode, write = data["encoded"], data["normal_admission_failure"]
+        self.assertEqual(len(data["ADMISSION_OWNER_REASONS"]), 10)
+        for kind in (owner.ProcessError, owner.ProcessCleanupError, owner.ProcessOutcomeUnknown):
+            for reason, label in data["ADMISSION_OWNER_REASONS"].items():
+                error = kind(reason, 63)
+                before = dict(error.__dict__)
+                raw = write("execute", error, owner, [])
+                value = data["classify_normal_admission_failure"](encode(raw))
+                self.assertEqual(value["ownerDiagnostic"], {"reason": label, "failureMask": 63})
+                self.assertEqual(value["exceptionClass"], "ProcessError")
+                self.assertEqual(error.__dict__, before)
+                self.assertEqual(BaseException.args.__get__(error), (reason,))
+                self.assertIs(value["nativeSuccessInferred"], False)
+        for mask in (32, *range(48, 64), None, True, False, -1, 0, 1, 31, 33, 47, 64, "63"):
+            raw = write("execute", owner.ProcessError("owned command produced incomplete output", mask), owner, [])
+            expected = mask if type(mask) is int and (mask == 32 or 48 <= mask <= 63) else None
+            self.assertEqual(raw["ownerDiagnostic"], {"reason": "incomplete-output", "failureMask": expected})
+        class PrivateString(str):
+            def __hash__(self):
+                raise AssertionError("custom-message-must-not-be-hashed")
+        for args in ((), ("PRIVATE-SENTINEL",), ("x" * 129,), (PrivateString("private"),),
+                     (object(),), ("owned command produced incomplete output", "PRIVATE-SENTINEL")):
+            error = owner.ProcessError("unused")
+            error.args = args
+            del error.owner_failure_mask
+            raw = write("execute", error, owner, [])
+            self.assertEqual(raw["ownerDiagnostic"], {"reason": "unknown", "failureMask": None})
+            self.assertNotIn(b"PRIVATE-SENTINEL", encode(raw))
+        class OtherOwnerError(owner.ProcessError):
+            @property
+            def args(self):
+                raise AssertionError("subclass-args-must-not-be-read")
+        for error in (OtherOwnerError("owned command produced incomplete output", 63),
+                      ValueError("PRIVATE-SENTINEL"), owner.ProcessInterrupted()):
+            self.assertIsNone(write("execute", error, owner, [])["ownerDiagnostic"])
+        self.assertIsNone(write("loader", ValueError("PRIVATE-SENTINEL"), None, [])["ownerDiagnostic"])
+
+    def test_admission_tracebacks_retain_first_and_last_three_with_bounded_scan(self):
+        data, owner = admission_reducers()
+        files = [str(ROOT / name) for name in data["ADMISSION_SOURCE_FILES"]]
+        def observe(locations):
+            error = owner.ProcessError("owned command produced incomplete output", 48)
+            following = None
+            for filename, line in reversed(locations):
+                namespace = {"following": following, "error": error}
+                body = "    raise error\n" if following is None else "    return following()\n"
+                exec(compile("\n" * (line - 2) + "def invoke():\n" + body, filename, "exec"), namespace)
+                following = namespace["invoke"]
+            try:
+                following()
+            except owner.ProcessError as caught:
+                return data["normal_admission_failure"]("execute", caught, owner, [])
+            self.fail("synthetic-exception-not-observed")
+        locations = [(files[0], 10), (files[0], 20), (files[0], 30), (files[1], 40),
+                     (files[2], 50), (files[3], 60)]
+        raw = observe(locations)
+        self.assertEqual(raw["sourceFrames"], [{"source": Path(path).name, "line": line}
+            for path, line in [locations[0], *locations[-3:]]])
+        self.assertIs(raw["sourceFramesTruncated"], True)
+        for kept in (locations[:1], locations[:4]):
+            raw = observe([*kept, ("/PRIVATE-SENTINEL/not-allowed.py", 70)])
+            self.assertEqual(raw["sourceFrames"], [{"source": Path(path).name, "line": line} for path, line in kept])
+            self.assertIs(raw["sourceFramesTruncated"], False)
+            self.assertNotIn(b"PRIVATE-SENTINEL", data["encoded"](raw))
+        raw = observe([(files[0], 100 + index) for index in range(70)] + [(files[3], 999999)])
+        self.assertEqual(len(raw["sourceFrames"]), 4)
+        self.assertEqual(raw["sourceFrames"][0], {"source": Path(files[0]).name, "line": 100})
+        self.assertTrue(all(frame["line"] != 999999 for frame in raw["sourceFrames"]))
+        self.assertIs(raw["sourceFramesTruncated"], True)  # Last observed is not claimed globally deepest.
+
+    def test_admission_optional_fields_preserve_dense_old_facts_and_refuse_bad_data(self):
+        data, owner = admission_reducers()
+        encode, classify = data["encoded"], data["classify_normal_admission_failure"]
+        command = {"role": max(data["ADMISSION_COMMAND_ROLES"], key=len), "returncode": 255,
+            "timeoutSeconds": 720, "roleCapSeconds": 720, "outputLimitBytes": 1048576,
+            "argvSha256": "1" * 64, "stdoutBytes": 1048576, "stdoutSha256": "2" * 64,
+            "stderrBytes": 0, "stderrSha256": "3" * 64}
+        raw = data["normal_admission_failure"]("publication",
+            owner.ProcessError("owned command failed, timed out, or produced incomplete output", 63),
+            owner, [dict(command) for _ in range(16)])
+        source = max((Path(path).name for path in data["ADMISSION_SOURCE_FILES"]), key=len)
+        raw["sourceFrames"] = [{"source": source, "line": 1000000} for _ in range(4)]
+        raw["sourceFramesTruncated"] = True
+        raw["ownerFailure"] = dict(dispatched=False, contained=False, cleanupComplete=False)
+        for with_post in (False, True):
+            dense = json.loads(encode(raw))
+            if with_post:
+                dense.update(stage="execute", exceptionClass="Refused", ownerDiagnostic=None,
+                    resultPost={"schemaVersion": 1, "query": "summary", "originalReturncode": 0,
+                        "heldVsPre": [True] * 9, "namedVsPre": [True] * 9, "heldVsNamed": [False] * 9})
+                dense["commands"][-1].update(role="normal-ui-summary", returncode=0)
+            old = {key: value for key, value in dense.items() if key not in ("ownerDiagnostic", "sourceFramesTruncated")}
+            baseline, observed = classify(encode(old)), classify(encode(dense))
+            self.assertEqual(baseline["status"], "observed-exception-only")
+            self.assertEqual(observed["status"], "observed-exception-only")
+            self.assertEqual({key: value for key, value in observed.items()
+                              if key not in ("ownerDiagnostic", "sourceFramesTruncated")}, baseline)
+            self.assertLessEqual(len(encode(observed)) + 1, 4096)  # Actual encoder, no fabricated byte pressure.
+            self.assertEqual(len(observed["commands"]), 16)
+            self.assertEqual(len(observed["sourceFrames"]), 4)
+            self.assertIs(observed["nativeSuccessInferred"], False)
+        good = {"reason": "incomplete-output", "failureMask": 63}
+        for bad in ({}, True, [], {**good, "message": "PRIVATE-SENTINEL"}, {**good, "reason": "PRIVATE-SENTINEL"},
+                    *({**good, "failureMask": mask} for mask in (True, 0, 31, 33, 47, 64, "63"))):
+            broken = {**raw, "ownerDiagnostic": bad}
+            self.assertEqual(classify(encode(broken))["status"], "unavailable")
+        for broken in ({**raw, "sourceFramesTruncated": 1}, {**raw, "sourceFramesTruncated": None},
+                       {**raw, "exceptionClass": "Refused"}, {**raw, "extra": "PRIVATE-SENTINEL"}):
+            self.assertEqual(classify(encode(broken))["status"], "unavailable")
 
     def test_current_dependency_preparation_pins_actual_runner(self):
         body = RUNNER.read_bytes()

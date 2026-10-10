@@ -148,7 +148,11 @@ UI_ADMISSION_STAGES = frozenset(("request", "context", "loader", "phase", "execu
 UI_ADMISSION_EXCEPTIONS = frozenset(("Refused", "AttributeError", "TypeError", "ValueError", "ImportError",
     "ModuleNotFoundError", "OSError", "FileNotFoundError", "PermissionError", "RuntimeError", "KeyError",
     "AssertionError", "KeyboardInterrupt", "SystemExit", "ProcessError", "ProcessInterrupted", "other"))
-UI_ADMISSION_SOURCES = frozenset(("macos_normal_ui_runner.py", "macos_aqua_qualification.py", "owned_process.py"))
+UI_ADMISSION_SOURCES = frozenset(("macos_normal_ui_runner.py", "macos_aqua_qualification.py", "owned_process.py",
+                                   "_command_process.py"))
+UI_OWNER_REASONS = frozenset(("incomplete-output", "output-bound", "protocol-or-ownership",
+    "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected", "stopped-before-exec",
+    "parent-ended", "observer-ended", "fence-collision", "unknown"))
 UI_ADMISSION_ROLES = frozenset(("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
     "saved-version-source-roster", "saved-version-core-interrupt", "verify-generated-runner", "generated-runner-entitlements",
     "one-admitted-ui-test", "normal-ui-test-tree", "normal-toolchain-xcode", "normal-toolchain-sdkPath",
@@ -157,6 +161,97 @@ INPUT_LIMIT = 3 * 1024 * 1024
 OUTPUT_LIMIT = 128 * 1024
 JSON_NODE_LIMIT = 250000
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+# Public SOURCE-selected IDs and exact guard codes, not diagnostic prose.
+DATA_CONTRACT_PHASES = ("mount", "apfs", "build", "rust", "python")
+DATA_CONTRACT_TEST_IDS = (
+    'test_workflow_transaction_profile.WorkflowUpdateFilesystemTests.test_failure_after_first_real_replacement_restores_originals_and_primary',
+    'test_workflow_transaction_profile.WorkflowUpdateFilesystemTests.test_mixed_update_create_preserve_commits_and_cleans_original_backups',
+    'test_candidate_evidence.CandidateEvidenceAdmissionTests.test_platform_and_posix_prerequisites_control_both_methods_without_io',
+    'test_candidate_evidence.CandidateEvidenceAdmissionTests.test_darwin_requires_every_original_posix_descriptor_primitive',
+    'test_candidate_evidence.CandidateEvidenceAdmissionTests.test_unsupported_profiles_are_closed_without_io',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_darwin_route_uses_the_original_host_reader_without_more_authority',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_android_and_ios_use_real_validators_and_exact_redacted_contract',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_declared_decimal_precision_and_distinct_manifest_run_roles',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_forged_self_consistency_never_claims_provenance_or_artifact_authority',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_artifact_projection_has_stable_role_order_not_document_order',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_only_three_fixed_documents_are_opened_no_publishers_or_payloads',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_missing_is_incomplete_and_present_invalid_dominates_missing',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_malformed_json_duplicates_floats_nonfinite_and_schema_stage_self_digest',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_actual_candidate_intent_receipt_cross_bindings_not_only_self_digests',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_private_or_legacy_validator_messages_are_never_forwarded',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_byte_integer_node_depth_and_projection_limits_are_not_policy_invalid',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_exact_two_mib_each_and_six_mib_total_are_admitted_without_extra_files',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_unrepresentable_valid_identifiers_and_large_run_text_are_limits',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_utf8_and_unsafe_root_refusals_are_constant',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_read_io_refusal_does_not_reflect_path_or_native_exception',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_original_root_identity_is_checked_before_any_document_read',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_root_parent_leaf_links_and_portable_aliases_are_not_followed',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_special_foreign_owner_and_foreign_device_refuse_before_leaf_open',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_changed_leaf_absence_and_ancestor_veto_even_nonconsistent_results',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_one_cooperative_deadline_includes_pure_validation_and_final_checks',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_descriptor_close_uncertainty_attempts_all_original_closes_once',
+    'test_candidate_evidence.CandidateEvidenceObservationTests.test_original_iterator_close_uncertainty_is_not_incomplete',
+    'test_lifecycle_evidence.LifecycleLayoutTests.test_closed_params_and_platform_before_io',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_darwin_routes_every_stage_through_the_original_shared_reader',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_three_real_layouts_reuse_policy_and_never_upgrade_authority',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_shared_fixtures_and_core_blocker_parity',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_platform_stage_intent_and_predecessor_disagreement_export_no_partial_history',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_missing_invalid_and_inconsistent_never_export_history',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_repeated_candidate_bytes_must_match_without_claiming_bundle_inventory',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_exact_document_and_aggregate_limits_require_real_eof',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_zero_remaining_refuses_next_nonempty_file_even_after_invalid_values',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_rejected_arrays_are_charged_before_top_level_kind_rejection',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_symlink_changed_and_original_cleanup_failures_withhold_results',
+    'test_lifecycle_evidence.LifecycleEvidenceTests.test_observation_does_not_write_launch_or_contact_services',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_changed_sibling_target_or_saved_configuration_is_not_a_second_preview_or_write',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_directory_move_lost_return_preserves_owned_transition_for_original_and_restart_rollback',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_failure_after_committed_marker_never_retries_import_or_claims_false_success',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_image_only_limit_accepts_a_header_checked_image_larger_than_unchanged_global_limit',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_new_directory_import_is_one_shot_and_preserves_original_sources_and_saved_inputs',
+    'test_metadata_images_edit.MetadataImagesEditTests.test_private_original_object_exclusions_protect_a_target_even_without_a_relative_source_name',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_00_actual_mixed_ready_rollback_preserves_old_identity_and_readonly_facts',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_actual_committed_target_is_checked_again_before_last_backup_cleanup',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_changed_saved_dependencies_targets_and_portable_alias_refuse_without_public_effects',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_cleanup_failure_after_owned_deletion_is_not_retried_and_new_inspection_can_finish',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_committed_and_rolled_back_cleanup_accept_only_complete_controls_and_admitted_data_subset',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_complete_preparing_between_and_owned_new_directory_states',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_current_revision_rechecks_config_siblings_targets_and_journal_identity_before_apply',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_idle_and_unreadable_configuration_never_manufacture_usable_baseline_or_recovery',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_incomplete_contradictory_or_foreign_control_proof_is_conflict_not_cleanup_authority',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_one_shot_consent_immutable_authority_and_discard_do_not_erase_inspected_commit',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_original_stop_after_owned_rollback_move_preserves_failure_and_requires_new_recovery',
+    'test_metadata_images_recovery.MetadataImagesRecoveryFilesystemTests.test_terminal_fsync_failure_keeps_rolled_back_fact_without_cleanup_or_false_success',
+    'test_github_preflight_frames.GitHubPreflightBootstrapTests.test_exact_linux_and_darwin_admit_only_the_fixed_engine_family',
+    'test_github_preflight_frames.GitHubPreflightBootstrapTests.test_other_platforms_flags_and_unbound_paths_refuse_before_engine_entry',
+    'test_github_release.GitHubReleaseBootstrapTests.test_exact_linux_and_darwin_admit_only_the_fixed_engine_family',
+    'test_github_release.GitHubReleaseBootstrapTests.test_other_platforms_flags_and_unbound_paths_refuse_before_engine_entry',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_intent_and_run_are_exact_canonical_noncredential_records',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_intent_rejects_broadened_authority_and_modified_caller',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_initial_contains_no_credential_and_binds_exact_ready_digest',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_initial_and_go_frames_reject_extra_pipelined_duplicate_or_unbound_input',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_pending_is_fresh_native_scope_only_and_go_contains_no_token',
+    'test_github_preflight_frames.GitHubPreflightFrameTests.test_final_result_preserves_accepted_uncertain_and_observed_distinctions',
+    'test_github_release.GitHubReleaseFrameTests.test_full64_maximum_retained_records_fit_the_private_result_without_truncation',
+    'test_github_release.GitHubReleaseFrameTests.test_protocol_journal_and_go_cannot_cross_preflight_family',
+    'test_github_release.GitHubReleaseFrameTests.test_original_helper_waits_for_durable_intent_and_closes_before_final',
+    'test_github_release.GitHubReleaseTransportTests.test_only_release_config_role_can_read_base64_overhead_in_all_framing_modes',
+    'test_github_release.GitHubReleaseTransportTests.test_release_aggregate_and_original_deadline_are_never_renewed',
+    'test_github_preflight.GitHubPreflightPolicyTests.test_caller_source_and_identity_fail_before_any_dispatch',
+    'test_github_preflight.GitHubPreflightPolicyTests.test_dispatch_is_one_post_and_returned_id_is_not_workflow_success',
+    'test_github_preflight.GitHubPreflightPolicyTests.test_changed_branch_during_consent_is_not_sent',
+    'test_github_preflight.GitHubPreflightPolicyTests.test_lost_response_204_and_invalid_run_url_never_retry_or_claim_no_effect',
+    'test_github_release.GitHubReleasePolicyTests.test_selection_is_closed_original_data_never_current_version_substitution',
+    'test_github_release.GitHubReleasePolicyTests.test_single_dispatch_latches_uncertainty_and_refuses_replacement_source',
+    'test_github_release.GitHubReleasePolicyTests.test_original_attempt_observation_requires_stage_jobs_not_build_repetition',
+    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_observes_original_complete_report_and_settled_projection',
+    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_diagnostics_workflow_has_one_bounded_original_result',
+    'test_macos_normal_diagnostics_source.NormalDiagnosticsSourceTests.test_normal_saved_offline_and_empty_recovery_use_original_gui_only',
+    'test_android_build_tools.MacToolAdmissionDataTests.test_mac_commands_use_exact_contents_home_private_environment_and_inspection_only',
+    'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
+)
+DATA_CONTRACT_GUARDS = frozenset(('cargo-artifact-eof', 'cargo-artifact-original', 'cargo-artifact-path', 'cargo-artifact-postimage', 'cargo-artifact-shape', 'cargo-build-finished', 'cargo-debug-artifact', 'command-not-complete', 'filesystem-header', 'filesystem-native-volume', 'filesystem-row', 'filesystem-volume', 'fixed-input-changed', 'fixed-input-shape', 'output-bound', 'output-changed', 'python-counts', 'rust-aggregate-marker', 'source-post', 'temporary-nonempty', 'temporary-post', 'unclassified'))
 
 
 class Refused(ValueError):
@@ -297,14 +392,23 @@ def project_ui_admission(value):
     if value["status"] == "unavailable":
         need(set(value) == fields)
         return dict(value)
+    fields |= {"stage", "exceptionClass", "sourceFrames", "ownerFailure", "commands"}
     need(value["status"] == "observed-exception-only"
-         and set(value) == fields | {"stage", "exceptionClass", "sourceFrames", "ownerFailure", "commands"}
+         and fields <= set(value) <= fields | {"ownerDiagnostic", "sourceFramesTruncated"}
          and type(value["stage"]) is str and value["stage"] in UI_ADMISSION_STAGES
          and type(value["exceptionClass"]) is str and value["exceptionClass"] in UI_ADMISSION_EXCEPTIONS)
     frames, owner, commands = value["sourceFrames"], value["ownerFailure"], value["commands"]
     need(type(frames) is list and len(frames) <= 4 and type(commands) is list and len(commands) <= 16
          and type(owner) is dict and set(owner) == {"dispatched", "contained", "cleanupComplete"}
          and all(item is None or type(item) is bool for item in owner.values()))
+    if "ownerDiagnostic" in value and (diagnostic := value["ownerDiagnostic"]) is not None:
+        need(value["exceptionClass"] == "ProcessError" and type(diagnostic) is dict
+             and set(diagnostic) == {"reason", "failureMask"}
+             and type(diagnostic["reason"]) is str and diagnostic["reason"] in UI_OWNER_REASONS
+             and (diagnostic["failureMask"] is None or type(diagnostic["failureMask"]) is int
+                  and (diagnostic["failureMask"] == 32 or 48 <= diagnostic["failureMask"] <= 63)))
+    if "sourceFramesTruncated" in value:
+        boolean(value["sourceFramesTruncated"])
     for frame in frames:
         need(type(frame) is dict and set(frame) == {"source", "line"}
              and type(frame["source"]) is str and frame["source"] in UI_ADMISSION_SOURCES)
@@ -331,6 +435,90 @@ def project_ui_diagnostic(value, role, caller_status):
     if role != "admission":
         need(row["originalReturncode"] == status)
     return {**row, "receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False}
+
+
+def project_data_contract_failure(value, context, statuses, inventory_paths):
+    """Failure-only sidecar observations; no raw captures or native acceptance."""
+    fields = {"schemaVersion", "kind", "source", "workflowSource", "runId", "runAttempt", "target", "phase",
+        "originalReturncode", "originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow",
+        "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256", "guardCode", "python", "cargo",
+        "diagnosticOnly", "productReady"}
+    need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["kind"] == "mrk-native-data-contract-failure-diagnostics-v1"
+         and value["diagnosticOnly"] is True and value["productReady"] is False
+         and all(value[name] == context[name] for name in ("source", "workflowSource", "runId", "runAttempt", "target"))
+         and value["phase"] in DATA_CONTRACT_PHASES
+         and type(value["guardCode"]) is str and value["guardCode"] in DATA_CONTRACT_GUARDS)
+    for name in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow"):
+        boolean(value[name])
+    code = value["originalReturncode"]
+    if code is not None:
+        integer(code, 65535, -65536)
+    need(not value["originalReturned"] or code is not None)
+    for stream in ("stdout", "stderr"):
+        integer(value[stream + "Bytes"], 4 * 1024 * 1024)
+        hex_value(value[stream + "Sha256"])
+    caller = statuses.get("data-contracts/" + value["phase"] + ".status", {"receiptState": "absent"})
+    need(type(caller) is dict and caller.get("receiptState") in ("observed", "absent", "refused")
+         and set(caller) == ({"receiptState", "returncode"} if caller["receiptState"] == "observed" else {"receiptState"}))
+    matched = None
+    if caller["receiptState"] == "observed":
+        need(value["originalReturned"] and code == integer(caller["returncode"], 65535, -65536))
+        matched = True  # Equality alone, including zero, is not a phase pass.
+    closed = (value["originalReturned"] and value["outputComplete"] and value["captureClosed"]
+              and not value["timedOut"] and not value["outputOverflow"])
+    python = value["python"]
+    if python is not None:
+        counts = ("testsRun", "failures", "errors", "skipped", "expectedFailures", "unexpectedSuccesses")
+        need(closed and value["phase"] == "python" and type(python) is dict and set(python) == set(counts) | {
+            "actualHostBeforeAndAfter", "failureTests", "classifiedTestCount", "omittedTestCount", "unclassifiedTestCount"})
+        for name in counts:
+            integer(python[name], 84 if name == "testsRun" else 65535)
+        boolean(python["actualHostBeforeAndAfter"])
+        rows = python["failureTests"]
+        need(type(rows) is list and len(rows) <= 16)
+        keys = []
+        for row in rows:
+            need(type(row) is dict and set(row) == {"kind", "id"} and row["kind"] in ("failure", "error")
+                 and type(row["id"]) is str and row["id"] in DATA_CONTRACT_TEST_IDS)
+            keys.append((row["kind"], row["id"]))
+        need(len(set(keys)) == len(keys) and keys == [(kind, name) for name in DATA_CONTRACT_TEST_IDS
+             for kind in ("failure", "error") if (kind, name) in keys])
+        classified = integer(python["classifiedTestCount"], 168)
+        omitted = integer(python["omittedTestCount"], 152)
+        unknown = integer(python["unclassifiedTestCount"], 65535)
+        need(classified == len(rows) + omitted and classified + unknown <= python["failures"] + python["errors"]
+             and all(sum(row["kind"] == kind for row in rows) <= python[field]
+                     for kind, field in (("failure", "failures"), ("error", "errors"))))
+    cargo = value["cargo"]
+    result = dict(value)
+    if cargo is not None:
+        need(closed and value["phase"] == "build" and type(cargo) is dict
+             and set(cargo) == {"errors", "unclassifiedErrors", "omittedErrors"})
+        integer(cargo["unclassifiedErrors"], 4096); integer(cargo["omittedErrors"], 4096)
+        rows = cargo["errors"]
+        need(type(rows) is list and len(rows) <= 8)
+        seen, projected = set(), []
+        for row in rows:
+            need(type(row) is dict and set(row) == {"code", "source", "line", "column"}
+                 and type(row["code"]) is str and re.fullmatch(r"E[0-9]{4}", row["code"]) is not None)
+            source, line, column = row["source"], row["line"], row["column"]
+            if source is None:
+                need(line is None and column is None)
+            else:
+                need(type(source) is str and 0 < len(source) <= 240 and re.fullmatch(r"[A-Za-z0-9_./-]+", source)
+                     and all(part not in ("", ".", "..") for part in source.split("/")))
+                integer(line, 1000000, 1); integer(column, 1000000, 1)
+            key = (row["code"], source, line, column)
+            need(key not in seen)
+            seen.add(key)  # Validate genuine original uniqueness BEFORE source redaction.
+            if source not in inventory_paths:
+                source = line = column = None
+            projected.append({"code": row["code"], "source": source, "line": line, "column": column})
+        # Distinct original rows may project equally; do not invent count changes.
+        result["cargo"] = {**cargo, "errors": projected}
+    return {**result, "receiptState": "observed", "binding": "same-source-run-target-context",
+            "callerStatus": dict(caller), "statusMatched": matched, "nativeSuccessInferred": False}
 
 
 def decode(body, budget, *, inventory=False):
@@ -545,7 +733,7 @@ def project_receipt(value, context, phase):
     return result
 
 
-def project_inventory(value, body, context):
+def project_inventory(value, body, context, *, collect_paths=None):
     need(set(value) == {"source", "tree", "files"} and value["source"] == context["source"])
     tree = hex_value(value["tree"], 40)
     rows = value["files"]
@@ -559,6 +747,8 @@ def project_inventory(value, body, context):
              and row["gitMode"] in ("100644", "100755"))
         paths.add(path)
         hex_value(row["blob"], 40); hex_value(row["sha256"]); integer(row["size"], 32 * 1024 * 1024)
+    if collect_paths is not None:
+        collect_paths.update(paths)  # Only after EVERY inventory row passed; no partial attribution.
     return {"receiptState": "observed", "tree": tree, "fileCount": len(rows), "sha256": hashlib.sha256(body).hexdigest()}
 
 
@@ -682,17 +872,21 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                           lambda body, phase=phase: project_receipt(decode(body, budget), context, phase))
             row["callerStatus"] = statuses.get(PHASE_STATUS.get(phase))
             phases[phase] = row
+        inventory_paths = set()
         inventory = observe("source-inventory.json", 2 * 1024 * 1024,
-            lambda body: project_inventory(decode(body, budget, inventory=True), body, context))
+            lambda body: project_inventory(decode(body, budget, inventory=True), body, context, collect_paths=inventory_paths))
         deliveries = {name: observe(path, 16384, lambda body, removal=removal:
             project_summary(decode(body, budget), context, removal)) for name, path, removal in
             (("preview", "preview/PREVIEW.json", False), ("removal", "remove-preview/REMOVAL.json", True))}
         ui_diagnostics = {role: observe(path, 4096, lambda body, role=role:
             project_ui_diagnostic(decode(body, budget), role, statuses["normal-ui/build.status"]))
             for role, path in UI_DIAGNOSTICS} if profile == "installed" else {}
+        data_failure = observe("data-contracts/failure-diagnostics.json", 16384,
+            lambda body: project_data_contract_failure(decode(body, budget), context, statuses, inventory_paths)) if profile == "installed" else None
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
-                 "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics}
+                 "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
+                 "dataContractFailure": data_failure}
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         need(len(body) <= OUTPUT_LIMIT and directory_identity(os.fstat(root)) == root_id
              == directory_identity(os.stat(work, follow_symlinks=False)))

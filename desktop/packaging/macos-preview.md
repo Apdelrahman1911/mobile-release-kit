@@ -16,9 +16,10 @@ Rust, Node.js or the CLI to try the application.
   material, live Store credentials or private release data for this early test.
 - **Ordinary V2 installation requires the configured, SOURCE-selected producer
   identity:** its genuine Developer ID Application certificate/key, completed
-  package signature and the native app-purpose checks. The shipping profiles
-  are currently unconfigured, so no qualified ordinary installed preview is
-  available from them. Credential-free engineering fixtures do **not** satisfy
+  package signature and the native app-purpose checks. The public Application,
+  Installer and notary configurations are enrolled. Current-package Installer-key,
+  notarization and installed-preview verification remain pending; configuration
+  is not native qualification. Credential-free engineering fixtures do **not** satisfy
   this requirement; an unsigned/ad-hoc fixture is not an ordinary V2 package.
 - This delivery route additionally requires the separate SOURCE-selected
   Developer ID Installer identity and Apple notary authentication. It admits
@@ -38,7 +39,9 @@ Rust, Node.js or the CLI to try the application.
   same-package no-op, missing-app restore or explicitly SOURCE-authorized
   update. Missing/unknown records, unlisted predecessors or retained failures
   are refused, not repaired by deleting files. These paths still need genuine
-  native qualification; no old-version pruning or uninstall is provided.
+  native qualification; no old-version pruning is provided. Removal uses the
+  separate removal disk image and its accompanying guide; its execution and recovery
+  remain unqualified here.
 
 The adjacent **PREVIEW.json** identifies the exact source commit/tree,
 GitHub workflow/run/attempt, DMG/package/producer-sidecar SHA-256 values,
@@ -78,8 +81,8 @@ A missing, failed or skipped check is not a pass.
 This check does not prove POSIX exit status or every worker's finality, direct
 payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full
 feature journeys. The root maintenance gate is permanent; never remove or replace
-it as troubleshooting. Update/restore evidence and any future uninstall
-remain separate obligations. Physical/manual observations of this exact
+it as troubleshooting. Update/restore evidence and the separate removal
+carrier's execution/recovery remain separate obligations. Physical/manual observations of this exact
 distribution and the checklist below remain separate.
 
 ## What this source currently exposes on macOS
