@@ -2,6 +2,7 @@
 import ast
 import copy
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -12,6 +13,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("macos_public_verification_evidence", ROOT / "desktop/tools/macos_public_verification_evidence.py")
@@ -48,12 +50,12 @@ def write(root, name, value):
     return path
 
 
-def project(root):
+def project(root, *, removal_case="disabled"):
     return DATA.project(str(root), profile="installed", source=CONTEXT["source"], workflow_source=CONTEXT["workflowSource"],
-                        run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"])
+                        run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"], removal_case=removal_case)
 
 
-def normal_diagnostic_data():
+def normal_diagnostic_data(*, removal=False):
     """Compile only genuine DATA writers/constants, never import the native runner.
 
     CompletedProcess is only an inert record constructor; no subprocess runner
@@ -65,6 +67,8 @@ def normal_diagnostic_data():
         "normal_failure_diagnostics", "classify_normal_admission_failure", "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
         "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
         "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES"}
+    if removal:
+        names.update(("TARGET", "CLASS", "REMOVAL_METHODS", "removal_selection", "removal_ui_result"))
     nodes, found = [], set()
     for node in ast.parse(path.read_text()).body:
         name = node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else (
@@ -98,7 +102,219 @@ def admission_diagnostic(normal):
     return normal["classify_normal_admission_failure"](json.dumps(raw).encode())
 
 
+def removal_data():
+    """Only existing terminal-comparison and fixed-role DATA, no native owners."""
+    result = []
+    for filename, names in (
+        ("stage_macos_installed.py", {"Refused", "need", "maintenance_hex", "REMOVAL_FIXTURE_CASES", "REMOVAL_FIXTURE_PHASES",
+            "removal_fixture_case_data", "removal_fixture_observation_pair", "removal_fixture_terminal_data"}),
+        ("macos_android_helper_package.py", {"Refused", "need", "REMOVAL_CASES", "removal_runtime_roles", "removal_native_result_data"}),
+    ):
+        path = ROOT / "desktop/tools" / filename
+        nodes, found = [], set()
+        for node in ast.parse(path.read_text()).body:
+            name = node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else (
+                node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) else None)
+            if name in names:
+                nodes.append(node); found.add(name)
+        if found != names:
+            raise AssertionError("finite-removal-DATA-dependencies")
+        namespace = {"re": re}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
+        result.append(namespace)
+    return result
+
+
+def removal_receipt(case, stager, helper, normal):
+    """Synthetic normalized observations, never native/removal authority."""
+    binding = {"sourceCommit": CONTEXT["source"], "target": CONTEXT["target"], "release": DATA.REMOVAL_RELEASE,
+        "inventorySha256": "b" * 64, "packageSha256": "c" * 64, "removeDescriptorSha256": "d" * 64,
+        "removeSignatureSha256": "e" * 64}
+    before = {"phase": "before", "binding": binding, "rootIdentity": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "expectedFiles": 3, "expectedDirectories": 2, "presentFiles": 3, "presentDirectories": 2,
+        "archives": [], "appPresent": True, "firstEligibleAbsent": False, "allPayloadAbsent": False,
+        **{key: "f" * 64 for key in ("installationStateSha256", "installedProducerSha256", "installedSignatureSha256", "payloadCommitmentSha256")}}
+    old = {"invocation": "1" * 32, "snapshotSha256": "4" * 64, "tipSha256": "5" * 64, "prefix": 3,
+        "requestId": "6" * 32, "rootNonce": "1" * 32, "previousTipSha256": None, "genesisSnapshotSha256": "4" * 64}
+    new = {"invocation": "2" * 32, "snapshotSha256": None, "tipSha256": "8" * 64, "prefix": 4,
+        "requestId": "9" * 32, "rootNonce": "2" * 32, "previousTipSha256": old["tipSha256"], "genesisSnapshotSha256": old["genesisSnapshotSha256"]}
+    middle = dict(before, phase="after-cancel") if case == "ordinary" else dict(before,
+        phase="after-cut", presentFiles=2, firstEligibleAbsent=True, archives=[old])
+    terminal = dict(before, phase="terminal", presentFiles=0, presentDirectories=0,
+        appPresent=False, firstEligibleAbsent=True, allPayloadAbsent=True,
+        archives=[dict(old, prefix=4)] if case == "ordinary" else [old, new])
+    arguments = {} if case == "ordinary" else {
+        "effects_sha": "a" * 64, "supervisor": {"role": "resume", "actualChildReturncode": 0,
+            "originalChildWaitObserved": True, "effectsSha256": "a" * 64},
+        "effects": {"requestId": new["requestId"], "rootNonce": new["rootNonce"], "previousTipSha256": old["tipSha256"],
+            "genesisSnapshotSha256": old["genesisSnapshotSha256"], "returnedUnlinks": 4, "appRootUnlinkOrdinal": 4}}
+    final = stager["removal_fixture_terminal_data"](case, before, middle, terminal, **arguments)
+    method = normal["REMOVAL_METHODS"][case]
+    selected = "-[MRKNormalAppUITests.NormalAppUITests " + method + "]"
+    output = ("MRK_MACOS_REMOVAL_UI=v1;case=" + case + ";cancelObserved=" + ("1" if case == "ordinary" else "0")
+        + ";continueObserved=1;originalTerminated=1;gateClosed=1;gateFree=unqualified;normalQuit=0;channelClosed=1\n"
+        + "Test Case '" + selected + "' started.\nTest Case '" + selected + "' passed (1.0 seconds).\n").encode()
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    tree = {"testNodes": [{"name": "MRKNormalAppUITests", "nodeType": "Test Suite", "children": [
+        {"name": method + "()", "nodeType": "Test Case", "nodeIdentifier": "NormalAppUITests/" + method + "()", "result": "Passed"}]}]}
+    ui = normal["removal_ui_result"](output, json.dumps(counts).encode(), json.dumps(tree).encode(), case)
+    value = receipt("package-removal-fixture"); del value["finalImage"]
+    value["notarySubmission"] = value["notaryAuthentication"] = None
+    value["originalCalls"] = [{"role": role, "entered": True, "returned": True, "capturesSettled": True,
+        "returncode": 1 if role in ("removal-live-cancel", "removal-live-cut") else 0,
+        "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64} for role in helper["removal_runtime_roles"](case)]
+    value["removalFixture"] = dict(final, originalUIJoined=True, uiObservation=ui, outputs=3 if case == "ordinary" else 6,
+        outputsSha256="c" * 64, requestsDirectoryNamedOnly=True, mountedInputsDetached=True,
+        sourcePrePostMatched=True, firstOriginalErrorPreserved=True, productReady=False)
+    return value
+
+
 class PublicVerificationEvidenceData(unittest.TestCase):
+    def test_genuine_removal_data_preserves_case_facts_and_expected_nonzero(self):
+        stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
+        self.assertEqual(DATA.REMOVAL_RELEASE, json.loads((ROOT / "desktop/macos-installed-inputs/build-release.json").read_text())["release"])
+        self.assertEqual(DATA.REMOVAL_METHODS, normal["REMOVAL_METHODS"])
+        union = set()
+        for case in ("ordinary", "abrupt"):
+            roles = helper["removal_runtime_roles"](case)
+            self.assertEqual(DATA.REMOVAL_ROLES[case], roles)
+            union.update(roles)
+            value = removal_receipt(case, stager, helper, normal)
+            row = DATA.project_receipt(value, {**CONTEXT, "expectedRemovalCase": case}, "package-removal-fixture")
+            self.assertEqual(row["originalCalls"]["recordedCount"], 9)
+            self.assertEqual(row["originalCalls"]["unclassifiedCount"], 0)
+            nonzero = [call for call in row["originalCalls"]["calls"] if call["returncode"] != 0]
+            self.assertEqual(len(nonzero), 1)
+            self.assertTrue(helper["removal_native_result_data"](case, nonzero[0]["role"], nonzero[0]["returncode"]))
+            final = row["removalFixture"]
+            self.assertEqual(final, value["removalFixture"])
+            self.assertEqual(final["qualification"], "pending-original-owner-finality")
+            self.assertIs(final["powerLossQualified"], False)
+            self.assertIs(final["productReady"], False)
+            self.assertEqual(final["uiObservation"]["gateFree"], "unqualified")
+            self.assertIs(final["uiObservation"]["normalQuit"], False)
+            self.assertIs(row["recordedPassed"], True)  # Separate from pending fixture qualification.
+        self.assertEqual(len(union), 12)
+        self.assertTrue(union <= DATA.NATIVE_ROLES)
+
+    def test_removal_mixed_cases_context_and_closed_fields_are_refused(self):
+        stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
+        value = removal_receipt("ordinary", stager, helper, normal)
+        context = {**CONTEXT, "expectedRemovalCase": "ordinary"}
+        for key, bad in (("expectedRemovalCase", "disabled"), ("expectedRemovalCase", "abrupt"),
+                         ("target", "x86_64-apple-darwin"), ("profile", "aqua"), ("source", "2" * 40)):
+            with self.subTest(context=key), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(value, {**context, key: bad}, "package-removal-fixture")
+        mutations = (((), "case", "abrupt"), ((), "archives", True), ((), "outputs", 6),
+            ((), "qualification", "passed"), ((), "powerLossQualified", True), ((), "originalUIJoined", False),
+            ((), "allPayloadAbsent", 1), ((), "abruptProcessCutObserved", True), ((), "outputsSha256", SENTINEL),
+            (("targetBinding",), "release", SENTINEL), (("targetBinding",), "sourceCommit", "2" * 40),
+            (("targetBinding",), "target", "x86_64-apple-darwin"), (("targetBinding",), "packageSha256", SENTINEL),
+            (("uiObservation",), "case", "abrupt"), (("uiObservation",), "testIdentifier", SENTINEL),
+            (("uiObservation",), "normalQuit", True), (("uiObservation",), "gateFree", "qualified"),
+            (("uiObservation",), "nativeSummarySha256", SENTINEL), (("uiObservation", "testCounts"), "passedTests", True))
+        for path, name, bad in mutations:
+            broken = copy.deepcopy(value); node = broken["removalFixture"]
+            for part in path: node = node[part]
+            node[name] = bad
+            with self.subTest(path=path, name=name), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(broken, context, "package-removal-fixture")
+        for key in value["removalFixture"]:
+            broken = copy.deepcopy(value); del broken["removalFixture"][key]
+            with self.subTest(missing=key), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(broken, context, "package-removal-fixture")
+        for path in ((), ("targetBinding",), ("uiObservation",), ("uiObservation", "testCounts")):
+            broken = copy.deepcopy(value); node = broken["removalFixture"]
+            for part in path: node = node[part]
+            node["rawMessage"] = SENTINEL
+            with self.subTest(extra=path), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(broken, context, "package-removal-fixture")
+        for role in ("removal-live-cut", SENTINEL):
+            broken = copy.deepcopy(value); broken["originalCalls"][3]["role"] = role
+            with self.assertRaises(DATA.Refused):
+                DATA.project_receipt(broken, context, "package-removal-fixture")
+        broken = copy.deepcopy(value); broken["originalCalls"] *= 15
+        with self.assertRaises(DATA.Refused):
+            DATA.project_receipt(broken, context, "package-removal-fixture")
+        broken = copy.deepcopy(value); broken["phase"] = "package-remove"
+        with self.assertRaises(DATA.Refused):
+            DATA.project_receipt(broken, context, "package-remove")
+
+    def test_removal_failed_parent_and_partial_originals_never_become_success(self):
+        stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
+        value = removal_receipt("ordinary", stager, helper, normal)
+        context = {**CONTEXT, "expectedRemovalCase": "ordinary"}
+        value.update(passed=False, originalClosesKnown=False, targetRetired=False)
+        row = DATA.project_receipt(value, context, "package-removal-fixture")
+        self.assertIs(row["recordedPassed"], False)
+        self.assertIs(row["originalClosesKnown"], False)
+        self.assertEqual(row["removalFixture"]["qualification"], "pending-original-owner-finality")
+        del value["removalFixture"]
+        value["originalCalls"] = [{"role": "removal-target-attach", "entered": True, "returned": False, "capturesSettled": False}]
+        row = DATA.project_receipt(value, context, "package-removal-fixture")
+        self.assertIsNone(row["removalFixture"])
+        self.assertEqual(row["originalCalls"]["recordedCount"], 1)
+        self.assertIsNone(row["originalCalls"]["calls"][0].get("returncode"))
+        self.assertIs(row["originalCalls"]["calls"][0]["returned"], False)
+
+    def test_removal_cli_case_suffix_is_optional_explicit_and_fixed(self):
+        choices = (("installed", CONTEXT["target"], [], 0, "disabled"),
+            ("aqua", CONTEXT["target"], [], 0, "disabled"),
+            ("installed", "x86_64-apple-darwin", [], 0, "disabled"),
+            *( ("installed", CONTEXT["target"], ["--removal-case", case], 0, case) for case in ("disabled", "ordinary", "abrupt") ),
+            ("aqua", CONTEXT["target"], ["--removal-case", "ordinary"], 1, None),
+            ("installed", "x86_64-apple-darwin", ["--removal-case", "ordinary"], 1, None),
+            ("installed", CONTEXT["target"], ["--removal-case", SENTINEL], 1, None),
+            ("installed", CONTEXT["target"], ["--other", "ordinary"], 1, None),
+            ("installed", CONTEXT["target"], ["--removal-case", "ordinary", "--removal-case", "ordinary"], 1, None))
+        for profile, target, suffix, expected, case in choices:
+            with self.subTest(profile=profile, target=target, suffix=suffix), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                args = ["--profile", profile, "--work", str(root), "--target", target, "--source", CONTEXT["source"],
+                    "--workflow-source", CONTEXT["workflowSource"], "--run-id", CONTEXT["runId"], "--run-attempt", CONTEXT["runAttempt"]]
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(DATA.main(args + suffix), expected)
+                if expected == 0:
+                    self.assertEqual(json.loads((root / DATA.OUTPUT).read_text())["expectedRemovalCase"], case)
+                else:
+                    self.assertFalse((root / DATA.OUTPUT).exists())
+                # A recognized option in the wrong position is not a generic CLI.
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(DATA.main(["--removal-case", "ordinary"] + args), 1)
+
+    def test_removal_file_projection_keeps_case_and_caller_status_independent(self):
+        stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
+        for case in ("ordinary", "abrupt"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); value = removal_receipt(case, stager, helper, normal)
+                path = write(root, "android-helper-package-removal-fixture.json", value); before = path.read_bytes()
+                result = project(root, removal_case=case)
+                self.assertEqual(result["expectedRemovalCase"], case)
+                row = result["phases"]["package-removal-fixture"]
+                self.assertEqual(row["removalFixture"]["case"], case)
+                self.assertEqual(row["callerStatus"], {"receiptState": "absent"})
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_data_contract_five_statuses_are_observations_not_phase_acceptance(self):
+        names = tuple("data-contracts/" + role + ".status" for role in ("mount", "apfs", "build", "rust", "python"))
+        self.assertEqual(tuple(name for name in DATA.STATUS_FILES if name.startswith("data-contracts/")), names)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [write(root, name, body) for name, body in zip(names, (b"0\n", b"1\n", b"unavailable\n", b"0 0 0\n"))]
+            raw = write(root, "data-contracts/result.json", SENTINEL.encode())
+            before = [path.read_bytes() for path in paths + [raw]]
+            result = project(root)
+            self.assertEqual(result["statuses"][names[0]], {"receiptState": "observed", "returncode": 0})
+            self.assertEqual(result["statuses"][names[1]], {"receiptState": "observed", "returncode": 1})
+            self.assertEqual(result["statuses"][names[2]], {"receiptState": "refused"})
+            self.assertEqual(result["statuses"][names[3]], {"receiptState": "refused"})
+            self.assertEqual(result["statuses"][names[4]], {"receiptState": "absent"})
+            self.assertEqual([path.read_bytes() for path in paths + [raw]], before)
+            self.assertIs(result["diagnosticOnly"], True)
+            self.assertIs(result["productReady"], False)
+            self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
+
     def test_genuine_normal_build_writer_preserves_finite_cause_without_compiler_prose(self):
         value = build_diagnostic(normal_diagnostic_data())
         row = DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": 70})
@@ -203,7 +419,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 value = copy.deepcopy(base); value[key] = bad
                 with self.subTest(role=role, key=key, bad=bad), self.assertRaises(DATA.Refused):
                     DATA.project_ui_diagnostic(value, role, status)
-            for key in base.keys() - {"buildFailureReasons"}:
+            for key in base.keys() - {"buildFailureReasons", "destinationTable"}:
                 value = copy.deepcopy(base); del value[key]
                 with self.subTest(role=role, missing=key), self.assertRaises(DATA.Refused):
                     DATA.project_ui_diagnostic(value, role, status)
@@ -457,13 +673,18 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 body = json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode()
                 self.assertLessEqual(len(body), 4096)
                 write(root, path, body)
-            result = project(root)
+            stager, helper = removal_data()
+            removal = removal_receipt("ordinary", stager, helper, normal_diagnostic_data(removal=True))
+            write(root, "android-helper-package-removal-fixture.json", removal)
+            result = project(root, removal_case="ordinary")
             for phase in roster:
                 self.assertEqual(result["phases"][phase]["receiptState"], "observed", phase)
                 self.assertIs(result["phases"][phase]["recordedPassed"], True, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["unclassifiedCount"], 0, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["recordedCount"], len(roster[phase][0]))
             self.assertTrue(all(row["receiptState"] == "observed" for row in result["normalUiBuildDiagnostics"].values()))
+            self.assertEqual(result["phases"]["package-removal-fixture"]["originalCalls"]["recordedCount"], 9)
+            self.assertEqual(result["phases"]["package-removal-fixture"]["removalFixture"]["case"], "ordinary")
             self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
 
     def test_fixed_roster_preserves_originals_and_independent_failure_status(self):
@@ -526,6 +747,86 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         value["platform"] = "macOS26-x86_64"
         with self.assertRaises(DATA.Refused):
             DATA.project_summary(value, CONTEXT, False)
+
+    def test_genuine_destination_table_projection_preserves_partial_observations_only(self):
+        normal = normal_diagnostic_data()
+        status = {"receiptState": "observed", "returncode": 70}
+        header = b'Available destinations for the "MRKNormalAppUI" scheme:\n'
+        good = b'{ platform:macOS, arch:x86_64, name:' + SENTINEL.encode() + b' }\n'
+        for raw in (b'', header, header + good, header + b'{ platform:iOS, name:unknown }\n',
+                    header + b'{ platform:macOS }\n', header + good * 9,
+                    header + good.rstrip(b'\n')):
+            original = CompletedProcess([], 70, raw, b'')
+            value = normal["normal_failure_diagnostics"]("build", None, original)
+            row = DATA.project_ui_diagnostic(value, "build", status)
+            self.assertEqual(row["destinationTable"], value["destinationTable"])
+            self.assertEqual(row["originalReturncode"], 70)
+            self.assertEqual(row["binding"], "same-work-root-parent-context-only")
+            self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertNotIn(SENTINEL, json.dumps(row))
+        value = normal["failure_base"]("build", None, CompletedProcess([], 70, b'', b''))
+        self.assertEqual(DATA.project_ui_diagnostic(value, "build", status)["destinationTable"]["state"], "unavailable")
+        value.pop("destinationTable")
+        self.assertNotIn("destinationTable", DATA.project_ui_diagnostic(value, "build", status))
+
+    def test_destination_table_public_schema_is_optional_typed_and_closed(self):
+        normal = normal_diagnostic_data()
+        status = {"receiptState": "observed", "returncode": 70}
+        original = CompletedProcess([], 70, b'Available destinations for the "MRKNormalAppUI" scheme:\n'
+            b'{ platform:macOS, name:Any Mac }\n', b'')
+        value = normal["normal_failure_diagnostics"]("build", None, original)
+        table = value["destinationTable"]
+        row = table["rows"][0]
+        for key, bad in (("stream", SENTINEL), ("stream", True), ("section", SENTINEL), ("section", 1),
+                         ("platform", "iOS"), ("platform", None), ("architecture", "i386"), ("architecture", False),
+                         ("errorPresent", 1), ("errorPresent", None), ("name", SENTINEL)):
+            broken = copy.deepcopy(value); broken["destinationTable"]["rows"] = [{**row, key: bad}]
+            with self.subTest(key=key, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(broken, "build", status)
+        for bad in (None, [], {}, {**table, "state": SENTINEL}, {**table, "state": True},
+                    {**table, "state": "absent"}, {**table, "state": "unavailable"},
+                    {**table, "rows": [row] * 9}, {**table, "rows": [None]}, {**table, "rows": None},
+                    {**table, "unknownRowObserved": 1}, {**table, "malformedRowObserved": None},
+                    {**table, "rowsTruncated": 1}, {**table, "rowsTruncated": True},
+                    {**table, "complete": True}, {**table, "error": SENTINEL}):
+            broken = copy.deepcopy(value); broken["destinationTable"] = bad
+            with self.subTest(table=bad), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(broken, "build", status)
+        for state in ("absent", "unavailable"):
+            for flag in ("unknownRowObserved", "malformedRowObserved", "rowsTruncated"):
+                broken = copy.deepcopy(value); broken["findingsTruncated"] = True
+                broken["destinationTable"] = {**table, "state": state, "rows": [], flag: True}
+                with self.subTest(state=state, flag=flag), self.assertRaises(DATA.Refused):
+                    DATA.project_ui_diagnostic(broken, "build", status)
+        query = build_diagnostic(normal, "query"); query["destinationTable"] = table
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(query, "toolchain", status)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": 0})
+
+    def test_destination_table_fixed_file_projection_keeps_full_eight_rows_and_status70(self):
+        normal = normal_diagnostic_data()
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        raw = header + (b'{ platform:macOS, arch:arm64, id:' + SENTINEL.encode()
+                        + b', name:Private Mac, error:' + SENTINEL.encode() + b' }\n') * 8
+        value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, b'', raw))
+        self.assertEqual(len(value["destinationTable"]["rows"]), 8)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = write(root, "normal-ui/build.failure-diagnostics.json", value)
+            before = path.read_bytes()
+            self.assertLessEqual(len(before), 4096)
+            write(root, "normal-ui/build.status", b"70\n")
+            result = project(root)
+            observed = result["normalUiBuildDiagnostics"]["build"]
+            self.assertEqual(observed["receiptState"], "observed")
+            self.assertEqual(observed["destinationTable"], value["destinationTable"])
+            self.assertEqual(observed["originalReturncode"], 70)
+            self.assertIs(observed["nativeSuccessInferred"], False)
+            self.assertEqual(path.read_bytes(), before)
+            self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+            self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+
 
 
 if __name__ == "__main__":

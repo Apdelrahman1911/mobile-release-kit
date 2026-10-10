@@ -4446,7 +4446,8 @@ jobs:
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \
             --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \
             --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \
-            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --removal-case "$MRK_MACOS_REMOVAL_CASE"
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success'

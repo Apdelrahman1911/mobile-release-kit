@@ -18802,17 +18802,18 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         }
         const ARGUMENT_LIMIT: usize = 1024;
         const ARGUMENT_BYTES_LIMIT: usize = 4096;
+        const ARGUMENT_COUNT_LIMIT: usize = if cfg!(feature = "macos-installed-removal-observer") { 7 } else { 4 };
         #[derive(Debug,Clone,Copy,PartialEq,Eq)]
         enum CompiledEntryRole { Installer, Remover }
         #[derive(Debug,PartialEq,Eq)]
         enum EntryKind { CompletedPackage, PrivateWriter, Removal, RemovalResume }
         fn entry_arguments_data(values: impl IntoIterator<Item=std::ffi::OsString>) -> Result<Vec<String>> {
-            let mut result = Vec::with_capacity(4); let mut total = 0usize;
-            // Read at most the four admitted values plus one refusal sentinel.
+            let mut result = Vec::with_capacity(ARGUMENT_COUNT_LIMIT); let mut total = 0usize;
+            // Read at most the compiled role's admitted values plus one refusal sentinel.
             // Never collect an unbounded iterator or replace invalid UTF-8.
-            for value in values.into_iter().take(5) {
+            for value in values.into_iter().take(ARGUMENT_COUNT_LIMIT + 1) {
                 let bytes = value.as_encoded_bytes();
-                check(result.len() < 4 && !bytes.is_empty() && bytes.len() <= ARGUMENT_LIMIT
+                check(result.len() < ARGUMENT_COUNT_LIMIT && !bytes.is_empty() && bytes.len() <= ARGUMENT_LIMIT
                     && !bytes.iter().any(|b| b.is_ascii_control()),"entry-argument-bound")?;
                 total = total.checked_add(bytes.len()).filter(|n| *n <= ARGUMENT_BYTES_LIMIT).ok_or("entry-argument-bound")?;
                 result.push(value.into_string().map_err(|_| "entry-argument-utf8")?);
@@ -19318,7 +19319,15 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     };
                     assert_eq!(entry_kind_data(input),expected);
                 }
-                for values in [vec!["a";5],vec![""],vec!["a\nb"],vec!["a\0b"]] { assert!(args(&values).is_err()); }
+                let expected_count = if cfg!(feature = "macos-installed-removal-observer") { 7 } else { 4 };
+                assert_eq!(ARGUMENT_COUNT_LIMIT, expected_count);
+                assert_eq!(args(&vec!["a";expected_count]).unwrap().len(), expected_count);
+                assert!(args(&vec!["a";expected_count+1]).is_err());
+                let bounded = "x".repeat(ARGUMENT_LIMIT);
+                assert!(args(&[bounded.as_str();4]).is_ok());
+                #[cfg(feature = "macos-installed-removal-observer")]
+                assert!(args(&[bounded.as_str(),bounded.as_str(),bounded.as_str(),bounded.as_str(),"x"]).is_err());
+                for values in [vec![""],vec!["a\nb"],vec!["a\0b"]] { assert!(args(&values).is_err()); }
                 assert!(entry_arguments_data([std::ffi::OsString::from("x".repeat(ARGUMENT_LIMIT+1))]).is_err());
                 use std::os::unix::ffi::OsStringExt;
                 assert!(entry_arguments_data([std::ffi::OsString::from_vec(vec![0xff])]).is_err());
@@ -19492,12 +19501,15 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         path.clone(),"2".repeat(64),"3".repeat(64),"4".repeat(64)];
                     for phase in ["before","after-cancel","after-cut","terminal"] {
                         args[1]=format!("--fixture-observe-{phase}");
-                        let (_,invocation)=removal_observer_arguments_data(&args).unwrap();
+                        let admitted=entry_arguments_data(args.iter().cloned().map(std::ffi::OsString::from)).unwrap();
+                        assert_eq!(admitted,args);
+                        let (_,invocation)=removal_observer_arguments_data(&admitted).unwrap();
                         let script=invocation.script().unwrap();assert!(script.len()<=1024);
                         assert!(std::str::from_utf8(&script).unwrap().ends_with(&format!("--fixture-observe-{phase} \"$1\" '{path}' '{}' '{}' '{}'\n",args[4],args[5],args[6])));
                     }
                     for n in 0..7 {assert!(removal_observer_arguments_data(&args[..n]).is_err());}
                     let mut wrong=args.clone();wrong.push("x".into());assert!(removal_observer_arguments_data(&wrong).is_err());
+                    assert!(entry_arguments_data(wrong.iter().cloned().map(std::ffi::OsString::from)).is_err());
                     for flag in ["--resume","--fixture-supervise","--fixture-observe-unknown"] {
                         let mut wrong=args.clone();wrong[1]=flag.into();assert!(removal_observer_arguments_data(&wrong).is_err());
                     }

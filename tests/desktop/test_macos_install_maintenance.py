@@ -249,7 +249,9 @@ class MacMaintenancePreparationTests(unittest.TestCase):
         self.assertIn('EntryKind::PrivateWriter) => dispatch_private(&args)', entry)
         self.assertIn('EntryKind::CompletedPackage) => completed_entry(&args[1],&args[2],started)', entry)
         arguments = private.split('fn entry_arguments_data(', 1)[1].split('pub(super) fn entry()', 1)[0]
-        self.assertIn('values.into_iter().take(5)', arguments)
+        self.assertIn('const ARGUMENT_COUNT_LIMIT: usize = if cfg!(feature = "macos-installed-removal-observer") { 7 } else { 4 };', private)
+        self.assertIn('values.into_iter().take(ARGUMENT_COUNT_LIMIT + 1)', arguments)
+        self.assertIn('result.len() < ARGUMENT_COUNT_LIMIT', arguments)
         self.assertIn('value.into_string()', arguments)
         self.assertNotIn('to_string_lossy', arguments)
         self.assertIn('[_,source,completed] if source.starts_with', arguments)

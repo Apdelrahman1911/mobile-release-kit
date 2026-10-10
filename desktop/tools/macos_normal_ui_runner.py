@@ -2224,6 +2224,8 @@ def failure_base(phase, selection, original, *, engineering=False):
     if not engineering and phase == "build":
         value["compilerDiagnostics"] = []
         value["buildFailureReasons"] = []
+        value["destinationTable"] = {"state": "unavailable", "unknownRowObserved": False,
+            "malformedRowObserved": False, "rowsTruncated": False, "rows": []}
         value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
@@ -2278,6 +2280,14 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     ) if compiler_eligible else ()
     if compiler_eligible:
         markers["buildFailed"] = rb"(?m)^\*\* BUILD FAILED \*\*\r?$"
+        table = value["destinationTable"]
+        table["state"] = "absent"  # No exact header observed, not an eligible-destination count.
+        destination_header = (rb'[ \t]{0,32}(Available|Ineligible) destinations for the '
+                              rb'"MRKNormalAppUI" scheme:[ \t]{0,32}')
+        destination_row = rb"[ \t]{0,32}\{([\x20-\x7e]{1,4094})\}[ \t]{0,32}"
+        atom = rb"[\x21-\x2b\x2d-\x7a\x7c\x7e]"  # Neither comma nor braces.
+        destination_field = (rb" {0,8}([A-Za-z]{1,8}) {0,8}: {0,8}(" + atom
+            + rb"(?:[\x20-\x2b\x2d-\x7a\x7c\x7e]{0,1022}" + atom + rb")?) {0,8}")
     if methods:
         markers.update(selectedCaseStarted=rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
             selectedCaseFailed=rb"(?m)^Test Case '" + case + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$")
@@ -2526,6 +2536,7 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 value["findingsTruncated"] = True
 
     for stream, body in (("stdout", original.stdout), ("stderr", original.stderr)):
+        destination_section = None  # A header never lends authority across streams.
         for key, pattern in markers.items():
             value["markers"][key] = value["markers"][key] or re.search(pattern, body) is not None
         for match in re.finditer(codes, body):
@@ -2549,6 +2560,39 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
             if complete and record.endswith(b"\r"):
                 record = record[:-1]
             if compiler_eligible:
+                bounded = complete and len(record) <= 4096
+                header = re.fullmatch(destination_header, record) if bounded else None
+                if header is not None:
+                    destination_section = "available" if header.group(1) == b"Available" else "ineligible"
+                    table["state"] = "observed"
+                elif destination_section is not None and record.lstrip(b" \t").startswith(b"{"):
+                    if not bounded:
+                        table["rowsTruncated"] = value["findingsTruncated"] = True
+                    else:
+                        row_match = re.fullmatch(destination_row, record)
+                        fields = row_match.group(1).split(b",", 5) if row_match is not None else []
+                        parts, malformed = {}, not 1 <= len(fields) <= 5
+                        for field in fields if not malformed else ():
+                            item = re.fullmatch(destination_field, field)
+                            if item is None or item.group(1) in parts:
+                                malformed = True
+                                break
+                            parts[item.group(1)] = item.group(2)
+                        if malformed or not {b"platform", b"name"} <= parts.keys():
+                            table["malformedRowObserved"] = True
+                        elif (not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"}
+                              or parts[b"platform"] != b"macOS"
+                              or parts.get(b"arch") not in (None, b"arm64", b"x86_64")):
+                            table["unknownRowObserved"] = True
+                        elif len(table["rows"]) == 8:
+                            table["rowsTruncated"] = value["findingsTruncated"] = True
+                        else:
+                            # Opaque id/name/error fields never escape as text or per-value hashes.
+                            table["rows"].append({"stream": stream, "section": destination_section,
+                                "platform": "macos", "architecture": parts[b"arch"].decode("ascii")
+                                if b"arch" in parts else None, "errorPresent": b"error" in parts})
+                elif record.strip(b" \t"):
+                    destination_section = None
                 if complete and len(record) <= 4096:
                     # Fixed diagnostic categories only: do not publish scheme names,
                     # destination identifiers, variable message tails, or raw text.
@@ -2711,6 +2755,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        while table["rows"] and len(encoded(value)) + 1 > 4094:
+            table["rows"].pop()
+            table["rowsTruncated"] = value["findingsTruncated"] = True
+        if len(encoded(value)) + 1 > 4094:
+            del value["destinationTable"]  # Even optional metadata cannot displace old facts.
+            value["findingsTruncated"] = True
         while value["buildFailureReasons"] and len(encoded(value)) + 1 > 4094:
             value["buildFailureReasons"].pop()
             value["findingsTruncated"] = True

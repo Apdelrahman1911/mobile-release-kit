@@ -1629,7 +1629,33 @@ PUBLIC_VERIFICATION_WORKFLOW_MARKERS = ('public_evidence',
  '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n')
 
 
+# One exact optional removal-case CLI suffix, before the original privacy inverse.
+# This is SOURCE normalization only, never removal or original-finality evidence.
+REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE = ('            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n', '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \\\n            --removal-case "$MRK_MACOS_REMOVAL_CASE"\n')
+
+
+def without_removal_public_verification_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("removal public verification workflow source bound differs")
+    installed = "name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n"
+    if "desktop/tools/macos_public_verification_evidence.py" not in source or not source.startswith(installed):
+        if "--removal-case" in source:
+            raise AssertionError("removal public verification workflow route differs")
+        return source
+    previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+    anchor = '--profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET"'
+    if source.count(anchor) != 1:
+        raise AssertionError("removal public verification workflow anchor differs")
+    if source.count(previous) == 1 and source.count("\n" + previous) == 1 and "--removal-case" not in source:
+        return source
+    if (source.count(current) != 1 or source.count("\n" + current) != 1
+            or previous in source or source.count("--removal-case") != 1):
+        raise AssertionError("removal public verification workflow exact delta differs")
+    return source.replace("\n" + current, "\n" + previous, 1)
+
+
 def without_public_verification_workflow(source):
+    source = without_removal_public_verification_workflow(source)
     if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
         raise AssertionError("public verification workflow source bound differs")
     if not any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
@@ -2227,6 +2253,45 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def test_removal_public_evidence_case_is_current_before_historical_projection(self):
+        # Read actual current SOURCE, not the inverse view or a raw artifact.
+        root = Path(__file__).absolute().parents[2]
+        with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
+            body = stream.read(512 * 1024 + 1)
+        self.assertLessEqual(len(body), 512 * 1024)
+        source = body.decode("utf-8", "strict")
+        previous, current = REMOVAL_PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+        self.assertEqual(source.count(current), 1)
+        self.assertNotIn(previous, source)
+        self.assertEqual(source.count('--removal-case "$MRK_MACOS_REMOVAL_CASE"'), 1)
+        prior = without_removal_public_verification_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(),
+                         "70f45b237ad1fee9466dafa427e661df2c8cd5bb96f513820eeacd5145c2bf32")
+        self.assertEqual(without_removal_public_verification_workflow(prior), prior)
+        self.assertEqual(without_public_verification_workflow(source), without_public_verification_workflow(prior))
+        self.assertEqual(without_app_signature_workflow(source), without_app_signature_workflow(prior))
+        for altered in ("", current + current, previous + current, current[:-1],
+                        current.replace("--removal-case", "--removal-case disabled", 1),
+                        current.replace("MRK_MACOS_REMOVAL_CASE", "MRK_OTHER_CASE", 1),
+                        current.replace('            --removal-case', '          --removal-case', 1),
+                        current.split('            --removal-case', 1)[0],
+                        current.replace("--profile installed", "--profile aqua", 1)):
+            damaged = source.replace(current, altered, 1)
+            self.assertNotEqual(damaged, source)
+            with self.subTest(altered=altered), self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(damaged)
+            with self.assertRaises(AssertionError):
+                without_public_verification_workflow(damaged)
+        self.assertEqual(without_removal_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+        self.assertEqual(without_removal_public_verification_workflow(source + "# unrelated mutation\n"),
+                         prior + "# unrelated mutation\n")
+        with self.assertRaises(AssertionError):
+            without_app_signature_workflow(source + "# unrelated mutation\n")
+        for invalid in (None, b"DATA", "x" * (512 * 1024 + 1), "--removal-case disabled\n"):
+            with self.assertRaises(AssertionError):
+                without_removal_public_verification_workflow(invalid)
+
     def test_public_verification_exports_are_current_closed_data_before_projection(self):
         # Fixed bounded SOURCE only. No historical module/product import or child.
         root = Path(__file__).absolute().parents[2]
@@ -2239,6 +2304,8 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                 self.assertTrue(source.startswith(header))
                 self.assertEqual(source.count("        id: public_evidence\n"), 1)
                 self.assertEqual(source.count("desktop/tools/macos_public_verification_evidence.py"), 1)
+                # Only the independently asserted current removal-case CLI suffix is projected here.
+                source = without_removal_public_verification_workflow(source)
                 upload_count = 0
                 for previous, current in replacements:
                     self.assertEqual(source.count(current), 1)
@@ -3172,9 +3239,17 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertIn('"fullUIQualified": False', result)
         for flag in ('artifactBytesVerified', 'signingAuthenticated', 'githubAuthenticityEstablished', 'storeStateEstablished', 'releaseReadinessEstablished', 'recoverySafetyEstablished'):
             self.assertIn('"' + flag + '": False', result)
+        evidence = blocks['evidence']
+        self.assertIn("steps.public_evidence.outcome == 'success'", evidence)
+        self.assertEqual(evidence.count('          path:'), 1)
+        self.assertEqual(evidence.split('          path: ', 1)[1].split('          if-no-files-found:', 1)[0],
+                         '${{ steps.work.outputs.root }}/public-verification-evidence.json\n')
+        # Current privacy policy and historical evidence are separate contracts.
+        historical_uploads = without_public_verification_workflow(raw)
         for name in ('test-file-limit.status', 'test.status', 'test.runner-admission.json', 'test.failure-diagnostics.json',
                      'summary.status', 'summary.command-admission.json', 'summary.failure-diagnostics.json', 'result.json'):
-            self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 1)
+            self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 0)
+            self.assertEqual(historical_uploads.count('{0}/normal-ui/release-evidence-' + name), 1)
         self.assertIn('"release-evidence": "release-evidence"', raw.split("      - name: Remove only this completed preview build's disposable compiler outputs", 1)[1])
         # Remove only the accepted outer tool delta before historical evidence.
         tool_predecessor = without_tool_enrollment_workflow(raw)

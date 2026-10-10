@@ -46,9 +46,19 @@ STATUS_FILES = (
     *("aqua-" + role + ".status" for role in ("project-fields", "android-inputs", "local-edits3", "doctor-preflight2",
       "vault-helper", "installation-inspection", "project-recovery", "ios-account")), "aqua.status",
     "headless-build.status", "headless-tests.status", "headless-native-tests.status",
+    "data-contracts/mount.status", "data-contracts/apfs.status", "data-contracts/build.status",
+    "data-contracts/rust.status", "data-contracts/python.status",
     *("wrapping-" + role + "-build.status" for role in ("codec", "normal", "observer", "qualification", "reader")),
 )
+REMOVAL_ROLE_PREFIX = ("removal-target-attach", "removal-observers-attach", "removal-observer-before")
+REMOVAL_ROLE_SUFFIX = ("removal-observer-terminal", "removal-observers-detach", "removal-target-detach")
+REMOVAL_ROLES = {case: REMOVAL_ROLE_PREFIX + middle + REMOVAL_ROLE_SUFFIX for case, middle in (
+    ("ordinary", ("removal-live-cancel", "removal-observer-after-cancel", "removal-live-continue")),
+    ("abrupt", ("removal-live-cut", "removal-observer-after-cut", "removal-resume")))}
+REMOVAL_METHODS = {"ordinary": "testInstalledRemovalCancelThenContinue", "abrupt": "testInstalledRemovalContinueBeforeInterruption"}
+REMOVAL_RELEASE = "macos26-arm64-desktop-01"
 NATIVE_ROLES = frozenset((
+    *REMOVAL_ROLES["ordinary"], *REMOVAL_ROLES["abrupt"],
     "build", "resident-image-sign", "resident-image-verify-signed", "entry-build", "desktop-facade-build",
     "resident-facade-build", "sign", "verify-signed", "verify-before", "verify-after",
     "verify-before-resident-image", "verify-after-resident-image", "verify-before-history-provider", "verify-before-github-seal",
@@ -205,6 +215,8 @@ def project_ui_failure(value, phase):
     build_fields = {"compilerDiagnostics"} if phase == "build" else set()
     if phase == "build" and "buildFailureReasons" in value:
         build_fields.add("buildFailureReasons")  # Backward-compatible absence remains unproven, not empty.
+    if phase == "build" and "destinationTable" in value:
+        build_fields.add("destinationTable")  # Optional absence is not an empty table observation.
     need(phase in ("build", "query") and set(value) == fields | build_fields
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["scope"] == "normal-macos-ui-failure-diagnostic-only" and value["phase"] == phase
@@ -255,6 +267,23 @@ def project_ui_failure(value, phase):
                      and row["stream"] in ("stdout", "stderr")
                      and row["code"] in ("destination-not-found", "no-eligible-destination"))
             need(len({(row["stream"], row["code"]) for row in rows}) == len(rows))
+        if "destinationTable" in value:
+            table = value["destinationTable"]
+            need(type(table) is dict and set(table) == {"state", "unknownRowObserved",
+                 "malformedRowObserved", "rowsTruncated", "rows"}
+                 and table["state"] in ("unavailable", "absent", "observed"))
+            for name in ("unknownRowObserved", "malformedRowObserved", "rowsTruncated"):
+                boolean(table[name])
+            rows = table["rows"]
+            need(type(rows) is list and len(rows) <= 8
+                 and (not table["rowsTruncated"] or value["findingsTruncated"])
+                 and (table["state"] == "observed" or not (rows or table["unknownRowObserved"]
+                      or table["malformedRowObserved"] or table["rowsTruncated"])))
+            for row in rows:
+                need(type(row) is dict and set(row) == {"stream", "section", "platform", "architecture", "errorPresent"}
+                     and row["stream"] in ("stdout", "stderr") and row["section"] in ("available", "ineligible")
+                     and row["platform"] == "macos" and row["architecture"] in (None, "arm64", "x86_64"))
+                boolean(row["errorPresent"])
     return dict(value)
 
 
@@ -408,6 +437,50 @@ def project_final(row):
     return result
 
 
+def project_removal_fixture(value, context, calls):
+    if value is None:
+        return None
+    case = context.get("expectedRemovalCase", "disabled")
+    need(case in ("ordinary", "abrupt") and context.get("profile") == "installed"
+         and context["target"] == "aarch64-apple-darwin" and type(value) is dict)
+    true_fields = ("allPayloadAbsent", "ordinaryOriginalFinalityRequired", "originalUIJoined",
+        "requestsDirectoryNamedOnly", "mountedInputsDetached", "sourcePrePostMatched", "firstOriginalErrorPreserved")
+    abrupt_fields = ("abruptProcessCutObserved", "samePackageLinkedResumeObserved", "appRootLastReturnedEffectObserved")
+    need(set(value) == {"schemaVersion", "case", "targetBinding", "archives", "qualification", "uiObservation",
+         "outputs", "outputsSha256", "powerLossQualified", "productReady", *true_fields, *abrupt_fields}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["case"] == case
+         and value["qualification"] == "pending-original-owner-finality"
+         and value["powerLossQualified"] is False and value["productReady"] is False
+         and all(value[name] is True for name in true_fields)
+         and all(value[name] is (case == "abrupt") for name in abrupt_fields))
+    need(integer(value["archives"], 2, 1) == (1 if case == "ordinary" else 2)
+         and integer(value["outputs"], 6, 3) == (3 if case == "ordinary" else 6))
+    hex_value(value["outputsSha256"])
+    binding = value["targetBinding"]
+    hashes = ("inventorySha256", "packageSha256", "removeDescriptorSha256", "removeSignatureSha256")
+    need(type(binding) is dict and set(binding) == {"sourceCommit", "target", "release", *hashes}
+         and binding["sourceCommit"] == context["source"] and binding["target"] == context["target"]
+         and binding["release"] == REMOVAL_RELEASE)
+    for name in hashes:
+        hex_value(binding[name])
+    ui = value["uiObservation"]
+    ui_true = ("oneOriginalAttemptObserved", "originalAppTerminated", "uiGateClosed", "uiChannelClosed")
+    need(type(ui) is dict and set(ui) == {"case", "testIdentifier", "testCounts", "nativeSummarySha256",
+         "nativeTestTreeSha256", "gateFree", "normalQuit", "productReady", *ui_true}
+         and ui["case"] == case and ui["testIdentifier"] == "MRKNormalAppUITests/NormalAppUITests/" + REMOVAL_METHODS[case]
+         and ui["gateFree"] == "unqualified" and ui["normalQuit"] is False and ui["productReady"] is False
+         and all(ui[name] is True for name in ui_true))
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(type(ui["testCounts"]) is dict and set(ui["testCounts"]) == set(counts)
+         and all(type(ui["testCounts"][name]) is int and ui["testCounts"][name] == count for name, count in counts.items()))
+    hex_value(ui["nativeSummarySha256"]); hex_value(ui["nativeTestTreeSha256"])
+    # Only case consistency, not a replacement for the owner's ordered/final
+    # original validation. Expected cancellation/cut return1 remains unchanged.
+    need(type(calls) is list and len(calls) <= 128 and all(type(row) is dict
+         and row.get("role") in REMOVAL_ROLES[case] for row in calls))
+    return dict(value)
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -465,6 +538,10 @@ def project_receipt(value, context, phase):
     result["finalImageMount"] = None if mount is None else {name: optional(mount, name, boolean) for name in
         ("attachEntered", "originalKnown", "detached", "retained", "installerEntered", "systemServiceExitClaimed")}
     result["failure"] = project_failure(value.get("failure"))
+    removal = value.get("removalFixture")
+    need(removal is None or phase == "package-removal-fixture")
+    if phase == "package-removal-fixture":
+        result["removalFixture"] = project_removal_fixture(removal, context, value.get("originalCalls"))
     return result
 
 
@@ -567,10 +644,13 @@ def read_input(root, name, limit, budget):
             os.close(child)
 
 
-def project(work, *, profile, source, workflow_source, run_id, run_attempt, target):
+def project(work, *, profile, source, workflow_source, run_id, run_attempt, target, removal_case="disabled"):
     need(profile in ("installed", "aqua") and target in TARGETS)
+    need(removal_case in ("disabled", "ordinary", "abrupt")
+         and (removal_case == "disabled" or profile == "installed" and target == "aarch64-apple-darwin"))
     context = {"profile": profile, "source": hex_value(source, 40), "workflowSource": hex_value(workflow_source, 40),
-               "runId": identifier(run_id), "runAttempt": identifier(run_attempt), "target": target}
+               "runId": identifier(run_id), "runAttempt": identifier(run_attempt), "target": target,
+               "expectedRemovalCase": removal_case}
     need(source == workflow_source and len(PHASES) <= 20 and len(STATUS_FILES) <= 100
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
@@ -637,11 +717,13 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
 
 def main(arguments):
     try:
-        need(len(arguments) == 14 and tuple(arguments[::2]) ==
+        need(len(arguments) in (14, 16) and tuple(arguments[:14:2]) ==
              ("--profile", "--work", "--target", "--source", "--workflow-source", "--run-id", "--run-attempt"))
-        profile, work, target, source, workflow_source, run_id, run_attempt = arguments[1::2]
+        need(len(arguments) == 14 or arguments[14] == "--removal-case")
+        removal_case = "disabled" if len(arguments) == 14 else arguments[15]
+        profile, work, target, source, workflow_source, run_id, run_attempt = arguments[1:14:2]
         project(work, profile=profile, source=source, workflow_source=workflow_source,
-                run_id=run_id, run_attempt=run_attempt, target=target)
+                run_id=run_id, run_attempt=run_attempt, target=target, removal_case=removal_case)
     except Exception:
         print("Public evidence projection refused; originals remain local.", file=sys.stderr)
         return 1
