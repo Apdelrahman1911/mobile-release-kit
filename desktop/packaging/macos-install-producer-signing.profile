@@ -1,2 +1,9 @@
 schema=1
-state=unconfigured
+state=configured
+team-identifier=7CGZ2343AA
+rsa-bits=2048
+leaf-certificate-sha1=5effa7d19bbe005b19c1617833cbe22186c2af96
+leaf-certificate-sha256=e5ba1d05f136fbef3ca5816f0efb1e946cb2cfb81819b745d9f914e7e9256d72
+issuer-certificate-sha256=f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a
+root-certificate-sha256=b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024
+public-key-pkcs1-sha256=de5ef0a510d85b2ad534dd7ece9b9feada358b2a5e156c025744b2a926967b30
