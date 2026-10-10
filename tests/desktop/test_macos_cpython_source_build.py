@@ -6,7 +6,7 @@ tool/SDK discovery, source build or supplier activation occurs here.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import gzip
 import hashlib
@@ -8796,6 +8796,95 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Four closed entry forms, not a purpose/path/run selector. The
+            # two old modes retain their exact probe_mode contract below.
+            for arguments, reference, expected in (
+                    ([], seal.REFERENCE, False),
+                    (["--history-provider-probe"], seal.PROVIDER_REFERENCE, False),
+                    (["--publish-build-capsule"], seal.REFERENCE, True),
+                    (["--history-provider-probe", "--publish-build-capsule"], seal.PROVIDER_REFERENCE, True)):
+                with self.subTest(capsule_entry=(arguments, reference)):
+                    self.assertIs(seal.capsule_mode(arguments, reference), expected)
+            for arguments, reference in (
+                    (["--publish-build-capsule"], seal.PROVIDER_REFERENCE),
+                    (["--history-provider-probe", "--publish-build-capsule"], seal.REFERENCE),
+                    (["--publish-build-capsule", "--history-provider-probe"], seal.PROVIDER_REFERENCE),
+                    (["--publish-build-capsule", "--publish-build-capsule"], seal.REFERENCE),
+                    (["--publish-build-capsule", "extra"], seal.REFERENCE),
+                    (["--publish-build-capsule"], "refs/heads/main"),
+                    ("--publish-build-capsule", seal.REFERENCE),
+                    (("--publish-build-capsule",), seal.REFERENCE)):
+                with self.subTest(capsule_entry_refusal=(arguments, reference)), self.assertRaises(ValueError):
+                    seal.capsule_mode(arguments, reference)
+            self.assertEqual(seal.CAPSULE_PURPOSES, {
+                "history-provider": ("gh", 64 * 1024 * 1024),
+                "github-seal": ("mrk-github-seal", 16 * 1024 * 1024)})
+            self.assertEqual(seal.CAPSULE_RECEIPT_LIMIT, 16384)
+            # Exact public prepared DATA returned by the genuine LOCAL owner;
+            # no raw LOCAL reports, copied products or invented publication IDs.
+            # Embedded bytes keep this SOURCE group independent of a binary-
+            # bearing verification branch. Production pins are NOT patched here.
+            prepared_bodies = {'aarch64-apple-darwin': b'{"facts":{"binary":{"bytes":37471938,"sha256":"a704813e4e64f8814e5fa21677f7dab51d9b77d045ded75dd11bcdc1a53d5516"},"buildOrigin":{"allJoinedZeroAndPipesClosed":true,"buildInfo":{"bytes":15522,"sha256":"964a1f69d320598576c66cd488fdde3263d086ce4585ec8bd2d27acd07805a27"},"childOriginals":5,"closedSummary":{"bytes":1305,"sha256":"08097318d2bf066e92d605a2c56b250e4232685986b32cf882ca8b32884f8602"},"crossbuild":{"bytes":9544,"sha256":"4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f"},"dependencyInventorySha256":"b89f11a408a83d5447361c297940da11b9f7b86e7426d4416e4bf0ed7592155b","dependencyPost":true,"developerIdSigned":false,"embeddedNoticesComplete":true,"kind":"offline-owned-crossbuild","namespaceOriginals":1,"nativeExecuted":false,"notarized":false,"noticeContentRuntimeExecuted":false,"result":{"bytes":144446,"sha256":"b0163a148c227bc6973790d96cd2171f44c1d204560c8a9378322634e7a3b8fd"},"sourceInventory":{"bytes":624960,"fileBytes":24177947,"fileCount":1918,"sha256":"8b255198a701d0cc48a53ec76c226231689d5ab2c528ce8599b694da8434914d"},"sourcePost":true,"toolchainInventorySha256":"ed83e96ad8c3327bb6056086809e97f07a3419690a5b601b04f552126b8d824e","toolchainPost":true},"notices":{"contentSha256":"3dc7d2cd021d654387e5be71603869a039a3d2adf8b97a6fd0dda4ef3743a44d","files":333,"manifestSha256":"ed34b914139709ddccdedc1d3cd779b28eab05c55f7575266a479af858235294","modules":162},"sourceManifestSha256":"d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd","target":"aarch64-apple-darwin"},"nativeAuthority":false,"schemaVersion":1,"state":"unconfigured-publication","uploadAuthorized":false}\n', 'x86_64-apple-darwin': b'{"facts":{"binary":{"bytes":39889552,"sha256":"aca3bcfd4fc35d9bcd800f06fe09f7d6c50ab4d2428f04c4ba081a32bfebbe4e"},"buildOrigin":{"allJoinedZeroAndPipesClosed":true,"buildInfo":{"bytes":15520,"sha256":"cc3137dcf5ad6a9092a525d3ca8eacdcb8899f3256194b67c7f7e190c0731102"},"childOriginals":5,"closedSummary":{"bytes":1305,"sha256":"08097318d2bf066e92d605a2c56b250e4232685986b32cf882ca8b32884f8602"},"crossbuild":{"bytes":9544,"sha256":"4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f"},"dependencyInventorySha256":"b89f11a408a83d5447361c297940da11b9f7b86e7426d4416e4bf0ed7592155b","dependencyPost":true,"developerIdSigned":false,"embeddedNoticesComplete":true,"kind":"offline-owned-crossbuild","namespaceOriginals":1,"nativeExecuted":false,"notarized":false,"noticeContentRuntimeExecuted":false,"result":{"bytes":144446,"sha256":"b0163a148c227bc6973790d96cd2171f44c1d204560c8a9378322634e7a3b8fd"},"sourceInventory":{"bytes":624960,"fileBytes":24177947,"fileCount":1918,"sha256":"8b255198a701d0cc48a53ec76c226231689d5ab2c528ce8599b694da8434914d"},"sourcePost":true,"toolchainInventorySha256":"ed83e96ad8c3327bb6056086809e97f07a3419690a5b601b04f552126b8d824e","toolchainPost":true},"notices":{"contentSha256":"087592d4d366fcf2c49851571542959bb91607408c6e677ffdc2484fd7293c2e","files":333,"manifestSha256":"ed34b914139709ddccdedc1d3cd779b28eab05c55f7575266a479af858235294","modules":162},"sourceManifestSha256":"d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd","target":"x86_64-apple-darwin"},"nativeAuthority":false,"schemaVersion":1,"state":"unconfigured-publication","uploadAuthorized":false}\n'}
+            expected_records = tuple((seal.PROVIDER_INPUT_ROOT + "/" + target + "/build-facts.json",
+                                      seal.PROVIDER_FACTS_PINS[target]) for target in seal.TARGETS)
+            self.assertEqual(seal.provider_fact_records(), expected_records)
+            for target, body in prepared_bodies.items():
+                with self.subTest(prepared_target=target):
+                    self.assertEqual((len(body), hashlib.sha256(body).hexdigest()), seal.PROVIDER_FACTS_PINS[target])
+                    decoded = json.loads(body)
+                    actual = seal.capsule_prepared(body, target)
+                    self.assertEqual(actual, decoded["facts"])
+                    self.assertEqual(actual["target"], target)
+                    self.assertEqual(actual["binary"], {"bytes": seal.PROVIDER_PINS[target][0],
+                                                       "sha256": seal.PROVIDER_PINS[target][1]})
+                    self.assertIsNone(seal.capsule_origin(actual["buildOrigin"]))
+                    self.assertEqual(actual["buildOrigin"]["childOriginals"], 5)
+                    self.assertEqual(actual["buildOrigin"]["namespaceOriginals"], 1)
+                    self.assertIs(decoded["nativeAuthority"], False)
+                    self.assertIs(decoded["uploadAuthorized"], False)
+                    self.assertNotIn("sourceCommit", actual)
+                    self.assertNotIn("runId", actual)
+                    other = next(t for t in prepared_bodies if t != target)
+                    for changed in (body + b" ", body[:-1], bytearray(body), b"{}\n"):
+                        with self.assertRaisesRegex(ValueError, "^capsule-facts-pin$"):
+                            seal.capsule_prepared(changed, target)
+                    with self.assertRaisesRegex(ValueError, "^capsule-facts-pin$"):
+                        seal.capsule_prepared(body, other)
+            with self.assertRaisesRegex(ValueError, "^capsule-facts-target$"):
+                seal.capsule_prepared(next(iter(prepared_bodies.values())), "other-target")
+            target = next(iter(prepared_bodies))
+            for pin in (None, [1, "a" * 64], (True, "a" * 64), (0, "a" * 64),
+                        (16385, "a" * 64), (1, "0" * 64), (1, "A" * 64), (1, "a" * 63)):
+                with self.subTest(unbound_facts=pin), patch.dict(seal.PROVIDER_FACTS_PINS, {target: pin}):
+                    with self.assertRaisesRegex(ValueError, "^capsule-facts-unbound$"):
+                        seal.provider_fact_records()
+            # Rebind ONLY an inert mutated fixture's whole SOURCE hash so these
+            # cases reach the real closed parser instead of stopping at hash.
+            # This is not a successful production SOURCE or publication grant.
+            for path, replacement in (
+                    (("schemaVersion",), True), (("nativeAuthority",), 0),
+                    (("uploadAuthorized",), True), (("state",), "published"),
+                    (("extra",), None), (("facts", "target"), "wrong-target"),
+                    (("facts", "sourceManifestSha256"), "0" * 64),
+                    (("facts", "binary", "bytes"), True),
+                    (("facts", "notices", "files"), True),
+                    (("facts", "notices", "extra"), None),
+                    (("facts", "buildOrigin", "childOriginals"), 6),
+                    (("facts", "buildOrigin", "namespaceOriginals"), True),
+                    (("facts", "buildOrigin", "sourcePost"), 1),
+                    (("facts", "buildOrigin", "nativeExecuted"), 0),
+                    (("facts", "buildOrigin", "result", "bytes"), 262145),
+                    (("facts", "buildOrigin", "result", "sha256"), "0" * 64),
+                    (("facts", "buildOrigin", "sourceInventory", "fileCount"), 2049),
+                    (("facts", "buildOrigin", "runId"), "123")):
+                with self.subTest(prepared_shape=path):
+                    value = json.loads(prepared_bodies[target])
+                    node = value
+                    for key in path[:-1]: node = node[key]
+                    node[path[-1]] = replacement
+                    changed = BUILD.canonical(value) + b"\n"
+                    with patch.dict(seal.PROVIDER_FACTS_PINS, {target: (len(changed), hashlib.sha256(changed).hexdigest())}):
+                        with self.assertRaises(ValueError): seal.capsule_prepared(changed, target)
             # Same fixed owner route, not a second native/process test. The
             # expected rc1 is accepted only for one exact provider observation.
             self.assertIs(seal.probe_mode([], seal.REFERENCE), False)
@@ -8840,16 +8929,28 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 original = root / "input"
                 original.write_bytes(b"inert provider bytes; never launched")
                 pin = (original.stat().st_size, hashlib.sha256(original.read_bytes()).hexdigest())
-                receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents={str(root): BUILD.custody(root.lstat())})
                 receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
                 invoke = lambda **kw: seal.SealBuild.provider_stream(receiver, original, pin, **kw)
-                identity, prefix = invoke()
+                identity, prefix, no_copy = invoke()
+                self.assertIsNone(no_copy)
                 self.assertEqual(prefix, original.read_bytes())
                 copy_path = root / "copied"
-                invoke(original=identity, destination=copy_path)
+                sentinel = object()
+                receiver.provider_copy_identity = sentinel
+                same_original, copy_prefix, private_copy = invoke(original=identity, destination=copy_path)
+                self.assertEqual((same_original, copy_prefix), (identity, prefix))
+                self.assertEqual(private_copy, BUILD.identity(copy_path.stat()))
+                self.assertIs(receiver.provider_copy_identity, sentinel)
                 self.assertEqual(copy_path.read_bytes(), prefix)
                 self.assertEqual(copy_path.stat().st_mode & 0o777, 0o555)
-                seal.SealBuild.provider_stream(receiver, copy_path, pin, original=receiver.provider_copy_identity)
+                seal.SealBuild.provider_stream(receiver, copy_path, pin, original=private_copy)
+                capsule_copy_path = root / "capsule-copy"
+                _, _, capsule_copy = invoke(original=identity, destination=capsule_copy_path)
+                self.assertNotEqual(capsule_copy, private_copy)
+                self.assertEqual(capsule_copy, BUILD.identity(capsule_copy_path.stat()))
+                self.assertIs(receiver.provider_copy_identity, sentinel)
+                seal.SealBuild.provider_stream(receiver, capsule_copy_path, pin, original=capsule_copy)
                 with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"):
                     seal.SealBuild.provider_stream(receiver, original, (pin[0], "0" * 64))
                 saved = root / "saved"
@@ -8860,12 +8961,28 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 saved.unlink()
                 self.assertTrue(BUILD.DATA.known)
                 self.assertEqual(BUILD.DATA._pending, 0)
+            # A dispatched failed create has no returned original: the SAME
+            # existing DATA ledger conservatively remains unknown, even though
+            # O_EXCL preserved the prior destination bytes. Never reset it just
+            # to continue positive tests in this isolated fixture.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                original, existing = root / "input", root / "existing"
+                original.write_bytes(b"abc"); existing.write_bytes(b"kept")
+                pin = (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False,
+                    provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                with self.assertRaises(FileExistsError):
+                    seal.SealBuild.provider_stream(receiver, original, pin, destination=existing)
+                self.assertEqual(existing.read_bytes(), b"kept")
+                self.assertFalse(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 1)
             for fault in ("named-post", "close-unknown"):
                 with self.subTest(provider_stream=fault), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
                     path = root / "input"
                     path.write_bytes(b"post-bound inert bytes")
                     pin = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
-                    receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                    receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents={str(root): BUILD.custody(root.lstat())})
                     receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
                     real_read, real_close = os.read, os.close
                     if fault == "named-post":
@@ -8905,7 +9022,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                         notice_pins[target] = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
                         notice_originals[target] = BUILD.identity(path.stat())
                         parents[str(target_dir)] = BUILD.custody(target_dir.lstat())
-                    receiver = SimpleNamespace(check=lambda: None, provider_parents=parents,
+                    receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents=parents,
                                                provider_notice_originals=notice_originals)
                     receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
                     receiver.provider_stream = lambda path, pin, **kw: seal.SealBuild.provider_stream(receiver, path, pin, **kw)
@@ -8959,7 +9076,31 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     target = next(iter(seal.PROVIDER_PINS))
                     if scenario == "missing-notice": (inputs / target / "NOTICES.txt").unlink()
                     else: (inputs / target / "unexpected").write_bytes(b"refuse")
-                    receiver = SimpleNamespace(check=lambda: None, target=target)
+                    receiver = SimpleNamespace(check=lambda: None, target=target, capsule_mode=False)
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
+                        with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
+                        stream.assert_not_called()
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            # Capsule inputs have exactly two target directories and exactly
+            # gh/NOTICES/facts within each: no old compact-record fallback. The
+            # first stream is deliberately unavailable, so malformed rosters
+            # must refuse before any binary or native-tool admission.
+            for scenario in ("missing-facts", "extra-target-file", "old-root-record"):
+                with self.subTest(capsule_input_roster=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    inputs = root / "provider-inputs"
+                    inputs.mkdir()
+                    for target in seal.TARGETS:
+                        target_dir = inputs / target
+                        target_dir.mkdir()
+                        (target_dir / "gh").write_bytes(b"inert-not-launched")
+                        (target_dir / "NOTICES.txt").write_bytes(b"inert")
+                        (target_dir / "build-facts.json").write_bytes(prepared_bodies[target])
+                    target = next(iter(seal.TARGETS))
+                    if scenario == "missing-facts": (inputs / target / "build-facts.json").unlink()
+                    elif scenario == "extra-target-file": (inputs / target / "extra").write_bytes(b"refuse")
+                    else: (inputs / "crossbuild.json").write_bytes(b"no raw evidence fallback")
+                    receiver = SimpleNamespace(check=lambda: None, target=target, capsule_mode=True)
                     with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
                         with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
                         stream.assert_not_called()
@@ -8997,11 +9138,359 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     scratch_retired=True, data_finality=True))
             workflow = (ROOT / ".github/workflows/desktop-macos-github-seal.yml").read_text()
             self.assertIn("      - verify/desktop-macos-github-seal\n      - verify/desktop-macos-history-provider-probe\n", workflow)
-            self.assertEqual(workflow.count("--history-provider-probe\n"), 1)
+            self.assertEqual(workflow.count("--history-provider-probe --publish-build-capsule\n"), 1)
+            self.assertEqual(workflow.count("macos_github_seal_build.py --publish-build-capsule\n"), 1)
             self.assertIn("test \"$GITHUB_REF\" = refs/heads/verify/desktop-macos-github-seal", workflow)
             self.assertIn("timeout-minutes: 25", workflow)
             self.assertIn("if-no-files-found: ignore", workflow)
             self.assertNotIn("workflow_dispatch", workflow)
+            # Only two success-gated capsules; diagnostic upload remains
+            # separate and cannot turn an original failure into product evidence.
+            for title, purpose, ref, prefix, binary in (
+                    ("History provider", "history-provider", seal.PROVIDER_REFERENCE, "mrk-history-provider", "gh"),
+                    ("sealed-box helper", "github-seal", seal.REFERENCE, "mrk-github-seal", "mrk-github-seal")):
+                marker = "      - name: Publish finalized " + title + " build capsule\n"
+                self.assertEqual(workflow.count(marker), 1)
+                step = workflow.split(marker, 1)[1].split("      - name:", 1)[0]
+                self.assertIn("        if: success() && github.ref == '" + ref
+                    + "' && steps.build.outcome == 'success' && steps.sourcepost.outcome == 'success'\n", step)
+                self.assertIn("        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", step)
+                self.assertIn("          name: tool-build-" + purpose
+                    + "-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}\n", step)
+                directory = "/Users/runner/work/_temp/" + prefix + "-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/"
+                self.assertIn("          path: |\n            " + directory + binary
+                    + "\n            " + directory + "tool-build-receipt.json\n", step)
+                self.assertEqual(step.count(directory), 2)
+                for line in ("if-no-files-found: error", "compression-level: 0", "retention-days: 7"):
+                    self.assertIn("          " + line + "\n", step)
+                self.assertNotIn("/public/", step)
+                self.assertNotIn("always()", step)
+            self.assertEqual(workflow.count("          if-no-files-found: error\n"), 2)
+            # Receipt DATA comes from the actual method, with checked publication
+            # IDs distinct from the offline provider build origin. No receipt
+            # by itself proves the enclosing original returned successfully.
+            receipt_fields = {"schemaVersion", "kind", "purpose", "target", "sourceCommit",
+                "sourceManifestSha256", "binary", "notices", "runId", "runAttempt",
+                "sourcePost", "originalsClosed", "productsFinal"}
+            source_rows = {"inert-source.py": {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
+            source_commit = "a" * 40
+            source_evidence = BUILD.canonical({"sourceCommit": source_commit, "rows": source_rows})
+            for purpose in seal.CAPSULE_PURPOSES:
+                provider = purpose == "history-provider"
+                facts = json.loads(prepared_bodies[target])["facts"]
+                pin = (facts["binary"]["bytes"], facts["binary"]["sha256"]) if provider else (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(target=target, source=source_commit, run_id="9007199254740991", attempt="9007199254740991",
+                    source_binding=source_rows, evidence={"source-binding.json": source_evidence},
+                    capsule_purpose=purpose, provider_mode=provider, capsule_pin=pin, provider_prepared={target: facts})
+                body = seal.SealBuild.capsule_receipt(receiver)
+                value = json.loads(body)
+                self.assertLessEqual(len(body), 16384)
+                self.assertEqual(set(value), receipt_fields | ({"buildOrigin"} if provider else set()))
+                self.assertEqual((value["sourceCommit"], value["runId"], value["runAttempt"]),
+                                 (source_commit, "9007199254740991", "9007199254740991"))
+                self.assertEqual(value["purpose"], purpose)
+                self.assertTrue(all(value[key] is True for key in ("sourcePost", "originalsClosed", "productsFinal")))
+                if provider:
+                    self.assertEqual(value["buildOrigin"], facts["buildOrigin"])
+                    self.assertEqual(value["notices"], facts["notices"])
+                    self.assertEqual(value["sourceManifestSha256"], facts["sourceManifestSha256"])
+                else:
+                    self.assertIsNone(value["notices"])
+                    self.assertNotIn("buildOrigin", value)
+                    self.assertEqual(value["sourceManifestSha256"], hashlib.sha256(source_evidence).hexdigest())
+                for field, bad in (("run_id", "0"), ("run_id", "01"), ("run_id", "1" * 17),
+                        ("run_id", 1), ("attempt", True), ("attempt", "1" * 17),
+                        ("run_id", "9007199254740992"), ("attempt", "9007199254740992"),
+                        ("source", "0" * 40), ("source", "A" * 40), ("target", "wrong-target")):
+                    with self.subTest(capsule_context=(purpose, field, bad)), patch.object(receiver, field, bad):
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-publication-context$"):
+                            seal.SealBuild.capsule_receipt(receiver)
+                for changed_source in (BUILD.canonical({"sourceCommit": source_commit, "rows": {}}),
+                                       source_evidence + b" ", BUILD.canonical(source_rows)):
+                    with patch.object(receiver, "evidence", {"source-binding.json": changed_source}):
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-full-source-binding$"):
+                            seal.SealBuild.capsule_receipt(receiver)
+
+            # Tiny real files exercise the existing streaming/copy/readback,
+            # parent originals, same-task census and consuming retirement. No
+            # executable or native build is admitted; only prerequisite source
+            # and provider observations are inert ports, kept explicit here.
+            def capsule_fixture(root, purpose):
+                work = root / "work"
+                work.mkdir(mode=0o700)
+                private = work / "private"
+                private.mkdir(mode=0o700)
+                (private / "bounded-work").write_bytes(b"five!")
+                export = work / "export-pending"
+                export.mkdir(mode=0o700)
+                provider = purpose == "history-provider"
+                if provider:
+                    original = root / "inert-provider"
+                else:
+                    (export / "helper").mkdir(mode=0o700)
+                    original = export / "helper/mrk-github-seal"
+                original.write_bytes(b"abc")
+                original.chmod(0o555)
+                pin = (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(work=work, private=private, public=work / "public", export=export,
+                    work_identity=BUILD.custody(work.lstat()), private_identity=BUILD.custody(private.lstat()),
+                    export_identity=BUILD.custody(export.lstat()),
+                    export_helper_identity=None if provider else BUILD.custody((export / "helper").lstat()),
+                    export_promoted=False, capsule_promoted=False, capsule_mode=True, capsule_purpose=purpose,
+                    capsule_pending=work / "capsule-pending", capsule_public=work / "capsule",
+                    capsule_identity=None, capsule_copy_identity=None, capsule_receipt_identity=None,
+                    provider_mode=provider, provider_private_retired=False, provider_parents={}, provider_source_parents={},
+                    provider_original=original, provider_pin=pin, provider_identity=BUILD.identity(original.lstat()),
+                    success_ready=True, failure=None, source_post=True, inflight=False, cleaning=True,
+                    deadline=time.monotonic() + 60, cleanup_deadline=time.monotonic() + 60,
+                    source=source_commit, target=target, run_id="123", attempt="1", source_binding=source_rows,
+                    native={"helperExecutable": {"bytes": 3, "sha256": pin[1]}},
+                    export_rows={} if provider else {"helper/mrk-github-seal": {"size": 3, "sha256": pin[1]}},
+                    evidence={"source-binding.json": source_evidence}, commands=[], cleanup_errors=[], scratch_retired=False,
+                    entered=3 if provider else 23, returned=3 if provider else 23,
+                    role_limits=seal.PROVIDER_ROLES if provider else seal.ROLE_LIMITS,
+                    guard=SimpleNamespace(handler_state="RESTORED", lifetime_ledger=SimpleNamespace(
+                        verdict=lambda: SimpleNamespace(complete=True, fatal=False, contained=True))))
+                receiver.provider_post = lambda **kwargs: None  # Previously admitted provider observation, not a probe.
+                for method in ("check", "final_check", "mkdir", "census", "evidence_bytes", "evidence_json",
+                        "provider_parents_post", "provider_stream", "capsule_reserve", "capsule_parents_post",
+                        "capsule_products_post", "capsule_source_post", "prepare_capsule", "capsule_receipt",
+                        "retire_capsule", "publish_capsule", "publish"):
+                    setattr(receiver, method, getattr(seal.SealBuild, method).__get__(receiver))
+                return receiver
+
+            # Positive tiny-file cases supply bounded free-space DATA for the
+            # unchanged full-size production reservation; they do not allocate
+            # that capacity in the 32MiB scratch. Zero-space refusal stays below.
+            for purpose in seal.CAPSULE_PURPOSES:
+                with self.subTest(capsule_copy=purpose), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, purpose)
+                    with patch.object(seal, "source_snapshot", return_value=source_rows) as snapshot, \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)) as storage:
+                        receiver.prepare_capsule()
+                        storage.assert_called_once_with(receiver.work)
+                        self.assertEqual(receiver.capsule_reservation["bytes"], seal.CAPSULE_PURPOSES[purpose][1] + 16384)
+                        expected = (sum(row["size"] for row in receiver.export_rows.values())
+                            + sum(map(len, receiver.evidence.values())) + seal.QUERY_LIMIT
+                            + seal.CAPSULE_PURPOSES[purpose][1] + 16384)
+                        self.assertEqual(receiver.capsule_reservation["combinedBytes"], expected)
+                        self.assertEqual(receiver.capsule_reservation["combinedEntries"],
+                            1 + len(receiver.export_rows) + len(receiver.evidence)
+                            + (2 if receiver.provider_mode else 3) + 6)
+                        self.assertEqual(snapshot.call_args.kwargs, {"provider": receiver.provider_mode, "capsule": True})
+                        self.assertNotEqual(receiver.capsule_copy_identity, receiver.provider_identity)
+                        binary = receiver.capsule_pending / seal.CAPSULE_PURPOSES[purpose][0]
+                        self.assertEqual(binary.read_bytes(), b"abc")
+                        self.assertEqual(binary.stat().st_mode & 0o777, 0o555)
+                        self.assertEqual(receiver.capsule_copy_identity, BUILD.identity(binary.lstat()))
+                        self.assertEqual(sorted(p.name for p in receiver.capsule_pending.iterdir()), [binary.name])
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-output-collision$"):
+                            receiver.prepare_capsule()
+                        receiver.capsule_products_post()
+                        if purpose == "github-seal":
+                            BUILD.retire_tree(receiver.private, receiver.cleanup_deadline)
+                            receiver.scratch_retired = True
+                            receiver.publish(receiver.guard.lifetime_ledger.verdict())
+                            self.assertFalse(receiver.capsule_pending.exists())
+                            self.assertTrue(receiver.capsule_promoted)
+                            self.assertEqual(sorted(p.name for p in receiver.capsule_public.iterdir()),
+                                ["mrk-github-seal", "tool-build-receipt.json"])
+                            receipt = receiver.capsule_public / "tool-build-receipt.json"
+                            self.assertEqual(receipt.stat().st_mode & 0o777, 0o444)
+                            self.assertEqual(json.loads(receipt.read_bytes())["sourceManifestSha256"], hashlib.sha256(source_evidence).hexdigest())
+                            receiver.capsule_products_post(receipt=True)
+                        receiver.retire_capsule()
+                        self.assertIsNone(receiver.capsule_identity)
+                        self.assertFalse(receiver.capsule_pending.exists() or receiver.capsule_public.exists())
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+
+            # Budget refusals happen before mkdir/copy. Large amounts are scalar
+            # DATA, never giant fixture allocations or independent quota pools.
+            for scenario in ("public", "combined-work", "combined-entries", "space", "census-bool"):
+                with self.subTest(capsule_quota=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    if scenario == "public": receiver.export_rows["oversized"] = {"size": seal.PUBLIC_BYTES}
+                    if scenario == "combined-work": receiver.census = lambda: {"entries": 0, "bytes": seal.WORK_BYTES}
+                    if scenario == "combined-entries": receiver.census = lambda: {"entries": seal.WORK_ENTRIES, "bytes": 0}
+                    if scenario == "census-bool": receiver.census = lambda: {"entries": True, "bytes": 0}
+                    usage = SimpleNamespace(free=0 if scenario == "space" else 2 * seal.WORK_BYTES)
+                    with patch.object(seal.shutil, "disk_usage", return_value=usage), patch.object(receiver, "mkdir", side_effect=AssertionError("copy must not start")) as mkdir:
+                        with self.assertRaises(BUILD.BuildRefused): receiver.prepare_capsule()
+                        mkdir.assert_not_called()
+                    self.assertFalse(receiver.capsule_pending.exists())
+                    self.assertIsNone(receiver.capsule_identity)
+                    self.assertTrue(BUILD.DATA.known)
+
+            for scenario in ("binary-substitute", "parent-substitute", "unexpected-member", "source-post", "close-unknown"):
+                with self.subTest(capsule_refusal=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)):
+                        receiver.prepare_capsule()
+                    binary = receiver.capsule_pending / "mrk-github-seal"
+                    if scenario == "binary-substitute":
+                        binary.rename(root / "kept-original")
+                        binary.write_bytes(b"abc"); binary.chmod(0o555)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^provider-input-original$"):
+                            receiver.capsule_products_post()
+                    elif scenario == "parent-substitute":
+                        receiver.capsule_pending.rename(receiver.work / "kept-directory")
+                        receiver.capsule_pending.mkdir(mode=0o700)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-directory-original$"):
+                            receiver.capsule_products_post()
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-directory-original$"):
+                            receiver.retire_capsule()
+                    elif scenario == "unexpected-member":
+                        (receiver.capsule_pending / "extra").write_bytes(b"x")
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-member-roster$"):
+                            receiver.capsule_products_post()
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-member-roster$"):
+                            receiver.retire_capsule()
+                    elif scenario == "source-post":
+                        with patch.object(seal, "source_snapshot", return_value={}):
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "^verification-source-final-post$"):
+                                receiver.capsule_source_post()
+                    else:
+                        actual_close = os.close
+                        def capsule_close_unknown(fd):
+                            actual_close(fd)
+                            raise OSError("inert consuming close uncertainty")
+                        with patch.object(seal.os, "close", capsule_close_unknown), self.assertRaises(OSError):
+                            receiver.capsule_products_post()
+                        self.assertFalse(BUILD.DATA.known)
+                        with patch.object(receiver, "final_check", side_effect=AssertionError("unknown cannot retire")) as check:
+                            receiver.retire_capsule()
+                            check.assert_not_called()
+                        self.assertTrue(binary.exists())
+                    self.assertFalse(receiver.capsule_public.exists())
+
+            # Exercise the actual cleanup branch after a real copy failure.
+            # Retained export bytes are already represented by the tiny fixture;
+            # only the earlier compiler/product-retention stage is an inert port.
+            # Known custody permits exact retirement before rethrowing the first
+            # failure. Unknown close cannot claim scratch retirement or discover
+            # a new cleanup capability from the visible pending path.
+            for scenario in ("known-copy", "unknown-close", "pending-retirement", "export-retirement"):
+                with self.subTest(capsule_cleanup=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    receiver.libtool_alias_originals = {}
+                    receiver.retain_products = lambda: None
+                    observed = []
+                    actual_prepare = receiver.prepare_capsule
+                    def observed_prepare():
+                        try: actual_prepare()
+                        except BaseException as error:
+                            observed.append(error)
+                            raise
+                    receiver.prepare_capsule = observed_prepare
+                    retired = []
+                    actual_retire = BUILD.retire_tree
+                    retirement_error = OSError("inert consuming retirement failure")
+                    def retiring(path, deadline):
+                        retired.append(path)
+                        if (scenario == "pending-retirement" and path == receiver.capsule_pending
+                                or scenario == "export-retirement" and path == receiver.export):
+                            raise retirement_error
+                        return actual_retire(path, deadline)
+                    actual_close = os.close
+                    close_error = OSError("inert consuming close uncertainty")
+                    close_failed = [False]
+                    def closing(fd):
+                        actual_close(fd)
+                        if scenario == "unknown-close" and not close_failed[0]:
+                            close_failed[0] = True
+                            raise close_error
+                    actual_write = os.write
+                    def writing(fd, data):
+                        return actual_write(fd, data) if scenario == "unknown-close" else 0
+                    with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)), \
+                            patch.object(seal.os, "write", side_effect=writing), \
+                            patch.object(seal.os, "close", side_effect=closing), \
+                            patch.object(BUILD, "retire_tree", side_effect=retiring):
+                        with self.assertRaises((BUILD.BuildRefused, OSError)) as raised:
+                            seal.SealBuild.cleanup(receiver)
+                    self.assertEqual(len(observed), 1)
+                    self.assertIs(raised.exception, observed[0])
+                    self.assertFalse(receiver.capsule_public.exists())
+                    if scenario == "unknown-close":
+                        self.assertIs(raised.exception, close_error)
+                        self.assertFalse(BUILD.DATA.known)
+                        self.assertFalse(receiver.scratch_retired)
+                        self.assertEqual(retired, [])
+                        self.assertTrue(receiver.private.exists())
+                        self.assertTrue(receiver.export.exists())
+                        self.assertTrue(receiver.capsule_pending.exists())
+                        self.assertIsNotNone(receiver.capsule_identity)
+                    else:
+                        self.assertEqual(str(raised.exception), "provider-copy-short")
+                        self.assertTrue(BUILD.DATA.known)
+                        self.assertEqual(BUILD.DATA._pending, 0)
+                        self.assertTrue(receiver.scratch_retired)
+                        self.assertFalse(receiver.private.exists())
+                        if scenario == "known-copy":
+                            self.assertEqual(retired, [receiver.private, receiver.capsule_pending, receiver.export])
+                            self.assertFalse(receiver.capsule_pending.exists() or receiver.export.exists())
+                            self.assertIsNone(receiver.capsule_identity)
+                            self.assertIsNone(receiver.export_identity)
+                            self.assertIsNone(receiver.export_helper_identity)
+                            self.assertEqual(receiver.export_rows, {})
+                        else:
+                            self.assertIs(raised.exception.__cause__, retirement_error)
+                            self.assertTrue(receiver.export.exists())
+                            if scenario == "pending-retirement":
+                                self.assertEqual(retired, [receiver.private, receiver.capsule_pending])
+                                self.assertTrue(receiver.capsule_pending.exists())
+                                self.assertIsNotNone(receiver.capsule_identity)
+                            else:
+                                self.assertEqual(retired, [receiver.private, receiver.capsule_pending, receiver.export])
+                                self.assertFalse(receiver.capsule_pending.exists())
+                                self.assertIsNone(receiver.capsule_identity)
+                            self.assertIsNotNone(receiver.export_identity)
+                            self.assertTrue(receiver.export_rows)
+            # A late capsule refusal AFTER the real evidence directory was
+            # promoted still raises. A diagnostic report that says passed is
+            # not the enclosing original's exit and cannot permit an upload.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                receiver = capsule_fixture(root, "github-seal")
+                with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                        patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)):
+                    receiver.prepare_capsule()
+                BUILD.retire_tree(receiver.private, receiver.cleanup_deadline)
+                receiver.scratch_retired = True
+                def late_source(*args, **kwargs):
+                    return {} if receiver.export_promoted else source_rows
+                with patch.object(seal, "source_snapshot", side_effect=late_source):
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^verification-source-final-post$"):
+                        receiver.publish(receiver.guard.lifetime_ledger.verdict())
+                self.assertTrue(receiver.export_promoted)
+                report = json.loads((receiver.public / "report.json").read_bytes())
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(report["transportState"], "pending-original-entry-exit")
+                self.assertFalse(receiver.capsule_public.exists())
+                self.assertTrue(receiver.capsule_pending.exists())
+                receiver.retire_capsule()
+                self.assertFalse(receiver.capsule_pending.exists())
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
+            # No later SOURCE/copy/receipt port is entered unless the SAME
+            # original has all required finality observations, including bools.
+            for scenario in ("passed-false", "passed-int", "failure", "source", "inflight", "counts",
+                             "ledger", "fatal", "contained", "handlers", "scratch", "data"):
+                with self.subTest(capsule_finality=scenario), patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    verdict = SimpleNamespace(complete=scenario != "ledger", fatal=scenario == "fatal", contained=scenario != "contained")
+                    receiver = SimpleNamespace(success_ready=True, source_post=scenario != "source", inflight=scenario == "inflight",
+                        entered=3, returned=2 if scenario == "counts" else 3, role_limits=seal.PROVIDER_ROLES,
+                        failure={} if scenario == "failure" else None, scratch_retired=scenario != "scratch",
+                        guard=SimpleNamespace(handler_state="OWNED" if scenario == "handlers" else "RESTORED",
+                            lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)))
+                    if scenario == "data": BUILD.DATA.unknown()
+                    passed = False if scenario == "passed-false" else 1 if scenario == "passed-int" else True
+                    with patch.object(receiver, "capsule_source_post", create=True, side_effect=AssertionError("no source port")) as post:
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-original-finality$"):
+                            seal.SealBuild.publish_capsule(receiver, passed)
+                        post.assert_not_called()
             # All nine fixed official metadata aliases are ordinary generated
             # work, including eight convenience archives on both Darwin CPUs.
             self.assertEqual(set(seal.LIBTOOL_ARCHIVES), {
@@ -9194,7 +9683,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                         seal.python_entry_binding(invalid, "/not-read")
             # SOURCE/host facts below are inert DATA to enter only the actual
             # early main guards. No builder bootstrap, file IO or native runs.
-            with patch.object(seal.os, "environ", {
+            with ExitStack() as host_patches:
+                host_patches.enter_context(patch.object(seal.os, "environ", {
                 "MRK_SEAL_TARGET": "aarch64-apple-darwin",
                 "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1",
                 "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
@@ -9205,21 +9695,22 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 "GITHUB_WORKFLOW_REF": seal.REPOSITORY + "/" + seal.WORKFLOW + "@" + seal.REFERENCE,
                 "GITHUB_WORKSPACE": str(seal.CHECKOUT), "RUNNER_TEMP": str(seal.WORK_PARENT),
                 "DEVELOPER_DIR": str(seal.DEVELOPER), "MRK_SEAL_PYTHON": "/fixture/python",
-            }), patch.object(seal.sys, "argv", ["fixed-entry"]), \
-                 patch.object(seal.sys, "platform", "darwin"), \
-                 patch.object(seal.sys, "version_info", (3, 14, 7)), \
-                 patch.object(seal.sys, "flags", SimpleNamespace(isolated=True, no_site=True)), \
-                 patch.object(seal.sys, "dont_write_bytecode", True), \
-                 patch.object(seal.sys, "executable", "/fixture/python"), \
-                 patch.object(seal.os, "uname", return_value=SimpleNamespace(machine="arm64")), \
-                 patch.object(seal.platform, "mac_ver", return_value=("26.6.2", (), "arm64")), \
-                 patch.object(seal.os, "getuid", return_value=65534), \
-                 patch.object(seal.os, "geteuid", return_value=65534), \
-                 patch.object(seal.os, "getgid", return_value=65534), \
-                 patch.object(seal.os, "getegid", return_value=65534), \
-                 patch.object(seal, "python_entry_binding", side_effect=lambda selected, reported:
-                     seal.need(selected == reported, "actual-setup-python-entry")), \
-                 patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")) as bootstrap:
+            }))
+                host_patches.enter_context(patch.object(seal.sys, "argv", ["fixed-entry"]))
+                host_patches.enter_context(patch.object(seal.sys, "platform", "darwin"))
+                host_patches.enter_context(patch.object(seal.sys, "version_info", (3, 14, 7)))
+                host_patches.enter_context(patch.object(seal.sys, "flags", SimpleNamespace(isolated=True, no_site=True)))
+                host_patches.enter_context(patch.object(seal.sys, "dont_write_bytecode", True))
+                host_patches.enter_context(patch.object(seal.sys, "executable", "/fixture/python"))
+                host_patches.enter_context(patch.object(seal.os, "uname", return_value=SimpleNamespace(machine="arm64")))
+                host_patches.enter_context(patch.object(seal.platform, "mac_ver", return_value=("26.6.2", (), "arm64")))
+                host_patches.enter_context(patch.object(seal.os, "getuid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "geteuid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "getgid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "getegid", return_value=65534))
+                host_patches.enter_context(patch.object(seal, "python_entry_binding", side_effect=lambda selected, reported:
+                     seal.need(selected == reported, "actual-setup-python-entry")))
+                bootstrap = host_patches.enter_context(patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")))
                 cases = (("MRK_SEAL_TARGET", "bad", "target", "fixed-seal-target"),
                          ("GITHUB_SHA", "0" * 40, "run", "fixed-seal-run"),
                          ("GITHUB_JOB", "bad", "context", "fixed-seal-workflow-context"),
@@ -9239,6 +9730,28 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     seal.main()
                 bootstrap.assert_called_once_with()
                 self.assertIn("stage=bootstrap reason=builder-source-hash", seal.failure_diagnostic(caught.exception))
+                # Drive the actual early main guards for all four modes under
+                # the same inert pre-bootstrap stop. New receipts cap IDs at
+                # 9007199254740991; legacy modes keep their original20 digits. No host,
+                # filesystem, source/bootstrap or native action actually runs.
+                for flags, reference, digits in (
+                        ([], seal.REFERENCE, 20),
+                        (["--history-provider-probe"], seal.PROVIDER_REFERENCE, 20),
+                        (["--publish-build-capsule"], seal.REFERENCE, 16),
+                        (["--history-provider-probe", "--publish-build-capsule"], seal.PROVIDER_REFERENCE, 16)):
+                    for field in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+                        for identifier, admitted in (("1", True), ("9" * digits if digits == 20 else "9007199254740991", True),
+                                ("1" * (digits + 1), False), ("0", False), ("01", False), ("", False)) + (
+                                    (("9007199254740992", False),) if digits == 16 else ()):
+                            with self.subTest(capsule_main=(flags, field, identifier)), \
+                                    patch.object(seal.sys, "argv", ["fixed-entry", *flags]), \
+                                    patch.dict(seal.os.environ, {"GITHUB_REF": reference,
+                                        "GITHUB_WORKFLOW_REF": seal.REPOSITORY + "/" + seal.WORKFLOW + "@" + reference,
+                                        field: identifier}):
+                                bootstrap.reset_mock()
+                                with self.assertRaisesRegex(ValueError, "^" + ("builder-source-hash" if admitted else "fixed-seal-run") + "$"):
+                                    seal.main()
+                                self.assertEqual(bootstrap.call_count, int(admitted))
             # Formatting never stringifies an exception, prints a path/message,
             # adopts a fake build owner or upgrades unknown DATA finality.
             class HostileError(Exception):
@@ -9283,7 +9796,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                         self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
                     receiver.inflight, receiver.scratch_retired, receiver.source_post = 1, 0, "private-value"
                     self.assertIn("inflight=unavailable scratchRetired=unavailable sourcePost=unavailable", seal.failure_diagnostic(HostileError()))
-                    for reason in ("original-command-failed", "work-entry", "static-libtool-metadata"):
+                    for reason in ("original-command-failed", "work-entry", "static-libtool-metadata", "capsule-combined-bound"):
                         line = seal.failure_diagnostic(BUILD.BuildRefused(reason))
                         self.assertIn("reason=" + reason + " ", line)
                         self.assertLessEqual(len(line.encode("ascii")), 512)
