@@ -5620,7 +5620,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "e02fca27200986a06cf6b321425112973c9801995ca680f4705e45261c4e75d3",
+    "desktop/tools/stage_macos_installed.py": "61e2817d6235d90432fc9e9e98f394dfffd17abe9add02ba383e214559e70cd9",
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
@@ -5841,7 +5841,7 @@ def _gate_installation(body, status, binding, environment, stage, selection, anc
         "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
         "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
     need(set(value) == set(fixed) | {"invocation", "nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
-                                   "installationMetadata", "maintenanceGate"}, "gate-installation-keys")
+                                   "installationMetadata", "maintenanceGate", "registrationReservation"}, "gate-installation-keys")
     for key, expected in fixed.items():
         _exact(value[key], expected)
     # This is semantic validation by the current pinned parser, NOT the raw
@@ -5887,6 +5887,8 @@ def _gate_installation(body, status, binding, environment, stage, selection, anc
     # or establish a historical outer exit, exclusion or signature authority.
     _exact(value["maintenanceGate"], {"state": "protected-permanent-gate-data-correspondence", "bytes": len(stage.MAINTENANCE_GATE_BYTES),
                                     "exclusionObserved": False, "workerFinalityEstablished": False})
+    _exact(value["registrationReservation"], {"state": "protected-permanent-reservation-data-correspondence",
+        "bytes": len(stage.REGISTRATION_GATE_BYTES), "exclusionObserved": False, "workerFinalityEstablished": False})
     exported = value["installerResultExport"]
     need(type(exported) is dict and set(exported) == {"bytes", "sha256", "identity", "finalityBasis"}
          and type(exported["bytes"]) is int and 0 < exported["bytes"] <= 65536 and _gate_sha(exported["sha256"])
@@ -5948,7 +5950,8 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET):
     target_row = target_data(target)
     selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        body, original = _gate_file(fixtures, str(checkout / relative), None, 256 * 1024)
+        limit = 345583 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)
         bodies[relative] = body

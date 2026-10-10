@@ -742,7 +742,46 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
   '900e8a281f11cd3bddc346a58e380328531165c5ed02394c620a2bbff46dd0b8',
   '                  "workflow-refusal": "workflow-refusal"}[scope]'))
 
+# This exact current two-site pin delta is independent of the historical
+# workflow additions below. Preserve their complete predecessor hash checks.
+def without_current_runtime_source_pin(source):
+    current = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    previous = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '[[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    # Only the already-reviewed installed and Aqua admission indentations.
+    guards = [indent + guard for indent in ("          ", "            ")
+              if "\n" + indent + guard in source]
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or len(guards) != 1
+            or source.count("\n" + guards[0]) != 1):
+        raise AssertionError("current runtime source pin exact two-site delta differs")
+    for line in (configured, guards[0]):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+TOOL_ENROLLMENT_WORKFLOW_INVERSE = ((41577, 4155, 'e1ad3768ba7ed53f8217824d1348ca502b9bcf88b0562ce82ca66de2efd9cdfe', ''), (45965, 244, 'dec34c68710ed49677a78116d21f6c9a1eb3e13bc0c2bb83b26b78babeb76523', ''), (46419, 78, '251bd1dc99a992dba08e5aba35b0d7b67765f79b4da5679606da413e18ee08dd', '            --target "$MRK_MACOS_TARGET" \\\n'), (90916, 363, '4bec18b0387d401a0cb993bf2d1396cce3fe8ca432abcd966e1eef12317d3eab', ''), (91329, 163, '98ec04098231bc33c3a4fa0614ef46cbdd6057e9f58af89fa9e3bf332dd4258d', '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'), (95390, 368, '31da7f0d6c48b8dc93d41545e63747b4a170a208737daac4630c58b1e7cb105b', ''))
+
+def without_tool_enrollment_workflow(source):
+    source = without_current_runtime_source_pin(source)
+    if "      - name: Select only SOURCE-enrolled current signed GitHub tools" not in source:
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(TOOL_ENROLLMENT_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("tool enrollment workflow region changed")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00":
+        raise AssertionError("tool enrollment workflow inverse changed original")
+    return value.decode()
+
+
 def without_release_evidence_workflow(source):
+    source = without_current_runtime_source_pin(source)
+    source = without_tool_enrollment_workflow(source)
     if '"savedReleaseEvidenceUI": "passed"' not in source:
         if 'release-evidence) singleton=' in source: raise AssertionError("partial release_evidence_workflow source")
         return source
@@ -2075,9 +2114,25 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                      'summary.status', 'summary.command-admission.json', 'summary.failure-diagnostics.json', 'result.json'):
             self.assertEqual(raw.count('{0}/normal-ui/release-evidence-' + name), 1)
         self.assertIn('"release-evidence": "release-evidence"', raw.split("      - name: Remove only this completed preview build's disposable compiler outputs", 1)[1])
+        # Remove only the accepted outer tool delta before historical evidence.
+        tool_predecessor = without_tool_enrollment_workflow(raw)
+        self.assertEqual(hashlib.sha256(tool_predecessor.encode()).hexdigest(),
+                         "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00")
+        self.assertEqual(without_tool_enrollment_workflow(tool_predecessor), tool_predecessor)
+        self.assertEqual(without_tool_enrollment_workflow(
+            without_current_runtime_source_pin(raw)), tool_predecessor)
+        tool_marker = '      - name: Select only SOURCE-enrolled current signed GitHub tools'
+        tool_argument = '"${history_provider_arguments[@]}"'
+        self.assertEqual(raw.count(tool_marker), 1)
+        self.assertEqual(raw.count(tool_argument), 1)
+        for damaged in (raw.replace(tool_marker, "      - name: partial GitHub tool selection", 1),
+                        raw.replace(tool_argument, tool_argument + "-changed", 1)):
+            with self.assertRaises(AssertionError): without_release_evidence_workflow(damaged)
         for token in ('"savedReleaseEvidenceMarkerObserved") is True', '"releasePromotionObserved": False', 'release-evidence) singleton=release-evidence;'):
             with self.assertRaises(AssertionError): without_release_evidence_workflow(raw.replace(token, token + '-changed', 1))
+            with self.assertRaises(AssertionError): without_release_evidence_workflow(tool_predecessor.replace(token, token + '-changed', 1))
         raw = without_release_evidence_workflow(raw)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), '80998a0d9633a7a3bae47407ecb06f2d2b748ebb0e96fa068c7bfc42149a7626')
         ids, blocks = steps(raw)
         self.assertEqual(ids.count('normal_saved_version_recovery_ui_test'), 1)
         self.assertEqual(ids.count('normal_saved_version_recovery_ui_result'), 1)

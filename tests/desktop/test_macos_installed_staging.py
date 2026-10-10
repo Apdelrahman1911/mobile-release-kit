@@ -306,7 +306,30 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
   '900e8a281f11cd3bddc346a58e380328531165c5ed02394c620a2bbff46dd0b8',
   '                  "workflow-refusal": "workflow-refusal"}[scope]'))
 
+# This exact current two-site pin delta is independent of the historical
+# workflow additions below. Preserve their complete predecessor hash checks.
+def without_current_runtime_source_pin(source):
+    current = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    previous = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '[[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    # Only the already-reviewed installed and Aqua admission indentations.
+    guards = [indent + guard for indent in ("          ", "            ")
+              if "\n" + indent + guard in source]
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or len(guards) != 1
+            or source.count("\n" + guards[0]) != 1):
+        raise AssertionError("current runtime source pin exact two-site delta differs")
+    for line in (configured, guards[0]):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_release_evidence_workflow(source):
+    source = without_current_runtime_source_pin(source)
+    source = without_tool_enrollment_workflow(source)
     if '"savedReleaseEvidenceUI": "passed"' not in source:
         if 'release-evidence) singleton=' in source: raise AssertionError("partial release_evidence_workflow source")
         return source
@@ -387,6 +410,7 @@ TOOL_ENROLLMENT_WORKFLOW_INVERSE = ((41577, 4155, 'e1ad3768ba7ed53f8217824d1348c
 
 
 def without_tool_enrollment_workflow(source):
+    source = without_current_runtime_source_pin(source)
     if "      - name: Select only SOURCE-enrolled current signed GitHub tools" not in source:
         return source
     value = source.encode()
@@ -6229,9 +6253,24 @@ class MacInstalledData(unittest.TestCase):
             with self.assertRaises(ValueError): case_data(scope, {'savedReleaseEvidenceMarkerObserved': True}, {}, None, None)
         for wrong in ('evidence', 'ordinary-seven', True):
             with self.assertRaises(ValueError): ns['singleton_selection'](wrong)
+        # Remove only the accepted outer tool delta before historical evidence.
+        tool_predecessor = without_tool_enrollment_workflow(current)
+        self.assertEqual(hashlib.sha256(tool_predecessor.encode()).hexdigest(),
+                         "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00")
+        self.assertEqual(without_tool_enrollment_workflow(tool_predecessor), tool_predecessor)
+        self.assertEqual(without_tool_enrollment_workflow(
+            without_current_runtime_source_pin(current)), tool_predecessor)
+        tool_marker = '      - name: Select only SOURCE-enrolled current signed GitHub tools'
+        tool_argument = '"${history_provider_arguments[@]}"'
+        self.assertEqual(current.count(tool_marker), 1)
+        self.assertEqual(current.count(tool_argument), 1)
+        for damaged in (current.replace(tool_marker, "      - name: partial GitHub tool selection", 1),
+                        current.replace(tool_argument, tool_argument + "-changed", 1)):
+            with self.assertRaises(AssertionError): without_release_evidence_workflow(damaged)
         for token in ('release-evidence) singleton=release-evidence;', '"savedReleaseEvidenceMarkerObserved") is True',
                       '"release-evidence": "release-evidence"', '"artifactBytesVerified": False'):
             with self.assertRaises(AssertionError): without_release_evidence_workflow(current.replace(token, token + '-changed', 1))
+            with self.assertRaises(AssertionError): without_release_evidence_workflow(tool_predecessor.replace(token, token + '-changed', 1))
         current = without_release_evidence_workflow(current)
         self.assertEqual(hashlib.sha256(current.encode()).hexdigest(), '80998a0d9633a7a3bae47407ecb06f2d2b748ebb0e96fa068c7bfc42149a7626')
         # One already-implemented refusal journey, not another default-seven pass.
@@ -9538,7 +9577,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
     def test_ordinary_workflow_binds_reviewed_current_payload_before_normal_release(self):
         root = Path(__file__).absolute().parents[2]
-        workflow = without_remove_output_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8"))
+        workflow = (root / ".github/workflows/desktop-macos-installed.yml").read_text(encoding="utf-8")
         anchors = {}
         for variable in ("MRK_BUNDLED_RUNTIME_SOURCE_SHA256", "MRK_BUNDLED_PROTOCOL_SHA256"):
             configured = TOOL.re.findall(r"^      " + variable + r": ([0-9a-f]{64})$", workflow, TOOL.re.M)
@@ -9553,6 +9592,19 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # Its format, guards and CLI binding here do not establish its authority.
         self.assertEqual(TOOL.CURRENT_PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
         self.assertNotEqual(TOOL.PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
+        # Validate the raw current equality above, then feed the exact prior
+        # two-site pin bytes to the unchanged historical workflow inverses.
+        current_pin = anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"]
+        previous_pin = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+        self.assertEqual(workflow.count(current_pin), 2)
+        normalized = without_current_runtime_source_pin(workflow)
+        self.assertEqual(normalized, workflow.replace(current_pin, previous_pin))
+        self.assertEqual(without_current_runtime_source_pin(normalized), normalized)
+        for partial in (workflow.replace(current_pin, previous_pin, 1),
+                        previous_pin.join(workflow.rsplit(current_pin, 1))):
+            with self.assertRaisesRegex(AssertionError, "^current runtime source pin exact two-site delta differs$"):
+                without_current_runtime_source_pin(partial)
+        workflow = without_remove_output_workflow(workflow)
         for field, variable in (("runtimeManifestSha256", "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
                                 ("runtimeSourceInputsSha256", "MRK_BUNDLED_RUNTIME_SOURCE_SHA256"),
                                 ("protocolSha256", "MRK_BUNDLED_PROTOCOL_SHA256")):

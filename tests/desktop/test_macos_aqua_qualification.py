@@ -10251,6 +10251,16 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
     descriptor = stage.canonical(producer) + b"\n"
     request, invocation = "1" * 32, "2" * 32
     states = {"fresh-install": "installed", "update": "installed", "same-package-noop": "same-package", "restore-fixed-app": "restored-app"}
+    # Exact native-parent shape, but synthetic DATA: no lock/close witness.
+    created = action == "fresh-install"
+    reservation = {"schemaVersion": 1, "entered": True,
+        "creation": "created" if created else "existing-not-modified",
+        "fixedBytes": len(stage.REGISTRATION_GATE_BYTES), "writtenBytes": len(stage.REGISTRATION_GATE_BYTES) if created else 0,
+        "sealed": created, "filePersisted": created, "parentPersisted": created,
+        "writer": "closed" if created else "not-attempted", "verified": True,
+        "exclusiveAttempted": not created, "exclusiveAcquired": not created,
+        "participant": "closed", "closedUnderMaintenance": True, "verifiedAfterGo": False,
+        "cleanup": "original-closes-only-permanent-reservation-retained"}
     original = {"schemaVersion": 2, "kind": "maintenance-parent-pending-finalization", "invocation": invocation,
         "requestId": request, "resultName": "MobileReleaseKit-InstallerResult-v2-" + request + ".json",
         "resultFinality": "pending-own-write-readback-close-and-outer-return", "action": action, "writerState": states[action],
@@ -10258,7 +10268,7 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
         "payloadWriteCount": 0 if action == "same-package-noop" else 4,
         "payloadWriteBytes": 0 if action == "same-package-noop" else 4096, "originalWriterJoined": True,
         "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
-        "historicalOuterExit": "unverified"}
+        "historicalOuterExit": "unverified", "registrationReservation": reservation}
     # Deliberately different from canonical semantic reserialization; the gate
     # must keep original export bytes/hash as separately reported readback DATA.
     raw_export = json.dumps(original, indent=2).encode() + b"\n"
@@ -10280,6 +10290,8 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
         "installationMetadata": metadata,
         "maintenanceGate": {"state": "protected-permanent-gate-data-correspondence", "bytes": len(stage.MAINTENANCE_GATE_BYTES),
                             "exclusionObserved": False, "workerFinalityEstablished": False},
+        "registrationReservation": {"state": "protected-permanent-reservation-data-correspondence", "bytes": len(stage.REGISTRATION_GATE_BYTES),
+                                    "exclusionObserved": False, "workerFinalityEstablished": False},
         "producerSignatureAuthority": "native-parent-and-application-checks-separate", "historicalOuterExit": "unverified",
         "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
         "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
@@ -10498,6 +10510,34 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                         self.assertNotEqual(value['installerResultExport']['bytes'], len(stage.canonical(value['originalInstallerResult']) + b'\n'))
                         if action in ("same-package-noop", "restore-fixed-app"):
                             self.assertNotEqual(value['installationMetadata'][0]['instance'], value['invocation'])
+                    # Both actual parent record branches remain action-bound.
+                    # Fixed readback never promotes either branch to exclusion.
+                    parent = value['originalInstallerResult']['registrationReservation']
+                    self.assertEqual(parent['creation'], 'created' if action == 'fresh-install' else 'existing-not-modified')
+                    self.assertEqual(parent['fixedBytes'], value['registrationReservation']['bytes'])
+                    alternative = deepcopy(value)
+                    create = action != 'fresh-install'
+                    alternative['originalInstallerResult']['registrationReservation'].update(
+                        creation='created' if create else 'existing-not-modified',
+                        writtenBytes=len(stage.REGISTRATION_GATE_BYTES) if create else 0,
+                        sealed=create, filePersisted=create, parentPersisted=create,
+                        writer='closed' if create else 'not-attempted',
+                        exclusiveAttempted=not create, exclusiveAcquired=not create)
+                    raw = json.dumps(alternative['originalInstallerResult'], indent=2).encode() + b'\n'
+                    alternative['installerResultExport'].update(bytes=len(raw), sha256=M.digest(raw))
+                    alternative['installerResultExport']['identity'][6] = len(raw)
+                    if action in ('fresh-install', 'update'):
+                        self.assertEqual(invoke(alternative), alternative)
+                    else:
+                        with self.assertRaisesRegex(stage.Refused, '^registration-reservation-not-predecessor-creation$'):
+                            invoke(alternative)
+                    bad = deepcopy(value); del bad['originalInstallerResult']['registrationReservation']
+                    with self.assertRaisesRegex(stage.Refused, '^maintenance-export-shape$'): invoke(bad)
+                    for key, replacement in (('entered', False), ('fixedBytes', len(stage.REGISTRATION_GATE_BYTES) + 1),
+                            ('verified', False), ('participant', 'owned'), ('closedUnderMaintenance', False),
+                            ('verifiedAfterGo', True), ('cleanup', 'closed'), ('exclusiveAcquired', action == 'fresh-install')):
+                        bad = deepcopy(value); bad['originalInstallerResult']['registrationReservation'][key] = replacement
+                        with self.subTest(action=action, reservation=key), self.assertRaises(stage.Refused): invoke(bad)
                     # Each action uses the actual joined-writer/state/count parser.
                     for key, replacement in (("writerState", "installed" if action in ("same-package-noop", "restore-fixed-app") else "same-package"),
                                              ("writerExit", True), ("originalWriterJoined", False), ("requestId", "a" * 32),
@@ -10539,6 +10579,15 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     lambda row: row['installationMetadata'][0].update(historicalOuterExit='verified'),
                     lambda row: row['maintenanceGate'].update(workerFinalityEstablished=True),
                     lambda row: row['maintenanceGate'].update(exclusionObserved=True),
+                    lambda row: row.pop('registrationReservation'),
+                    lambda row: row.update(registrationReservation=None),
+                    lambda row: row['registrationReservation'].update(extra=True),
+                    lambda row: row['registrationReservation'].update(state='unverified'),
+                    lambda row: row['registrationReservation'].update(bytes=len(stage.REGISTRATION_GATE_BYTES) + 1),
+                    lambda row: row['registrationReservation'].update(bytes=True),
+                    lambda row: row['registrationReservation'].update(exclusionObserved=True),
+                    lambda row: row['registrationReservation'].update(exclusionObserved=0),
+                    lambda row: row['registrationReservation'].update(workerFinalityEstablished=True),
                     lambda row: row['installerResultExport'].update(bytes=1),
                     lambda row: row['installerResultExport'].update(finalityBasis='receipt-only'),
                     lambda row: row['installerResultExport']['identity'].__setitem__(3, 0),
@@ -10817,8 +10866,11 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             with patch.dict(sys.modules):
                 held, posts = [], []
                 def source_file(fixture, name, parent, limit):
-                    self.assertIsNone(parent); self.assertEqual(limit, 256 * 1024)
+                    relative = Path(name).relative_to(PATH.parents[2]).as_posix()
+                    self.assertIsNone(parent)
+                    self.assertEqual(limit, 345583 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
                     raw = Path(name).read_bytes()
+                    self.assertLessEqual(len(raw), limit)
                     row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
                     return raw, row
                 def post(row, capture=False):
@@ -10833,6 +10885,56 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                 self.assertIs(sys.modules['_mrk_shipping_gate_stager'], loaded)
             self.assertEqual(set(sys.modules), set(previous))
             self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
+
+            # Wrong SOURCE is refused before import; an original POST failure
+            # after import still refuses rather than granting a usable stager.
+            held, posts = [], []
+            def changed_source_file(fixture, name, parent, limit):
+                raw, row = source_file(fixture, name, parent, limit)
+                self.assertEqual(len(raw), 345583)
+                return bytes([raw[0] ^ 1]) + raw[1:], row
+            with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_source_file), \
+                 patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
+                with self.assertRaisesRegex(M.Refused, '^gate-stager-source-pin$'):
+                    M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
+                attempted_import.assert_not_called()
+            self.assertEqual(len(held), 1); self.assertEqual(posts, [])
+            held, posts = [], []
+            def changed_source_post(row, capture=False):
+                body, _digest = post(row, capture)
+                return body, '0' * 64
+            with patch.dict(sys.modules), patch.object(M, '_gate_file', source_file), \
+                 patch.object(M, '_gate_file_read', changed_source_post):
+                with self.assertRaisesRegex(M.Refused, '^gate-stager-source-changed$'):
+                    M._gate_load_stager(SimpleNamespace(), PATH.parents[2], target=M.INTEL_TARGET)
+                self.assertIn('_mrk_shipping_gate_stager', sys.modules)
+            self.assertEqual(len(held), 3); self.assertEqual(posts, held[:1])
+            self.assertEqual(set(sys.modules), set(previous))
+            self.assertTrue(all(sys.modules[name] is original for name, original in previous.items()))
+
+            # The existing real reader admits the exact accepted SOURCE size,
+            # not 256KiB, and refuses one additional byte before capture/import.
+            # These are private regular-file DATA originals, not native work.
+            stager_body = PATH.with_name('stage_macos_installed.py').read_bytes()
+            self.assertEqual(len(stager_body), 345583)
+            for extra in (b'', b'\n'):
+                with tempfile.TemporaryDirectory(prefix='mrk-gate-source-bound-') as temporary:
+                    selected = Path(temporary) / 'stage_macos_installed.py'
+                    selected.write_bytes(stager_body + extra); selected.chmod(0o600)
+                    fixture = M.Fixtures(BINDING, M.os.getuid(), M.os.getgid(), M.VAULT_HELPER_SCOPE)
+                    try:
+                        if extra:
+                            with self.assertRaisesRegex(M.Refused, '^gate-original-file$'):
+                                M._gate_file(fixture, str(selected), None, 345583)
+                            self.assertEqual(fixture.gate_files, [])
+                        else:
+                            body, original = M._gate_file(fixture, str(selected), None, 345583)
+                            self.assertEqual(body, stager_body)
+                            self.assertEqual(original['sha256'], M.SHIPPING_GATE_SOURCE_PINS['desktop/tools/stage_macos_installed.py'])
+                            M._gate_recheck(fixture)
+                    finally:
+                        fixture.close()
+                    self.assertFalse(fixture.fds); self.assertEqual(fixture.close_errors, 0)
 
             # Genuine disposable regular-file DATA checks exercise unchanged
             # same-original POST and consuming-close behavior for EACH new file.
@@ -12421,7 +12523,7 @@ class LocalEditsAquaDataTests(unittest.TestCase):
         self.assertEqual(workflow.count("      MRK_MACOS_RUNNER: ${{ matrix.runner }}\n"), 1)
         self.assertIn('case "$MRK_MACOS_TARGET" in', admission)
         self.assertIn("*) exit 1 ;;", admission)
-        source_pin = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+        source_pin = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
         self.assertEqual(workflow.count("      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + source_pin + "\n"), 1)
         self.assertEqual(admission.count('"$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + source_pin), 1)
         expected_suppliers = (('aarch64-apple-darwin', 'macos-26', 'arm64', 'ARM64', '2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d', 'ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695', '158cdff422e3837f7ab5e6192af76a578faf6fab', '37467019389', '1', '11415902210'), ('x86_64-apple-darwin', 'macos-26-intel', 'x86_64', 'X64', 'a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b', '739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd', '079ab2a2c8fef88f01bf909e7669c685f07e1375', '37476532238', '1', '11419502465'))
