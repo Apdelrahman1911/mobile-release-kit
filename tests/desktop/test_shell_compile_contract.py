@@ -4004,8 +4004,9 @@ class ShellCompileContractTests(unittest.TestCase):
                     helper.phase_receipt(app_bound, app_phase, checks, node=helper.NODE, mac_history_result=history_app_result())
 
 
-        # The same phase/decoder, with inert originals: exact installed argv,
-        # no test execution, and failed output can never authorize cleanup.
+        # The same phase/decoder, with inert originals: same installed compilation
+        # graph/cwd and short JSON rendering, not identical diagnostic argv.
+        # No test execution; failed output can never authorize cleanup.
         observer = mac_context("aarch64-apple-darwin", "observer-only")
         raw_error = (json.dumps({"reason": "compiler-message", "manifest_path": observer["source"] + "/desktop/src-tauri/Cargo.toml",
             "message": {"level": "error", "code": {"code": "E0433"}, "message": "synthetic private prose",
@@ -4097,7 +4098,7 @@ class ShellCompileContractTests(unittest.TestCase):
             argv, call = next(row for row in calls if row[1]["check"] == "mac-observer-compile-only")
             self.assertEqual(argv, ["/direct/cargo", "test", "--locked", "--no-default-features", "--features",
                 "desktop-shell,custom-protocol,macos-installed-observation", "--target", "aarch64-apple-darwin",
-                "--test", "installed-shell-observation", "--no-run", "--message-format=json"])
+                "--test", "installed-shell-observation", "--no-run", "--message-format=json,json-diagnostic-short"])
             self.assertEqual(str(call["cwd"]), observer["source"] + "/desktop/src-tauri")
             self.assertEqual(call["timeout"], 1440)
             self.assertEqual(call["env"]["CARGO_TARGET_DIR"], observer["root"] + "/target")

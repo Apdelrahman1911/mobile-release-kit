@@ -9619,12 +9619,13 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
             and context["macCompile"].get("target") == "aarch64-apple-darwin",
             "Mac observer compiler context differs")
     check = "mac-observer-compile-only"
-    # Exact installed DATA argv/cwd. Its independent clean cache/target is not
-    # an invented same-run effective-toolchain or installed package receipt.
+    # Same installed DATA compilation graph/cwd; only JSON rendering is shorter.
+    # Diagnostic argv differs without suppressing warnings/errors. Its independent
+    # cache/target is not a same-run effective-toolchain or installed package receipt.
     argv = [cargo, "test", "--locked", "--no-default-features", "--features",
             "desktop-shell,custom-protocol,macos-installed-observation", "--target",
             "aarch64-apple-darwin", "--test", "installed-shell-observation",
-            "--no-run", "--message-format=json"]
+            "--no-run", "--message-format=json,json-diagnostic-short"]
     environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
     output_path = root / "target/source-slots-compile.stdout"
     stderr_path = root / "target/source-slots-compile.stderr"
