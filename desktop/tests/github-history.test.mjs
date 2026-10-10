@@ -322,6 +322,9 @@ test('History preserves original observation and cancellation across stale repli
 });
 
 test('History component SOURCE exposes exact read controls, contextual help and retained evidence limits', () => {
+  const packageData = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const testEntries = packageData.scripts.test.split(/\s+/);
+  assert.equal(testEntries.filter((entry) => entry === 'tests/github-history.test.mjs').length, 1);
   const source = readFileSync(new URL('../src/components/GitHubHistory.tsx', import.meta.url), 'utf8');
   for (const text of ['Exact GitHub run ID', 'Exact run attempt', 'Release stage to observe', 'Evidence platform',
     'Start authenticated history read', 'Cancel this local read', 'Read local Status',

@@ -1967,7 +1967,7 @@ mod lookup_memory {
             let mut none=Census::new(&old,&source,&retirement);none.current=None;
             assert!(none.owner(&old).is_ok());
             let native=data_context();let payload=Arc::new(Payload{kind:Kind::AndroidKeystore,material:None,
-                fields:Some(commands::own_fields(Kind::AndroidKeystore,&serde_json::json!({"storePassword":"test","keyPassword":null,"keyAlias":null})).unwrap())});
+                fields:Some(commands::own_fields(Kind::AndroidKeystore,&serde_json::json!({"storePassword":"test","keyPassword":null,"keyAlias":null})).ok().unwrap())});
             let loan=github_secret::data_loan(native.clone(),payload.clone());
             let mut census=Census::new(&old,&source,&retirement);census.current=None;
             census.context(&native).unwrap();census.payload(&payload).unwrap();let before=census.bytes;
@@ -1986,7 +1986,7 @@ mod lookup_memory {
             // Real nonsecret borrowed-field and original Arc census, not a
             // fake SecretSealed. Same backing is charged once across clones.
             let variable_payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
-                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).unwrap())});
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
             let variable=github_variable::data_loan(native.clone(),variable_payload.clone(),crate::github_setup_protocol::VariableRequirement::GoogleWifProvider);
             census.context(&native).unwrap();census.payload(&variable_payload).unwrap();let before_variable=census.bytes;
             census.variable_loan(&variable).unwrap();let variable_bytes=census.bytes;
@@ -2005,7 +2005,7 @@ mod lookup_memory {
             assert!(!variable.current(&current,"changed-project",native.registry_generation,&native.project));
             assert!(!variable.current(&current,&native.project_id,native.registry_generation+1,&native.project));
             current.records[0].payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
-                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).unwrap())});
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).ok().unwrap())});
             assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
             current.records[0].payload=variable_payload.clone();current.records[0].mutation_pending=true;
             assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.records[0].mutation_pending=false;
@@ -2981,9 +2981,9 @@ impl DocumentBinding {
         use crate::ios_archive_protocol::Availability;
         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
-            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled() { return Availability::CleanupUnknown; }
+            || self.inner.bridge.preflight.disabled() || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || self.inner.bridge.artifact_inspection.disabled()) { return Availability::CleanupUnknown; }
         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping() { return Availability::Shutdown; }
+            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || self.inner.bridge.artifact_inspection.stopping()) { return Availability::Shutdown; }
         if let Some(reason) = ios_archive_document_gate(state, crate::ios_archive_protocol::Profile::current()) { return reason; }
         // Require actual Disconnect, not an idle/retired public GitHub ticket.
         // Asset phase AND original resources must settle, as must all edits,
@@ -2993,7 +2993,7 @@ impl DocumentBinding {
             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
-            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy() { return Availability::Busy; }
+            || self.inner.bridge.preflight.busy() || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || self.inner.bridge.artifact_inspection.busy()) { return Availability::Busy; }
         Availability::Available
     }
     pub(crate) fn ios_archive_subscribe(&self) -> watch::Receiver<u32> { self.inner.bridge.ios_archive.subscribe() }
@@ -3244,7 +3244,7 @@ impl DocumentBinding {
             if let Some(publisher) = publisher.as_mut() { let _ = publisher.accept(crate::android_registration_app_protocol::Reason::Shutdown); }
             state.saved_input = None;
             state.stopping = true; self.inner.bridge.diagnostics.request_shutdown();
-            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
         }
         self.bump(&mut state);
         }
@@ -4527,7 +4527,7 @@ impl DocumentBinding {
                 state.github.retire(GitHubReason::Cancelled);
                 self.inner.bridge.diagnostics.request_shutdown();
                 self.inner.bridge.preflight.request_shutdown();
-                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown();
+                self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown();
                 if let Some(slot) = state.slot.as_mut() { slot.stop(Reason::Shutdown, now); }
                 stop_quit(&mut state, now);
                 fixture_event!(owner, QuitStop, 1);
@@ -5997,7 +5997,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     // join! does not short-circuit an error or abandon any original future.
     let settlement = async {
         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown());
+        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown());
     };
     tokio::pin!(settlement);
     loop {
@@ -6009,7 +6009,7 @@ async fn run_quit(document: DocumentBinding, owner: Arc<OriginalWork>, app: taur
     }
     // Late all-positive settlement may permit exit, never a successful import,
     // new owner, reassignment or reuse of this unknown session.
-    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && document.inner.bridge.preflight.can_exit() && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit()))) {
+    while !(document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && document.inner.bridge.preflight.can_exit() && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit() && document.inner.bridge.artifact_inspection.can_exit()))) {
         tokio::select! {
             _ = owner.wake.notified() => document.tick(),
             _ = tokio::time::sleep(Duration::from_millis(50)) => document.tick(),
@@ -8099,6 +8099,33 @@ mod tests {
         assert_eq!(accepted_quit_cleanup_end(&state), Some(at + CLEANUP));
         state.quit = None;
         assert_eq!(accepted_quit_cleanup_end(&state), None);
+
+        // SOURCE fanout, not a dialog/worker settlement receipt. The real
+        // owner shutdown semantics are exercised by the existing artifact
+        // clock/decoder group; this catches omissions in its native callers.
+        let source = include_str!("asset_session.rs");
+        let response = source.split_once("fn gui_response(").unwrap().1.split_once("fn phase(").unwrap().0;
+        let accepted = response.split_once("if quit {\n            if facts.accepted {").unwrap().1
+            .split_once("} else { stop_quit(").unwrap().0;
+        let request = "self.inner.bridge.artifact_inspection.request_shutdown();";
+        assert_eq!(response.matches(request).count(), 1);
+        assert!(response.find("let mut state = self.lock()").unwrap() < response.find(request).unwrap());
+        assert!(accepted.find("state.stopping = true").unwrap() < accepted.find(request).unwrap());
+        assert!(accepted.find(request).unwrap() < accepted.find("stop_quit(").unwrap());
+        let compatibility = source.split_once("pub(crate) fn compatibility_quit_result(").unwrap().1
+            .split_once("fn common_gate(").unwrap().0;
+        assert_eq!(compatibility.matches(request).count(), 1);
+        let compatibility_accepted = compatibility.split_once("if accepted {").unwrap().1.split_once("\n        }").unwrap().0;
+        assert!(compatibility_accepted.contains(request));
+        let quit = source.split_once("async fn run_quit(").unwrap().1
+            .split_once("// The fixed data-only exit observer").unwrap().0;
+        let join = quit.split_once("tokio::join!(").unwrap().1.split_once(");").unwrap().0;
+        assert_eq!(join.matches("document.inner.bridge.artifact_inspection.shutdown()").count(), 1);
+        let late = quit.split_once("while !(").unwrap().1.split_once(" {\n").unwrap().0;
+        assert_eq!(late.matches("document.inner.bridge.artifact_inspection.can_exit()").count(), 1);
+        let exit = source.split_once("pub(crate) fn can_exit(&self) -> bool {").unwrap().1
+            .split_once("pub(crate) fn exit_cleanup_end(").unwrap().0;
+        assert!(exit.contains("self.inner.bridge.artifact_inspection.can_exit()"));
     }
 
     #[test]
