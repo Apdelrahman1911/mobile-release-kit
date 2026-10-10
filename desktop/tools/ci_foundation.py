@@ -9629,6 +9629,7 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
     output_path = root / "target/source-slots-compile.stdout"
     stderr_path = root / "target/source-slots-compile.stderr"
     primary, returned_code, compiler_diagnostic = None, None, None
+    capture_admission = None
     try:
         remaining(30)
         with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
@@ -9659,8 +9660,10 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
                     stderr = source_slots_read(stderr_path, originals[1], retain=True)
                     compiler_diagnostic = source_slots_compiler_diagnostic(context, raw, stderr, returned_code,
                                                                           timeout_for=remaining)
-                except BaseException:
-                    pass  # Optional explanation must not replace this original.
+                except BaseException as diagnostic_error:
+                    capture_admission = (diagnostic_error.__dict__.get("_source_slots_capture_admission")
+                                         if type(diagnostic_error) is CheckFailure else None)
+                    # Optional explanation must not replace this original.
             raise primary
         remaining(30)
         source_slots_read(output_path, originals[0])
@@ -9668,6 +9671,8 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
         remaining(30)
     except BaseException as error:
         first = primary if primary is not None else error
+        if capture_admission is None and type(error) is CheckFailure:
+            capture_admission = error.__dict__.get("_source_slots_capture_admission")
         failure = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": "compile",
                    "status": "failed-or-unknown", "lastFixedStage": check,
                    "originalCommandReturnCode": returned_code, "macCompile": context["macCompile"],
@@ -9675,6 +9680,14 @@ def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict
                                                    "workflowRef", "workflowSha256", "runId", "attempt")}}
         failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
             returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
+        try:
+            facts = source_slots_capture_admission(capture_admission)
+            if facts is not None and facts["output"] in {"source-slots-compile.stdout", "source-slots-compile.stderr"}:
+                explained = {**failure, "captureAdmission": facts}
+                if len(json.dumps(explained, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384:
+                    failure = explained
+        except BaseException:
+            pass  # Optional partial facts never displace the original receipt/failure.
         try:
             if failure["compilerDiagnostic"]["state"] == "complete":
                 try:

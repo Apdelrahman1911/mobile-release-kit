@@ -4011,8 +4011,11 @@ class ShellCompileContractTests(unittest.TestCase):
             "message": {"level": "error", "code": {"code": "E0433"}, "message": "synthetic private prose",
                         "spans": [{"is_primary": True, "file_name": "src/bridge.rs", "line_start": 467, "column_start": 9}]}})
             + '\n{"reason":"build-finished","success":false}\n').encode()
-        for fault in (None, "returned101", "unknown", "timeout", "returned101-close", "close", "reader", "overflow", "late"):
-            events, captures, calls, publications, original_errors = [], {}, [], [], []
+        admission_faults = {"admission-byte", "admission-stderr", "returned101-admission", "malformed-admission",
+                            "noncompile-admission", "optional-admission", "returned101-optional", "returned101-publication"}
+        for fault in (None, "returned101", "unknown", "timeout", "returned101-close", "close", "reader", "overflow", "late",
+                      *sorted(admission_faults)):
+            events, captures, calls, publications, original_errors, reader_errors, reader_facts = [], {}, [], [], [], [], []
             clock = [100.0]
             ObserverPath, writer, read = source_slots_paths(events, captures)
             original_open = ObserverPath.open
@@ -4030,8 +4033,8 @@ class ShellCompileContractTests(unittest.TestCase):
                 check = kw["check"]
                 calls.append((list(argv), {k: v for k, v in kw.items() if k not in ("output", "diagnostics")}))
                 if check == "mac-observer-compile-only":
-                    kw["output"].write(raw_error.decode() if fault in ("returned101", "returned101-close") else '{"reason":"build-finished","success":true}\n')
-                    if fault in ("returned101", "returned101-close", "unknown", "timeout"):
+                    kw["output"].write(raw_error.decode() if fault and fault.startswith("returned101") else '{"reason":"build-finished","success":true}\n')
+                    if fault in ("unknown", "timeout") or fault and fault.startswith("returned101"):
                         error = helper.CheckFailure("synthetic first original failure")
                         if fault.startswith("returned101"):
                             error._returned_command = (check, 101)
@@ -4047,7 +4050,24 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertIn(("closed", observer["root"] + "/target/source-slots-compile.stderr"), events)
                 if fault in ("reader", "overflow"):
                     raise helper.CheckFailure("synthetic " + fault + " original admission")
+                if fault in admission_faults and (fault != "admission-stderr" or path.name == "source-slots-compile.stderr"):
+                    cap = 1024 * 1024 if path.name.endswith("stderr") else 2 * 1024 * 1024
+                    facts = {"schemaVersion": 1, "output": path.name, "limitBytes": cap,
+                        "writerBytes": expected[6] if fault == "admission-stderr" else cap + 1,
+                        "openedBytes": expected[6] if fault == "admission-stderr" else cap + 1,
+                        "failedCheck": "named-identity" if fault == "admission-stderr" else "byte-bound",
+                        "readerClosed": True, "partialObservation": True}
+                    if fault == "malformed-admission": facts["readerClosed"] = False
+                    if fault == "noncompile-admission": facts.update(output="metadata.json", limitBytes=16 * 1024 * 1024)
+                    error = helper.CheckFailure("synthetic original capture refusal")
+                    error._source_slots_capture_admission = facts
+                    reader_errors.append(error); reader_facts.append(deepcopy(facts))
+                    raise error
                 return captures[str(path)] if retain else read(path, expected)
+            def publish_observer(path, value):
+                self.assertEqual(path.name, "compile-checks.json")
+                publications.append(deepcopy(value))
+                if fault == "returned101-publication": raise KeyboardInterrupt("synthetic optional publication failure")
             with self.subTest(observer_fault=fault), contextlib.ExitStack() as stack:
                 for manager in (
                     patch.object(helper, "Path", ObserverPath), patch.object(ObserverPath, "open", opened),
@@ -4058,16 +4078,20 @@ class ShellCompileContractTests(unittest.TestCase):
                     patch.object(helper, "run", side_effect=invoke_observer),
                     patch.object(helper, "source_slots_writer", side_effect=writer),
                     patch.object(helper, "source_slots_read", side_effect=read_observer),
-                    patch.object(helper, "write_json", side_effect=lambda path, value: publications.append(deepcopy(value))),
+                    patch.object(helper, "write_json", side_effect=publish_observer),
                     patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]),
                     patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-never-exported"}, clear=True),
                 ): stack.enter_context(manager)
+                if fault in ("optional-admission", "returned101-optional"):
+                    stack.enter_context(patch.object(helper, "source_slots_capture_admission",
+                        side_effect=SystemExit("synthetic optional fact validation failure")))
                 if fault is None:
                     helper.phase_mac_compile("compile", observer)
                 else:
                     with self.assertRaises(helper.CheckFailure) as failed:
                         helper.phase_mac_compile("compile", observer)
                     if original_errors: self.assertIs(failed.exception, original_errors[0])
+                    elif reader_errors: self.assertIs(failed.exception, reader_errors[0])
             self.assertEqual([kw["check"] for _, kw in calls if kw["check"] != "source-slots-diagnostic-source"],
                              ["node-version", "typescript-no-emit", "vite-assets", "mac-observer-compile-only"])
             argv, call = next(row for row in calls if row[1]["check"] == "mac-observer-compile-only")
@@ -4090,6 +4114,12 @@ class ShellCompileContractTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure): helper.validate_compile_receipt(record, observer, "compile")
                 self.assertEqual(record["originalCommandReturnCode"], 101 if fault.startswith("returned101") else None if fault in ("unknown", "timeout") else 0)
                 self.assertEqual(record["compilerDiagnostic"]["state"], "complete" if fault == "returned101" else "unavailable")
+                self.assertEqual("captureAdmission" in record,
+                    fault in {"admission-byte", "admission-stderr", "returned101-admission", "returned101-publication"})
+                if "captureAdmission" in record:
+                    self.assertEqual(record["captureAdmission"], reader_facts[0])
+                    self.assertEqual(record["captureAdmission"]["readerClosed"], True)
+                    self.assertEqual(record["captureAdmission"]["partialObservation"], True)
                 if fault == "returned101":
                     self.assertEqual(record["compilerDiagnostic"]["errors"][0]["code"], "E0433")
                     self.assertEqual(record["compilerDiagnostic"]["sources"][0]["gitBlob"], "a" * 40)
