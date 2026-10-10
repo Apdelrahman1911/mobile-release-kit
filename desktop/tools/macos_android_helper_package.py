@@ -1148,6 +1148,203 @@ _FAILURE_OWNER_REASONS = (
 )
 
 
+# Only these SOURCE crate identities can disambiguate relative compiler spans.
+_COMPILER_PACKAGES = {
+    "mrk-android-register": ("desktop/helpers/macos-android-register", "0.1.0"),
+    "mobile-release-kit-desktop": ("desktop/src-tauri", "0.1.1"),
+    "mrk-macos-installed-native": ("desktop/native/macos-installed-native", "0.1.0"),
+}
+_COMPILER_ROOTS = tuple(value[0] for value in _COMPILER_PACKAGES.values()) + ("desktop/native/macos-installed-entry",)
+_COMPILER_NATIVE_FILES = (
+    "src/native.m", "src/android_registration.m", "src/android_service_management.m",
+    "src/wrapping_keychain.m", "src/vault_filesystem.m", "src/vault_helper_control.m",
+    "src/wrapping_interaction_policy.h", "src/vault_helper_control.h", "src/vault_helper_auth.m",
+)
+_COMPILER_CLASSES = (
+    "locked-update", "missing-package", "offline", "download-failed", "network-failed",
+    "unsupported-rustc", "no-space", "build-script-failed", "linker-failed", "unclassified",
+)
+
+
+def compiler_source(path, checkout, package=None):
+    """Lexical SOURCE location only. Never resolve/stat/read a diagnostic path."""
+    if type(path) is not str or not 0 < len(path) <= 4096 or re.fullmatch(r"[A-Za-z0-9_./+-]+", path) is None:
+        return None
+    if path.startswith(checkout + "/"):
+        parts = path[len(checkout) + 1:].split("/")
+    elif path.startswith("/"):
+        return None
+    elif path.startswith("desktop/"):
+        parts = path.split("/")
+    elif package is not None:
+        if type(package) is not str or package not in _COMPILER_ROOTS:
+            return None
+        parts = package.split("/") + path.split("/")
+    elif path in _COMPILER_NATIVE_FILES:
+        parts = ["desktop", "native", "macos-installed-native"] + path.split("/")
+    elif path.startswith(("../../src-tauri/", "../../native/macos-installed-native/")):
+        # Explicit helper Cargo cwd, not a guessed base for src/lib.rs/build.rs.
+        parts = ["desktop", "helpers", "macos-android-register"] + path.split("/")
+    else:
+        return None
+    normalized = []
+    for part in parts:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not normalized:
+                return None
+            normalized.pop()
+        else:
+            normalized.append(part)
+    result = "/".join(normalized)
+    return result if (len(result) <= 160 and result.endswith((".rs", ".m", ".c", ".h"))
+                      and any(result.startswith(root + "/") for root in _COMPILER_ROOTS)) else None
+
+
+def compiler_diagnostic(stdout, stderr, checkout):
+    """Sanitize SAME failed Cargo captures. Never export messages or commands."""
+    result = {"rows": [], "rowsOmitted": False, "scanComplete": True,
+              "rustMessages": 0, "clangErrors": 0, "buildScriptPanics": 0, "classifications": []}
+    if (type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 4 * 1024 * 1024
+            or type(checkout) is not str or not checkout.startswith("/") or len(checkout) > 4096):
+        result.update(scanComplete=False, classifications=["unclassified"])
+        return result
+    def position(value, maximum):
+        return value if type(value) is int and 0 < value <= maximum else None
+    def add(kind, code, path, line, column, package):
+        row = {"kind": kind, "code": code if type(code) is str and re.fullmatch(r"E[0-9]{4}", code) else None,
+               "source": compiler_source(path, checkout, package),
+               "line": position(line, 1000000), "column": position(column, 65535)}
+        if row not in result["rows"]:
+            if len(result["rows"]) < 8:
+                result["rows"].append(row)
+            else:
+                result["rowsOmitted"] = True
+    classes, lines_seen = set(), 0
+    for body in (stdout, stderr):
+        offset, package = 0, None
+        while offset < len(body):
+            if lines_seen == 65536:
+                result["scanComplete"] = False
+                break
+            lines_seen += 1
+            end = body.find(b"\n", offset)
+            end = len(body) if end < 0 else end
+            start, offset = offset, end + 1
+            if end - start > 256 * 1024:
+                result["scanComplete"] = False
+                continue
+            raw = body[start:end]
+            # Text searches have a smaller bound than Cargo JSON. The left
+            # path boundary below also prevents retries at each path character.
+            if not raw.startswith(b"{") and len(raw) > 8192:
+                result["scanComplete"] = False
+                continue
+            try:
+                text = raw.decode("utf-8", "strict").rstrip("\r")
+            except UnicodeError:
+                result["scanComplete"] = False
+                continue
+            if text.startswith("{"):
+                if '"compiler-message"' not in text:
+                    continue
+                try:
+                    message = json.loads(text)
+                except (ValueError, RecursionError):
+                    result["scanComplete"] = False
+                    continue
+                if type(message) is not dict or message.get("reason") != "compiler-message":
+                    continue
+                detail = message.get("message")
+                if type(detail) is not dict or detail.get("level") != "error":
+                    continue
+                result["rustMessages"] += 1
+                context = ""  # Unknown/contradictory package is not the helper cwd.
+                for name, (root, version) in _COMPILER_PACKAGES.items():
+                    manifest = checkout + "/" + root + "/Cargo.toml"
+                    prefix = "path+file://" + checkout + "/" + root + "#"
+                    identities = (prefix + name + "@" + version, prefix + version)
+                    supplied_manifest, supplied_id = message.get("manifest_path"), message.get("package_id")
+                    if ((supplied_manifest == manifest and (supplied_id is None or supplied_id in identities))
+                            or supplied_manifest is None and supplied_id in identities):
+                        context = root
+                        break
+                code = detail.get("code")
+                code = code.get("code") if type(code) is dict else None
+                spans = detail.get("spans")
+                primary = False
+                if type(spans) is list:
+                    if len(spans) > 64:
+                        result["scanComplete"] = False
+                    for span in spans[:64]:
+                        if type(span) is dict and span.get("is_primary") is True:
+                            primary = True
+                            add("rust", code, span.get("file_name"), span.get("line_start"), span.get("column_start"), context)
+                if not primary:
+                    add("rust", code, None, None, None, context)
+                continue  # Never mine rendered/message JSON text as stderr.
+            lower = text.lower()
+            if "lock file" in lower and "--locked" in lower and ("update" in lower or "updated" in lower): classes.add("locked-update")
+            if "no matching package named" in lower or "no matching version" in lower: classes.add("missing-package")
+            if "offline mode" in lower or "--offline" in lower: classes.add("offline")
+            if "failed to download" in lower or ("failed to get" in lower and "as a dependency" in lower): classes.add("download-failed")
+            if any(token in lower for token in ("could not resolve host", "failed to connect", "network failure", "timed out", "ssl connect error")): classes.add("network-failed")
+            if "requires rustc" in lower or "rustc is not supported" in lower or "requires rust version" in lower: classes.add("unsupported-rustc")
+            if "no space left on device" in lower: classes.add("no-space")
+            if "failed to run custom build command" in lower:
+                classes.add("build-script-failed")
+                package = ""
+                heading = re.match(r"error: failed to run custom build command for `([A-Za-z0-9_-]+) v([0-9.]+)(?: |`)", text)
+                if heading:
+                    pair = _COMPILER_PACKAGES.get(heading[1])
+                    if pair is not None and heading[2] == pair[1]:
+                        package = pair[0]
+            if ("linking with" in lower and "failed" in lower) or "linker command failed" in lower: classes.add("linker-failed")
+            line_package = package
+            warning = re.match(r"warning: ([A-Za-z0-9_-]+)@([0-9.]+):", text)
+            if warning:
+                pair = _COMPILER_PACKAGES.get(warning[1])
+                line_package = pair[0] if pair is not None and warning[2] == pair[1] else ""
+            clang = re.search(r"(?<![A-Za-z0-9_./+:-])([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6})(?::([1-9][0-9]{0,4}))?: (?:fatal )?error:", text)
+            if clang:
+                result["clangErrors"] += 1
+                add("clang", None, clang[1], int(clang[2]), int(clang[3]) if clang[3] else None, line_package)
+            panic = re.search(r"panicked at ([A-Za-z0-9_./+-]{1,4096}):([1-9][0-9]{0,6}):([1-9][0-9]{0,4}):", text)
+            if panic:
+                result["buildScriptPanics"] += 1
+                add("build-script-panic", None, panic[1], int(panic[2]), int(panic[3]), line_package)
+    result["classifications"] = [value for value in _COMPILER_CLASSES if value in classes] or ["unclassified"]
+    return result
+
+
+def compiler_diagnostic_data(value):
+    """Only the parser's closed passive fields can enter the public line."""
+    if type(value) is not dict:
+        return None
+    rows, classes = value.get("rows"), value.get("classifications")
+    if (type(rows) is not list or len(rows) > 8 or type(classes) is not list or len(classes) > len(_COMPILER_CLASSES)
+            or any(type(item) is not str or item not in _COMPILER_CLASSES for item in classes)
+            or any(type(value.get(key)) is not bool for key in ("rowsOmitted", "scanComplete"))
+            or any(type(value.get(key)) is not int or not 0 <= value[key] <= 65536
+                   for key in ("rustMessages", "clangErrors", "buildScriptPanics"))):
+        return None
+    output = []
+    for row in rows:
+        if type(row) is not dict or set(row) != {"kind", "code", "source", "line", "column"}:
+            return None
+        kind, code, source = row["kind"], row["code"], row["source"]
+        if (type(kind) is not str or kind not in ("rust", "clang", "build-script-panic")
+                or code is not None and (type(code) is not str or re.fullmatch(r"E[0-9]{4}", code) is None)
+                or source is not None and (type(source) is not str or compiler_source(source, "/") != source)
+                or any(row[key] is not None and (type(row[key]) is not int or not 0 < row[key] <= maximum)
+                       for key, maximum in (("line", 1000000), ("column", 65535)))):
+            return None
+        output.append(dict(row))
+    return {"rows": output, "classifications": list(classes),
+            **{key: value[key] for key in ("rowsOmitted", "scanComplete", "rustMessages", "clangErrors", "buildScriptPanics")}}
+
+
 def failure_exception(error, stager=None):
     """Classify the original object without rendering it or trusting its name."""
     selected = type(error)
@@ -1212,6 +1409,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
         "diagnosticOnly": True, "productReady": False,
         "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
         "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
+        "compiler": compiler_diagnostic_data(state.get("compiler_failure")),
         "originalFailure": {
             "recorded": type(receipt.get("failure")) is dict if state else None,
             "stage": token(original.get("stage"), _FAILURE_STAGES),
@@ -1247,7 +1445,14 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
 def emit_failure_diagnostic(error, **context):
     """Best effort only: diagnostic failure cannot replace the original exit1."""
     try:
-        body = json.dumps(failure_diagnostic(error, **context), sort_keys=True, separators=(",", ":")) + "\n"
+        value = failure_diagnostic(error, **context)
+        body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        # Retain the existing primary diagnosis within its unchanged whole-line
+        # bound. Only a fresh diagnostic row copy is trimmed, never owner state.
+        while len(body) > 4096 and value["compiler"] is not None and value["compiler"]["rows"]:
+            value["compiler"]["rows"].pop()
+            value["compiler"]["rowsOmitted"] = True
+            body = json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
         if body.isascii() and len(body) <= 4096:
             written = sys.stderr.write(body)
             if type(written) is int and written == len(body):
@@ -1544,6 +1749,7 @@ class Operation:
         self.removal_requests = None
         self.entries, self.calls, self.errors = [], [], []
         self.diagnostic_failure = None  # Private finite DATA, never a completion/ownership latch.
+        self.compiler_failure = None  # Only a failed, returned, capture-settled build may populate this.
         self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
         self.credential_active = None
@@ -1834,6 +2040,11 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase == "prepare" and role == "build" and result.returncode != 0:
+            try:
+                self.compiler_failure = compiler_diagnostic(result.stdout, result.stderr, str(self.checkout))
+            except BaseException:
+                pass  # No diagnostic failure may replace the SAME nonzero result.
         diagnostic = self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
         need(result.returncode == 0 or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode),

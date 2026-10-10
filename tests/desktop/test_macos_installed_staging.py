@@ -4594,6 +4594,178 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual([line.split("=", 1)[0] for line in stdout.getvalue().splitlines()],
                         ["sha256", "entry-sha256", "resident-image-sha256", "desktop-facade-sha256", "image-release-id"])
 
+        # Compiler diagnostics are data from the SAME failed, settled Cargo
+        # result. Never render messages, external paths, or a successful build.
+        source = "/private/compiler-checkout"
+        helper_root = "desktop/helpers/macos-android-register"
+        native_root = "desktop/native/macos-installed-native"
+        def compiler_message(path="src/lib.rs", *, line=43, column=7, code="E0308", root=helper_root):
+            return {"reason": "compiler-message", "manifest_path": source + "/" + root + "/Cargo.toml",
+                "message": {"level": "error", "code": {"code": code, "explanation": private},
+                    "message": private, "rendered": private,
+                    "spans": [{"file_name": path, "line_start": line, "column_start": column, "is_primary": True},
+                              {"file_name": "/private/secondary.rs", "line_start": 1, "column_start": 1, "is_primary": False}]}}
+        rust = module.compiler_diagnostic(self.encoded([compiler_message()]), b"", source)
+        self.assertEqual(rust["rows"], [{"kind": "rust", "code": "E0308", "source": helper_root + "/src/lib.rs", "line": 43, "column": 7}])
+        self.assertEqual((rust["rustMessages"], rust["scanComplete"], rust["rowsOmitted"]), (1, True, False))
+        self.assertEqual(module.compiler_diagnostic_data(rust), rust)
+        self.assertNotIn(private, json.dumps(rust))
+        for path, root, expected in (
+            (source + "/desktop/src-tauri/src/lib.rs", helper_root, "desktop/src-tauri/src/lib.rs"),
+            ("../../src-tauri/src/lib.rs", helper_root, "desktop/src-tauri/src/lib.rs"),
+            ("src/lib.rs", "unrecognized-crate", None), ("build.rs", "unrecognized-crate", None),
+            ("/private/outside/lib.rs", helper_root, None), ("../../../../outside.rs", helper_root, None),
+            ("src/private\nname.rs", helper_root, None), ("src/" + "x" * 161 + ".rs", helper_root, None),
+        ):
+            with self.subTest(compilerPath=path):
+                value = module.compiler_diagnostic(self.encoded([compiler_message(path, root=root)]), b"", source)
+                self.assertEqual(value["rows"][0], {"kind": "rust", "code": "E0308", "source": expected, "line": 43, "column": 7})
+        # Actual package identity alone can disambiguate; contradicting it with
+        # a different admitted manifest must not adopt either crate.
+        message = compiler_message()
+        message.pop("manifest_path")
+        message["package_id"] = "path+file://" + source + "/" + helper_root + "#mrk-android-register@0.1.0"
+        self.assertEqual(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"], rust["rows"])
+        message["manifest_path"] = source + "/" + native_root + "/Cargo.toml"
+        self.assertIsNone(module.compiler_diagnostic(self.encoded([message]), b"", source)["rows"][0]["source"])
+        invalid = compiler_message(line=True, column=65536, code="E12345")
+        row = module.compiler_diagnostic(self.encoded([invalid]), b"", source)["rows"][0]
+        self.assertEqual((row["code"], row["line"], row["column"]), (None, None, None))
+        c_output = ("warning: mrk-macos-installed-native@0.1.0: src/native.m:31:9: error: " + private + "\n").encode()
+        panic_output = ("error: failed to run custom build command for `mrk-macos-installed-native v0.1.0 (" + source + ")`\n"
+                        "thread 'main' panicked at build.rs:88:3:\n" + private + "\n").encode()
+        for stdout_body, stderr_body in ((c_output, panic_output), (b"", c_output + panic_output)):
+            value = module.compiler_diagnostic(stdout_body, stderr_body, source)
+            self.assertEqual(value["rows"], [
+                {"kind": "clang", "code": None, "source": native_root + "/src/native.m", "line": 31, "column": 9},
+                {"kind": "build-script-panic", "code": None, "source": native_root + "/build.rs", "line": 88, "column": 3}])
+            self.assertEqual((value["clangErrors"], value["buildScriptPanics"]), (1, 1))
+            self.assertEqual(value["classifications"], ["build-script-failed"])
+            self.assertNotIn(private, json.dumps(value))
+        for text, expected in (
+            ("src/native.m:4:2: fatal error: private\n", native_root + "/src/native.m"),
+            ("src/lib.rs:4:2: error: private\n", None),
+            ("warning: foreign@0.1.0: src/native.m:4:2: error: private\n", None),
+            ("error: failed to run custom build command for `foreign v0.1.0`\nthread 'main' panicked at build.rs:4:2:\n", None),
+        ):
+            value = module.compiler_diagnostic(b"", text.encode(), source)
+            self.assertEqual(value["rows"][0]["source"], expected)
+            self.assertEqual((value["rows"][0]["line"], value["rows"][0]["column"]), (4, 2))
+        class_text = (b"error: lock file needs to be updated but --locked was passed\n"
+                      b"no matching package named private found; offline mode\n"
+                      b"failed to download private; could not resolve host\n"
+                      b"private requires rustc 99; no space left on device\n"
+                      b"failed to run custom build command for `foreign v0.1.0`\n"
+                      b"linking with private failed\n")
+        classes = module.compiler_diagnostic(b"", class_text, source)
+        self.assertEqual(classes["classifications"], list(module._COMPILER_CLASSES[:-1]))
+        self.assertFalse(classes["rows"])
+        self.assertNotIn("private", json.dumps(classes))
+        many = module.compiler_diagnostic(self.encoded([compiler_message(line=i) for i in range(1, 10)]), b"", source)
+        self.assertEqual((len(many["rows"]), many["rustMessages"], many["rowsOmitted"]), (8, 9, True))
+        for body in (b'{"reason":"compiler-message",', b'\xff\n', b'x' * 8193,
+                     b'{"compiler-message":"' + b'x' * (256 * 1024), b'\n' * 65537,
+                     b'x' * (4 * 1024 * 1024 + 1)):
+            value = module.compiler_diagnostic(body, b"", source)
+            self.assertFalse(value["scanComplete"])
+            self.assertFalse(value["rows"])
+        # A pathlike prefix cannot cause retry at every character or attribute
+        # the short valid-looking suffix of a single overlong path token.
+        long_token = b"x" * 5000 + b"/desktop/src-tauri/src/lib.rs:1:2: error: private\n"
+        self.assertFalse(module.compiler_diagnostic(b"", long_token, source)["rows"])
+        for key, wrong in (("rustMessages", True), ("scanComplete", 1), ("classifications", [private]),
+                           ("rows", [dict(rust["rows"][0], source="/private/outside.rs")]),
+                           ("rows", [dict(rust["rows"][0], line=True)])):
+            self.assertIsNone(module.compiler_diagnostic_data(dict(rust, **{key: wrong})))
+
+        actual_parser = module.compiler_diagnostic
+        for kind in ("captured", "parser-error", "unknown", "success"):
+            with self.subTest(compilerOriginal=kind), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "owner" if kind == "unknown" else None if kind == "success" else "nonzero")
+                original_command, parser_calls = owner.run_owned, []
+                captured_stdout = self.encoded([compiler_message()])
+                # Relocate only the synthetic Cargo manifest to THIS actual tiny
+                # checkout; the native port remains the existing inert fixture.
+                captured_stdout = captured_stdout.replace(source.encode(), str(checkout).encode())
+                captured_stderr = c_output
+                def command(argv, **options):
+                    returned = original_command(argv, **options)
+                    if kind in ("captured", "parser-error"):
+                        self.assertEqual(returned.returncode, 101)
+                        return CompletedProcess(returned.args, returned.returncode, captured_stdout, captured_stderr)
+                    return returned
+                owner.run_owned = command
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
+                def inspect(stdout_body, stderr_body, actual_checkout):
+                    parser_calls.append(True)
+                    self.assertIs(stdout_body, captured_stdout)
+                    self.assertIs(stderr_body, captured_stderr)
+                    self.assertEqual(actual_checkout, str(checkout))
+                    self.assertEqual((operation.calls[-1]["returncode"], operation.calls[-1]["returned"],
+                                      operation.calls[-1]["capturesSettled"]), (101, True, True))
+                    if kind == "parser-error":
+                        raise PrivateError(private)
+                    return actual_parser(stdout_body, stderr_body, actual_checkout)
+                with mock.patch.object(module, "compiler_diagnostic", side_effect=inspect):
+                    if kind == "success":
+                        operation.execute()
+                    else:
+                        with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                            operation.execute()
+                self.assertEqual(len(parser_calls), 1 if kind in ("captured", "parser-error") else 0)
+                if kind == "captured":
+                    self.assertEqual(operation.compiler_failure["rows"], rust["rows"] + [
+                        {"kind": "clang", "code": None, "source": native_root + "/src/native.m", "line": 31, "column": 9}])
+                    projected = module.failure_diagnostic(module.Refused("helper-package-incomplete"), operation=operation, stager=TOOL)
+                    self.assertEqual(projected["compiler"], operation.compiler_failure)
+                    self.assertNotIn(str(checkout), json.dumps(projected))
+                    self.assertNotIn(private, json.dumps(projected))
+                else:
+                    self.assertIsNone(operation.compiler_failure)
+                if kind in ("captured", "parser-error"):
+                    self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-build")
+                    self.assertEqual(len(observations), 1)
+                    self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+                    self.assertFalse(operation.receipt["passed"] or operation.credential_calls or operation.credential_contexts)
+                elif kind == "unknown":
+                    self.assertFalse(operation.calls[0]["returned"] or operation.calls[0]["capturesSettled"])
+                    self.assertFalse(operation.receipt["passed"])
+                else:
+                    self.assertTrue(operation.receipt["passed"])
+                    self.assertEqual(len(observations), len(module.PREPARE_ROLES))
+
+        # The public whole-line cap stays4096. The reducer copies rows; trimming
+        # its output cannot change the saved original diagnostic fact. A larger
+        # encoder whitespace margin explicitly forces the same cap branch.
+        passive = object.__new__(module.Operation)
+        passive.__dict__.update(receipt={}, compiler_failure=copy.deepcopy(many))
+        for index, row in enumerate(passive.compiler_failure["rows"]):
+            row["source"] = "desktop/src-tauri/src/" + str(index) + "x" * 134 + ".rs"
+        passive.compiler_failure["rowsOmitted"] = False
+        stored = copy.deepcopy(passive.compiler_failure)
+        actual_dumps, output = json.dumps, io.StringIO()
+        failure = module.Refused("helper-package-incomplete")
+        initial = module.failure_diagnostic(failure, operation=passive)
+        initial_line = actual_dumps(initial, sort_keys=True, separators=(",", ":")) + "\n"
+        self.assertEqual(len(initial["compiler"]["rows"]), 8)
+        self.assertFalse(initial["compiler"]["rowsOmitted"])
+        self.assertLessEqual(len(initial_line.encode("ascii")), 4096)
+        margin = 4097 - len(initial_line)
+        def padded_dumps(value, **options):
+            return actual_dumps(value, **options) + " " * margin
+        self.assertEqual(len((padded_dumps(initial, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")), 4097)
+        with mock.patch.object(module.json, "dumps", side_effect=padded_dumps), contextlib.redirect_stderr(output):
+            module.emit_failure_diagnostic(failure, operation=passive)
+        body = output.getvalue()
+        self.assertTrue(body)
+        self.assertLessEqual(len(body.encode("ascii")), 4096)
+        value = json.loads(body)
+        self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+        self.assertTrue(value["compiler"]["rowsOmitted"])
+        self.assertEqual(len(value["compiler"]["rows"]), 7)
+        self.assertEqual(passive.compiler_failure, stored)
+
 
 
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
