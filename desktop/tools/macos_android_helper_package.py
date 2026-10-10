@@ -547,7 +547,7 @@ def package_signature_data(body, selection, certificates, path):
     """Closed pkgutil trust/timestamp/complete-chain projection; no raw output."""
     need(type(body) is bytes and 0 < len(body) <= 65536 and body.endswith(b"\n")
          and type(selection) is dict and type(certificates) is tuple and len(certificates) == 3
-         and isinstance(path, Path) and path.name == "MobileReleaseKit.pkg", "package-signature-bound")
+         and isinstance(path, Path) and path.name in ("MobileReleaseKit.pkg", "Remove.pkg"), "package-signature-bound")
     try:
         text = body.decode("utf-8")
     except UnicodeError:

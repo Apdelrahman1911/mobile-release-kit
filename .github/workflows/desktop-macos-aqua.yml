@@ -960,8 +960,7 @@ jobs:
           set -e
           printf '%s\n' "$status" > "$MRK_MACOS_WORK/vault-helper-build.status"
           if [[ $status != 0 ]]; then
-            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2
-            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2
+            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\n' "$status" >&2 || :
             exit "$status"
           fi
           helper="$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain"
@@ -1070,7 +1069,6 @@ jobs:
             # Optional diagnostics cannot replace the original compiler status.
             set +e
             printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are retained.\n' "$remover_status" >&2
-            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2
             exit "$remover_status"
           fi
           [[ "$remover_status_saved" == 0 ]] || exit "$remover_status_saved"
@@ -1664,204 +1662,25 @@ jobs:
           if len(data) > 4096: raise ValueError("diagnostic metadata bound")
           publish("bounded-diagnostics.json", data)
           PY_DIAGNOSTICS
+      - name: Project closed public verification facts without raw originals
+        id: public_evidence
+        if: always() && steps.work.outputs.root != ''
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \
+            --profile aqua --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \
+            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Preserve bounded original evidence; upload alone is not an Aqua pass
-        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
+        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3') && steps.public_evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}
-          path: |
-            ${{ steps.work.outputs.root }}/source-binding.json
-            ${{ steps.work.outputs.root }}/package-format-input.json
-            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg
-            ${{ steps.work.outputs.root }}/package-format-prepare.json
-            ${{ steps.work.outputs.root }}/package-format-tar.status
-            ${{ steps.work.outputs.root }}/package-format-xar.status
-            ${{ steps.work.outputs.root }}/package-format-audit.json
-            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg
-            ${{ steps.work.outputs.root }}/source-inventory.json
-            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json
-            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json
-            ${{ steps.work.outputs.root }}/runtime-result.json
-            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json
-            ${{ steps.work.outputs.root }}/android-support-result.json
-            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
-            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
-            ${{ steps.work.outputs.root }}/headless-build.status
-            ${{ steps.work.outputs.root }}/headless-tests.stdout
-            ${{ steps.work.outputs.root }}/headless-tests.stderr
-            ${{ steps.work.outputs.root }}/headless-tests.status
-            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stdout
-            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stderr
-            ${{ steps.work.outputs.root }}/headless-catalogue-tests.status
-            ${{ steps.work.outputs.root }}/headless-native-tests.stdout
-            ${{ steps.work.outputs.root }}/headless-native-tests.stderr
-            ${{ steps.work.outputs.root }}/headless-native-tests.status
-            ${{ steps.work.outputs.root }}/headless-tests.receipt.json
-            ${{ steps.work.outputs.root }}/shipping-gate-control.receipt.json
-            ${{ steps.work.outputs.root }}/shipping-gate-control.status
-            ${{ steps.work.outputs.root }}/shipping-capacity-data.receipt.json
-            ${{ steps.work.outputs.root }}/shipping-capacity-data.status
-            ${{ steps.work.outputs.root }}/frontend-data.receipt.json
-            ${{ steps.work.outputs.root }}/frontend-data-tests.stdout
-            ${{ steps.work.outputs.root }}/frontend-data-tests.stderr
-            ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl
-            ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt
-            ${{ steps.work.outputs.root }}/bounded-diagnostics.json
-            ${{ steps.work.outputs.root }}/observer-build.status
-            ${{ steps.work.outputs.root }}/vault-helper-build.status
-            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl
-            ${{ steps.work.outputs.root }}/vault-helper-build.stderr
-            ${{ steps.work.outputs.root }}/vault-helper-signing.json
-            ${{ steps.work.outputs.root }}/android-helper-prepare.json
-            ${{ steps.work.outputs.root }}/android-helper-build.jsonl
-            ${{ steps.work.outputs.root }}/android-helper-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-build.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-entry-build.status
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status
-            ${{ steps.work.outputs.root }}/android-helper-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.status
-            ${{ steps.work.outputs.root }}/android-helper-verify-before.json
-            ${{ steps.work.outputs.root }}/android-helper-verify-after.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json
-            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json
-            ${{ steps.work.outputs.root }}/remover-build.jsonl
-            ${{ steps.work.outputs.root }}/remover-build.stderr
-            ${{ steps.work.outputs.root }}/remover-build.status
-            ${{ steps.work.outputs.root }}/android-helper-sign-remover.json
-            ${{ steps.work.outputs.root }}/app-result.json
-            ${{ steps.work.outputs.root }}/input-result.json
-            ${{ steps.work.outputs.root }}/scripts-result.json
-            ${{ steps.work.outputs.root }}/package-audit.json
-            ${{ steps.work.outputs.root }}/installation-observation.json
-            ${{ steps.work.outputs.root }}/installer-output.tail.txt
-            ${{ steps.work.outputs.root }}/installer-output.status
-            ${{ steps.work.outputs.root }}/installer-log-cursor.json
-            ${{ steps.work.outputs.root }}/installer-log-cursor.status
-            ${{ steps.work.outputs.root }}/installer-log-capture.json
-            ${{ steps.work.outputs.root }}/installer-log-capture.status
-            ${{ steps.work.outputs.root }}/installer-log-selected.txt
-            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg
-            ${{ steps.work.outputs.root }}/package-prepare.json
-            ${{ steps.work.outputs.root }}/package-tar.status
-            ${{ steps.work.outputs.root }}/package-xar.status
-            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg
-            ${{ steps.work.outputs.root }}/packaging-selection.json
-            ${{ steps.work.outputs.root }}/producer-root/Install.pkg
-            ${{ steps.work.outputs.root }}/producer-root/producer.json
-            ${{ steps.work.outputs.root }}/producer-root/producer.sig
-            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg
-            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg
-            ${{ steps.work.outputs.root }}/package-request-id.txt
-            ${{ steps.work.outputs.root }}/android-helper-package-install.json
-            ${{ steps.work.outputs.root }}/android-helper-notarize-payload.json
-            ${{ steps.work.outputs.root }}/android-helper-finalize-package.json
-            ${{ steps.work.outputs.root }}/package-finalization.status
-            ${{ steps.work.outputs.root }}/package-install.stdout
-            ${{ steps.work.outputs.root }}/package-install.stderr
-            ${{ steps.work.outputs.root }}/package-install.status
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr
-            ${{ steps.work.outputs.root }}/android-helper-producer-build.status
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr
-            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-create.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr
-            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status
-            ${{ steps.work.outputs.root }}/android-helper-installer.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer.status
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr
-            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
-            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
-            ${{ steps.work.outputs.root }}/aqua-project-fields-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-project-fields-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-project-fields.status
-            ${{ steps.work.outputs.root }}/aqua-android-inputs-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-android-inputs-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-android-inputs.status
-            ${{ steps.work.outputs.root }}/aqua-local-edits3-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-local-edits3-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-local-edits3.status
-            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status
-            ${{ steps.work.outputs.root }}/aqua-vault-helper-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-vault-helper-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-vault-helper.status
-            ${{ steps.work.outputs.root }}/aqua-installation-inspection-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-installation-inspection-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-installation-inspection.status
-            ${{ steps.work.outputs.root }}/aqua-project-recovery-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-project-recovery-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-project-recovery.status
-            ${{ steps.work.outputs.root }}/aqua-ios-account-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-ios-account-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua-ios-account.status
-            ${{ steps.work.outputs.root }}/aqua-results.jsonl
-            ${{ steps.work.outputs.root }}/aqua-failure.jsonl
-            ${{ steps.work.outputs.root }}/aqua.status
+          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -1869,65 +1688,27 @@ jobs:
       # shipping-binary equivalence, notarization or physical-device claim.
       # On uncertainty retain originals; runner disposal is not observed here.
       - name: Preserve bounded Android lifecycle results and original workflow exit evidence
-        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success'
+        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-android-registration-lifecycle
-          path: |
-            ${{ steps.work.outputs.root }}/source-inventory.json
-            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl
-            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt
-            ${{ steps.work.outputs.root }}/headless-build.status
-            ${{ steps.work.outputs.root }}/headless-tests.stdout
-            ${{ steps.work.outputs.root }}/headless-tests.stderr
-            ${{ steps.work.outputs.root }}/headless-tests.status
-            ${{ steps.work.outputs.root }}/headless-native-tests.stdout
-            ${{ steps.work.outputs.root }}/headless-native-tests.stderr
-            ${{ steps.work.outputs.root }}/headless-native-tests.status
-            ${{ steps.work.outputs.root }}/headless-tests.receipt.json
-            ${{ steps.work.outputs.root }}/bounded-diagnostics.json
+          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json
           if-no-files-found: error
           retention-days: 14
       - name: Preserve bounded classification DATA and original workflow exit evidence
-        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success'
+        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-xcode-installed-classification
-          path: |
-            ${{ steps.work.outputs.root }}/source-inventory.json
-            ${{ steps.work.outputs.root }}/xcode-installed-classification-result.json
+          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json
           if-no-files-found: error
           retention-days: 7
       - name: Preserve bounded private-cohort public facts and compiler-only diagnostics
-        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success'
+        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == 'success' && steps.public_evidence.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-wrapping-keychain-private
-          path: |
-            ${{ steps.work.outputs.root }}/source-inventory.json
-            ${{ steps.work.outputs.root }}/wrapping-native.receipt.json
-            ${{ steps.work.outputs.root }}/wrapping-native.report.json
-            ${{ steps.work.outputs.root }}/wrapping-before-add.report.json
-            ${{ steps.work.outputs.root }}/wrapping-before-lookup.report.json
-            ${{ steps.work.outputs.root }}/wrapping-creator.report.json
-            ${{ steps.work.outputs.root }}/wrapping-reader.report.json
-            ${{ steps.work.outputs.root }}/wrapping-pair.receipt.json
-            ${{ steps.work.outputs.root }}/wrapping-codec.receipt.json
-            ${{ steps.work.outputs.root }}/wrapping-codec-build.jsonl
-            ${{ steps.work.outputs.root }}/wrapping-codec-build.stderr
-            ${{ steps.work.outputs.root }}/wrapping-codec-build.status
-            ${{ steps.work.outputs.root }}/wrapping-normal-build.jsonl
-            ${{ steps.work.outputs.root }}/wrapping-normal-build.stderr
-            ${{ steps.work.outputs.root }}/wrapping-normal-build.status
-            ${{ steps.work.outputs.root }}/wrapping-observer-build.jsonl
-            ${{ steps.work.outputs.root }}/wrapping-observer-build.stderr
-            ${{ steps.work.outputs.root }}/wrapping-observer-build.status
-            ${{ steps.work.outputs.root }}/wrapping-qualification-build.jsonl
-            ${{ steps.work.outputs.root }}/wrapping-qualification-build.stderr
-            ${{ steps.work.outputs.root }}/wrapping-qualification-build.status
-            ${{ steps.work.outputs.root }}/wrapping-reader-build.jsonl
-            ${{ steps.work.outputs.root }}/wrapping-reader-build.stderr
-            ${{ steps.work.outputs.root }}/wrapping-reader-build.status
+          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json
           if-no-files-found: error
           retention-days: 7
           compression-level: 0

@@ -384,7 +384,835 @@ RECENT_APP_SIGNATURE_WORKFLOW_INVERSE = (('prebuild',
     ''),)))
 
 
+# Exact public-evidence/export-only successor. Never refresh the historical
+# workflow hashes or treat reconstructed private capture paths as upload policy.
+PUBLIC_VERIFICATION_WORKFLOW_INVERSE = (('.github/workflows/desktop-macos-installed.yml',
+  'name: Desktop Mac normal package and limited early preview (Aqua gate separate)\n',
+  'f6a2aae527c8daceb01621195f127d83fdb5e33a0de59e1d27744d79462bd071',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('            "$@" 2>&1 | /usr/bin/tee /dev/stderr | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n',
+    '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile installed --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'),
+   ('      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: |\n'
+    "            ${{ format('{0}/source-binding.json\n"
+    '            {0}/removal-observer-build.status\n'
+    '            {0}/removal-observers.status\n'
+    '            {0}/android-helper-prepare-removal-observers.json\n'
+    '            {0}/package-removal-fixture.status\n'
+    '            {0}/android-helper-package-removal-fixture.json\n'
+    '            {0}/normal-ui/removal-ordinary-test.runner-admission.json\n'
+    '            {0}/normal-ui/removal-abrupt-test.runner-admission.json\n'
+    '            {0}/normal-ui/android-inputs.status\n'
+    '            {0}/normal-ui/android-input-status.json\n'
+    '            {0}/prepare-ui-inputs-failure.json\n'
+    '            {0}/normal-ui/android-signed-build-test.status\n'
+    '            {0}/normal-ui/android-signed-build-summary.status\n'
+    '            {0}/normal-ui/android-signed-build-result.status\n'
+    '            {0}/normal-ui/android-signed-build.facts.json\n'
+    '            {0}/normal-ui/android-signed-build-result.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.status\n'
+    '            {0}/normal-ui/ios-unsigned-archive.facts.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.runner-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.command-admission.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/ios-unsigned-archive-summary.failure-diagnostics.json\n'
+    '            {0}/effective-rust-toolchain.json\n'
+    '            {0}/source-inventory.json\n'
+    '            {0}/data-contracts/mount.stdout\n'
+    '            {0}/data-contracts/mount.stderr\n'
+    '            {0}/data-contracts/mount.status\n'
+    '            {0}/data-contracts/apfs.stdout\n'
+    '            {0}/data-contracts/apfs.stderr\n'
+    '            {0}/data-contracts/apfs.status\n'
+    '            {0}/data-contracts/build.stdout\n'
+    '            {0}/data-contracts/build.stderr\n'
+    '            {0}/data-contracts/build.status\n'
+    '            {0}/data-contracts/rust.stdout\n'
+    '            {0}/data-contracts/rust.stderr\n'
+    '            {0}/data-contracts/rust.status\n'
+    '            {0}/data-contracts/python.stdout\n'
+    '            {0}/data-contracts/python.stderr\n'
+    '            {0}/data-contracts/python.status\n'
+    '            {0}/data-contracts/result.json\n'
+    '            {0}/normal-build.jsonl\n'
+    '            {0}/normal-build.status\n'
+    '            {0}/normal-build.stderr.tail.txt\n'
+    '            {0}/preview-result.json\n'
+    '            {0}/normal-ui/build-file-limit.status\n'
+    '            {0}/normal-ui/build-file-budget.status\n'
+    '            {0}/normal-ui/build-file-budget.json\n'
+    '            {0}/normal-ui/test-file-limit.status\n'
+    '            {0}/normal-ui/test-file-budget.status\n'
+    '            {0}/normal-ui/test-file-budget.json\n'
+    '            {0}/normal-ui/project-test-file-limit.status\n'
+    '            {0}/normal-ui/project-test-file-budget.status\n'
+    '            {0}/normal-ui/project-test-file-budget.json\n'
+    '            {0}/normal-ui/persistence-test-file-limit.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.status\n'
+    '            {0}/normal-ui/persistence-test-file-budget.json\n'
+    '            {0}/normal-ui/toolchain.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.failure-diagnostics.json\n'
+    '            {0}/normal-ui/build.admission-diagnostics.json\n'
+    '            {0}/normal-ui/build.command-admission.json\n'
+    '            {0}/normal-ui/test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/summary.command-admission.json\n'
+    '            {0}/normal-ui/project-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/project-summary.command-admission.json\n'
+    '            {0}/normal-ui/persistence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.command-admission.json\n'
+    '            {0}/normal-ui/diagnostics-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/diagnostics-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-checks-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-checks-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.status\n'
+    '            {0}/normal-ui/saved-version-recovery-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.status\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.command-admission.json\n'
+    '            {0}/normal-ui/saved-version-recovery-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/saved-version-recovery-result.json\n'
+    '            {0}/normal-ui/workflow-refusal-test-file-limit.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.status\n'
+    '            {0}/normal-ui/workflow-refusal-test.runner-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.status\n'
+    '            {0}/normal-ui/workflow-refusal-summary.command-admission.json\n'
+    '            {0}/normal-ui/workflow-refusal-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/workflow-refusal-result.json\n'
+    '            {0}/normal-ui/release-evidence-test-file-limit.status\n'
+    '            {0}/normal-ui/release-evidence-test.status\n'
+    '            {0}/normal-ui/release-evidence-test.runner-admission.json\n'
+    '            {0}/normal-ui/release-evidence-test.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-summary.status\n'
+    '            {0}/normal-ui/release-evidence-summary.command-admission.json\n'
+    '            {0}/normal-ui/release-evidence-summary.failure-diagnostics.json\n'
+    '            {0}/normal-ui/release-evidence-result.json\n'
+    '            {0}/normal-ui/build.status\n'
+    '            {0}/normal-ui/test.status\n'
+    '            {0}/normal-ui/test.runner-admission.json\n'
+    '            {0}/normal-ui/summary.status\n'
+    '            {0}/normal-ui/xcode-version.txt\n'
+    '            {0}/normal-ui/sdk-path.txt\n'
+    '            {0}/normal-ui/sdk-version.txt\n'
+    '            {0}/normal-ui/sdk-build.txt\n'
+    '            {0}/normal-ui/result.json\n'
+    '            {0}/normal-ui/persistence-test.status\n'
+    '            {0}/normal-ui/persistence-test.runner-admission.json\n'
+    '            {0}/normal-ui/persistence-diagnostics.json\n'
+    '            {0}/normal-ui/persistence-summary.status\n'
+    '            {0}/normal-ui/persistence-result.json\n'
+    '            {0}/normal-ui/project-test.status\n'
+    '            {0}/normal-ui/project-test.runner-admission.json\n'
+    '            {0}/normal-ui/project-summary.status\n'
+    '            {0}/normal-ui/project-result.json\n'
+    '            {0}/normal-ui/diagnostics-test-file-limit.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.status\n'
+    '            {0}/normal-ui/diagnostics-test-file-budget.json\n'
+    '            {0}/normal-ui/diagnostics-test.status\n'
+    '            {0}/normal-ui/diagnostics-test.runner-admission.json\n'
+    '            {0}/normal-ui/diagnostics-safe-facts.json\n'
+    '            {0}/normal-ui/diagnostics-summary.status\n'
+    '            {0}/normal-ui/diagnostics-result.json\n'
+    '            {0}/normal-ui/saved-checks-test-file-limit.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.status\n'
+    '            {0}/normal-ui/saved-checks-test-file-budget.json\n'
+    '            {0}/normal-ui/saved-checks-test.status\n'
+    '            {0}/normal-ui/saved-checks-test.runner-admission.json\n'
+    '            {0}/normal-ui/saved-checks-safe-facts.json\n'
+    '            {0}/normal-ui/saved-checks-summary.status\n'
+    '            {0}/normal-ui/saved-checks-result.json\n'
+    '            {0}/package-format-input.json\n'
+    '            {0}/PackageFormat-original.pkg\n'
+    '            {0}/package-format-prepare.json\n'
+    '            {0}/package-format-tar.status\n'
+    '            {0}/package-format-xar.status\n'
+    '            {0}/package-format-audit.json\n'
+    '            {0}/package-format-final/PackageFormat.pkg\n'
+    '            {0}/native-acl-compile.log\n'
+    '            {0}/native-acl-compile.status\n'
+    '            {0}/native-acl-probe.log\n'
+    '            {0}/native-acl-probe.status\n'
+    '            {0}/native-acl-cleanup.status\n'
+    '            {0}/native-acl-probe-result.json\n'
+    '            {0}/runtime-result.json\n'
+    '            {0}/fresh-python-transport-result.json\n'
+    '            {0}/android-support-result.json\n'
+    '            {0}/vault-helper-build.status\n'
+    '            {0}/vault-helper-build.jsonl\n'
+    '            {0}/vault-helper-build.stderr\n'
+    '            {0}/vault-helper-signing.json\n'
+    '            {0}/android-helper-prepare.json\n'
+    '            {0}/android-helper-build.jsonl\n'
+    '            {0}/android-helper-build.stderr\n'
+    '            {0}/android-helper-build.status\n'
+    '            {0}/android-helper-resident-image-sign.stdout\n'
+    '            {0}/android-helper-resident-image-sign.stderr\n'
+    '            {0}/android-helper-resident-image-sign.status\n'
+    '            {0}/android-helper-resident-image-verify-signed.stdout\n'
+    '            {0}/android-helper-resident-image-verify-signed.stderr\n'
+    '            {0}/android-helper-resident-image-verify-signed.status\n'
+    '            {0}/android-helper-entry-build.stdout\n'
+    '            {0}/android-helper-entry-build.stderr\n'
+    '            {0}/android-helper-entry-build.status\n'
+    '            {0}/android-helper-desktop-facade-build.stdout\n'
+    '            {0}/android-helper-desktop-facade-build.stderr\n'
+    '            {0}/android-helper-desktop-facade-build.status\n'
+    '            {0}/android-helper-resident-facade-build.stdout\n'
+    '            {0}/android-helper-resident-facade-build.stderr\n'
+    '            {0}/android-helper-resident-facade-build.status\n'
+    '            {0}/android-helper-verify-before-resident-image.stdout\n'
+    '            {0}/android-helper-verify-before-resident-image.stderr\n'
+    '            {0}/android-helper-verify-before-resident-image.status\n'
+    '            {0}/android-helper-verify-after-resident-image.stdout\n'
+    '            {0}/android-helper-verify-after-resident-image.stderr\n'
+    '            {0}/android-helper-verify-after-resident-image.status\n'
+    '            {0}/android-helper-sign.stdout\n'
+    '            {0}/android-helper-sign.stderr\n'
+    '            {0}/android-helper-sign.status\n'
+    '            {0}/android-helper-verify-signed.stdout\n'
+    '            {0}/android-helper-verify-signed.stderr\n'
+    '            {0}/android-helper-verify-signed.status\n'
+    '            {0}/android-helper-verify-before.stdout\n'
+    '            {0}/android-helper-verify-before.stderr\n'
+    '            {0}/android-helper-verify-before.status\n'
+    '            {0}/android-helper-verify-after.stdout\n'
+    '            {0}/android-helper-verify-after.stderr\n'
+    '            {0}/android-helper-verify-after.status\n'
+    '            {0}/android-helper-verify-before.json\n'
+    '            {0}/android-helper-verify-after.json\n'
+    '            {0}/android-helper-sign-vault-helper.json\n'
+    '            {0}/android-helper-sign-desktop-image.json\n'
+    '            {0}/android-helper-sign-desktop-payload.json\n'
+    '            {0}/android-helper-sign-root-app.json\n'
+    '            {0}/android-helper-sign-root-installer.json\n'
+    '            {0}/remover-build.jsonl\n'
+    '            {0}/remover-build.stderr\n'
+    '            {0}/remover-build.status\n'
+    '            {0}/android-helper-sign-remover.json\n'
+    '            {0}/app-result.json\n'
+    '            {0}/input-result.json\n'
+    '            {0}/dialog-regressions.log\n'
+    '            {0}/dialog-regressions.status\n'
+    '            {0}/installer-finalizer-regression.log\n'
+    '            {0}/installer-finalizer-regression.status\n'
+    '            {0}/native-abi-regression.log\n'
+    '            {0}/native-abi-regression.status\n'
+    '            {0}/focused-regressions.json\n'
+    '            {0}/scripts-fixture-result.json\n'
+    '            {0}/package-fixture-audit.json\n'
+    '            {0}/installer-fixture-output.txt\n'
+    '            {0}/installer-fixture-output.status\n'
+    '            {0}/installer-fixture-log-cursor.json\n'
+    '            {0}/installer-fixture-log-cursor.status\n'
+    '            {0}/installer-fixture-log-capture.json\n'
+    '            {0}/installer-fixture-log-capture.status\n'
+    '            {0}/installer-fixture-log-selected.txt\n'
+    '            {0}/installer-fixture-observation.json\n'
+    '            {0}/MobileReleaseKit-InstallerFixture-original.pkg\n'
+    '            {0}/package-fixture-prepare.json\n'
+    '            {0}/package-fixture-tar.status\n'
+    '            {0}/package-fixture-xar.status\n'
+    '            {0}/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg\n'
+    '            {0}/scripts-result.json\n'
+    '            {0}/package-audit.json\n'
+    '            {0}/installation-observation.json\n'
+    '            {0}/installer-output.txt\n'
+    '            {0}/installer-output.status\n'
+    '            {0}/installer-log-cursor.json\n'
+    '            {0}/installer-log-cursor.status\n'
+    '            {0}/installer-log-capture.json\n'
+    '            {0}/installer-log-capture.status\n'
+    '            {0}/installer-log-selected.txt\n'
+    '            {0}/MobileReleaseKit-original.pkg\n'
+    '            {0}/package-prepare.json\n'
+    '            {0}/package-tar.status\n'
+    '            {0}/package-xar.status\n'
+    '            {0}/package-final/MobileReleaseKit.pkg\n'
+    '            {0}/packaging-selection.json\n'
+    '            {0}/producer-root/Install.pkg\n'
+    '            {0}/producer-root/producer.json\n'
+    '            {0}/producer-root/producer.sig\n'
+    '            {0}/distribution/MobileReleaseKit.dmg\n'
+    '            {0}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            {0}/package-request-id.txt\n'
+    '            {0}/android-helper-package-install.json\n'
+    '            {0}/remove-scripts-result.json\n'
+    '            {0}/remove-package-prepare.json\n'
+    '            {0}/remove-package-tar.status\n'
+    '            {0}/remove-package-xar.status\n'
+    '            {0}/remove-package-finalization.status\n'
+    '            {0}/package-remove.status\n'
+    '            {0}/remove-image-finalization.status\n'
+    '            {0}/android-helper-finalize-remove-package.json\n'
+    '            {0}/android-helper-package-remove.json\n'
+    '            {0}/android-helper-finalize-remove-image.json\n'
+    '            {0}/remove-preview-result.json\n'
+    '            {0}/android-helper-notarize-payload.json\n'
+    '            {0}/android-helper-finalize-package.json\n'
+    '            {0}/package-finalization.status\n'
+    '            {0}/image-finalization.status\n'
+    '            {0}/image-finalization.stdout\n'
+    '            {0}/image-finalization.stderr\n'
+    '            {0}/android-helper-finalize-image.json\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stdout\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.stderr\n'
+    '            {0}/android-helper-final-image-resolve-notarytool.status\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stdout\n'
+    '            {0}/android-helper-final-image-resolve-stapler.stderr\n'
+    '            {0}/android-helper-final-image-resolve-stapler.status\n'
+    '            {0}/android-helper-final-image-signature-before.stdout\n'
+    '            {0}/android-helper-final-image-signature-before.stderr\n'
+    '            {0}/android-helper-final-image-signature-before.status\n'
+    '            {0}/android-helper-final-image-submit.stdout\n'
+    '            {0}/android-helper-final-image-submit.stderr\n'
+    '            {0}/android-helper-final-image-submit.status\n'
+    '            {0}/android-helper-final-image-log.stdout\n'
+    '            {0}/android-helper-final-image-log.stderr\n'
+    '            {0}/android-helper-final-image-log.status\n'
+    '            {0}/android-helper-final-image-staple.stdout\n'
+    '            {0}/android-helper-final-image-staple.stderr\n'
+    '            {0}/android-helper-final-image-staple.status\n'
+    '            {0}/android-helper-final-image-validate.stdout\n'
+    '            {0}/android-helper-final-image-validate.stderr\n'
+    '            {0}/android-helper-final-image-validate.status\n'
+    '            {0}/android-helper-final-image-signature-after.stdout\n'
+    '            {0}/android-helper-final-image-signature-after.stderr\n'
+    '            {0}/android-helper-final-image-signature-after.status\n'
+    '            {0}/android-helper-final-image-verify.stdout\n'
+    '            {0}/android-helper-final-image-verify.stderr\n'
+    '            {0}/android-helper-final-image-verify.status\n'
+    '            {0}/android-helper-final-image-attach.stdout\n'
+    '            {0}/android-helper-final-image-attach.stderr\n'
+    '            {0}/android-helper-final-image-attach.status\n'
+    '            {0}/android-helper-final-image-detach.stdout\n'
+    '            {0}/android-helper-final-image-detach.stderr\n'
+    '            {0}/android-helper-final-image-detach.status\n'
+    '            {0}/package-install.stdout\n'
+    '            {0}/package-install.stderr\n'
+    '            {0}/package-install.status\n'
+    '            {0}/android-helper-producer-build.stdout\n'
+    '            {0}/android-helper-producer-build.stderr\n'
+    '            {0}/android-helper-producer-build.status\n'
+    '            {0}/android-helper-producer-emitter.stdout\n'
+    '            {0}/android-helper-producer-emitter.stderr\n'
+    '            {0}/android-helper-producer-emitter.status\n'
+    '            {0}/android-helper-distribution-create.stdout\n'
+    '            {0}/android-helper-distribution-create.stderr\n'
+    '            {0}/android-helper-distribution-create.status\n'
+    '            {0}/android-helper-distribution-sign.stdout\n'
+    '            {0}/android-helper-distribution-sign.stderr\n'
+    '            {0}/android-helper-distribution-sign.status\n'
+    '            {0}/android-helper-distribution-verify-signature.stdout\n'
+    '            {0}/android-helper-distribution-verify-signature.stderr\n'
+    '            {0}/android-helper-distribution-verify-signature.status\n'
+    '            {0}/android-helper-distribution-verify-image.stdout\n'
+    '            {0}/android-helper-distribution-verify-image.stderr\n'
+    '            {0}/android-helper-distribution-verify-image.status\n'
+    '            {0}/android-helper-observation-create.stdout\n'
+    '            {0}/android-helper-observation-create.stderr\n'
+    '            {0}/android-helper-observation-create.status\n'
+    '            {0}/android-helper-observation-sign.stdout\n'
+    '            {0}/android-helper-observation-sign.stderr\n'
+    '            {0}/android-helper-observation-sign.status\n'
+    '            {0}/android-helper-observation-verify-signature.stdout\n'
+    '            {0}/android-helper-observation-verify-signature.stderr\n'
+    '            {0}/android-helper-observation-verify-signature.status\n'
+    '            {0}/android-helper-observation-verify-image.stdout\n'
+    '            {0}/android-helper-observation-verify-image.stderr\n'
+    '            {0}/android-helper-observation-verify-image.status\n'
+    '            {0}/android-helper-distribution-attach.stdout\n'
+    '            {0}/android-helper-distribution-attach.stderr\n'
+    '            {0}/android-helper-distribution-attach.status\n'
+    '            {0}/android-helper-installer-log-cursor.stdout\n'
+    '            {0}/android-helper-installer-log-cursor.stderr\n'
+    '            {0}/android-helper-installer-log-cursor.status\n'
+    '            {0}/android-helper-installer.stdout\n'
+    '            {0}/android-helper-installer.stderr\n'
+    '            {0}/android-helper-installer.status\n'
+    '            {0}/android-helper-installer-log-capture.stdout\n'
+    '            {0}/android-helper-installer-log-capture.stderr\n'
+    '            {0}/android-helper-installer-log-capture.status\n'
+    '            {0}/android-helper-distribution-detach.stdout\n'
+    '            {0}/android-helper-distribution-detach.stderr\n'
+    "            {0}/android-helper-distribution-detach.status', steps.work.outputs.root) }}\n"
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n',
+    '      - name: Preserve bounded originals; upload success is never GUI/native acceptance\n'
+    '        id: evidence\n'
+    "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && "
+    "steps.work.outputs.root != '') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && '
+    "format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ "
+    'github.run_attempt }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Do not start a payload build, host scan, notice-only task, service,\n'
+    '      # publication of a release, Store workflow, or synthetic GUI success here.\n'
+    '      # The focused real Aqua/Save procedure and separate command/result gates\n'
+    '      # are in desktop/packaging/macos-installed.md.\n'))),
+ ('.github/workflows/desktop-macos-aqua.yml',
+  'name: Desktop macOS genuine Aqua engineering verification\n',
+  '3ada5fb2ddacbc22ab11e039e9028cc729e7383cb3467f19977ddf17a1d4f258',
+  (('            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/vault-helper-build.stderr" >&2\n'
+    '            /usr/bin/tail -c 32768 "$MRK_MACOS_WORK/vault-helper-build.jsonl" >&2\n',
+    "            printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\\n' "
+    '"$status" >&2 || :\n'),
+   ('          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            /usr/bin/tail -c 16384 "$MRK_MACOS_WORK/remover-build.stderr" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n',
+    '          if [[ "$remover_status" != 0 ]]; then\n'
+    '            # Optional diagnostics cannot replace the original compiler status.\n'
+    '            set +e\n'
+    "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+    'retained.\\n\' "$remover_status" >&2\n'
+    '            exit "$remover_status"\n'
+    '          fi\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n',
+    '      - name: Project closed public verification facts without raw originals\n'
+    '        id: public_evidence\n'
+    "        if: always() && steps.work.outputs.root != ''\n"
+    '        timeout-minutes: 1\n'
+    '        shell: bash\n'
+    '        run: |\n'
+    '          set -euo pipefail\n'
+    '          umask 077\n'
+    '          /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \\\n'
+    '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_public_verification_evidence.py \\\n'
+    '            --profile aqua --work "$MRK_MACOS_WORK" --target "$MRK_MACOS_TARGET" \\\n'
+    '            --source "$GITHUB_SHA" --workflow-source "$GITHUB_WORKFLOW_SHA" \\\n'
+    '            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"\n'
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'),
+   ('      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-binding.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-input.json\n'
+    '            ${{ steps.work.outputs.root }}/PackageFormat-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-format-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-format-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/package-format-final/PackageFormat.pkg\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-intent.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-host-preparation-result.json\n'
+    '            ${{ steps.work.outputs.root }}/runtime-result.json\n'
+    '            ${{ steps.work.outputs.root }}/fresh-python-transport-result.json\n'
+    '            ${{ steps.work.outputs.root }}/android-support-result.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-catalogue-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-gate-control.status\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/shipping-capacity-data.status\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/frontend-data-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '            ${{ steps.work.outputs.root }}/observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/vault-helper-signing.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-image-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-entry-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-desktop-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-resident-facade-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after-resident-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-signed.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-before.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-verify-after.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-vault-helper.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-desktop-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-app.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-root-installer.json\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/remover-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-sign-remover.json\n'
+    '            ${{ steps.work.outputs.root }}/app-result.json\n'
+    '            ${{ steps.work.outputs.root }}/input-result.json\n'
+    '            ${{ steps.work.outputs.root }}/scripts-result.json\n'
+    '            ${{ steps.work.outputs.root }}/package-audit.json\n'
+    '            ${{ steps.work.outputs.root }}/installation-observation.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/installer-output.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.json\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/installer-log-selected.txt\n'
+    '            ${{ steps.work.outputs.root }}/MobileReleaseKit-original.pkg\n'
+    '            ${{ steps.work.outputs.root }}/package-prepare.json\n'
+    '            ${{ steps.work.outputs.root }}/package-tar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-xar.status\n'
+    '            ${{ steps.work.outputs.root }}/package-final/MobileReleaseKit.pkg\n'
+    '            ${{ steps.work.outputs.root }}/packaging-selection.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/Install.pkg\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.json\n'
+    '            ${{ steps.work.outputs.root }}/producer-root/producer.sig\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit.dmg\n'
+    '            ${{ steps.work.outputs.root }}/distribution/MobileReleaseKit-Observation.dmg\n'
+    '            ${{ steps.work.outputs.root }}/package-request-id.txt\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-package-install.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-notarize-payload.json\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-finalize-package.json\n'
+    '            ${{ steps.work.outputs.root }}/package-finalization.status\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stdout\n'
+    '            ${{ steps.work.outputs.root }}/package-install.stderr\n'
+    '            ${{ steps.work.outputs.root }}/package-install.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-producer-emitter.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-create.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-signature.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-observation-verify-image.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-attach.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-cursor.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-installer-log-capture.status\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stdout\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr\n'
+    '            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-fields.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-android-inputs.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-local-edits3.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-doctor-preflight2.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-vault-helper.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-installation-inspection.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-project-recovery.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-ios-account.status\n'
+    '            ${{ steps.work.outputs.root }}/aqua-results.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua-failure.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/aqua.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n',
+    '      - name: Preserve bounded original evidence; upload alone is not an Aqua pass\n'
+    "        if: always() && steps.work.outputs.root != '' && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == "
+    "'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE "
+    "== 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' "
+    "|| env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || "
+    "env.MRK_MACOS_AQUA_SCOPE == 'local-edits3') && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ '
+    'env.MRK_MACOS_AQUA_SCOPE }}-${{ matrix.target }}\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'
+    '          compression-level: 0\n'
+    '      # Instrumented engineering evidence only. No release, Store mutation,\n'
+    '      # shipping-binary equivalence, notarization or physical-device claim.\n'
+    '      # On uncertainty retain originals; runner disposal is not observed here.\n'),
+   ('      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.admitted.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.stderr.tail.txt\n'
+    '            ${{ steps.work.outputs.root }}/headless-build.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stdout\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.stderr\n'
+    '            ${{ steps.work.outputs.root }}/headless-native-tests.status\n'
+    '            ${{ steps.work.outputs.root }}/headless-tests.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/bounded-diagnostics.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n',
+    '      - name: Preserve bounded Android lifecycle results and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'android-registration-lifecycle' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-android-registration-lifecycle\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 14\n'),
+   ('      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/xcode-installed-classification-result.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n',
+    '      - name: Preserve bounded classification DATA and original workflow exit evidence\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'xcode-installed-classification' && steps.source.outcome "
+    "== 'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-xcode-installed-classification\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'),
+   ('      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: |\n'
+    '            ${{ steps.work.outputs.root }}/source-inventory.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-native.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-add.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-before-lookup.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-creator.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader.report.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-pair.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec.receipt.json\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-codec-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-normal-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-observer-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-qualification-build.status\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.jsonl\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.stderr\n'
+    '            ${{ steps.work.outputs.root }}/wrapping-reader-build.status\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n',
+    '      - name: Preserve bounded private-cohort public facts and compiler-only diagnostics\n'
+    "        if: always() && env.MRK_MACOS_AQUA_SCOPE == 'wrapping-keychain-private' && steps.source.outcome == "
+    "'success' && steps.public_evidence.outcome == 'success'\n"
+    '        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1\n'
+    '        with:\n'
+    '          name: desktop-macos-aqua-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt '
+    '}}-wrapping-keychain-private\n'
+    '          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json\n'
+    '          if-no-files-found: error\n'
+    '          retention-days: 7\n'
+    '          compression-level: 0\n'
+    '      # Never upload native stdout/stderr, a private Keychain, task-root contents\n'
+    '      # or a diagnostic filesystem sweep. Uncertainty has no fixture cleanup.\n'))))
+PUBLIC_VERIFICATION_WORKFLOW_MARKERS = ('public_evidence',
+ 'public-verification-evidence.json',
+ 'macos_public_verification_evidence.py',
+ 'Fixed vault helper compiler failed with original status',
+ '          if [[ "$remover_status" != 0 ]]; then\n'
+ '            # Optional diagnostics cannot replace the original compiler status.\n'
+ '            set +e\n'
+ "            printf 'Fixed remover compiler failed with original status %s; bounded diagnostics are "
+ 'retained.\\n\' "$remover_status" >&2\n'
+ '            exit "$remover_status"\n'
+ '          fi\n',
+ '            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"\n')
+
+
+def without_public_verification_workflow(source):
+    if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
+        raise AssertionError("public verification workflow source bound differs")
+    if not any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        return source
+    selected = [rows for path, header, prior_hash, rows in PUBLIC_VERIFICATION_WORKFLOW_INVERSE
+                if source.startswith(header)]
+    if len(selected) != 1:
+        raise AssertionError("public verification workflow exact route differs")
+    for previous, current in reversed(selected[0]):
+        if source.count(current) != 1 or source.count("\n" + current) != 1:
+            raise AssertionError("public verification workflow exact delta differs")
+        source = source.replace("\n" + current, "\n" + previous, 1)
+    if any(marker in source for marker in PUBLIC_VERIFICATION_WORKFLOW_MARKERS):
+        raise AssertionError("public verification workflow partial delta remains")
+    return source
+
+
 def without_recent_app_signature_workflow(source):
+    source = without_public_verification_workflow(source)
     if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
         raise AssertionError("recent app signature workflow source bound differs")
     for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
@@ -4866,6 +5694,36 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
 
 
+    def test_installer_public_source_nomination_matches_exact_der_chain(self):
+        # Public SOURCE pin correspondence only; no native trust or private key.
+        root = Path(__file__).resolve().parents[2]
+        expected = {
+            "schemaVersion": 1, "mode": "developer-id-installer", "teamId": "7CGZ2343AA",
+            "identityCommonName": "Developer ID Installer: Abdelrahman Farag (7CGZ2343AA)",
+            "leafSha1": "2176c921a318fd50510672b92022813c4e617fbd",
+            "leafSha256": "76880822154a840386b3a309382069568262ad79a84611d1281b823312e9fe04",
+            "issuerSha256": "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a",
+            "rootSha256": "b0b1730ecbc7ff4505142c49f1295e6eda6bcaed7e2c68c5be91b5a11001f024",
+        }
+        selection = ANDROID_HELPER.installer_profile((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes())
+        self.assertEqual(selection, expected)
+        certificates = []
+        for name, size in (("leaf", 1489), ("issuer", 1090), ("root", 1215)):
+            certificate = root / "desktop/packaging/macos-installer-certificates" / (name + ".der")
+            self.assertTrue(stat.S_ISREG(certificate.lstat().st_mode))
+            body = certificate.read_bytes()
+            self.assertEqual(len(body), size)
+            self.assertLessEqual(len(body), 16384)
+            self.assertEqual(hashlib.sha256(body).hexdigest(), expected[name + "Sha256"])
+            certificates.append(body)
+        self.assertEqual(len(set(certificates)), 3)
+        self.assertEqual(hashlib.sha1(certificates[0]).hexdigest(), expected["leafSha1"])
+        application = TOOL.packaging_signing_data((root / ANDROID_HELPER.PRODUCER_PROFILE).read_bytes(),
+                                                  (root / ANDROID_HELPER.PROFILE).read_bytes())
+        self.assertEqual(selection["teamId"], application.team)
+        self.assertEqual(application.leaf_sha1, "5effa7d19bbe005b19c1617833cbe22186c2af96")
+        self.assertNotEqual(selection["leafSha1"], application.leaf_sha1)
+
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
         module = ANDROID_HELPER
         with tempfile.TemporaryDirectory() as temporary:
@@ -5328,6 +6186,30 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      signature + b'4. FOREIGN\n', signature.replace(b'INERT DATA\n', b'INERT\x00DATA\n', 1), b'x' * 65537):
             with self.assertRaises(module.Refused):
                 module.package_signature_data(body, selection, certificates, path)
+
+        # The removal caller has a distinct fixed package name, not an
+        # arbitrary .pkg grant. Its actual header, trust and chain still bind.
+        removal_path = Path('/DATA-only/Remove.pkg')
+        removal_signature = signature.replace(b'MobileReleaseKit.pkg', b'Remove.pkg')
+        expected_signature = {"trusted": True, "timestamp": True,
+                              "certificateSha256": [module.digest(value) for value in certificates]}
+        for header in (b'Remove.pkg', str(removal_path).encode()):
+            body = removal_signature.replace(b'Package "Remove.pkg":', b'Package "' + header + b'":', 1)
+            self.assertEqual(module.package_signature_data(body, selection, certificates, removal_path), expected_signature)
+        for name in ('Other.pkg', 'Install.pkg', 'remove.pkg', 'Remove.pkg.bak'):
+            body = removal_signature.replace(b'Remove.pkg', name.encode())
+            with self.subTest(unrelatedPackage=name), self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path.with_name(name))
+        for header in (b'MobileReleaseKit.pkg', b'Other.pkg', b'/OTHER/Remove.pkg'):
+            body = removal_signature.replace(b'Package "Remove.pkg":', b'Package "' + header + b'":', 1)
+            with self.subTest(mismatchedHeader=header), self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path)
+        issuer_fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
+        for body in (removal_signature.replace(b'trusted by macOS', b'untrusted by macOS'),
+                     removal_signature.replace(b'Signed with a trusted timestamp on:', b'Signed without a trusted timestamp on:'),
+                     removal_signature.replace(issuer_fingerprint, b'00 ' * 31 + b'00')):
+            with self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, removal_path)
 
         # Only these five fixed archive purposes are accepted. The default ZIP
         # parser behavior remains unchanged; null arch is NONAUTHORITY metadata
@@ -5963,7 +6845,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                                      (source_signing.team, source_signing.leaf_sha1))
         self.assertEqual(source_notary["mode"], "app-store-connect-team-key")
         self.assertEqual(source_notary["teamId"], source_signing.team)
-        self.assertEqual(json.loads((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes()), {"schemaVersion": 1, "mode": "unconfigured"})
+        source_installer = ANDROID_HELPER.installer_profile((root / ANDROID_HELPER.INSTALLER_PROFILE).read_bytes())
+        self.assertEqual(source_installer["mode"], "developer-id-installer")
+        self.assertEqual(source_installer["teamId"], source_signing.team)
+        self.assertNotEqual(source_installer["leafSha1"], source_signing.leaf_sha1)
         methods = {node.name: ast.get_source_segment((root / "desktop/tools/macos_android_helper_package.py").read_text(), node)
                    for node in operation.body if isinstance(node, ast.FunctionDef)}
         images = methods["package_image"]
@@ -6029,6 +6914,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         diagnostics = ("Encrypt only the settled failed ARM compiler captures",
                        "Retain ciphertext and finite transport receipt only")
         retained += (prebuild_name,)
+        excluded += ("Project closed public verification facts without raw originals",)
         self.assertEqual(set(app_named),set(retained+excluded+added+diagnostics))
         # Assert exact raw successor bytes before any historical projection.
         for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
@@ -9599,6 +10485,61 @@ def current_data_fixture():
 
 @unittest.skipUnless(sys.platform in ("darwin", "linux"), "POSIX DATA stager")
 class MacCurrentRuntimeData(unittest.TestCase):
+    def test_public_verification_exports_are_current_closed_data_before_projection(self):
+        # Fixed bounded SOURCE only. No historical module/product import or child.
+        root = Path(__file__).absolute().parents[2]
+        for path, header, prior_hash, replacements in PUBLIC_VERIFICATION_WORKFLOW_INVERSE:
+            with self.subTest(workflow=path):
+                with (root / path).open("rb") as stream:
+                    body = stream.read(512 * 1024 + 1)
+                self.assertLessEqual(len(body), 512 * 1024)
+                source = body.decode("utf-8", "strict")
+                self.assertTrue(source.startswith(header))
+                self.assertEqual(source.count("        id: public_evidence\n"), 1)
+                self.assertEqual(source.count("desktop/tools/macos_public_verification_evidence.py"), 1)
+                upload_count = 0
+                for previous, current in replacements:
+                    self.assertEqual(source.count(current), 1)
+                    if current.startswith("      - name: Preserve"):
+                        upload_count += 1
+                        self.assertEqual([line for line in current.splitlines() if line.startswith("          path:")],
+                                         ["          path: ${{ steps.work.outputs.root }}/public-verification-evidence.json"])
+                        self.assertIn("&& steps.public_evidence.outcome == 'success'\n", current)
+                        self.assertNotIn("          path: |", current)
+                    if current.startswith("      - name: Project closed public verification facts"):
+                        projector = current.split("      - name:", 2)[1]
+                        self.assertIn("        timeout-minutes: 1\n", projector)
+                        self.assertIn("/usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC", projector)
+                        self.assertNotIn("secrets.", projector)
+                        self.assertNotIn("continue-on-error", projector)
+                    for altered in (current + current, current[:-1], current.replace(" ", "  ", 1)):
+                        with self.assertRaises(AssertionError):
+                            without_public_verification_workflow(source.replace(current, altered, 1))
+                    # No partial old/new export state is accepted.
+                    with self.assertRaises(AssertionError):
+                        without_public_verification_workflow(source.replace(current, previous, 1))
+                self.assertEqual(upload_count, 1 if "installed.yml" in path else 4)
+                prior = without_public_verification_workflow(source)
+                self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), prior_hash)
+                self.assertEqual(without_public_verification_workflow(prior), prior)
+                self.assertEqual(without_public_verification_workflow(source + "# unrelated mutation\n"),
+                                 prior + "# unrelated mutation\n")
+                if "installed.yml" in path:
+                    # Existing historical whole-workflow hash still rejects unrelated bytes.
+                    with self.assertRaises(AssertionError):
+                        without_app_signature_workflow(source + "# unrelated mutation\n")
+                    delivery_name = "      - name: Upload only the normal user preview package and guide\n"
+                    delivery = source.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    old_delivery = prior.split(delivery_name, 1)[1].split("      - name:", 1)[0]
+                    self.assertEqual(delivery, old_delivery)
+                    self.assertEqual([line.strip() for line in delivery.splitlines()
+                                      if line.startswith("            ${{ steps.work.outputs.root }}/")],
+                                     ["${{ steps.work.outputs.root }}/" + leaf for leaf in
+                                      ("preview/MobileReleaseKit.dmg", "preview/README.md", "preview/PREVIEW.json",
+                                       "remove-preview/MobileReleaseKit-Remove.dmg", "remove-preview/REMOVE.md", "remove-preview/REMOVAL.json")])
+        self.assertEqual(without_public_verification_workflow("unchanged historical DATA\n"),
+                         "unchanged historical DATA\n")
+
     def test_exact_recent_app_workflow_projection_preserves_historical_hashes(self):
         # Bounded SOURCE DATA only; never import a stager or execute a workflow.
         root = Path(__file__).absolute().parents[2]

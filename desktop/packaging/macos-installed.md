@@ -714,11 +714,11 @@ its CDHash partition. It uses the same per-purpose keychain for the existing
 from an unsigned or compiler-future executable permission grant. Public package
 original-call roles and the existing15-call emission/Installer sequence remain.
 
-This wiring does **not** configure a Developer ID Installer identity: the current
-bounded package producer uses the Application identity and existing raw producer
-signature; adopting Installer/package signing would require a separate explicit
-policy. No Apple ID/notary API key, `notarytool`, staple, Gatekeeper or distributable
-notarization claim is added. Genuine configured key discovery/use, signature
+This Application wiring remains separate from the Developer ID Installer public
+SOURCE nomination and S3 package-signing policy below. The bounded package producer
+still uses the Application identity and existing raw producer signature. This
+wiring alone adds no Apple ID/notary API key, `notarytool`, staple, Gatekeeper or
+distributable notarization claim. Genuine configured key discovery/use, signature
 verification, native emitter/Installer, final signed-runtime nomination/M and
 installed/Aqua journeys remain required. Credential-free hardened-runtime
 engineering results remain reusable for their exact executed SOURCE; they are
@@ -1077,13 +1077,12 @@ itself and does not waive those remaining phases.
 The `finalize-package` phase uses the existing fixed `Operation` / `run_owned`
 originals after `pkgbuild` and the complete root-owned Scripts XAR reconstruction.
 That reconstruction now produces `package-unsigned/MobileReleaseKit.pkg`, not P.
-The separate public `macos-installer-signing.json` profile is intentionally
-`unconfigured`; a real later SOURCE nomination must supply the team, exact
-Developer ID Installer common name, leaf SHA1 and distinct leaf/issuer/root
-SHA256 values, plus the three public DER originals under
-`macos-installer-certificates/`. These must match the Application team, but the
-Installer leaf must be different. No sample certificates, key or future pins
-are provided. The named `macos-developer-id` environment supplies the
+The separate public `macos-installer-signing.json` profile now nominates the
+observed Developer ID Installer common name, Team `7CGZ2343AA`, leaf SHA1 and
+distinct leaf/issuer/root SHA256 values, with the three exact public DER originals
+under `macos-installer-certificates/`. The Installer shares the Application team
+but has a different leaf; this public SOURCE selection supplies no private key.
+The named `macos-developer-id` environment supplies the
 separate `MRK_MACOS_INSTALLER_P12_BASE64` / `MRK_MACOS_INSTALLER_P12_PASSWORD`
 pair and the existing team P8 API-key secret only to this fixed helper call.
 The Application P12 is not supplied to this phase or substituted for it.
@@ -1098,10 +1097,17 @@ The fixed helper extracts certificates only, performs an exact DER roundtrip,
 and completes private-file cleanup before retaining only `leaf.der` for one day.
 It never imports a keychain identity, extracts a private key, signs, or submits
 to Apple. Bootstrap success is not Team/Installer-role/chain/private-key proof.
-The profile remains unconfigured until the genuine run-bound public leaf and
-its Team, Installer role, validity, and exact Apple chain are independently
-validated. Public profile nomination still cannot replace later actual
-`productsign` and `pkgutil --check-signature` signing, system-trust, and timestamp
+The nominated leaf came from successful run `38052182326`, attempt `1`, artifact
+`11669776299`, at source `afd7f20e1d896a08866592ca87fb39c86c7c8cee`.
+Public inspection observed the exact Installer CN/Team, critical Installer marker
+`1.2.840.113635.100.6.1.14` (DER NULL), and EKU `1.2.840.113635.100.4.13`.
+The retained public recipe checked every critical extension before an explicit
+OpenSSL `-ignore_critical` chain/current-time/basic-constraints check against the
+independently pinned Developer ID G2 issuer and original Apple Root CA. That
+cryptographic check does not enforce the Apple marker/proprietary EKU semantics
+or establish native Apple policy, system trust, revocation, or private-key use.
+Public nomination cannot replace the existing native `pkgSign` check, actual
+`productsign` and `pkgutil --check-signature` signing/system-trust/timestamp
 qualification, notarization, or final-package verification.
 
 An exclusive task-private keychain admits only the fixed `productsign` and
