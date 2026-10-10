@@ -1918,7 +1918,7 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
     need(all(mount[key] is True for key in ("attachEntered", "originalKnown", "detached"))
          and all(mount[key] is False for key in ("retained", "installerEntered", "systemServiceExitClaimed")), "final-image-mount-finality")
     roles = ("resolve-notarytool", "resolve-stapler", "signature-before", "submit", "log", "staple", "validate", "signature-after",
-             "verify", "attach", "detach")
+             "verify", "attach", "detach", "policy-status", "policy-assess")
     calls = value["originalCalls"]
     need(type(calls) is list and len(calls) == len(roles), "final-image-original-count")
     for row, role in zip(calls, roles):
@@ -1932,7 +1932,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
         "signatureBytes", "signatureSha256", "producerProfileSha256", "serviceProfileSha256", "originalImageBytes", "originalImageSha256",
         "submittedSha256", "imageBytes", "imageSha256", "imageMode", "notaryProfileSha256", "submissionId", "status", "sha256Compared",
         "errorCount", "warningCount", "ticketRowCount", "logSha256", "strictSignatureBeforeAndAfter", "actualStaplerValidation",
-        "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached", "assurance"), "final-image-fields")
+        "actualImageVerification", "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached",
+        "assessmentSubsystemEnabledBefore", "actualDiskImagePolicyAssessment", "assurance"), "final-image-fields")
     need(type(final["schemaVersion"]) is int and final["schemaVersion"] == 1 and final["kind"] == ("mrk-final-removal-image" if remove else "mrk-final-user-image")
          and (final["target"], final["release"], final["packageVersion"]) == (selection.target, selection.release, selection.package_version)
          and (request is None if remove else maintenance_hex(request, 32) and final["requestId"] == request), "final-image-current-binding")
@@ -1965,7 +1966,8 @@ def final_image_receipt_data(body, *, selection, binding, request, package, desc
          and maintenance_hex(final["logSha256"], 64)
          and value["notarySubmission"] == {"id": final["submissionId"], "status": "Accepted"}, "final-image-notary-observation")
     need(all(final[key] is True for key in ("strictSignatureBeforeAndAfter", "actualStaplerValidation", "actualImageVerification",
-                                          "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached"))
+                                          "finalMountReadOnly", "finalMountOriginalsMatch", "originalMountDetached",
+                                          "assessmentSubsystemEnabledBefore", "actualDiskImagePolicyAssessment"))
          and final["assurance"] == "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority", "final-image-scoped-observation")
     return final
 

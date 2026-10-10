@@ -258,6 +258,15 @@ ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnosti
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
 def without_artifact_wait_diagnostic_source(source):
+    # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
+    saved_marker = 'raw["sourceInputsSha256"] as? String'
+    saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
+    saved_current = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+    if saved_marker in source:
+        if (source.count(saved_marker) != 1
+                or source.count(saved_prior) + source.count(saved_current) != 1):
+            raise AssertionError('saved-version current SOURCE handoff differs')
+        source = source.replace(saved_current, saved_prior, 1)
     if 'MRK_MACOS_ENGINEERING_ARTIFACT_QUERY' not in source:
         return source  # Historical intermediate source remains valid for old inverses.
     if (source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN) != 1 or source.count(ARTIFACT_WAIT_DIAGNOSTIC_END) != 1

@@ -269,6 +269,15 @@ ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnosti
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
 def without_artifact_wait_diagnostic_source(source):
+    # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
+    saved_marker = 'raw["sourceInputsSha256"] as? String'
+    saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
+    saved_current = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+    if saved_marker in source:
+        if (source.count(saved_marker) != 1
+                or source.count(saved_prior) + source.count(saved_current) != 1):
+            raise AssertionError('saved-version current SOURCE handoff differs')
+        source = source.replace(saved_current, saved_prior, 1)
     if 'MRK_MACOS_ENGINEERING_ARTIFACT_QUERY' not in source:
         return source  # Historical intermediate source remains valid for old inverses.
     if (source.count(ARTIFACT_WAIT_DIAGNOSTIC_BEGIN) != 1 or source.count(ARTIFACT_WAIT_DIAGNOSTIC_END) != 1
@@ -1268,6 +1277,43 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         ):
             with self.subTest(selection=changed[15:18]), self.assertRaises(MODULE.Refused):
                 MODULE.normal_cli_arguments(changed)
+
+        # Current recovery SOURCE is the genuine configured runtime nomination,
+        # not an arbitrary replacement digest or a claim of native qualification.
+        expected_source = '58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d'
+        nomination = json.loads((ROOT / "desktop/macos-installed-inputs/python-signed-runtime-binding.json").read_bytes())
+        self.assertEqual(set(nomination["targets"]), {MODULE.ARM_TARGET, MODULE.INTEL_TARGET})
+        for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            self.assertEqual(nomination["targets"][target]["state"], "configured")
+            self.assertEqual(nomination["targets"][target]["sourceInputsSha256"], expected_source)
+        self.assertEqual(MODULE.SAVED_VERSION_SOURCE, expected_source)
+        profile = "desktop/packaging/macos-history-provider.profile"
+        self.assertEqual(hashlib.sha256((ROOT / profile).read_bytes()).hexdigest(),
+                         "76ce1597468fd1d4d420b1453194ea6ab89c1556de6bba5664c79637754c2e4b")
+        runner_source = (ROOT / "desktop/tools/macos_normal_ui_runner.py").read_text(encoding="utf-8")
+        self.assertEqual(runner_source.count("    def _sources(self):\n"), 1)
+        fixed_source = runner_source.split("    def _sources(self):\n", 1)[1].split("        selected =", 1)[0]
+        self.assertEqual(fixed_source,
+                         '        fixed = {"desktop/" + name for name in SAVED_VERSION_BOOTSTRAPS}\n'
+                         '        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py",\n'
+                         '                      "desktop/packaging/macos-history-provider.profile"))\n')
+        self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
+        self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
+        swift = SWIFT.read_text(encoding="utf-8")
+        current_line = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+        prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
+        self.assertEqual(swift.count(current_line), 1)
+        self.assertNotIn(prior_line, swift)
+        normalized = without_artifact_wait_diagnostic_source(swift)
+        self.assertEqual(normalized.count(prior_line), 1)
+        self.assertEqual(without_artifact_wait_diagnostic_source(swift.replace(current_line, prior_line, 1)), normalized)
+        self.assertEqual(without_artifact_wait_diagnostic_source(normalized), normalized)
+        self.assertEqual(without_artifact_wait_diagnostic_source("historical pre-recovery source\n"),
+                         "historical pre-recovery source\n")
+        for malformed in (current_line.replace(expected_source, "0" * 64), current_line.replace(" == ", " != "),
+                          current_line.rstrip("\n"), current_line + current_line, current_line + prior_line):
+            with self.subTest(saved_source_line=malformed[-80:]), self.assertRaises(AssertionError):
+                without_artifact_wait_diagnostic_source(swift.replace(current_line, malformed, 1))
 
         # The new singleton adds no budget to or extra method in any old call.
         selected = "saved-version-recovery-test.xcresult"
@@ -4254,15 +4300,19 @@ class NormalPhaseDataTests(unittest.TestCase):
         # producer, interpreter, signer, Xcode or application is executed here.
         # Actual core interruption remains the unchanged joined-child test/native prerequisite.
         fixture_data = (ROOT / MODULE.SAVED_VERSION_DATA).read_bytes()
+        source_faults = {"profile-missing", "profile-bytes", "runtime-old-s", "runtime-count", "runtime-target", "runtime-qualification"}
         for fault in (None, "producer-zero", "original-unknown", "seed-facts", "source-bytes", "consuming-close",
-                      "interrupt-named", "restored-facts"):
+                      "interrupt-named", "restored-facts", "profile-missing", "profile-bytes", "profile-post",
+                      "runtime-old-s", "runtime-count", "runtime-target", "runtime-qualification"):
             with self.subTest(saved_version_custody=fault), tempfile.TemporaryDirectory(prefix="mrk-saved-version-handoff-data-") as temporary:
                 base = Path(temporary)
                 source_root, work, parent = (base / value for value in ("source", "work", "temporary"))
                 for directory in (source_root, work, parent): directory.mkdir(mode=0o700)
                 normal = work / "normal-ui"; normal.mkdir(mode=0o700)
                 fixed = {"desktop/" + name for name in MODULE.SAVED_VERSION_BOOTSTRAPS}
-                fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py", "src/mobile_release/__init__.py"))
+                profile = "desktop/packaging/macos-history-provider.profile"
+                fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py",
+                              profile, "src/mobile_release/__init__.py"))
                 bodies = {name: b"inert admitted SOURCE, never imported or executed\n" for name in fixed | {MODULE.SAVED_VERSION_PRODUCER}}
                 bodies[MODULE.SAVED_VERSION_DATA] = fixture_data
                 rows, git_rows = [], []
@@ -4273,8 +4323,22 @@ class NormalPhaseDataTests(unittest.TestCase):
                     blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
                     git_rows.append(b"100644 blob " + blob.encode() + b"\t" + name.encode() + b"\0")
                 source_s = hashlib.sha256(MODULE.encoded(rows)).hexdigest()
+                # Keep the admitted expected S fixed even for a coherent changed
+                # profile+Git blob. A new Git row is not runtime-source authority.
+                if fault == "profile-missing":
+                    git_rows = [row for row in git_rows if not row.endswith(b"\t" + profile.encode() + b"\0")]
+                elif fault == "profile-bytes":
+                    changed = b"different inert profile, never imported or executed\n"
+                    (source_root / profile).write_bytes(changed)
+                    blob = hashlib.sha1(b"blob " + str(len(changed)).encode() + b"\0" + changed).hexdigest()
+                    git_rows = [(b"100644 blob " + blob.encode() + b"\t" + profile.encode() + b"\0")
+                                if row.endswith(b"\t" + profile.encode() + b"\0") else row for row in git_rows]
                 runtime = dict(sourceInputsSha256=source_s, sourceInputCount=len(rows), target=MODULE.ARM_TARGET,
                                qualification="current-source-staged-no-native-execution", successorManifestSha256="b" * 64)
+                if fault == "runtime-old-s": runtime["sourceInputsSha256"] = 'fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0'
+                if fault == "runtime-count": runtime["sourceInputCount"] -= 1
+                if fault == "runtime-target": runtime["target"] = MODULE.INTEL_TARGET
+                if fault == "runtime-qualification": runtime["qualification"] = "native-qualified"
                 (work / "runtime-result.json").write_bytes(json.dumps(runtime).encode())
                 owned, envs = [], []
                 fixture = None
@@ -4331,18 +4395,31 @@ class NormalPhaseDataTests(unittest.TestCase):
                         patch.object(MODULE, "SAVED_VERSION_SOURCE", source_s):
                     fixture = MODULE.SavedVersionFixture(phase, "a" * 40, normal)
                     try:
+                        if fault in source_faults:
+                            reason = "saved-version-current-s" if fault.startswith("profile-") else "saved-version-runtime-source-binding"
+                            with self.assertRaisesRegex(MODULE.Refused, "^" + reason + "$"):
+                                fixture.interrupt(MODULE.ARM_TARGET)
+                            self.assertIsNone(fixture.root)
+                            self.assertFalse(fixture.handoff.exists())
+                            self.assertEqual(len(owned), 1)
+                            self.assertEqual([row["role"] for row in phase.records], ["saved-version-source-roster"])
+                            self.assertIs(phase.environment, original_environment)
+                            self.assertLessEqual(len(fixture.fds), 28)
+                            continue
                         if fault in ("producer-zero", "original-unknown", "interrupt-named"):
                             with self.assertRaises(MODULE.Refused): fixture.interrupt(MODULE.ARM_TARGET)
                             self.assertFalse(fixture.handoff.exists())
                             self.assertEqual(len(owned), 2)
-                            self.assertLessEqual(len(fixture.fds), 54)
+                            self.assertLessEqual(len(fixture.fds), 59)
                             continue
                         fixture.interrupt(MODULE.ARM_TARGET)
-                        # 15SOURCE+6SOURCEparents+2runtime+1tmp+11fixture dirs+
-                        # 13public+6journal+2handoff =56 held; only the restored
-                        # version adds one later. The existing64-FD owner stays.
-                        self.assertEqual(len(fixture.fds), 56)
-                        self.assertEqual(len(set(fixture.fds)), 56)
+                        # Synthetic census:19SOURCE (13 bootstraps+profile)+7parents+
+                        # 2runtime+1tmp+11fixture dirs+13public+6journal+2handoff=61;
+                        # one restored version adds a retained original later.
+                        # Local controls also budget stdio/transients separately.
+                        self.assertEqual(len(fixture.fds), 61)
+                        self.assertEqual(len(set(fixture.fds)), 61)
+                        self.assertIn(profile, fixture.sources)
                         for path in fixture.originals.keys() - {MODULE.SAVED_VERSION_PATH}:
                             self.assertIs(fixture.seed[path], fixture.originals[path])
                         self.assertEqual([row["role"] for row in phase.records], ["saved-version-source-roster", "saved-version-core-interrupt"])
@@ -4359,7 +4436,9 @@ class NormalPhaseDataTests(unittest.TestCase):
                             os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000))
                         elif fault == "source-bytes":
                             (source_root / MODULE.SAVED_VERSION_PRODUCER).write_bytes(b"changed original source\n")
-                        if fault in ("seed-facts", "source-bytes"):
+                        elif fault == "profile-post":
+                            (source_root / profile).write_bytes(b"changed original history profile\n")
+                        if fault in ("seed-facts", "source-bytes", "profile-post"):
                             with self.assertRaises(MODULE.Refused): fixture.ui_call("one-admitted-ui-test", ["/inert/xcodebuild"], 420)
                             self.assertEqual(len(owned), 2)
                             self.assertIs(phase.environment, original_environment)
@@ -4369,11 +4448,11 @@ class NormalPhaseDataTests(unittest.TestCase):
                         if fault == "restored-facts":
                             with self.assertRaises(MODULE.Refused): fixture.restored()
                             self.assertNotIn("originalFixtureRestored", fixture.receipt)
-                            self.assertLessEqual(len(fixture.fds), 57)
+                            self.assertLessEqual(len(fixture.fds), 62)
                             continue
                         result = fixture.restored()
-                        self.assertEqual(len(fixture.fds), 57)
-                        self.assertEqual(len(set(fixture.fds)), 57)
+                        self.assertEqual(len(fixture.fds), 62)
+                        self.assertEqual(len(set(fixture.fds)), 62)
                         self.assertTrue(all(result[k] for k in ("originalFixtureRestored", "unrelatedOriginalsUnchanged", "readyJournalRemoved",
                                                                "sourcePrePostMatched", "uiOriginalMarkersObserved")))
                         self.assertFalse(result["interruptedGuiSaveObserved"])
@@ -4389,10 +4468,12 @@ class NormalPhaseDataTests(unittest.TestCase):
                             self.assertEqual(set(closed), owned_fds)
                             self.assertEqual(len(closed), len(owned_fds))
                     finally:
-                        held_count = len(fixture.fds)
+                        held = tuple(fixture.fds)
                         fixture.close()
-                        self.assertLessEqual(held_count, 57)
+                        self.assertLessEqual(len(held), 62)
                         self.assertEqual(fixture.fds, [])
+                        for fd in held:
+                            with self.assertRaises(OSError): os.fstat(fd)
 
     def test_closed_normal_failure_diagnostics_preserve_original_nonzero_and_privacy(self):
         selected = "testLaunchCancelAndQuit"

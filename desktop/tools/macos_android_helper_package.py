@@ -434,7 +434,8 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
 FINAL_IMAGE_PHASES = ("finalize-image", "finalize-remove-image")
 FINAL_IMAGE_ROLES = ("final-image-resolve-notarytool", "final-image-resolve-stapler", "final-image-signature-before",
                      "final-image-submit", "final-image-log", "final-image-staple", "final-image-validate",
-                     "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach")
+                     "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach",
+                     "final-image-policy-status", "final-image-policy-assess")
 
 FINAL_PACKAGE_PHASES = ("finalize-package", "finalize-remove-package")
 INSTALLER_PROFILE = "desktop/packaging/macos-installer-signing.json"
@@ -3638,7 +3639,8 @@ class Operation:
         need((self.notary_key is not None) == (role in ("final-image-submit", "final-image-log")), "final-image-private-role")
         bounds = {"final-image-resolve-notarytool": (30, 4096), "final-image-resolve-stapler": (30, 4096),
                   "final-image-submit": (1200, 65536), "final-image-log": (30, 1024 * 1024),
-                  "final-image-verify": (120, 65536), "final-image-attach": (60, 65536)}
+                  "final-image-verify": (120, 65536), "final-image-attach": (60, 65536),
+                  "final-image-policy-status": (30, 4096)}
         need((maximum, limit) == bounds.get(role, (30, 65536)), "final-image-original-bound")
         self.notary_post()
         now, endpoint = self.notary_clock()
@@ -3767,6 +3769,12 @@ class Operation:
         self.final_image_mount_verified = True
         self.detach_package_mount()
         self.notary_post()
+        # Policy observation on this SAME finalized copy, not a quarantined
+        # download or first-launch claim. Never change global policy or xattrs.
+        result = self.final_image_call("final-image-policy-status", ["/usr/sbin/spctl", "--status"], limit=4096)
+        need(result.stdout == b"assessments enabled\n" and not result.stderr, "final-image-policy-status-format")
+        self.final_image_call("final-image-policy-assess", ["/usr/sbin/spctl", "--assess", "--type", "open",
+            "--context", "context:primary-signature", "--ignore-cache", "--no-cache", str(path)])
         self.final_image_publish()
         self.notary_post()
         self.sha256 = self.final_image_sha
@@ -3775,6 +3783,7 @@ class Operation:
             "imageMode": 0o444, "notaryProfileSha256": digest(profile_body), "submissionId": submission["id"], "status": submission["status"], **log,
             "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
             "finalMountReadOnly": True, "finalMountOriginalsMatch": True, "originalMountDetached": self.mount_detached,
+            "assessmentSubsystemEnabledBefore": True, "actualDiskImagePolicyAssessment": True,
             "assurance": "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority"}
         self.final_image_complete = True
         self.notary_clock()

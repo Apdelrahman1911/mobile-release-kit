@@ -2498,6 +2498,27 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         if failure == "ticket-mode": path.chmod(0o644)
             elif role == "final-image-verify":
                 self.assertEqual(argv, ["/usr/bin/hdiutil", "verify", str(path)])
+            elif role in ("final-image-policy-status", "final-image-policy-assess"):
+                self.assertIsNone(operation.notary_key)
+                self.assertTrue(operation.mount_detached and operation.final_image_mount_verified)
+                self.assertFalse((work / "distribution-final").exists())
+                self.assertEqual(path.read_bytes(), final_image)
+                self.assertEqual(operation.receipt["notaryAuthentication"], {"created": True, "closed": True, "retired": True})
+                if role == "final-image-policy-status":
+                    self.assertEqual(argv, ["/usr/sbin/spctl", "--status"])
+                    self.assertEqual(options["output_limit"], 4096)
+                    output = b"assessments enabled\n"
+                    if failure == "policy-disabled": return CompletedProcess(argv, 1, b"assessments disabled\n", b"")
+                    if failure == "policy-disabled-zero": output = b"assessments disabled\n"
+                    if failure == "policy-status-extra": output += b"INERT extra output\n"
+                    if failure == "policy-status-stderr": return CompletedProcess(argv, 0, output, b"INERT status warning")
+                else:
+                    self.assertEqual(argv, ["/usr/sbin/spctl", "--assess", "--type", "open", "--context",
+                        "context:primary-signature", "--ignore-cache", "--no-cache", str(path)])
+                    self.assertEqual(options["output_limit"], 65536)
+                    if failure == "policy-denied": return CompletedProcess(argv, 3, b"", b"INERT policy denial")
+                    if failure == "policy-changed": path.write_bytes(b"X" + final_image[1:])
+                if failure == role + "-overflow": output = b"x" * (options["output_limit"] + 1)
             elif role == "final-image-attach":
                 self.assertEqual(argv, ["/usr/bin/hdiutil", "attach", str(path), "-readonly", "-nobrowse", "-noautoopen",
                     "-mountpoint", str(work / "package-mount"), "-plist"])
@@ -3904,9 +3925,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotEqual(path.read_bytes()[:1], state.original_image[:1])
                 self.assertEqual(returned, TOOL.digest(state.final_image))
                 self.assertEqual(tuple(row[0] for row in state.observations), module.FINAL_IMAGE_ROLES)
-                self.assertEqual([row[2]["timeout"] for row in state.observations], [30, 30, 30, 1200, 30, 30, 30, 30, 120, 60, 30])
+                self.assertEqual(module.FINAL_IMAGE_ROLES[:11], ("final-image-resolve-notarytool", "final-image-resolve-stapler",
+                    "final-image-signature-before", "final-image-submit", "final-image-log", "final-image-staple",
+                    "final-image-validate", "final-image-signature-after", "final-image-verify", "final-image-attach", "final-image-detach"))
+                self.assertEqual(module.FINAL_IMAGE_ROLES[11:], ("final-image-policy-status", "final-image-policy-assess"))
+                self.assertEqual([row[2]["timeout"] for row in state.observations], [30, 30, 30, 1200, 30, 30, 30, 30, 120, 60, 30, 30, 30])
                 self.assertEqual([row[2]["output_limit"] for row in state.observations], [4096, 4096, 65536, 65536,
-                    1048576, 65536, 65536, 65536, 65536, 65536, 65536])
+                    1048576, 65536, 65536, 65536, 65536, 65536, 65536, 4096, 65536])
                 self.assertFalse(active)
                 self.assertLessEqual(max(peaks), 60)  # Same existing64 descriptor limit including stdio.
                 self.assertTrue(all(row["closed"] and consumed.get(id(row), 0) == 1 for row in operation.entries))
@@ -3934,6 +3959,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     profiles=(state.credentials.producer, state.credentials.service,
                               (state.checkout / module.NOTARY_PROFILE).read_bytes()))
                 self.assertEqual(facts, receipt["finalImage"])
+                self.assertLessEqual(len(receipt_body), 16384)
+                self.assertIs(facts["assessmentSubsystemEnabledBefore"], True)
+                self.assertIs(facts["actualDiskImagePolicyAssessment"], True)
+                self.assertEqual(facts["assurance"], "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority")
                 # Exercise the Remove receipt-purpose branch against the same
                 # completed DATA shape. No original Install readback is reused
                 # as evidence that a remover ran: Remove explicitly has none.
@@ -3949,7 +3978,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     release_body=release_body, profiles=(state.credentials.producer, state.credentials.service,
                         (state.checkout / module.NOTARY_PROFILE).read_bytes()), remove=True)
                 self.assertEqual(TOOL.final_image_receipt_data(TOOL.canonical(removal), **removal_arguments), removal["finalImage"])
-                for mutation in ("phase", "kind", "request", "owner-key", "detach", "mount-retained", "unknown-close"):
+                for mutation in ("phase", "kind", "request", "owner-key", "detach", "mount-retained", "unknown-close",
+                                 "old-eleven", "extra-role", "policy-order", "policy-status-false", "policy-assess-false", "policy-missing"):
                     changed = copy.deepcopy(removal)
                     if mutation == "phase": changed["phase"] = "finalize-image"
                     elif mutation == "kind": changed["finalImage"]["kind"] = "mrk-final-user-image"
@@ -3957,6 +3987,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     elif mutation == "owner-key": changed["finalImage"]["packageInstallReceiptSha256"] = changed["finalImage"].pop("packageRemoveReceiptSha256")
                     elif mutation == "detach": changed["finalImageMount"]["detached"] = False
                     elif mutation == "mount-retained": changed["finalImageMount"]["retained"] = True
+                    elif mutation == "old-eleven": del changed["originalCalls"][11:]
+                    elif mutation == "extra-role": changed["originalCalls"].append(dict(changed["originalCalls"][-1]))
+                    elif mutation == "policy-order": changed["originalCalls"][-2:] = reversed(changed["originalCalls"][-2:])
+                    elif mutation == "policy-status-false": changed["finalImage"]["assessmentSubsystemEnabledBefore"] = False
+                    elif mutation == "policy-assess-false": changed["finalImage"]["actualDiskImagePolicyAssessment"] = False
+                    elif mutation == "policy-missing": changed["finalImage"].pop("actualDiskImagePolicyAssessment")
                     else: changed["originalClosesKnown"] = False
                     with self.assertRaises(TOOL.Refused): TOOL.final_image_receipt_data(TOOL.canonical(changed), **removal_arguments)
                 with self.assertRaises(TOOL.Refused):
@@ -5274,7 +5310,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertNotIn("final-package-sign", [row[0] for row in fixture.observations])
                 self.assertNotIn("final-package-submit", [row[0] for row in fixture.observations])
 
-        # Each of the11 SAME original roles is fail-closed for raised,
+        # Each of the13 SAME original roles is fail-closed for raised,
         # malformed, nonzero and late return. No late role gains a new clock.
         for role in module.FINAL_IMAGE_ROLES:
             for outcome in ("owner", "malformed", "nonzero", "late"):
@@ -5323,17 +5359,37 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertTrue(operation.mount_detached and operation.receipt["originalClosesKnown"])
                     self.assertFalse((state.work / "package-mount").exists())
 
+        for failure in ("policy-disabled", "policy-disabled-zero", "policy-status-extra", "policy-status-stderr",
+                        "policy-denied", "policy-changed", "final-image-policy-status-overflow", "final-image-policy-assess-overflow"):
+            with self.subTest(finalImagePolicy=failure), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory), failure=failure)
+                operation = state.operation
+                with self.final_image_fixture_call(state), self.assertRaises(module.Refused): operation.execute()
+                roles = [row[0] for row in state.observations]
+                status_failure = failure.startswith("policy-status") or failure.startswith("policy-disabled") or failure == "final-image-policy-status-overflow"
+                self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:12] if status_failure else module.FINAL_IMAGE_ROLES))
+                self.assertTrue(operation.mount_detached)
+                self.assertFalse(operation.receipt["passed"] or (state.work / "distribution-final").exists())
+                self.assertNotIn("finalImage", operation.receipt)
+                self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
+                if failure in ("policy-disabled", "policy-denied"):
+                    self.assertEqual(operation.calls[-1]["returncode"], 1 if failure == "policy-disabled" else 3)
+                    self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-" + roles[-1])
+                if failure in ("policy-disabled-zero", "policy-status-extra", "policy-status-stderr"):
+                    self.assertEqual(operation.receipt["failure"]["reason"], "final-image-policy-status-format")
+
         # Unknown consuming closes and direct-write/rename returns retain
         # custody. Even a file already moved into its final directory cannot
         # be consumed without the missing actual0 and closed final receipt.
-        for failure in ("capture-close", "key-close", "mounted-close", "copy-write", "publication-rename"):
+        for failure in ("capture-close", "key-close", "mounted-close", "copy-write", "publication-rename", "policy-capture-close"):
             with self.subTest(finalImageUnknown=failure), tempfile.TemporaryDirectory() as directory:
                 state = self.final_image_fixture(Path(directory)); operation = state.operation
                 faults = []
                 actual_close, actual_write, actual_rename = module.os.close, module.os.write, module.os.rename
                 book_close, pending_close = operation.close, {"fd": None}
                 selected = {"capture-close": "output-android-helper-final-image-signature-before.stdout",
-                            "key-close": "notary-private-key", "mounted-close": "mounted-Install.pkg"}.get(failure)
+                            "key-close": "notary-private-key", "mounted-close": "mounted-Install.pkg",
+                            "policy-capture-close": "output-android-helper-final-image-policy-status.stdout"}.get(failure)
                 def original_close(entry):
                     if not faults and entry["role"] == selected and entry["fd"] is not None:
                         pending_close["fd"] = entry["fd"]
@@ -5369,6 +5425,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 roles = [row[0] for row in state.observations]
                 if failure == "capture-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:3]))
                 if failure == "key-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:5]))
+                if failure == "policy-capture-close": self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:12]))
                 if failure == "mounted-close":
                     self.assertEqual(roles, list(module.FINAL_IMAGE_ROLES[:10]))
                     self.assertTrue(operation.mount_known and not operation.mount_detached)
@@ -6985,7 +7042,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertNotIn(forbidden, phase)
         self.assertLess(installed.index("macos_android_helper_package.py package-install"), installed.index(call))
         self.assertLess(installed.index(call), installed.index("stage_macos_installed.py preview"))
-        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES:
+        # These are the exact historical raw exports, not the current public
+        # whitelist. The two policy originals must never acquire raw uploads.
+        self.assertEqual(ANDROID_HELPER.FINAL_IMAGE_ROLES[11:], ("final-image-policy-status", "final-image-policy-assess"))
+        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES[:11]:
             for suffix in ("stdout", "stderr", "status"):
                 self.assertEqual(installed.count("/android-helper-" + role + "." + suffix), 1)
         self.assertEqual(installed.count("/android-helper-finalize-image.json"), 1)
@@ -7003,6 +7063,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             '"final-image-signature-after"', '"final-image-verify"', '"final-image-attach"',
             'self.mount_inputs(', 'self.detach_package_mount()', 'self.final_image_publish()')))
         self.assertIn('return self.notary_clock()[0]', methods["package_clock"])
+        self.assertEqual(final.count('self.final_image_call("final-image-policy-status"'), 1)
+        self.assertEqual(final.count('self.final_image_call("final-image-policy-assess"'), 1)
+        self.assertLess(final.index('self.detach_package_mount()'), final.index('"final-image-policy-status"'))
+        self.assertLess(final.index('"final-image-policy-status"'), final.index('"final-image-policy-assess"'))
+        self.assertLess(final.index('"final-image-policy-assess"'), final.index('self.final_image_publish()'))
+        self.assertIn('result.stdout == b"assessments enabled\\n" and not result.stderr', final)
+        self.assertIn('"--ignore-cache", "--no-cache", str(path)', final)
+        for forbidden in ('"--master-disable"', '"--global-disable"', '"--add"', '"--purge"', 'removexattr', 'setxattr'):
+            self.assertNotIn(forbidden, final)
+        for role in ANDROID_HELPER.FINAL_IMAGE_ROLES[11:]:
+            for suffix in ("stdout", "stderr", "status"):
+                self.assertNotIn('/android-helper-' + role + '.' + suffix, installed)
         self.assertIn('return self.final_image_call("final-image-detach", argv)', methods["package_call"])
         self.assertIn('after[:6] == before[:6]', methods["final_image_mutated"])
         self.assertIn('abs(after[6] - before[6]) <= 1024 * 1024', methods["final_image_mutated"])
@@ -7022,10 +7094,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         retained += (prebuild_name,)
         excluded += ("Project closed public verification facts without raw originals",)
         self.assertEqual(set(app_named),set(retained+excluded+added+diagnostics))
-        # Assert exact raw successor bytes before any historical projection.
+        # Retire only the independent budget delta; keep app_current raw below.
+        budget_predecessor = without_intel_app_build_budget_workflow(app_current)
         for label, markers, replacements in RECENT_APP_SIGNATURE_WORKFLOW_INVERSE:
             for current, previous in replacements:
-                self.assertEqual(app_current.count(current), 1, label)
+                self.assertEqual(budget_predecessor.count(current), 1, label)
         prebuild_step = app_named[prebuild_name]
         self.assertNotIn("        if:", prebuild_step)
         self.assertNotIn("continue-on-error", prebuild_step)
@@ -13394,6 +13467,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "sha256Compared": True, "errorCount": 0, "warningCount": 0, "ticketRowCount": 1, "logSha256": "e" * 64,
             "strictSignatureBeforeAndAfter": True, "actualStaplerValidation": True, "actualImageVerification": True,
             "finalMountReadOnly": True, "finalMountOriginalsMatch": True, "originalMountDetached": True,
+            "assessmentSubsystemEnabledBefore": True, "actualDiskImagePolicyAssessment": True,
             "assurance": "final-carrier-observation-not-downloaded-install-or-gatekeeper-authority"}
         final_receipt = {"schemaVersion": 1, "phase": "finalize-image", "target": selection.target, "source": "a" * 40,
             "packageRole": "ordinary-image", "workflowSource": "a" * 40,
@@ -13402,7 +13476,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "originalCalls": [{"role": "final-image-" + role, "entered": True, "returned": True, "capturesSettled": True,
                 "returncode": 0, "stdoutSha256": TOOL.digest(b""), "stderrSha256": TOOL.digest(b"")}
                 for role in ("resolve-notarytool", "resolve-stapler", "signature-before", "submit", "log", "staple", "validate",
-                             "signature-after", "verify", "attach", "detach")],
+                             "signature-after", "verify", "attach", "detach", "policy-status", "policy-assess")],
             "credentialOriginals": [], "credentialContexts": [], "targetRetired": True, "originalClosesKnown": True,
             "passed": True, "outerFinalityRequired": True, "androidServiceAuthenticated": False,
             "androidRegisteredCopyQualified": False, "androidBuildQualified": False,

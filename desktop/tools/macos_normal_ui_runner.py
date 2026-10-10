@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "7b53c155874177a413fd1df382543ba50540f769b6b0fbfddace002e7f257016"
+LOADER_SHA = "ba3ff0323055033e352021d04d3ecab2358d4e085d1d3c9fb379a29eea40675b"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -1373,7 +1373,7 @@ SAVED_VERSION_RESULT = "saved-version-recovery-test.xcresult"
 SAVED_VERSION_TEMPORARY = Path("/private/tmp")
 SAVED_VERSION_PRODUCER = "tests/desktop/test_saved_text_recovery.py"
 SAVED_VERSION_DATA = "desktop/native/macos-normal-ui/MRKNormalAppUITests/Fixtures/normal-project-v1.json"
-SAVED_VERSION_SOURCE = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
+SAVED_VERSION_SOURCE = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
 SAVED_VERSION_PATH = "project/release/version.properties"
 SAVED_VERSION_JOURNAL = "project/.mobile-release-version"
 SAVED_VERSION_ENV = "TEST_RUNNER_MRK_NORMAL_UI_SAVED_VERSION_FIXTURE"
@@ -1492,7 +1492,8 @@ class SavedVersionFixture:
 
     def _sources(self):
         fixed = {"desktop/" + name for name in SAVED_VERSION_BOOTSTRAPS}
-        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py"))
+        fixed.update(("desktop/cpython-source-inputs/github-ca.pem", "desktop/tools/prepare_runtime.py",
+                      "desktop/packaging/macos-history-provider.profile"))
         selected = sorted(fixed | {"src/mobile_release", SAVED_VERSION_PRODUCER, SAVED_VERSION_DATA})
         args = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                 "ls-tree", "-r", "-z", "--full-tree", self.source, "--", *selected]

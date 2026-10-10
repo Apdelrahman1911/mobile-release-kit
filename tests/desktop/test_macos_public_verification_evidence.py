@@ -315,6 +315,29 @@ def positive_ui_data(context=None, *, ios=False):
 
 
 class PublicVerificationEvidenceData(unittest.TestCase):
+
+    def test_notary_preflight_failure_preserves_only_fixed_current_guard_literals(self):
+        source = (ROOT / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        parsed = ast.parse(source)
+        selected = {"notary_tool", "notary_tool_post", "notary_rename_copy", "notary_snapshot",
+                    "notary_post", "notary_io", "notary_space"}
+        labels = {node.args[1].value for method in ast.walk(parsed)
+            if isinstance(method, ast.FunctionDef) and method.name in selected
+            for node in ast.walk(method) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "need" and len(node.args) == 2
+            and isinstance(node.args[1], ast.Constant) and type(node.args[1].value) is str
+            and node.args[1].value.startswith("notary-")}
+        self.assertEqual(len(labels), 29)
+        self.assertEqual(DATA.NOTARY_ADMISSION_REASONS, labels)
+        for reason in labels:
+            with self.subTest(reason=reason):
+                expected = {"stage": "notary-preflight-input", "type": "Refused", "reason": reason, "errno": None}
+                self.assertEqual(DATA.project_failure(expected), expected)
+                self.assertEqual(DATA.project_failure({**expected, "reason": reason + SENTINEL})["reason"],
+                    "notary-authentication" if reason.startswith("notary-key-") else "notary-refused")
+        self.assertEqual(DATA.project_failure({"stage": SENTINEL, "type": "OSError", "errno": 13}),
+                         {"stage": "unclassified", "type": "OSError", "reason": "unclassified", "errno": 13})
+        self.assertNotIn(SENTINEL, json.dumps(DATA.project_failure({"reason": SENTINEL})))
     def test_android_positive_closed_result_matches_genuine_facts_and_statuses(self):
         value, _, _, _, statuses, phases, inventory = positive_ui_data()
         result = DATA.project_android_positive(value, CONTEXT, statuses, phases, inventory)
@@ -836,6 +859,17 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertIsNone(row["finalImage"].get("strictSignatureBeforeAndAfter"))
         self.assertEqual(row["finalImage"]["warningCount"], 2)
         self.assertIsNone(row["originalCalls"]["calls"][0].get("dispatched"))
+        policy_fields = ("assessmentSubsystemEnabledBefore", "actualDiskImagePolicyAssessment")
+        self.assertTrue(all(name not in row["finalImage"] for name in policy_fields))
+        for enabled in (False, True):
+            value["finalImage"].update({name: enabled for name in policy_fields})
+            current = DATA.project_receipt(value, CONTEXT, "finalize-image")
+            self.assertTrue(all(current["finalImage"][name] is enabled for name in policy_fields))
+        value["finalImage"][policy_fields[0]] = None
+        self.assertIsNone(DATA.project_receipt(value, CONTEXT, "finalize-image")["finalImage"][policy_fields[0]])
+        for invalid in (1, "true", [True]):
+            value["finalImage"][policy_fields[0]] = invalid
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(value, CONTEXT, "finalize-image")
 
     def test_entire_exact_correlation_tuple_is_required(self):
         for field in ("source", "workflowSource", "runId", "runAttempt", "target", "phase"):
@@ -913,6 +947,17 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertNotIn(SENTINEL, json.dumps(result))
         self.assertEqual(DATA.project_failure({"stage": SENTINEL, "type": SENTINEL, "reason": SENTINEL}),
                          {"stage": "unclassified", "type": "unclassified", "reason": "unclassified", "errno": None})
+        for role, status in (("final-image-policy-status", 1), ("final-image-policy-assess", 3)):
+            policy = receipt(); policy["passed"] = False
+            policy["originalCalls"][0].update(role=role, returncode=status, stdout=SENTINEL, stderr=SENTINEL)
+            policy["failure"] = {"stage": role, "type": "Refused", "reason": "original-nonzero-" + role}
+            projected = DATA.project_receipt(policy, CONTEXT, "finalize-image")
+            self.assertEqual(projected["originalCalls"]["unclassifiedCount"], 0)
+            self.assertEqual(projected["originalCalls"]["calls"][0]["role"], role)
+            self.assertEqual(projected["originalCalls"]["calls"][0]["returncode"], status)
+            self.assertEqual(projected["failure"]["stage"], role)
+            self.assertIs(projected["recordedPassed"], False)
+            self.assertNotIn(SENTINEL, json.dumps(projected))
 
     def test_fixed_signature_and_notary_refusals_remain_distinguishable(self):
         reasons = ("package-signature-bound", "package-signature-header", "package-signature-trust-timestamp",
@@ -1042,6 +1087,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 self.assertIs(result["phases"][phase]["recordedPassed"], True, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["unclassifiedCount"], 0, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["recordedCount"], len(roster[phase][0]))
+            for phase in ("finalize-image", "finalize-remove-image"):
+                self.assertEqual(result["phases"][phase]["originalCalls"]["recordedCount"], 13)
+                self.assertIs(result["phases"][phase]["finalImage"]["assessmentSubsystemEnabledBefore"], True)
+                self.assertIs(result["phases"][phase]["finalImage"]["actualDiskImagePolicyAssessment"], True)
             self.assertTrue(all(row["receiptState"] == "observed" for row in result["normalUiBuildDiagnostics"].values()))
             self.assertEqual(result["phases"]["package-removal-fixture"]["originalCalls"]["recordedCount"], 9)
             self.assertEqual(result["phases"]["package-removal-fixture"]["removalFixture"]["case"], "ordinary")
