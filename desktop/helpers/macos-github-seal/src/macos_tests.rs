@@ -1,5 +1,5 @@
-//! Actual linked canonical calls plus eight sequential public-fixture child
-//! originals under the same separately admitted Mac owner and 10-second cap.
+//! Actual linked canonical calls plus eight public-fixture child originals,
+//! partitioned6+2 under two fixed original launches and ONE10-second owner cap.
 //! Build-parent evidence is NOT installed Desktop two-phase admission.
 //! Run only with the admitted sibling release helper and --test-threads=1.
 use super::*;
@@ -8,6 +8,13 @@ use std::io::Cursor;
 #[test]
 fn canonical_return_paths_wipe_input_and_refuse_low_order_key() {
     establish_policy().expect("fixed child policy");
+    let phase = test_phase();
+    if phase == TestPhase::Ordinary { returned_canonical_checks(); }
+    diagnostic_data_checks();
+    framed_build_parent_and_entropy_denial(phase);
+}
+
+fn returned_canonical_checks() {
     // RFC7748 Alice public key: public DATA, not an application credential.
     const PUBLIC: [u8; 32] = [
         0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54,
@@ -52,9 +59,6 @@ fn canonical_return_paths_wipe_input_and_refuse_low_order_key() {
     let mut failure = Some(Failure::Seal);
     first(&mut failure, Err(Failure::RandomClose));
     assert_eq!(failure, Some(Failure::Seal));
-
-    diagnostic_data_checks();
-    framed_build_parent_and_entropy_denial();
 }
 
 // Only this cfg(test) module links the two additional canonical observation/
@@ -67,7 +71,16 @@ unsafe extern "C" {
 
 const DEVICE_TEST: &str = "macos::tests::canonical_entropy_device_access";
 const DENIED_ENV: &str = "MRK_SEAL_TEST_ENTROPY_DENIED";
-const DENIED_POLICY: &str = "(version 1)(allow default)(deny network*)(deny file-read-data (literal \"/dev/urandom\") (literal \"/dev/random\"))";
+const PHASE_ENV: &str = "MRK_SEAL_TEST_PHASE";
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TestPhase { Ordinary, Denied }
+fn test_phase() -> TestPhase {
+    match std::env::var(PHASE_ENV).as_deref() {
+        Ok("ordinary6") => TestPhase::Ordinary,
+        Ok("denied2") => TestPhase::Denied,
+        _ => panic!("closed test-only owner phase"),
+    }
+}
 const ALICE_PUBLIC: [u8; 32] = [
     0x85,0x20,0xf0,0x09,0x89,0x30,0xa7,0x54,0x74,0x8b,0x7d,0xdc,0xb4,0x3e,0xf7,0x5a,
     0x0d,0xbf,0x3a,0x0d,0x26,0x38,0x1a,0xf4,0xeb,0xa4,0xa9,0x8e,0xaa,0x9b,0x4e,0x6a,
@@ -189,8 +202,8 @@ fn public_plaintext(size: usize) -> Vec<u8> {
 }
 
 // Eight fixed test cases only; no caller-visible executor or helper selector.
-// The existing 10-second C/A/W original owns this entire process group, including
-// blocking I/O/error cleanup. No renewed child timer, thread or process group.
+// The existing C/A/W owner clips both fixed phase originals to ONE10-second
+// endpoint, including blocking I/O/error cleanup. No renewed child timer/group.
 fn capture_case(case: Case, current: &std::path::Path, helper: &std::path::Path)
     -> Result<Capture, &'static str> {
     use std::io::Write;
@@ -198,10 +211,9 @@ fn capture_case(case: Case, current: &std::path::Path, helper: &std::path::Path)
     let probe = matches!(case, Case::DeviceControl | Case::DeviceDenied);
     let denied = matches!(case, Case::DeviceDenied | Case::EntropyDenied);
     let target = if probe { current } else { helper };
-    let mut command = if denied {
-        let mut value = Command::new("/usr/bin/sandbox-exec");
-        value.args(["-p", DENIED_POLICY]).arg(target); value
-    } else { Command::new(target) };
+    // The actual top-level owner applies the phase policy before this test
+    // parent exists. Children inherit it; never attempt nested sandbox_init.
+    let mut command = Command::new(target);
     command.env_clear().env("LANG", "C").env("LC_ALL", "C");
     if probe {
         command.args([DEVICE_TEST, "--exact", "--test-threads=1"]);
@@ -299,19 +311,22 @@ fn canonical_entropy_device_access() {
     assert_eq!(outcomes, [true, true], "actual fixed entropy device access");
 }
 
-fn framed_build_parent_and_entropy_denial() {
+fn framed_build_parent_and_entropy_denial(phase: TestPhase) {
     use std::os::unix::process::ExitStatusExt;
-    // Library-provided static name; compare only the expected ten bytes.
-    let name = unsafe { randombytes_implementation_name() };
-    assert!(!name.is_null());
-    let mut backend = [0u8; 10];
-    for (offset, slot) in backend.iter_mut().enumerate() {
-        // Canonical API returns a static NUL-terminated C string. Stop at its
-        // actual NUL; never read beyond a shorter unexpected backend name.
-        *slot = unsafe { name.add(offset).read() } as u8;
-        if *slot == 0 { break; }
+    if phase == TestPhase::Ordinary {
+        // This API initializes/stirs the RNG. Only ordinary may call it;
+        // denied must reach its actual device probe before any entropy use.
+        let name = unsafe { randombytes_implementation_name() };
+        assert!(!name.is_null());
+        let mut backend = [0u8; 10];
+        for (offset, slot) in backend.iter_mut().enumerate() {
+            // Canonical API returns a static NUL-terminated C string. Stop at its
+            // actual NUL; never read beyond a shorter unexpected backend name.
+            *slot = unsafe { name.add(offset).read() } as u8;
+            if *slot == 0 { break; }
+        }
+        assert_eq!(&backend, b"sysrandom\0");
     }
-    assert_eq!(&backend, b"sysrandom\0");
     let current = std::env::current_exe().expect("actual test executable");
     let name = current.file_name().and_then(|v| v.to_str()).unwrap();
     let suffix = name.strip_prefix("mrk_github_seal-").expect("exact Cargo test name");
@@ -319,10 +334,13 @@ fn framed_build_parent_and_entropy_denial() {
     let deps = current.parent().unwrap(); assert_eq!(deps.file_name().unwrap(), "deps");
     let release = deps.parent().unwrap(); assert_eq!(release.file_name().unwrap(), "release");
     let helper = release.join("mrk-github-seal");
-    let cases = [Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT),
-        Case::Trailing, Case::LowOrder, Case::DeviceControl, Case::DeviceDenied, Case::EntropyDenied];
+    let cases: &[Case] = match phase {
+        TestPhase::Ordinary => &[Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT),
+            Case::Trailing, Case::LowOrder, Case::DeviceControl],
+        TestPhase::Denied => &[Case::DeviceDenied, Case::EntropyDenied],
+    };
     let mut closed_originals = 0;
-    for case in cases {
+    for &case in cases {
         let captured = capture_case(case, &current, &helper).expect("actual child IO/close/wait");
         closed_originals += 1;
         report_captured(case, &captured);
@@ -355,5 +373,5 @@ fn framed_build_parent_and_entropy_denial() {
             }
         }
     }
-    assert_eq!(closed_originals, 8);
+    assert_eq!(closed_originals, match phase { TestPhase::Ordinary => 6, TestPhase::Denied => 2 });
 }

@@ -1,7 +1,8 @@
 """Fixed, credential-free Darwin build of the canonical sealed-box helper.
 
 This is a separate hosted verification context, not a CPython producer or a
-Desktop capability. All 22 native calls use the existing MRK process owner.
+Desktop capability. Ordinary23 calls and the fixed provider-only3 probes use
+the existing MRK process owner.
 Public output remains provisional until this original entry actually returns.
 """
 from __future__ import annotations
@@ -45,6 +46,9 @@ WORK_SECONDS, CLEANUP_SECONDS = 900, 60
 WORK_ENTRIES, WORK_BYTES, PUBLIC_BYTES = 8192, 512 * MIB, 96 * MIB
 OUTPUT_LIMIT, QUERY_LIMIT = MIB, 65536
 NATIVE_TEST = "macos::tests::canonical_return_paths_wipe_input_and_refuse_low_order_key"
+NATIVE_PHASE_ENV = "MRK_SEAL_TEST_PHASE"
+NATIVE_PHASES = (("helper-native-test", "ordinary6", 6), ("helper-entropy-test", "denied2", 2))
+NATIVE_DENIED_POLICY = '(version 1)(allow default)(deny network*)(deny file-read-data (literal "/dev/urandom") (literal "/dev/random"))'
 TARGETS = {
     "aarch64-apple-darwin": ("arm64", "ARM64", "1.98.1", 0x0100000C, 0),
     "x86_64-apple-darwin": ("x86_64", "X64", "1.98.0", 0x01000007, 3),
@@ -54,16 +58,16 @@ REUSE_PINS = {
     "macos_cpython_source_build.py": (91537, "70c7552f2b9eaace61ddc316da7482575692e4d3715eadfdef572b1aa0e44de6"),
     "macos_cpython_orchestrator.py": (105771, "963555122a18aa1a123b033becbb53a67e44b55c8f2d26f0554f79c29b07f296"),
     "macos_cpython_source_probe.py": (28617, "721b3adebde7925dbb6ee6e7c39ad4ae9aebe8f6c99f11b880378792595088c4"),
-    "macos_aqua_qualification.py": (455054, "be6271fb2345f2e35d7e671cc74e30e311fa47a49edfb3da345de040f7dfecfd"),
+    "macos_aqua_qualification.py": (455054, "352b73c1e95c2c13c778592ceb392caef3d4769e9ef7fd6eaf248ff3c73b8dba"),
 }
 HELPER_PINS = {
     'Cargo.lock': (141, 'bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3'),
     'Cargo.toml': (476, '7917d02fe12b37f2c5ea502bdf1315d7ce6aa6df04a69431aaf71df3c6c3c2fe'),
     'LICENSE.libsodium': (823, '508a76d186356c0dd807a670ef510964f8724557024796a2c426c6c0e19ab683'),
-    'README.md': (7528, '20a97cc2ca92f1d11eb35f8b404e7ea6002db1c1e8b9f2c8f711aed8f772ed09'),
+    'README.md': (11005, '87b43178941661882cb4940969cf313f68c14b9d6dc82b9435ada6e6885e303b'),
     'abi-check.c': (2489, '27c123f6e433b6608d2989add703cb7602b16d22d06938c552003b7eb1335868'),
     'src/macos.rs': (9898, 'a50d8977991a273ccaf1c50a8d6629361a5b05fcff32aac97121ef165258dc62'),
-    'src/macos_tests.rs': (19168, '9a6cc629fa68f177f193e768d42ae8617d8f26e4c3e01f9faa8b5044a5079fa5'),
+    'src/macos_tests.rs': (19853, 'fa3288176e0a031e0791496b6deb4e3396408dff1db96e24307713ac9191056d'),
     'src/main.rs': (1344, '14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310'),
     'src/protocol.rs': (3239, '5441b4fd3d1eae80cb7f8d70ee79341eb8a47123177d8a72e152c6f7109b0c71'),
     'src/protocol_tests.rs': (5602, 'a87b33d4743c1db9e8209baf171dae12a7ac6a8fa017896ef43498e6810be47d'),
@@ -80,10 +84,175 @@ ROLE_LIMITS = (
     ("static-four-symbols", 30, OUTPUT_LIMIT), ("canonical-box-build", 60, OUTPUT_LIMIT),
     ("canonical-box-test", 10, QUERY_LIMIT), ("helper-release", 120, OUTPUT_LIMIT),
     ("helper-native-test-build", 120, OUTPUT_LIMIT), ("helper-native-test", 10, QUERY_LIMIT),
+    ("helper-entropy-test", 10, QUERY_LIMIT),
 )
 def _static_symbol_argv(target, nm, library):
     """Intel LLVM nm suppresses only empty-member diagnostics; ARM stays exact."""
     return [nm, *(["--quiet"] if target == "x86_64-apple-darwin" else []), "-gU", str(library)]
+
+
+# Verification-only public inputs. Never a shipping/provider nomination.
+PROVIDER_REFERENCE = "refs/heads/verify/desktop-macos-history-provider-probe"
+PROVIDER_INPUT_ROOT = "desktop/history-provider-inputs"
+PROVIDER_SOURCE = PROVIDER_INPUT_ROOT + "/source-manifest.json"
+PROVIDER_CROSSBUILD = PROVIDER_INPUT_ROOT + "/crossbuild.json"
+PROVIDER_SOURCE_PIN = (212713, "d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd")
+PROVIDER_CROSSBUILD_PIN = (9544, "4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f")
+PROVIDER_PINS = {
+    "aarch64-apple-darwin": (37471938, "a704813e4e64f8814e5fa21677f7dab51d9b77d045ded75dd11bcdc1a53d5516"),
+    "x86_64-apple-darwin": (39889552, "aca3bcfd4fc35d9bcd800f06fe09f7d6c50ab4d2428f04c4ba081a32bfebbe4e"),
+}
+PROVIDER_NOTICE_PINS = {
+    "aarch64-apple-darwin": (1552072, "3dc7d2cd021d654387e5be71603869a039a3d2adf8b97a6fd0dda4ef3743a44d"),
+    "x86_64-apple-darwin": (1552072, "087592d4d366fcf2c49851571542959bb91607408c6e677ffdc2484fd7293c2e"),
+}
+PROVIDER_ROLES = (("network-denial", 15, QUERY_LIMIT), ("provider-version", 15, QUERY_LIMIT),
+                  ("provider-invalid-controls", 15, QUERY_LIMIT))
+PROVIDER_LOADS = ("/usr/lib/libSystem.B.dylib", "/usr/lib/libresolv.9.dylib",
+    "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+    "/System/Library/Frameworks/Security.framework/Versions/A/Security")
+PROVIDER_VERSION = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
+    b"https://github.com/cli/cli/releases/latest\n")
+PROVIDER_REFUSAL = b"managed history provider: controls\n"
+CAPSULE_MODIFIER = "--publish-build-capsule"
+CAPSULE_RECEIPT_LIMIT = 16384
+CAPSULE_PURPOSES = {"history-provider": ("gh", 64 * MIB), "github-seal": ("mrk-github-seal", 16 * MIB)}
+# Bound only to the actual reviewed LOCAL normalization output. Raw local
+# results/inventories never become hosted inputs or a caller-supplied receipt.
+PROVIDER_FACTS_PINS = {'aarch64-apple-darwin': (1623, 'b143103ca6928e2e900c0c648f406742080d4e4b87dadb72e30b418cef0d30e5'), 'x86_64-apple-darwin': (1622, '472ee0a35943f1395bc25d14db4d87b328d2c24e6600b29b9f2899e596a34373')}
+PROVIDER_NOTICE_MANIFEST = "ed34b914139709ddccdedc1d3cd779b28eab05c55f7575266a479af858235294"
+
+
+def probe_mode(argv, reference):
+    """No permissive flag/ref fallback; old seal entry remains zero-argument."""
+    need(type(argv) is list and type(reference) is str, "fixed-seal-workflow-context")
+    if argv == [] and reference == REFERENCE:
+        return False
+    need(argv == ["--history-provider-probe"] and reference == PROVIDER_REFERENCE,
+         "fixed-seal-workflow-context")
+    return True
+
+
+def capsule_mode(argv, reference):
+    """Only a literal modifier of either existing, independently checked mode."""
+    need(type(argv) is list, "fixed-seal-workflow-context")
+    if argv[-1:] == [CAPSULE_MODIFIER]:
+        probe_mode(argv[:-1], reference)
+        return True
+    probe_mode(argv, reference)
+    return False
+
+
+def provider_fact_records():
+    rows = []
+    for target in TARGETS:
+        pin = PROVIDER_FACTS_PINS[target]
+        need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int
+             and 0 < pin[0] <= CAPSULE_RECEIPT_LIMIT and type(pin[1]) is str
+             and re.fullmatch(r"[0-9a-f]{64}", pin[1]) and pin[1] != "0" * 64,
+             "capsule-facts-unbound")
+        rows.append((PROVIDER_INPUT_ROOT + "/" + target + "/build-facts.json", pin))
+    return tuple(rows)
+
+
+def capsule_origin(value):
+    """Closed DATA grammar; exact whole prepared SOURCE bytes are the anchor."""
+    refs = {"result": 256 * 1024, "closedSummary": 16384, "crossbuild": 65536, "buildInfo": 65536}
+    yes = {"allJoinedZeroAndPipesClosed", "sourcePost", "dependencyPost", "toolchainPost", "embeddedNoticesComplete"}
+    no = {"noticeContentRuntimeExecuted", "nativeExecuted", "developerIdSigned", "notarized"}
+    need(type(value) is dict and set(value) == set(refs) | yes | no | {"kind", "sourceInventory",
+         "dependencyInventorySha256", "toolchainInventorySha256", "childOriginals", "namespaceOriginals"}
+         and value["kind"] == "offline-owned-crossbuild"
+         and type(value["childOriginals"]) is int and value["childOriginals"] == 5
+         and type(value["namespaceOriginals"]) is int and value["namespaceOriginals"] == 1
+         and all(value[k] is True for k in yes) and all(value[k] is False for k in no), "capsule-build-origin")
+    for key in ("dependencyInventorySha256", "toolchainInventorySha256"):
+        need(type(value[key]) is str and re.fullmatch(r"[0-9a-f]{64}", value[key])
+             and value[key] != "0" * 64, "capsule-build-origin")
+    for key, limit in refs.items():
+        row = value[key]
+        need(type(row) is dict and set(row) == {"bytes", "sha256"}
+             and type(row["bytes"]) is int and 0 < row["bytes"] <= limit
+             and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+             and row["sha256"] != "0" * 64, "capsule-build-reference")
+    row = value["sourceInventory"]
+    need(type(row) is dict and set(row) == {"bytes", "sha256", "fileCount", "fileBytes"}
+         and all(type(row[k]) is int for k in ("bytes", "fileCount", "fileBytes"))
+         and 0 < row["bytes"] <= MIB and 0 < row["fileCount"] <= 2048 and 0 < row["fileBytes"] <= 32 * MIB
+         and type(row["sha256"]) is str and re.fullmatch(r"[0-9a-f]{64}", row["sha256"])
+         and row["sha256"] != "0" * 64, "capsule-build-reference")
+
+
+def capsule_prepared(body, target):
+    records = dict(provider_fact_records())
+    need(target in TARGETS, "capsule-facts-target")
+    name = PROVIDER_INPUT_ROOT + "/" + target + "/build-facts.json"
+    need(type(body) is bytes and (len(body), B.digest(body)) == records[name], "capsule-facts-pin")
+    value = B.decode(body)
+    need(type(value) is dict and set(value) == {"schemaVersion", "state", "facts", "nativeAuthority", "uploadAuthorized"}
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["state"] == "unconfigured-publication" and value["nativeAuthority"] is False
+         and value["uploadAuthorized"] is False and B.canonical(value) + b"\n" == body, "capsule-facts-shape")
+    facts = value["facts"]
+    need(type(facts) is dict and set(facts) == {"target", "sourceManifestSha256", "binary", "notices", "buildOrigin"}
+         and facts["target"] == target and facts["sourceManifestSha256"] == PROVIDER_SOURCE_PIN[1]
+         and type(facts["binary"]) is dict and type(facts["binary"].get("bytes")) is int
+         and facts["binary"] == {"bytes": PROVIDER_PINS[target][0], "sha256": PROVIDER_PINS[target][1]},
+         "capsule-facts-product")
+    notices = facts["notices"]
+    need(type(notices) is dict and all(type(notices.get(k)) is int for k in ("files", "modules"))
+         and notices == {"manifestSha256": PROVIDER_NOTICE_MANIFEST,
+            "contentSha256": PROVIDER_NOTICE_PINS[target][1], "files": 333, "modules": 162}, "capsule-facts-notices")
+    capsule_origin(facts["buildOrigin"])
+    return facts
+
+
+def provider_output(role, returncode, stdout, stderr):
+    """Returned DATA only. The caller still proves actual original settlement."""
+    if type(returncode) is not int or type(stdout) is not bytes or type(stderr) is not bytes:
+        return False
+    if role == "provider-version":
+        return returncode == 0 and stdout == PROVIDER_VERSION and stderr == b""
+    if role == "provider-invalid-controls":
+        return returncode == 1 and stdout == b"" and stderr == PROVIDER_REFUSAL
+    return role == "network-denial" and returncode == 0 and stderr == b""
+
+
+def provider_macho_data(prefix, total, target, orchestration):
+    """Same load-table parser over a bounded prefix of a separately hashed file."""
+    need(target in TARGETS and type(prefix) is bytes and 32 <= len(prefix) <= QUERY_LIMIT
+         and type(total) is int and len(prefix) <= total <= 128 * MIB
+         and prefix[:4] == b"\xcf\xfa\xed\xfe", "provider-thin-header")
+    machine, _, _, cpu, subtype = TARGETS[target]
+    header = struct.unpack_from("<8I", prefix)
+    need(header[1:4] == (cpu, subtype, 2) and header[7] == 0
+         and header[5] <= QUERY_LIMIT - 32, "provider-thin-header")
+    need(orchestration.native_slice(prefix, machine) == prefix, "provider-thin-header")
+    rows = orchestration.macho_records(prefix, machine)
+    loads, dyld, builds, signatures = [], [], [], []
+    for row in rows:
+        command, offset, size = row["command"], row["offset"], row["size"]
+        need(command not in {0x6, 0x7, 0xD, 0xF, 0x10, 0x12, 0x13, 0x14, 0x15,
+             0x1C, 0x8000001C, 0x27}, "provider-loader-override")
+        if command == 0x32:
+            need(size == 24 and struct.unpack_from("<4I", prefix, offset + 8)
+                 == (1, 0x000C0000, 0x000C0000, 0), "provider-minimum-sdk")
+            builds.append(command)
+        elif command == 0xE:
+            dyld.append(row["text"])
+        elif command in {0xC, 0x18, 0x80000018, 0x1F, 0x8000001F, 0x20, 0x23, 0x80000023}:
+            need(command == 0xC and row["text"] in PROVIDER_LOADS, "provider-system-load")
+            loads.append(row["text"])
+        elif command == 0x1D:
+            need(size == 16, "provider-signature-command")
+            start, length = struct.unpack_from("<II", prefix, offset + 8)
+            need(start >= 32 + header[5] and length > 0 and start + length == total,
+                 "provider-signature-command")
+            signatures.append(command)
+    need(len(builds) == 1 and dyld == ["/usr/lib/dyld"] and tuple(loads) == PROVIDER_LOADS
+         and len(signatures) == (1 if target == "aarch64-apple-darwin" else 0), "provider-loader-roster")
+    return {"thin": True, "minimumMacOS": "12.0", "sdk": "12.0", "loadDylibs": loads,
+            "GoAdHocSignatureCommand": bool(signatures), "DeveloperIdQualified": False}
 
 
 B = None
@@ -108,6 +277,58 @@ _DIAGNOSTIC_REASONS = frozenset((
     'bounded-canonical-tar',
     'bounded-original-roster',
     'build-capacity',
+    'provider-thin-header',
+    'provider-loader-override',
+    'provider-minimum-sdk',
+    'provider-system-load',
+    'provider-signature-command',
+    'provider-loader-roster',
+    'provider-input-pin',
+    'provider-input-original',
+    'provider-input-short',
+    'provider-copy-short',
+    'provider-input-post',
+    'provider-copy-original',
+    'provider-copy-post',
+    'provider-parent-post',
+    'provider-parent-original',
+    'provider-input-roster',
+    'provider-record-post',
+    'provider-record-unbound',
+    'provider-record-pin',
+    'provider-output-contract',
+    'provider-evidence-bound',
+    'capsule-binary-bound',
+    'capsule-binary-mode',
+    'capsule-build-origin',
+    'capsule-build-reference',
+    'capsule-cleanup-member',
+    'capsule-combined-bound',
+    'capsule-directory-original',
+    'capsule-entry-bound',
+    'capsule-export-original',
+    'capsule-export-path',
+    'capsule-facts-notices',
+    'capsule-facts-pin',
+    'capsule-facts-product',
+    'capsule-facts-shape',
+    'capsule-facts-target',
+    'capsule-facts-unbound',
+    'capsule-finality',
+    'capsule-full-source-binding',
+    'capsule-helper-byte-binding',
+    'capsule-helper-parent-original',
+    'capsule-member-roster',
+    'capsule-mode',
+    'capsule-original-finality',
+    'capsule-output-collision',
+    'capsule-publication-context',
+    'capsule-quote-data',
+    'capsule-receipt-bound',
+    'capsule-receipt-original',
+    'capsule-storage',
+    'capsule-task-original',
+    'capsule-work-finality',
     'build-input-original-post',
     'builder-already-loaded',
     'builder-source-hash',
@@ -180,6 +401,8 @@ _DIAGNOSTIC_REASONS = frozenset((
     'generated-alias-unrecorded',
     'canonical-libtool-archive-roster',
     'helper-exact-native-test',
+    'native-pair-admission',
+    'native-pair-capture',
     'helper-fixed-roster',
     'helper-no-build-discovery',
     'helper-source-directory-post',
@@ -300,9 +523,11 @@ def failure_diagnostic(error):
         observed = build.phase
         allowed = {"admission", "canonical-source-extraction", "source-and-native-final-post"}
         allowed.update(role for role, _, _ in ROLE_LIMITS)
+        if getattr(build, "provider_mode", False):
+            allowed.update(role for role, _, _ in PROVIDER_ROLES)
         phase = observed if type(observed) is str and observed in allowed else "unknown"
         entered, returned = build.entered, build.returned
-        if type(entered) is int and type(returned) is int and 0 <= returned <= entered <= 22:
+        if type(entered) is int and type(returned) is int and 0 <= returned <= entered <= 23:
             calls = f"{entered}/{returned}"
         # These are only retained observations, not an aggregate finality proof.
         observed_fields = vars(build)
@@ -313,7 +538,7 @@ def failure_diagnostic(error):
         scratch = closed_bool("scratch_retired")
         source_post = closed_bool("source_post")
         commands = observed_fields.get("commands")
-        if type(commands) is list and len(commands) <= 22:
+        if type(commands) is list and len(commands) <= 23:
             for row in reversed(commands):
                 if type(row) is dict and row.get("returned") is True:
                     value = row.get("returncode")
@@ -466,11 +691,22 @@ def absent(path):
     return False
 
 
-def source_snapshot(check):
+def source_snapshot(check, *, provider=False, capsule=False):
     fixed = {WORKFLOW, "desktop/tools/macos_github_seal_build.py", INVENTORY, ARCHIVE,
              "desktop/github-seal-inputs/README.md"}
     fixed.update("desktop/tools/" + name for name in REUSE_PINS)
     fixed.update(HELPER + "/" + name for name in HELPER_PINS)
+    if provider:
+        if capsule:
+            records = provider_fact_records()
+        else:
+            B.need(type(PROVIDER_CROSSBUILD_PIN) is tuple and len(PROVIDER_CROSSBUILD_PIN) == 2
+                   and type(PROVIDER_CROSSBUILD_PIN[0]) is int and 0 < PROVIDER_CROSSBUILD_PIN[0] <= QUERY_LIMIT
+                   and type(PROVIDER_CROSSBUILD_PIN[1]) is str
+                   and re.fullmatch(r"[0-9a-f]{64}", PROVIDER_CROSSBUILD_PIN[1]), "provider-record-unbound")
+            records = ((PROVIDER_SOURCE, PROVIDER_SOURCE_PIN), (PROVIDER_CROSSBUILD, PROVIDER_CROSSBUILD_PIN))
+        fixed = {WORKFLOW, "desktop/tools/macos_github_seal_build.py", *(name for name, _ in records)}
+        fixed.update("desktop/tools/" + name for name in REUSE_PINS)
     pending = [CHECKOUT / "src/mobile_release"]
     directories = 0
     while pending:
@@ -493,11 +729,19 @@ def source_snapshot(check):
     for name in sorted(fixed):
         check()
         path = CHECKOUT / name
-        body = B.read(path, 2 * MIB)
+        limit = (CAPSULE_RECEIPT_LIMIT if capsule else 2 * MIB) if provider and name in dict(records) else 2 * MIB
+        if provider and not capsule and name == PROVIDER_CROSSBUILD:
+            limit = QUERY_LIMIT
+        body = B.read(path, limit)
         rows[name] = {"size": len(body), "sha256": B.digest(body), "identity": B.identity(path.lstat())}
     for name, pin in REUSE_PINS.items():
         row = rows["desktop/tools/" + name]
         B.need((row["size"], row["sha256"]) == pin, "existing-owner-source-pin")
+    if provider:
+        for name, pin in records:
+            row = rows[name]
+            B.need((row["size"], row["sha256"]) == pin, "provider-record-pin")
+        return rows
     for name, pin in HELPER_PINS.items():
         row = rows[HELPER + "/" + name]
         B.need((row["size"], row["sha256"]) == pin, "helper-source-pin")
@@ -525,14 +769,26 @@ def limits():
 
 class SealBuild:
     """One fixed recipe around the already established MRK cancellation owner."""
-    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started, python_binding):
+    def __init__(self, *, target, source, run, attempt, owner, control, orchestration, probe, started, python_binding, provider=False, capsule=False):
         self.target, self.profile = target, TARGETS[target]
         self.source, self.run_id, self.attempt = source, run, attempt
         self.owner, self.control, self.orchestration, self.probe = owner, control, orchestration, probe
         self.started, self.deadline = started, started + WORK_SECONDS
         self.python_binding = python_binding
-        self.work = WORK_PARENT / f"mrk-github-seal-{target}-{source}-{run}-{attempt}"
+        B.need(type(provider) is bool and type(capsule) is bool, "fixed-seal-workflow-context")
+        self.provider_mode, self.provider_ready = provider, False
+        self.capsule_mode = capsule
+        self.capsule_purpose = "history-provider" if provider else "github-seal"
+        self.role_limits = PROVIDER_ROLES if provider else ROLE_LIMITS
+        prefix = "mrk-history-provider" if provider else "mrk-github-seal"
+        self.work = WORK_PARENT / f"{prefix}-{target}-{source}-{run}-{attempt}"
         self.private, self.public = self.work / "private", self.work / "public"
+        self.capsule_pending, self.capsule_public = self.work / "capsule-pending", self.work / "capsule"
+        self.capsule_identity = self.capsule_copy_identity = self.capsule_receipt_identity = None
+        self.export_identity = self.export_helper_identity = None
+        self.export_promoted = self.capsule_promoted = False
+        self.provider_parents, self.provider_source_parents = {}, {}
+        self.provider_private_retired = False
         self.work_identity = self.private_identity = None
         self.guard, owns = control.cancellation_owner(None, B.BuildRefused, "seal-handler-finality")
         B.need(owns, "seal-original-cancellation-owner")
@@ -548,6 +804,8 @@ class SealBuild:
         self.source_post = False
         self.runtime_rosters = {}
         self.libtool_alias_originals = {}
+        self.native_deadline = None
+        self.native_capture_remaining = 0
 
     def check(self):
         if self.cleaning:
@@ -562,6 +820,9 @@ class SealBuild:
         B.remaining(self.deadline + CLEANUP_SECONDS, time.monotonic(), CLEANUP_SECONDS)
 
     def evidence_bytes(self, name, body):
+        if getattr(self, "provider_mode", False):
+            B.need(type(body) is bytes and sum(map(len, self.evidence.values())) + len(body) <= MIB - QUERY_LIMIT,
+                   "provider-evidence-bound")
         return B.Build.evidence_bytes(self, name, body)
 
     def evidence_json(self, name, value):
@@ -754,21 +1015,37 @@ class SealBuild:
 
     def run(self, role, argv, *, cwd=None):
         self.check()
-        B.need(self.entered < len(ROLE_LIMITS) and role == ROLE_LIMITS[self.entered][0], "fixed-role-order")
-        _, maximum, output_limit = ROLE_LIMITS[self.entered]
-        selected = [self.sandbox, "-p", B.NETWORK_POLICY, *argv]
+        roles = self.role_limits
+        B.need(self.entered < len(roles) and role == roles[self.entered][0], "fixed-role-order")
+        _, maximum, output_limit = roles[self.entered]
+        native_phase = next((phase for phase in NATIVE_PHASES if role == phase[0]), None)
+        deadline, environment, policy = self.deadline, self.environment, B.NETWORK_POLICY
+        if native_phase is not None:
+            B.need(not self.provider_mode and self.native_deadline is not None, "native-pair-admission")
+            deadline = min(deadline, self.native_deadline)
+            B.need(type(self.native_capture_remaining) is int and 0 < self.native_capture_remaining <= QUERY_LIMIT,
+                   "native-pair-capture")
+            output_limit = min(output_limit, self.native_capture_remaining)
+            environment = {**self.environment, NATIVE_PHASE_ENV: native_phase[1]}
+            if role == "helper-entropy-test":
+                policy = NATIVE_DENIED_POLICY
+        selected = [self.sandbox, "-p", policy, *argv]
         directory = cwd or self.private
+        if self.provider_mode:
+            self.provider_post()
         self.recheck_tools()
+        if native_phase is not None:
+            B.remaining(deadline, time.monotonic(), maximum)
         row = {"role": role, "argv": selected, "cwd": str(directory),
-               "environmentSha256": B.digest(B.canonical(self.environment)),
+               "environmentSha256": B.digest(B.canonical(environment)),
                "started": time.monotonic(), "returned": False}
         self.phase = role
         self.commands.append(row)
         self.entered += 1
         self.inflight = True
         try:
-            result = self.owner.run_owned(selected, environ=self.environment, cwd=directory,
-                timeout=B.remaining(self.deadline, time.monotonic(), maximum), capture=True, text=False,
+            result = self.owner.run_owned(selected, environ=environment, cwd=directory,
+                timeout=B.remaining(deadline, time.monotonic(), maximum), capture=True, text=False,
                 output_limit=output_limit, cancellation=self.guard)
         except BaseException:
             verdict = self.guard.lifetime_ledger.verdict()
@@ -779,14 +1056,22 @@ class SealBuild:
             self.returned += 1
             B.need(B.original_result(result, selected) and len(result.stdout) + len(result.stderr) <= output_limit,
                    "original-command-return-contract")
+            if native_phase is not None:
+                self.native_capture_remaining -= len(result.stdout) + len(result.stderr)
             row.update(returned=True, returncode=result.returncode, ended=time.monotonic(),
                 stdoutSha256=self.evidence_bytes(role + ".stdout", result.stdout),
                 stderrSha256=self.evidence_bytes(role + ".stderr", result.stderr))
             self.recheck_tools()
-            B.need(result.returncode == 0 and b"(ignored)" not in result.stdout + result.stderr,
-                   "original-command-failed")
+            if self.provider_mode:
+                self.provider_post()
+                B.need(provider_output(role, result.returncode, result.stdout, result.stderr), "provider-output-contract")
+            else:
+                B.need(result.returncode == 0 and b"(ignored)" not in result.stdout + result.stderr,
+                       "original-command-failed")
             row["settledWork"] = self.census()
             self.check()
+            if native_phase is not None:
+                B.remaining(deadline, time.monotonic(), maximum)
             return result
 
     def line(self, result):
@@ -822,6 +1107,218 @@ class SealBuild:
             B.need(selected and (directory == root / "lib" or any(name.startswith("libstd-") for name in selected)),
                    "rust-runtime-complete-native-selection")
         return total
+
+    def provider_parents_post(self):
+        parents = self.provider_source_parents if self.provider_private_retired else self.provider_parents
+        for path, original in parents.items():
+            self.check()
+            info = Path(path).lstat()
+            B.need(stat.S_ISDIR(info.st_mode) and B.custody(info) == original,
+                   "provider-parent-post")
+
+    def provider_stream(self, path, pin, *, original=None, destination=None):
+        # Large input reads remain separate from the existing2MiB SOURCE reader.
+        # At most one64KiB block and one64KiB load table are retained, not the
+        # full executable; the SAME original is checked before/after all bytes.
+        self.check()
+        B.need(type(pin) is tuple and len(pin) == 2 and type(pin[0]) is int
+               and 0 < pin[0] <= 128 * MIB and type(pin[1]) is str
+               and re.fullmatch(r"[0-9a-f]{64}", pin[1]), "provider-input-pin")
+        info = path.lstat()
+        identity = B.identity(info)
+        B.need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size == pin[0]
+               and (original is None or identity == original), "provider-input-original")
+        self.provider_parents_post()
+        copy_identity = None
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        with B.DATA.acquiring(os.open, os.close, path, flags) as fd:
+            B.need(B.identity(os.fstat(fd)) == identity, "provider-input-original")
+            def transfer(output):
+                digest, count, prefix = hashlib.sha256(), 0, b""
+                while count < pin[0]:
+                    self.check()
+                    block = os.read(fd, min(65536, pin[0] - count))
+                    B.need(bool(block), "provider-input-short")
+                    if len(prefix) < QUERY_LIMIT:
+                        prefix += block[:QUERY_LIMIT - len(prefix)]
+                    digest.update(block)
+                    count += len(block)
+                    if output is not None:
+                        cursor = 0
+                        while cursor < len(block):
+                            self.check()
+                            written = os.write(output, block[cursor:])
+                            B.need(type(written) is int and 0 < written <= len(block) - cursor,
+                                   "provider-copy-short")
+                            cursor += written
+                B.need(not os.read(fd, 1) and (count, digest.hexdigest()) == pin,
+                       "provider-input-pin")
+                B.need(B.identity(os.fstat(fd)) == identity and B.identity(path.lstat()) == identity,
+                       "provider-input-post")
+                return prefix
+            if destination is None:
+                prefix = transfer(None)
+            else:
+                # A failed open/close stays in the SAME DATA ledger. No retry,
+                # guessed file adoption, or chmod of the checkout original.
+                with B.DATA.acquiring(os.open, os.close, destination,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600) as output:
+                    made = os.fstat(output)
+                    B.need(stat.S_ISREG(made.st_mode) and made.st_nlink == 1 and made.st_uid == os.getuid(),
+                           "provider-copy-original")
+                    prefix = transfer(output)
+                    os.fchmod(output, 0o555)
+                    after = os.fstat(output)
+                    B.need(B.custody(after)[:2] == B.custody(made)[:2] and B.custody(after)[3:] == B.custody(made)[3:]
+                           and after.st_size == pin[0]
+                           and stat.S_IMODE(after.st_mode) == 0o555 and after.st_nlink == 1
+                           and B.identity(destination.lstat()) == B.identity(after), "provider-copy-post")
+                    copy_identity = B.identity(after)
+            self.provider_parents_post()
+        self.check()
+        return identity, prefix, copy_identity
+
+    def provider_notices_post(self):
+        # Fixed descriptive sidecars, never executable/source authority. Preserve
+        # the exact initially observed originals across every subsequent read.
+        B.need(type(self.provider_notice_originals) is dict
+               and set(self.provider_notice_originals) == set(PROVIDER_NOTICE_PINS),
+               "provider-notice-originals")
+        for target, pin in PROVIDER_NOTICE_PINS.items():
+            path = CHECKOUT / PROVIDER_INPUT_ROOT / target / "NOTICES.txt"
+            self.provider_stream(path, pin, original=self.provider_notice_originals[target])
+
+    def provider_input(self):
+        self.provider_parents = {}
+        input_root = CHECKOUT / PROVIDER_INPUT_ROOT
+        path = input_root / self.target / "gh"
+        # All named source ancestors are real directories; no symlink/alias
+        # admission. Public checkout is not a same-UID isolation boundary.
+        for parent in (path.parent, *path.parent.parents):
+            self.check()
+            info = parent.lstat()
+            B.need(stat.S_ISDIR(info.st_mode) and not parent.is_symlink(), "provider-parent-original")
+            self.provider_parents[str(parent)] = B.custody(info)
+        B.need(len(self.provider_parents) <= 128, "provider-parent-original")
+        expected_root = sorted(TARGETS) if self.capsule_mode else ["aarch64-apple-darwin", "crossbuild.json",
+                         "source-manifest.json", "x86_64-apple-darwin"]
+        B.need(names(input_root, len(expected_root), self.check) == expected_root, "provider-input-roster")
+        for target in PROVIDER_PINS:
+            self.check()
+            directory = input_root / target
+            info = directory.lstat()
+            expected_names = ["NOTICES.txt", "build-facts.json", "gh"] if self.capsule_mode else ["NOTICES.txt", "gh"]
+            B.need(stat.S_ISDIR(info.st_mode) and not directory.is_symlink()
+                   and names(directory, len(expected_names), self.check) == expected_names, "provider-input-roster")
+            B.need((str(directory) not in self.provider_parents and len(self.provider_parents) < 128)
+                   or self.provider_parents.get(str(directory)) == B.custody(info),
+                   "provider-parent-original")
+            self.provider_parents[str(directory)] = B.custody(info)
+        B.need(set(PROVIDER_NOTICE_PINS) == set(PROVIDER_PINS), "provider-notice-roster")
+        self.provider_source_parents = dict(self.provider_parents)
+        if self.capsule_mode:
+            self.provider_prepared = {}
+            for target, (name, pin) in zip(TARGETS, provider_fact_records()):
+                body = B.read(CHECKOUT / name, CAPSULE_RECEIPT_LIMIT, expected=pin)
+                B.need(B.identity((CHECKOUT / name).lstat()) == self.source_binding[name]["identity"], "provider-record-post")
+                self.provider_prepared[target] = capsule_prepared(body, target)
+        self.provider_notice_originals = {}
+        for target, pin in PROVIDER_NOTICE_PINS.items():
+            notice = input_root / target / "NOTICES.txt"
+            identity, _, _ = self.provider_stream(notice, pin)
+            self.provider_notice_originals[target] = identity
+        B.need(B.custody((self.private / "provider").lstat()) == self.provider_directory_identity,
+               "provider-parent-post")
+        self.provider_original = path
+        self.provider_pin = PROVIDER_PINS[self.target]
+        self.provider_identity, prefix, _ = self.provider_stream(path, self.provider_pin)
+        self.provider_facts = provider_macho_data(prefix, self.provider_pin[0], self.target, self.orchestration)
+        self.provider_binary = self.private / "provider/gh"
+        for parent in (self.provider_binary.parent, self.private, self.work):
+            info = parent.lstat()
+            B.need((str(parent) not in self.provider_parents and len(self.provider_parents) < 128)
+                   or self.provider_parents.get(str(parent)) == B.custody(info),
+                   "provider-parent-original")
+            self.provider_parents[str(parent)] = B.custody(info)
+        B.need(len(self.provider_parents) <= 128, "provider-parent-original")
+        _, _, self.provider_copy_identity = self.provider_stream(path, self.provider_pin,
+            original=self.provider_identity, destination=self.provider_binary)
+        _, copied_prefix, _ = self.provider_stream(self.provider_binary, self.provider_pin,
+                                                   original=self.provider_copy_identity)
+        B.need(provider_macho_data(copied_prefix, self.provider_pin[0], self.target, self.orchestration)
+               == self.provider_facts, "provider-copy-post")
+        self.provider_ready = True
+        self.provider_post()
+
+    def provider_post(self, *, private=True):
+        B.need(private or (self.capsule_mode and self.provider_private_retired and self.scratch_retired
+                          and absent(self.private)), "provider-private-retirement")
+        self.provider_parents_post()
+        pairs = ((self.provider_original, self.provider_identity),)
+        if private:
+            pairs += ((self.provider_binary, self.provider_copy_identity),)
+        for path, original in pairs:
+            self.provider_stream(path, self.provider_pin, original=original)
+        self.provider_notices_post()
+        records = provider_fact_records() if self.capsule_mode else (
+            (PROVIDER_SOURCE, PROVIDER_SOURCE_PIN), (PROVIDER_CROSSBUILD, PROVIDER_CROSSBUILD_PIN))
+        for name, pin in records:
+            self.check()
+            before = self.source_binding[name]
+            B.need(B.identity((CHECKOUT / name).lstat()) == before["identity"], "provider-record-post")
+            B.read(CHECKOUT / name, pin[0], expected=pin)
+            B.need(B.identity((CHECKOUT / name).lstat()) == before["identity"], "provider-record-post")
+        self.check()
+
+    def prepare_provider(self):
+        self.work_identity = self.mkdir(self.work)
+        self.private_identity = self.mkdir(self.private)
+        for name in ("home", "tmp", "gh-config", "provider"):
+            made = self.mkdir(self.private / name)
+            if name == "provider":
+                self.provider_directory_identity = made
+        self.environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(self.private / "home"),
+            "TMPDIR": str(self.private / "tmp") + "/", "GH_CONFIG_DIR": str(self.private / "gh-config"),
+            "LANG": "C", "LC_ALL": "C", "TZ": "UTC", "GH_HOST": "github.com", "NO_COLOR": "1",
+            "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1",
+            "GH_TOKEN": "mrk-history-native-probe-not-a-credential"}
+        self.sandbox = self.protected_tool(Path("/usr/bin/sandbox-exec"), role="sandbox")
+        self.python = self.python_tools()
+        self.provider_input()
+        network = self.run("network-denial", [self.python, "-I", "-S", "-B",
+            str(CHECKOUT / "desktop/tools/macos_cpython_source_probe.py"), "network", self.target])
+        facts = B.probe_result(network.stdout, "network", self.target, self.probe)
+        B.need(network.stderr == b"" and type(facts.get("errno")) is int and facts["errno"] in {1, 13}, "network-denial")
+        self.toolchain.update(nativeHost=facts["nativeHost"], target=self.target,
+            pythonVersion=sys.version, pythonShipped=False, resourceLimits=self.resource_limits)
+        self.run("provider-version", [str(self.provider_binary), "--version"])
+        # gh reads private startup Config/KnownHosts BEFORE the apiRun guard.
+        # The explicit PUBLIC inert token satisfies CheckAuth; no secret token,
+        # user config, successful API client or real network request is tested.
+        self.environment["MRK_HISTORY_PROVIDER_V1"] = "1"
+        self.run("provider-invalid-controls", [str(self.provider_binary), "api", "--hostname", "github.com",
+                                               "--method", "GET", "user"])
+        self.provider_post()
+        self.recheck_tools(full=True)
+        B.need(source_snapshot(self.check, provider=True, capsule=self.capsule_mode) == self.source_binding,
+               "verification-source-final-post")
+        self.source_post = True
+        provider_inputs = {"binary": {"bytes": self.provider_pin[0], "sha256": self.provider_pin[1]},
+            "sourceManifest": PROVIDER_SOURCE_PIN,
+            "facts": self.provider_facts, "embeddedNoticesComplete": True,
+            "noticeContentRuntimeExecuted": False, "notices": PROVIDER_NOTICE_PINS,
+            "copiedIdentity": self.provider_copy_identity, "inputIdentity": self.provider_identity}
+        if self.capsule_mode:
+            provider_inputs["preparedFacts"] = PROVIDER_FACTS_PINS
+        else:
+            provider_inputs["crossbuild"] = PROVIDER_CROSSBUILD_PIN
+            self.evidence_bytes("crossbuild.json", B.read(CHECKOUT / PROVIDER_CROSSBUILD, QUERY_LIMIT, expected=PROVIDER_CROSSBUILD_PIN))
+        self.evidence_json("provider-inputs.json", provider_inputs)
+        self.evidence_json("toolchain.json", {**self.toolchain, "tools": list(self.tools.values()), "sameUidAdversaryIsolation": False})
+        self.evidence_json("source-binding.json", {"sourceCommit": self.source, "rows": self.source_binding})
+        self.check()
+        B.need(self.entered == self.returned == 3, "fixed-recipe-complete")
+        self.success_ready = True
 
     def prepare(self):
         self.work_identity = self.mkdir(self.work)
@@ -1189,14 +1686,29 @@ class SealBuild:
         test = self.run("helper-native-test-build", [self.cargo, "test", *common, "--no-run", "--message-format=json"], cwd=self.helper)
         executable = self.cargo_artifact(test, test=True)
         self.native["helperTestExecutable"] = self.macho(executable, limit=64 * MIB)
-        test = self.run("helper-native-test", [str(executable), NATIVE_TEST, "--exact", "--test-threads=1"])
-        text = test.stdout.decode("ascii", "strict")
-        lines = [line for line in text.split("\n") if line]
-        B.need(test.stderr == b"" and "\r" not in text and len(lines) == 3 and lines[0] == "running 1 test"
-               and lines[1] == "test " + NATIVE_TEST + " ... ok"
-               and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in [0-9]+\.[0-9]+s", lines[2]),
-               "helper-exact-native-test")
-        self.native["helperNativeTest"] = {"passed": 1, "failed": 0, "ignored": 0, "filteredUncredited": 4,
+        self.native_tests(executable)
+
+    def native_tests(self, executable):
+        # One epoch/capture pool for both separately owned process trees. Never
+        # renew it for the denied-policy phase, even after a known first return.
+        B.need(not self.provider_mode and self.native_deadline is None
+               and self.entered == self.returned == len(ROLE_LIMITS) - 2, "native-pair-admission")
+        self.native_deadline = min(self.deadline, time.monotonic() + 10)
+        self.native_capture_remaining = QUERY_LIMIT
+        phases = []
+        for role, phase, closed in NATIVE_PHASES:
+            B.remaining(self.native_deadline, time.monotonic(), 10)
+            test = self.run(role, [str(executable), NATIVE_TEST, "--exact", "--test-threads=1"])
+            text = test.stdout.decode("ascii", "strict")
+            lines = [line for line in text.split("\n") if line]
+            B.need(test.stderr == b"" and "\r" not in text and len(lines) == 3 and lines[0] == "running 1 test"
+                   and lines[1] == "test " + NATIVE_TEST + " ... ok"
+                   and re.fullmatch(r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in [0-9]+\.[0-9]+s", lines[2]),
+                   "helper-exact-native-test")
+            B.remaining(self.native_deadline, time.monotonic(), 10)
+            phases.append({"phase": phase, "passed": 1, "nestedOriginalsClosed": closed})
+        self.native["helperNativeTest"] = {"passed": 2, "selectedInvocations": 2,
+            "failed": 0, "ignored": 0, "filteredUncredited": 4, "phases": phases,
             "returnedWipePaths": True, "framedParentRoundTrip": False,
             "framedBuildParentRoundTrip": True, "nestedOriginalsClosed": 8,
             "positiveFrameSizes": [0, 3, 49152], "actualFrameRefusals": 2,
@@ -1226,16 +1738,16 @@ class SealBuild:
         self.evidence_json("source-binding.json", {"sourceCommit": self.source, "rows": self.source_binding})
         self.evidence_json("native-tests.json", self.native)
         self.check()
-        B.need(self.entered == self.returned == 22, "fixed-recipe-complete")
+        B.need(self.entered == self.returned == 23, "fixed-recipe-complete")
         self.success_ready = True
 
     def retain_products(self):
         # Only after all command originals have settled, before retiring their
         # work. Copy through same actual read/write/close/readback primitives.
         self.export = self.work / "export-pending"
-        self.mkdir(self.export)
+        self.export_identity = self.mkdir(self.export)
         helper = self.export / "helper"
-        self.mkdir(helper)
+        self.export_helper_identity = self.mkdir(helper)
         include = self.export / "include"
         self.mkdir(include)
         self.mkdir(include / "sodium")
@@ -1270,6 +1782,180 @@ class SealBuild:
             B.need(total <= PUBLIC_BYTES - 32 * MIB, "retained-product-limit")
             self.export_rows[name] = B.write(self.export / name, body, mode)
 
+    def capsule_reserve(self):
+        """Prospective SAME-task/output totals, not a second pool or live quota."""
+        B.need(self.capsule_mode and self.capsule_purpose in CAPSULE_PURPOSES, "capsule-mode")
+        _, limit = CAPSULE_PURPOSES[self.capsule_purpose]
+        private = self.census()
+        B.need(type(private) is dict and set(private) == {"entries", "bytes"}
+               and all(type(private[k]) is int and private[k] >= 0 for k in private)
+               and all(type(row) is dict and type(row.get("size")) is int and row["size"] >= 0
+                       for row in self.export_rows.values()), "capsule-quote-data")
+        # This is the SAME bounded command evidence the old publish path emits.
+        # Form it once now so the new copy quote includes its actual bytes.
+        self.evidence_json("commands.json", self.commands)
+        B.need(len(self.export_rows) + len(self.evidence) + 10 <= WORK_ENTRIES, "capsule-entry-bound")
+        parents = {".", "evidence"}
+        for name in self.export_rows:
+            parts = PurePosixPath(name).parts
+            B.need(1 <= len(parts) <= 4 and all(part not in {"", ".", ".."} for part in parts), "capsule-export-path")
+            parents.update("/".join(parts[:n]) for n in range(1, len(parts)))
+        products = sum(row["size"] for row in self.export_rows.values())
+        # All current evidence bodies already exist; leave the full old report
+        # bound rather than estimating its yet-unwritten serialization.
+        pending_evidence = sum(map(len, self.evidence.values())) + QUERY_LIMIT
+        capsule = limit + CAPSULE_RECEIPT_LIMIT
+        output = products + pending_evidence + capsule
+        entries = private["entries"] + len(self.export_rows) + len(self.evidence) + len(parents) + 6
+        B.need(output <= PUBLIC_BYTES and private["bytes"] + output <= WORK_BYTES
+               and entries <= WORK_ENTRIES, "capsule-combined-bound")
+        B.need(shutil.disk_usage(self.work).free >= pending_evidence + capsule, "capsule-storage")
+        self.capsule_reservation = {"bytes": capsule, "combinedBytes": output, "combinedEntries": entries}
+
+    def capsule_parents_post(self):
+        self.check()
+        B.need(B.custody(self.work.lstat()) == self.work_identity, "capsule-task-original")
+        export = self.public if self.export_promoted else self.export
+        B.need(B.custody(export.lstat()) == self.export_identity, "capsule-export-original")
+        if not self.provider_mode:
+            B.need(B.custody((export / "helper").lstat()) == self.export_helper_identity,
+                   "capsule-helper-parent-original")
+        if self.capsule_identity is not None:
+            root = self.capsule_public if self.capsule_promoted else self.capsule_pending
+            B.need(B.custody(root.lstat()) == self.capsule_identity, "capsule-directory-original")
+
+    def capsule_products_post(self, *, receipt=False):
+        self.capsule_parents_post()
+        root = self.capsule_public if self.capsule_promoted else self.capsule_pending
+        name, limit = CAPSULE_PURPOSES[self.capsule_purpose]
+        wanted = sorted([name, "tool-build-receipt.json"] if receipt else [name])
+        B.need(names(root, 2, self.check) == wanted and 0 < self.capsule_pin[0] <= limit,
+               "capsule-member-roster")
+        path = root / name
+        B.need(stat.S_IMODE(path.lstat().st_mode) == 0o555, "capsule-binary-mode")
+        self.provider_stream(path, self.capsule_pin, original=self.capsule_copy_identity)
+        if receipt:
+            path = root / "tool-build-receipt.json"
+            B.need(B.identity(path.lstat()) == self.capsule_receipt_identity
+                   and stat.S_IMODE(path.lstat().st_mode) == 0o444, "capsule-receipt-original")
+            B.read(path, CAPSULE_RECEIPT_LIMIT, expected=self.capsule_receipt_pin)
+            B.need(B.identity(path.lstat()) == self.capsule_receipt_identity, "capsule-receipt-original")
+        self.capsule_parents_post()
+
+    def capsule_source_post(self):
+        self.capsule_parents_post()
+        if self.provider_mode:
+            self.provider_post(private=not self.provider_private_retired)
+        else:
+            export = self.public if self.export_promoted else self.export
+            self.provider_stream(export / "helper/mrk-github-seal", self.capsule_pin,
+                                 original=self.capsule_source_identity)
+        B.need(source_snapshot(self.check, provider=self.provider_mode, capsule=True) == self.source_binding,
+               "verification-source-final-post")
+        self.capsule_parents_post()
+
+    def prepare_capsule(self):
+        B.need(self.capsule_mode and self.success_ready and self.failure is None and self.source_post
+               and B.DATA.known and not self.inflight, "capsule-work-finality")
+        B.need(self.capsule_identity is None and absent(self.capsule_pending) and absent(self.capsule_public),
+               "capsule-output-collision")
+        self.capsule_reserve()
+        name, limit = CAPSULE_PURPOSES[self.capsule_purpose]
+        if self.provider_mode:
+            path, pin, original = self.provider_original, self.provider_pin, self.provider_identity
+        else:
+            path = self.export / "helper/mrk-github-seal"
+            row = self.export_rows["helper/mrk-github-seal"]
+            pin = (row["size"], row["sha256"])
+            native = self.native["helperExecutable"]
+            B.need(pin == (native["bytes"], native["sha256"]), "capsule-helper-byte-binding")
+            original = B.identity(path.lstat())
+            self.capsule_source_identity = original
+        B.need(type(pin[0]) is int and 0 < pin[0] <= limit, "capsule-binary-bound")
+        self.capsule_pin = pin
+        self.capsule_identity = self.mkdir(self.capsule_pending)
+        self.capsule_parents_post()
+        _, _, self.capsule_copy_identity = self.provider_stream(path, pin, original=original,
+                                                              destination=self.capsule_pending / name)
+        self.capsule_products_post()
+        self.capsule_source_post()
+
+    def capsule_receipt(self):
+        # These are the checked entry's actual publication identifiers, NOT a
+        # claim that the offline provider compiler ran in this GitHub job.
+        B.need(self.target in TARGETS and type(self.source) is str
+               and re.fullmatch(r"[0-9a-f]{40}", self.source) and self.source != "0" * 40
+               and all(type(value) is str and re.fullmatch(r"[1-9][0-9]{0,15}", value)
+                       and int(value) <= 9007199254740991
+                       for value in (self.run_id, self.attempt)), "capsule-publication-context")
+        source = self.evidence["source-binding.json"]
+        B.need(source == B.canonical({"sourceCommit": self.source, "rows": self.source_binding}),
+               "capsule-full-source-binding")
+        value = {"schemaVersion": 1, "kind": "current-tool-build-capsule", "purpose": self.capsule_purpose,
+            "target": self.target, "sourceCommit": self.source, "sourceManifestSha256": B.digest(source),
+            "binary": {"bytes": self.capsule_pin[0], "sha256": self.capsule_pin[1]}, "notices": None,
+            "runId": self.run_id, "runAttempt": self.attempt,
+            "sourcePost": True, "originalsClosed": True, "productsFinal": True}
+        if self.provider_mode:
+            prepared = self.provider_prepared[self.target]
+            B.need(prepared["binary"] == value["binary"], "capsule-facts-product")
+            capsule_origin(prepared["buildOrigin"])
+            value.update(sourceManifestSha256=prepared["sourceManifestSha256"], notices=prepared["notices"],
+                         buildOrigin=prepared["buildOrigin"])
+        body = B.canonical(value)
+        B.need(len(body) <= CAPSULE_RECEIPT_LIMIT, "capsule-receipt-bound")
+        return body
+
+    def retire_capsule(self):
+        # This path is cleanup of OUR acquired directory only, never discovery
+        # of a lost mkdir result or adoption after an unknown close/rename.
+        if self.capsule_identity is None or not B.DATA.known:
+            return
+        self.final_check()
+        root = self.capsule_public if self.capsule_promoted else self.capsule_pending
+        B.need(B.custody(root.lstat()) == self.capsule_identity, "capsule-directory-original")
+        name, limit = CAPSULE_PURPOSES[self.capsule_purpose]
+        for member in names(root, 2, self.check):
+            B.need(member in {name, "tool-build-receipt.json"}, "capsule-member-roster")
+            info = (root / member).lstat()
+            B.need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                   and 0 <= info.st_size <= (limit if member == name else CAPSULE_RECEIPT_LIMIT),
+                   "capsule-cleanup-member")
+        B.retire_tree(root, self.cleanup_deadline)
+        self.capsule_identity = None
+
+    def publish_capsule(self, passed):
+        verdict = self.guard.lifetime_ledger.verdict()
+        B.need(passed is True and self.success_ready and self.source_post and not self.inflight
+               and self.entered == self.returned == len(self.role_limits)
+               and B.public_eligible(failure=self.failure, entered=self.entered, returned=self.returned,
+                   ledger={"complete": verdict.complete, "fatal": verdict.fatal, "contained": verdict.contained},
+                   handlers=self.guard.handler_state, scratch_retired=self.scratch_retired, data_finality=B.DATA.known),
+               "capsule-original-finality")
+        self.capsule_source_post()
+        self.capsule_products_post()
+        body = self.capsule_receipt()
+        path = self.capsule_pending / "tool-build-receipt.json"
+        row = B.write(path, body, 0o444)
+        self.capsule_receipt_pin = (row["size"], row["sha256"])
+        self.capsule_receipt_identity = B.identity(path.lstat())
+        self.capsule_products_post(receipt=True)
+        self.capsule_source_post()
+        B.need(sum(row["size"] for row in self.export_rows.values()) + self.capsule_pin[0] + len(body) <= PUBLIC_BYTES,
+               "capsule-combined-bound")
+        self.final_check()
+        B.need(absent(self.capsule_public), "capsule-output-collision")
+        try:
+            self.capsule_pending.rename(self.capsule_public)
+        except BaseException:
+            B.DATA.unknown()
+            raise
+        self.capsule_promoted = True
+        self.capsule_products_post(receipt=True)
+        self.capsule_source_post()
+        self.final_check()
+        B.need(absent(self.capsule_pending) and absent(self.private), "capsule-finality")
+
     def cleanup(self):
         verdict = self.guard.lifetime_ledger.verdict()
         B.need(B.DATA.known and not self.inflight and verdict.complete and not verdict.fatal and verdict.contained,
@@ -1282,31 +1968,66 @@ class SealBuild:
             self.scratch_retired = True
             return
         B.need(B.custody(self.work.lstat()) == self.work_identity, "original-task-root-changed")
+        if self.provider_mode and self.provider_ready:
+            self.provider_post()
+        capsule_error = None
         if self.failure is None and self.success_ready:
-            self.retain_products()
-        if self.private_identity is not None:
-            self.census()  # Enforce our tighter 8192/512MiB before the donor retire.
-            for name in LIBTOOL_ARCHIVES:
-                alias = self.private / "build/src/libsodium/.libs" / name
-                if name in self.libtool_alias_originals:
-                    self.libtool_alias(alias, retire=True)
-                else:
-                    B.need(absent(alias), "unadmitted-generated-alias")
-            B.retire_tree(self.private, self.cleanup_deadline)
-        self.scratch_retired = True
+            if self.provider_mode:
+                self.export = self.work / "export-pending"
+                self.export_identity = self.mkdir(self.export)  # Evidence only; capsule is a separate sibling.
+            else:
+                self.retain_products()
+            if self.capsule_mode:
+                try:
+                    self.prepare_capsule()
+                except BaseException as error:
+                    capsule_error = error
+                    if not B.DATA.known:
+                        raise  # Unknown copy/open/close grants no further retirement.
+        try:
+            if self.private_identity is not None:
+                self.census()  # Enforce our tighter 8192/512MiB before the donor retire.
+                for name in (() if self.provider_mode else LIBTOOL_ARCHIVES):
+                    alias = self.private / "build/src/libsodium/.libs" / name
+                    if name in self.libtool_alias_originals:
+                        self.libtool_alias(alias, retire=True)
+                    else:
+                        B.need(absent(alias), "unadmitted-generated-alias")
+                B.retire_tree(self.private, self.cleanup_deadline)
+            self.scratch_retired = True
+            if self.capsule_mode and self.provider_mode and self.provider_ready:
+                self.provider_private_retired = True  # Only after the actual retire_tree returned and its POST passed.
+            if capsule_error is not None:
+                self.retire_capsule()
+                # This export was positively acquired before capsule work. It
+                # cannot remain at the old failed-report destination, nor may
+                # a path lookup adopt an interrupted/unreturned mkdir result.
+                B.need(B.DATA.known and not self.export_promoted and self.export_identity is not None
+                       and B.custody(self.export.lstat()) == self.export_identity,
+                       "capsule-export-original")
+                B.retire_tree(self.export, self.cleanup_deadline)
+                self.export_identity = self.export_helper_identity = None
+                self.export_rows.clear()
+        except BaseException as cleanup_error:
+            if capsule_error is not None:
+                raise capsule_error from cleanup_error
+            raise
+        if capsule_error is not None:
+            raise capsule_error
 
     def publish(self, verdict):
         self.final_check()
         if not self.success_ready or self.failure is not None:
             self.export = self.work / "export-pending"
-            self.mkdir(self.export)
+            self.export_identity = self.mkdir(self.export)
         evidence = self.export / "evidence"
         self.mkdir(evidence)
-        self.evidence_json("commands.json", self.commands)
+        if not (self.capsule_mode and "commands.json" in self.evidence):
+            self.evidence_json("commands.json", self.commands)
         passed = B.public_eligible(failure=self.failure, entered=self.entered, returned=self.returned,
             ledger={"complete": verdict.complete, "fatal": verdict.fatal, "contained": verdict.contained},
             handlers=self.guard.handler_state, scratch_retired=self.scratch_retired, data_finality=B.DATA.known)
-        passed = passed and self.success_ready and self.entered == 22
+        passed = passed and self.success_ready and self.entered == len(self.role_limits)
         report = {"schemaVersion": 1, "kind": "macos-github-seal-build-v1", "sourceCommit": self.source,
             "runId": self.run_id, "runAttempt": self.attempt, "target": self.target,
             "status": "passed" if passed else "failed", "transportState": "pending-original-entry-exit",
@@ -1320,13 +2041,26 @@ class SealBuild:
             "officialSignatureVerified": False, "packagedHelperQualified": False,
             "framedParentRoundTripQualified": False, "nativeTests": self.native if passed else None,
             "evidence": {name: {"bytes": len(body), "sha256": B.digest(body)} for name, body in self.evidence.items()}}
+        if self.provider_mode:
+            report.update(kind="macos-history-provider-probe-v1", packagedProviderQualified=False,
+                authenticatedHistoryQualified=False, embeddedNoticesComplete=True,
+                noticeContentRuntimeExecuted=False, providerNotices=PROVIDER_NOTICE_PINS,
+                providerBinary={"bytes": PROVIDER_PINS[self.target][0], "sha256": PROVIDER_PINS[self.target][1]},
+                crossbuildRecord=PROVIDER_CROSSBUILD_PIN, sourceManifest=PROVIDER_SOURCE_PIN)
+            if self.capsule_mode:
+                del report["crossbuildRecord"]
+                report["preparedFacts"] = PROVIDER_FACTS_PINS
+            for name in ("officialArchiveSha256", "officialSignatureVerified", "packagedHelperQualified",
+                         "framedParentRoundTripQualified", "nativeTests"):
+                del report[name]
         body = B.canonical(report)
         B.need(len(body) <= QUERY_LIMIT, "report-bound")
         self.export_rows["report.json"] = B.write(self.export / "report.json", body, 0o444)
         for name, data in self.evidence.items():
             self.final_check()
             self.export_rows["evidence/" + name] = B.write(evidence / name, data, 0o444)
-        B.need(sum(row["size"] for row in self.export_rows.values()) <= PUBLIC_BYTES, "public-export-bound")
+        B.need(sum(row["size"] for row in self.export_rows.values()) <= (MIB if self.provider_mode else PUBLIC_BYTES),
+               "public-export-bound")
         for name, row in self.export_rows.items():
             self.final_check()
             B.read(self.export / name, row["size"], expected=(row["size"], row["sha256"]))
@@ -1337,23 +2071,29 @@ class SealBuild:
         except BaseException:
             B.DATA.unknown()
             raise
+        self.export_promoted = True
         self.final_check()
         B.need(absent(self.export) and absent(self.private), "public-and-scratch-finality")
+        if self.capsule_mode and passed:
+            self.publish_capsule(passed)
 
     def execute(self):
         scope = self.control.CleanupScope(self.guard, self.cleanup, owns_cancellation=True, first_primary=True)
-        caught = None
+        caught = capsule_cleanup_error = None
         try:
             try:
                 with scope:
                     self.guard.install()
                     self.guard.activate()
                     try:
-                        self.prepare()
-                        self.sources()
-                        self.build_sodium()
-                        self.probes_and_helper()
-                        self.final_sources()
+                        if self.provider_mode:
+                            self.prepare_provider()
+                        else:
+                            self.prepare()
+                            self.sources()
+                            self.build_sodium()
+                            self.probes_and_helper()
+                            self.final_sources()
                     except BaseException as error:
                         self.failure = {"phase": self.phase, "type": type(error).__name__,
                             "reason": str(error) if type(error) is B.BuildRefused else "original-operation-failed"}
@@ -1365,6 +2105,12 @@ class SealBuild:
             if self.failure is None:
                 self.failure = {"phase": "cleanup", "type": type(error).__name__, "reason": "original-cleanup-failed"}
         self.cleanup_errors = [type(error).__name__ for error in scope._cleanup_errors]
+        if caught is not None and self.capsule_mode:
+            try:
+                self.retire_capsule()
+            except BaseException as error:
+                capsule_cleanup_error = error
+                self.cleanup_errors.append(type(error).__name__)
         verdict = self.guard.lifetime_ledger.verdict()
         settled = B.DATA.known and not self.inflight and verdict.complete and not verdict.fatal and verdict.contained
         settled = settled and self.guard.handler_state == "RESTORED" and self.scratch_retired
@@ -1373,10 +2119,19 @@ class SealBuild:
             try:
                 self.publish(verdict)
             except BaseException as publication_error:
+                if self.capsule_mode:
+                    try:
+                        self.retire_capsule()
+                    except BaseException as retirement_error:
+                        if caught is not None:
+                            raise caught from retirement_error
+                        raise publication_error from retirement_error
                 if caught is not None:
                     raise caught from publication_error
                 raise
         if caught is not None:
+            if capsule_cleanup_error is not None:
+                raise caught from capsule_cleanup_error
             raise caught
         B.need(settled and self.success_ready, "complete-build-original-finality")
 
@@ -1386,7 +2141,10 @@ def main():
     started = time.monotonic()
     _DIAGNOSTIC_STAGE = "target"
     target = os.environ.get("MRK_SEAL_TARGET", "")
-    need(len(sys.argv) == 1 and target in TARGETS, "fixed-seal-target")
+    argv, reference = sys.argv[1:], os.environ.get("GITHUB_REF", "")
+    capsule = capsule_mode(argv, reference)
+    provider = probe_mode(argv[:-1] if capsule else argv, reference)
+    need(target in TARGETS, "fixed-seal-target")
     machine, runner_arch, _, _, _ = TARGETS[target]
     _DIAGNOSTIC_STAGE = "host"
     need(sys.platform == "darwin" and os.uname().machine == machine and platform.mac_ver()[0].startswith("26.")
@@ -1395,12 +2153,15 @@ def main():
     _DIAGNOSTIC_STAGE = "run"
     source, run, attempt = (os.environ.get(key, "") for key in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
     need(re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
-         and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-seal-run")
+         and all(re.fullmatch(r"[1-9][0-9]{0,15}" if capsule else r"[1-9][0-9]{0,19}", value)
+                 and (not capsule or int(value) <= 9007199254740991)
+                 for value in (run, attempt)), "fixed-seal-run")
     _DIAGNOSTIC_STAGE = "context"
+    reference = PROVIDER_REFERENCE if provider else REFERENCE
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
         "RUNNER_ARCH": runner_arch, "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
-        "GITHUB_REF": REFERENCE, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "seal-build",
-        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + REFERENCE,
+        "GITHUB_REF": reference, "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "seal-build",
+        "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + WORKFLOW + "@" + reference,
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT), "DEVELOPER_DIR": str(DEVELOPER)}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-seal-workflow-context")
     _DIAGNOSTIC_STAGE = "python-entry"
@@ -1414,7 +2175,7 @@ def main():
     os.umask(0o077)
     check = lambda: B.remaining(started + WORK_SECONDS, time.monotonic(), WORK_SECONDS)
     _DIAGNOSTIC_STAGE = "source-snapshot"
-    before = source_snapshot(check)
+    before = source_snapshot(check, provider=provider, capsule=capsule)
     tools = CHECKOUT / "desktop/tools"
     _DIAGNOSTIC_STAGE = "macho-load"
     orchestration = B.load_module("_mrk_seal_existing_macho", tools / "macos_cpython_orchestrator.py")
@@ -1431,7 +2192,7 @@ def main():
     _DIAGNOSTIC_STAGE = "build-init"
     build = SealBuild(target=target, source=source, run=run, attempt=attempt, owner=owner,
         control=cancellation, orchestration=orchestration, probe=probe, started=started,
-        python_binding=python_binding)
+        python_binding=python_binding, provider=provider, capsule=capsule)
     build.resource_limits, build.source_binding = resource_limits, before
     _DIAGNOSTIC_BUILD = build
     _DIAGNOSTIC_STAGE = "build-execute"
@@ -1451,4 +2212,6 @@ if __name__ == "__main__":
         print("Canonical seal build refused; only finalized public evidence is eligible for retention.", file=sys.stderr)
         raise SystemExit(1) from None
     print("Hosted Python executable mode prepared; native build remains unexecuted." if preparing else
+          "History provider probes returned; packaging and authenticated History remain separate."
+          if sys.argv[1:] in (["--history-provider-probe"], ["--history-provider-probe", CAPSULE_MODIFIER]) else
           "Canonical seal native tests returned; packaging and the framed parent integration remain separate.")

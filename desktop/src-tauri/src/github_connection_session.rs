@@ -469,21 +469,22 @@ pub(crate) struct ConnectionState {
     preflight: crate::github_preflight_session::State,
     release: crate::github_release_session::State,
     setup: crate::github_setup_session::State,
+    history: crate::github_history_session::State,
 }
 impl ConnectionState {
     pub(crate) fn new() -> Self {
         Self { status: empty_status(1, Reason::Unqualified), private: None, next_session: 0,
             cooldown: None, cooldown_blocked: false, unknown: false, exhausted: false,
-            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new() }
+            preflight: crate::github_preflight_session::State::new(), release: crate::github_release_session::State::new(), setup: crate::github_setup_session::State::new(), history: crate::github_history_session::State::new() }
     }
     pub(crate) fn snapshot(&self) -> Status { self.status.clone() }
     pub(crate) fn registration(&self) -> Option<(&str, u32)> {
         self.private.as_ref().map(|s| (s.project_id.as_str(), s.generation))
     }
     pub(crate) fn material_settled(&self) -> bool {
-        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending()
+        self.private.as_ref().is_none_or(|s| s.token.is_none() && s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending()
     }
-    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() }
+    pub(crate) fn native_work_pending(&self) -> bool { self.private.as_ref().is_some_and(|s| s.ticket.is_some()) || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() }
     fn fact_retirement(&mut self, reason: Reason) {
         stale(&mut self.status.account, reason); stale(&mut self.status.repository, reason); stale(&mut self.status.automation, reason);
     }
@@ -495,7 +496,7 @@ impl ConnectionState {
         }
     }
     fn room(&mut self) -> Result<(), BridgeError> {
-        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
+        if self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted || self.status.revision >= u32::MAX - 1 { self.exhaust(); return Err(refused(Reason::CleanupUnknown)); }
         if self.unknown { return Err(refused(Reason::CleanupUnknown)); } Ok(())
     }
     pub(crate) fn exhaust(&mut self) {
@@ -509,6 +510,7 @@ impl ConnectionState {
     fn unknown_inner(&mut self) {
         self.unknown = true;
         self.preflight.unknown(); self.release.unknown();
+        let history_before=self.history.snapshot();self.history.unknown();self.history.finish(history_before);
         let setup_before = self.setup.snapshot(); self.setup.unknown(); self.setup.finish(setup_before);
         self.unknown_operation();
         self.retire_inner(Reason::CleanupUnknown, false);
@@ -535,6 +537,9 @@ impl ConnectionState {
     }
     fn retire_inner(&mut self, reason: Reason, remove: bool) {
         self.preflight.stop(); self.release.stop();
+        let history_before=self.history.snapshot();
+        if reason==Reason::CleanupUnknown{self.history.unknown();}else{self.history.stop();}
+        self.history.finish(history_before);
         let setup_before = self.setup.snapshot();
         if reason == Reason::CleanupUnknown { self.setup.unknown(); } else { self.setup.stop(); }
         self.setup.finish(setup_before);
@@ -550,11 +555,11 @@ impl ConnectionState {
         let reason = private.retirement.unwrap_or(reason);
         if let Some(session) = &mut self.status.session { session.state = if self.unknown { SessionState::CleanupUnknown } else { SessionState::Disconnecting }; }
         self.fact_retirement(if self.unknown { Reason::CleanupUnknown } else { reason });
-        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() { self.complete_retirement(); }
+        if self.private.as_ref().is_some_and(|s| s.ticket.is_none()) && !self.preflight.native_work_pending() && !self.release.native_work_pending() && !self.setup.native_work_pending() && !self.history.native_work_pending() { self.complete_retirement(); }
     }
     fn complete_retirement(&mut self) {
         let Some(private) = &mut self.private else { return; };
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() { return; }
+        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() { return; }
         private.token = None;
         if self.unknown {
             if let Some(session) = &mut self.status.session { session.state = SessionState::CleanupUnknown; }
@@ -701,6 +706,8 @@ impl ConnectionState {
         self.release.revoke_consent(); self.release.view.pending.clear(); self.release.view.run = None;
         self.release.view.operation = None; self.release.view.session_id = None;
         self.release.finish(release_before);
+        let history_before=self.history.snapshot();self.history.view.operation=None;
+        self.history.view.session_id=None;self.history.view.result=None;self.history.finish(history_before);
         let setup_before = self.setup.snapshot(); self.setup.revoke_consent();
         self.setup.view.operation = None; self.setup.view.session_id = None; self.setup.view.observed = None;
         self.setup.finish(setup_before);
@@ -713,7 +720,7 @@ impl ConnectionState {
         self.room()?;
         if revision != self.status.revision { return Err(refused(Reason::TargetChanged)); }
         let private = self.private.as_ref().filter(|s| s.id == id).ok_or_else(|| refused(Reason::InvalidInput))?;
-        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() { return Err(refused(Reason::Busy)); }
+        if private.ticket.is_some() || self.preflight.native_work_pending() || self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() { return Err(refused(Reason::Busy)); }
         if let Some(reason) = private.retirement { return Err(refused(reason)); }
         if !self.status.capability.read_only_session_available { return Err(refused(self.status.capability.reason)); }
         if now >= private.clock.end { self.retire(Reason::Expired); return Err(refused(Reason::Expired)); }
@@ -749,7 +756,7 @@ impl ConnectionState {
     pub(crate) fn preflight_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_preflight_protocol::Status {
         use crate::{github_preflight_protocol::Reason as R, github_preflight_session::connection_reason};
         let before = self.preflight.snapshot(); self.preflight.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_preflight_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -870,8 +877,8 @@ impl ConnectionState {
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.release.native_work_pending() || self.setup.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.release.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -985,7 +992,7 @@ impl ConnectionState {
     pub(crate) fn release_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_release_protocol::Status {
         use crate::{github_release_protocol::Reason as R, github_release_session::connection_reason};
         let before = self.release.snapshot(); self.release.expire_consent(now);
-        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !crate::github_release_protocol::publisher_bound() { R::PublisherUnconfigured }
             else if !qualified { R::Unqualified }
@@ -1112,8 +1119,8 @@ impl ConnectionState {
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.preflight.native_work_pending() || self.setup.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.preflight.exhausted || self.release.exhausted || self.setup.exhausted || self.history.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.preflight.native_work_pending() || self.setup.native_work_pending() || self.history.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
         if now >= private.clock.end { return Err(s::refused(p::Reason::Expired)); }
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         let (account, repository, coordinate) = request.action.as_ref().map(|a|
@@ -1227,7 +1234,7 @@ impl ConnectionState {
     pub(crate) fn setup_status(&mut self, qualified: bool, now: Instant, external: Reason) -> crate::github_setup_protocol::Status {
         use crate::{github_setup_protocol::Reason as R, github_setup_session::connection_reason};
         let before = self.setup.snapshot(); self.setup.expire_consent(now); self.setup.observe_go();
-        let reason = if self.unknown || self.exhausted || self.setup.exhausted { R::CleanupUnknown }
+        let reason = if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted { R::CleanupUnknown }
             else if external != Reason::None { connection_reason(external) }
             else if !qualified { R::Unqualified }
             else if self.native_work_pending() { R::Busy }
@@ -1248,9 +1255,26 @@ impl ConnectionState {
         let before = self.setup.snapshot(); self.setup.stop(); self.setup.finish(before);
     }
     pub(crate) fn setup_ensure_idle(&self) -> Result<(), BridgeError> {
-        if self.unknown || self.exhausted || self.setup.exhausted { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
-        if self.setup.native_work_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::CleanupUnknown)); }
+        if self.setup.native_work_pending() || self.history.native_work_pending() { return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::Busy)); }
         Ok(())
+    }
+    pub(crate) fn setup_secret_work_pending(&self)->bool{
+        // Only the retained original Ticket, including stopping/unknown, owns
+        // the working debit. Idle consent is not an active-work prohibition.
+        self.setup.active.as_ref().is_some_and(|v|v.ticket.has_setup_material())
+    }
+    pub(crate) fn setup_secret_material(&self)->Option<&std::sync::Arc<crate::asset_session::GitHubSecretMaterial>>{
+        self.setup.active.as_ref().and_then(|v|v.ticket.secret_material())
+            .or_else(||self.setup.consent.as_ref().and_then(|v|v.material.as_ref().and_then(crate::github_setup_session::ConsentMaterial::secret).map(|v|&v.material)))
+    }
+    pub(crate) fn setup_variable_material(&self)->Option<&std::sync::Arc<crate::asset_session::GitHubVariableMaterial>>{
+        self.setup.active.as_ref().and_then(|v|v.ticket.variable_material())
+            .or_else(||self.setup.consent.as_ref().and_then(|v|v.material.as_ref().and_then(crate::github_setup_session::ConsentMaterial::variable)))
+    }
+    pub(crate) fn setup_has_material(&self)->bool{
+        self.setup.active.as_ref().is_some_and(|v|v.ticket.has_setup_material())
+            ||self.setup.consent.as_ref().is_some_and(|v|v.material.is_some())
     }
     pub(crate) fn setup_registered_project(&self) -> Option<&str> {
         self.setup.active.as_ref().map(|v| v.project_id.as_str())
@@ -1285,6 +1309,7 @@ impl ConnectionState {
     }
     fn setup_start(&mut self, request: crate::github_setup_protocol::Request, root: crate::asset_source::RegisteredRoot,
         edit_stamp: crate::edit_owner::SavedEditStamp, consent_id: String, consent_end: Option<Instant>,
+        material: Option<crate::supervisor::SetupNativeAdmission>,
         gate: crate::asset_session::GitHubSetupGoGate, supervisor: &Supervisor, now: Instant) -> Result<crate::github_setup_protocol::Status, BridgeError> {
         use crate::{github_setup_protocol as p, github_setup_session as s};
         if !supervisor.github_setup_profile_available() { return Err(s::refused(p::Reason::Unqualified)); }
@@ -1302,8 +1327,11 @@ impl ConnectionState {
         // old limits. Reserve the source capacities before making either clone,
         // then measure both actual clones before handing one to Supervisor.
         if !p::future_status_fits(&request, &session_id) { return Err(s::refused(p::Reason::InvalidInput)); }
-        p::encode_initial("github-setup-18446744073709551615", &request).map_err(|_| s::refused(p::Reason::InvalidInput))?;
-        let environment = matches!(&request.target.selection, p::Selection::Environment(_));
+        match &material {
+            Some(v)=>v.encode_initial("github-setup-18446744073709551615",&request),
+            None=>p::encode_initial("github-setup-18446744073709551615",&request),
+        }.map_err(|_|s::refused(p::Reason::InvalidInput))?;
+        let environment = matches!(&request.target.selection, p::Selection::Environment(_) | p::Selection::Secret(_) | p::Selection::Variable(_));
         let context_bytes = session_id.capacity().checked_add(project_id.capacity())
             .and_then(|v| v.checked_add(root.path.capacity())).and_then(|v| v.checked_add(consent_id.capacity()))
             .and_then(|v| v.checked_add(512)); // fixed operation/session display clone headroom
@@ -1318,7 +1346,8 @@ impl ConnectionState {
             request.retained_heap_bytes(), worker_request.retained_heap_bytes(), context_bytes]) {
             return Err(s::refused(p::Reason::ResponseLimit));
         }
-        let ticket = supervisor.start_github_setup(worker_request, gate).map_err(|error|
+        let ticket = match material {Some(v)=>supervisor.start_github_setup_material(worker_request,gate,v),
+            None=>supervisor.start_github_setup(worker_request,gate)}.map_err(|error|
             s::refused(match error.code.as_str() { "busy" => p::Reason::Busy, "cleanup_unknown" => p::Reason::CleanupUnknown,
                 "shutting_down" | "cancelled" => p::Reason::Cancelled, _ => p::Reason::RuntimeUnavailable }))?;
         let other = self.preflight.snapshot(); self.preflight.revoke_consent(); self.preflight.finish(other);
@@ -1334,26 +1363,83 @@ impl ConnectionState {
         use crate::{github_setup_protocol as p, github_setup_session as s};
         if args.expected_connection_revision != self.status.revision { return Err(s::refused(p::Reason::TargetChanged)); }
         let (_, target) = self.setup_context(&args.session_id, args.expected_revision, generation, binding, args.selection, now)?;
-        self.setup_start(p::Request { kind: p::Kind::Prepare, target, prepared: None }, root, edit_stamp, consent_id, None, gate, supervisor, now)
+        self.setup_start(p::Request { kind: p::Kind::Prepare, target, prepared: None }, root, edit_stamp, consent_id, None, None, gate, supervisor, now)
     }
-    pub(crate) fn setup_apply(&mut self, args: crate::github_setup_protocol::ApplyArgs,
-        generation: u32, root: crate::asset_source::RegisteredRoot, binding: &str,
-        edit: &crate::edit_owner::SavedEditGuard<'_>, gate: crate::asset_session::GitHubSetupGoGate,
-        supervisor: &Supervisor, now: Instant) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+    pub(crate) fn setup_secret_prepare(&mut self,args:crate::github_setup_protocol::PrepareArgs,
+        generation:u32,root:crate::asset_source::RegisteredRoot,binding:&str,edit_stamp:crate::edit_owner::SavedEditStamp,
+        consent_id:String,secret:crate::supervisor::SecretNativeAdmission,gate:crate::asset_session::GitHubSetupGoGate,
+        supervisor:&Supervisor,now:Instant)->Result<crate::github_setup_protocol::Status,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        if args.expected_connection_revision!=self.status.revision{return Err(s::refused(p::Reason::TargetChanged))}
+        let(_,target)=self.setup_context(&args.session_id,args.expected_revision,generation,binding,args.selection,now)?;
+        if !matches!(&target.selection,p::Selection::Secret(v) if v==secret.material().selection()){
+            return Err(s::refused(p::Reason::MaterialChanged));
+        }
+        self.setup_start(p::Request{kind:p::Kind::Prepare,target,prepared:None},root,edit_stamp,consent_id,None,Some(crate::supervisor::SetupNativeAdmission::Secret(secret)),gate,supervisor,now)
+    }
+    pub(crate) fn setup_variable_prepare(&mut self,args:crate::github_setup_protocol::PrepareArgs,
+        generation:u32,root:crate::asset_source::RegisteredRoot,binding:&str,edit_stamp:crate::edit_owner::SavedEditStamp,
+        consent_id:String,material:crate::supervisor::VariableNativeAdmission,gate:crate::asset_session::GitHubSetupGoGate,
+        supervisor:&Supervisor,now:Instant)->Result<crate::github_setup_protocol::Status,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        if args.expected_connection_revision!=self.status.revision{return Err(s::refused(p::Reason::TargetChanged))}
+        let(_,target)=self.setup_context(&args.session_id,args.expected_revision,generation,binding,args.selection,now)?;
+        if !matches!(&target.selection,p::Selection::Variable(v) if v==material.material().selection()){
+            return Err(s::refused(p::Reason::MaterialChanged));
+        }
+        self.setup_start(p::Request{kind:p::Kind::Prepare,target,prepared:None},root,edit_stamp,consent_id,None,
+            Some(crate::supervisor::SetupNativeAdmission::Variable(material)),gate,supervisor,now)
+    }
+    pub(crate) fn setup_take_apply(&mut self, args: crate::github_setup_protocol::ApplyArgs,
+        generation: u32, root: &crate::asset_source::RegisteredRoot, binding: &str,
+        edit: &crate::edit_owner::SavedEditGuard<'_>, now: Instant)
+        -> Result<(crate::github_setup_protocol::Target,crate::github_setup_session::Consent), BridgeError> {
         use crate::{github_setup_protocol as p, github_setup_session as s};
         let selection = self.setup.consent.as_ref().map(|v| v.prepared.target().selection.clone())
             .ok_or_else(|| s::refused(p::Reason::ConsentExpired))?;
         let (project_id, target) = self.setup_context(&args.session_id, args.expected_revision, generation, binding, selection, now)?;
         if !args.confirm || !self.setup.consent.as_ref().is_some_and(|v| v.id == args.consent_id
-            && v.session_id == args.session_id && v.project_id == project_id && v.generation == generation && v.root == root
+            && v.session_id == args.session_id && v.project_id == project_id && v.generation == generation && v.root == *root
             && v.prepared.target() == &target && v.prepared.valid() && now < v.end && edit.matches(&v.edit_stamp)) {
             return Err(s::refused(p::Reason::ConsentExpired));
         }
         let before = self.setup.snapshot();
         let consent = self.setup.consent.take().ok_or_else(|| s::refused(p::Reason::ConsentExpired))?;
         self.setup.revoke_consent(); self.setup.finish(before); // One use, even if later admission refuses.
+        Ok((target,consent))
+    }
+    pub(crate) fn setup_apply(&mut self, args: crate::github_setup_protocol::ApplyArgs,
+        generation: u32, root: crate::asset_source::RegisteredRoot, binding: &str,
+        edit: &crate::edit_owner::SavedEditGuard<'_>, gate: crate::asset_session::GitHubSetupGoGate,
+        supervisor: &Supervisor, now: Instant) -> Result<crate::github_setup_protocol::Status, BridgeError> {
+        use crate::{github_setup_protocol as p, github_setup_session as s};
+        let(target,consent)=self.setup_take_apply(args,generation,&root,binding,edit,now)?;
+        if matches!(&target.selection,p::Selection::Secret(_) | p::Selection::Variable(_)){return Err(s::refused(p::Reason::RuntimeUnavailable))}
         self.setup_start(p::Request { kind: p::Kind::Apply, target, prepared: Some(consent.prepared) }, root,
-            consent.edit_stamp, consent.id, Some(consent.end), gate, supervisor, now)
+            consent.edit_stamp, consent.id, Some(consent.end), None, gate, supervisor, now)
+    }
+    pub(crate) fn setup_secret_apply(&mut self,target:crate::github_setup_protocol::Target,
+        consent:crate::github_setup_session::Consent,root:crate::asset_source::RegisteredRoot,
+        secret:crate::supervisor::SecretNativeAdmission,gate:crate::asset_session::GitHubSetupGoGate,
+        supervisor:&Supervisor,now:Instant)->Result<crate::github_setup_protocol::Status,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        if !matches!(&target.selection,p::Selection::Secret(v) if v==secret.material().selection())||consent.material.is_some(){
+            return Err(s::refused(p::Reason::MaterialChanged))
+        }
+        self.setup_start(p::Request{kind:p::Kind::Apply,target,prepared:Some(consent.prepared)},root,
+            consent.edit_stamp,consent.id,Some(consent.end),Some(crate::supervisor::SetupNativeAdmission::Secret(secret)),gate,supervisor,now)
+    }
+    pub(crate) fn setup_variable_apply(&mut self,target:crate::github_setup_protocol::Target,
+        consent:crate::github_setup_session::Consent,root:crate::asset_source::RegisteredRoot,
+        material:crate::supervisor::VariableNativeAdmission,gate:crate::asset_session::GitHubSetupGoGate,
+        supervisor:&Supervisor,now:Instant)->Result<crate::github_setup_protocol::Status,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        if !matches!(&target.selection,p::Selection::Variable(v) if v==material.material().selection())||consent.material.is_some()
+            ||!matches!(&consent.prepared,p::Prepared::Variable(v) if material.material().prepared_matches(v)){
+            return Err(s::refused(p::Reason::MaterialChanged))
+        }
+        self.setup_start(p::Request{kind:p::Kind::Apply,target,prepared:Some(consent.prepared)},root,
+            consent.edit_stamp,consent.id,Some(consent.end),Some(crate::supervisor::SetupNativeAdmission::Variable(material)),gate,supervisor,now)
     }
     pub(crate) fn setup_cancel(&mut self, id: &str) -> Result<crate::github_setup_protocol::Status, BridgeError> {
         self.setup.cancel(id)?; Ok(self.setup.snapshot())
@@ -1361,15 +1447,15 @@ impl ConnectionState {
     pub(crate) fn setup_discard(&mut self, args: &crate::github_setup_protocol::DiscardArgs) -> Result<crate::github_setup_protocol::Status, BridgeError> {
         self.setup.discard(args)?; Ok(self.setup.snapshot())
     }
-    pub(crate) fn setup_go(&self, id: &str, digest: &str, request: &crate::github_setup_protocol::Request,
-        generation: u32, root: &crate::asset_source::RegisteredRoot, edit: &crate::edit_owner::SavedEditGuard<'_>,
-        now: Instant, claim: impl FnOnce() -> bool) -> Result<Vec<u8>, BridgeError> {
+    fn setup_original_current(&self,id:&str,request:&crate::github_setup_protocol::Request,
+        generation:u32,root:&crate::asset_source::RegisteredRoot,edit:&crate::edit_owner::SavedEditGuard<'_>,now:Instant)
+        ->Result<(),BridgeError>{
         use crate::{github_setup_protocol as p, github_setup_session as s};
         let active = self.setup.active.as_ref().filter(|v| v.ticket.operation_id() == id && &v.request == request
             && v.generation == generation && &v.root == root && edit.matches(&v.edit_stamp))
             .ok_or_else(|| s::refused(p::Reason::TargetChanged))?;
-        if self.unknown || self.exhausted || self.setup.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
-        if self.preflight.native_work_pending() || self.release.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
+        if self.unknown || self.exhausted || self.setup.exhausted || self.history.exhausted { return Err(s::refused(p::Reason::CleanupUnknown)); }
+        if self.preflight.native_work_pending() || self.release.native_work_pending() || self.history.native_work_pending() { return Err(s::refused(p::Reason::Busy)); }
         if active.consent_end.is_some_and(|end| now >= end) { return Err(s::refused(p::Reason::ConsentExpired)); }
         let private = self.private.as_ref().filter(|v| v.id == active.session_id && v.project_id == active.project_id
             && v.generation == active.generation && v.ticket.is_none() && v.retirement.is_none() && v.token.is_some())
@@ -1378,8 +1464,30 @@ impl ConnectionState {
         if self.cooldown_blocked || self.cooldown.is_some_and(|end| now < end) { return Err(s::refused(p::Reason::RateLimited)); }
         if private.account_pin.as_ref() != Some(&request.target.account_id) || private.repository_pin.as_ref() != Some(&request.target.repository_id)
             || !request.target.repository.eq_ignore_ascii_case(&private.repository) { return Err(s::refused(p::Reason::TargetChanged)); }
-        let bytes = p::encode_go(id, digest, private.token.as_deref().ok_or_else(|| s::refused(p::Reason::Expired))?)?;
-        if !claim() { return Err(s::refused(p::Reason::Cancelled)); } Ok(bytes)
+        Ok(())
+    }
+    pub(crate) fn setup_go(&self,id:&str,digest:&str,request:&crate::github_setup_protocol::Request,
+        generation:u32,root:&crate::asset_source::RegisteredRoot,edit:&crate::edit_owner::SavedEditGuard<'_>,
+        now:Instant,claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        self.setup_original_current(id,request,generation,root,edit,now)?;
+        let private=self.private.as_ref().ok_or_else(||s::refused(p::Reason::Expired))?;
+        let token=private.token.as_deref().ok_or_else(||s::refused(p::Reason::Expired))?;
+        let bytes=if request.kind==p::Kind::Apply&&matches!(&request.target.selection,p::Selection::Secret(_)){
+            self.setup.active.as_ref().ok_or_else(||s::refused(p::Reason::TargetChanged))?.ticket.encode_secret_apply_go(id,digest,token)?
+        }else if matches!(&request.target.selection,p::Selection::Variable(_)){
+            self.setup.active.as_ref().ok_or_else(||s::refused(p::Reason::TargetChanged))?.ticket.encode_variable_go(id,digest,token)?
+        }else{p::encode_go(id,digest,token)?};
+        if !claim(){return Err(s::refused(p::Reason::Cancelled))}Ok(bytes)
+    }
+    pub(crate) fn setup_secret_current(&self,id:&str,request:&crate::github_setup_protocol::Request,
+        material:&std::sync::Arc<crate::asset_session::GitHubSecretMaterial>,generation:u32,
+        root:&crate::asset_source::RegisteredRoot,edit:&crate::edit_owner::SavedEditGuard<'_>,now:Instant)->Result<(),BridgeError>{
+        self.setup_original_current(id,request,generation,root,edit,now)?;
+        if request.kind!=crate::github_setup_protocol::Kind::Prepare
+            ||!self.setup.active.as_ref().and_then(|v|v.ticket.secret_material()).is_some_and(|v|std::sync::Arc::ptr_eq(v,material)){
+            return Err(crate::github_setup_session::refused(crate::github_setup_protocol::Reason::MaterialChanged));
+        }Ok(())
     }
     pub(crate) fn reconcile_setup(&mut self, now: Instant, external: Reason,
         proof: Option<(u32, &crate::asset_source::RegisteredRoot, &crate::edit_owner::SavedEditGuard<'_>)>) {
@@ -1406,7 +1514,7 @@ impl ConnectionState {
         let claimed = active.ticket.go_claimed(); let kind = active.request.kind;
         let mut effect = if kind == p::Kind::Apply && claimed { p::Effect::Unknown } else { p::Effect::NotStarted };
         let mut reason = result.as_ref().map_or_else(s::outcome_reason, |v| v.result.reason);
-        let environment = matches!(&active.request.target.selection, p::Selection::Environment(_));
+        let environment = matches!(&active.request.target.selection, p::Selection::Environment(_) | p::Selection::Secret(_) | p::Selection::Variable(_));
         let original_bytes = if environment { active.ticket.retained_setup_heap_bytes() } else { Some(0) };
         let context_bytes = active.session_id.capacity().checked_add(active.project_id.capacity())
             .and_then(|v| v.checked_add(active.root.path.capacity())).and_then(|v| v.checked_add(active.consent_id.capacity()))
@@ -1456,8 +1564,19 @@ impl ConnectionState {
                     })();
                     match (publication, public_prepared) {
                         (Ok((end, expires_at)), Some(public_prepared)) => {
+                            let material=match &prepared {
+                                p::Prepared::Secret(_)=>match active.ticket.take_secret_sealed(){
+                                    Ok(Some(v)) if v.retained_heap_bytes().is_some_and(|n|n<=p::RESPONSE_LIMIT+16384)=>Some(s::ConsentMaterial::Secret(v)),
+                                    _=>{self.unknown_inner();self.setup.revoke_consent();return;},
+                                },
+                                p::Prepared::Variable(prepared)=>match active.ticket.variable_material(){
+                                    Some(v) if v.prepared_matches(prepared)=>Some(s::ConsentMaterial::Variable(v.clone())),
+                                    _=>{self.unknown_inner();self.setup.revoke_consent();return;},
+                                },
+                                p::Prepared::Repository(_)|p::Prepared::Environment(_)=>None,
+                            };
                             self.setup.view.consent = Some(p::ConsentView { id: active.consent_id.clone(), expires_at, prepared: public_prepared });
-                            self.setup.consent = Some(s::Consent { id: active.consent_id, prepared, end, session_id: active.session_id,
+                            self.setup.consent = Some(s::Consent { material, id: active.consent_id, prepared, end, session_id: active.session_id,
                                 project_id: active.project_id, generation: active.generation, root: active.root, edit_stamp: active.edit_stamp });
                         },
                         (Err(error), _) => { reason = if error.code == "github_remote_setup_refused_response_limit" { p::Reason::ResponseLimit } else { p::Reason::ConsentExpired }; self.setup.revoke_consent(); },
@@ -1466,7 +1585,7 @@ impl ConnectionState {
                 }
             }
         }
-        if reason != p::Reason::None && effect == p::Effect::ReadbackConfirmed { effect = p::Effect::Unknown; self.setup.view.observed = None; }
+        if reason != p::Reason::None && matches!(effect,p::Effect::ReadbackConfirmed|p::Effect::AcceptedNotValueVerified) { effect = p::Effect::Unknown; self.setup.view.observed = None; }
         if let Some(op) = &mut self.setup.view.operation { op.phase = p::Phase::Settled; op.reason = reason; op.effect = effect; }
         let retire = match reason {
             p::Reason::Unauthorized => Some(Reason::Unauthorized), p::Reason::TargetChanged => Some(Reason::TargetChanged),
@@ -1476,6 +1595,179 @@ impl ConnectionState {
         if let Some(reason) = retire { self.retire_inner(reason, false); }
         if retirement.is_some() { self.complete_retirement(); }
     }
+}
+
+// Read-only History uses the same credential, document mutex and Supervisor.
+// Neither nomination nor public Status is a source or settlement capability.
+impl ConnectionState {
+    pub(crate) fn history_work_pending(&self) -> bool { self.history.native_work_pending() }
+    pub(crate) fn history_has_retained_data(&self) -> bool {
+        self.history.view.session_id.is_some() || self.history.view.operation.is_some() || self.history.view.result.is_some()
+    }
+    pub(crate) fn history_registered_project(&self) -> Option<&str> {
+        self.history.active.as_ref().map(|v|v.nomination.project_id.as_str())
+    }
+    pub(crate) fn history_status(&mut self, profile: crate::github_history_protocol::Reason,
+        now: Instant, external: Reason) -> crate::github_history_protocol::Status {
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let before=self.history.snapshot();
+        let reason=if self.unknown||self.exhausted||self.history.exhausted {p::Reason::CleanupUnknown}
+            else if external!=Reason::None {s::connection_reason(external)}
+            else if !crate::github_preflight_protocol::publisher_bound() {p::Reason::PublisherUnconfigured}
+            else if profile!=p::Reason::None {profile}
+            else if self.native_work_pending() {p::Reason::Busy}
+            else if let Some(private)=&self.private {
+                if let Some(reason)=private.retirement {s::connection_reason(reason)}
+                else if now>=private.clock.end {p::Reason::Expired}
+                else if self.cooldown_blocked||self.cooldown.is_some_and(|end|now<end){p::Reason::RateLimited}
+                else if private.token.is_none()||private.account_pin.is_none()||private.repository_pin.is_none()
+                    || self.status.account.state!=FactState::Observed||self.status.repository.state!=FactState::Observed {p::Reason::NotConnected}
+                else{p::Reason::None}
+            }else{p::Reason::NotConnected};
+        self.history.view.available=reason==p::Reason::None;self.history.view.reason=reason;
+        if self.history.view.operation.is_none(){self.history.view.session_id=self.private.as_ref().map(|v|v.id.clone());}
+        self.history.finish(before);self.history.snapshot()
+    }
+    pub(crate) fn history_nomination(&mut self,args:crate::github_history_protocol::StartArgs,
+        generation:u32,root:crate::asset_source::RegisteredRoot,edit_stamp:crate::edit_owner::SavedEditStamp,
+        binding:String,owner_generation:String,work_nonce:String,now:Instant)
+        ->Result<(std::sync::Arc<crate::github_history_session::Nomination>,Instant),BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        self.room().map_err(|_|s::refused(p::Reason::CleanupUnknown))?;
+        if self.history.view.revision!=args.expected_revision||self.status.revision!=args.expected_connection_revision{
+            return Err(s::refused(p::Reason::TargetChanged));
+        }
+        if self.native_work_pending(){return Err(s::refused(p::Reason::Busy));}
+        if !self.history.view.available{return Err(s::refused(self.history.view.reason));}
+        if self.history.view.revision>=p::LAST_REVISION-8{self.exhaust();return Err(s::refused(p::Reason::CleanupUnknown));}
+        let private=self.private.as_ref().filter(|v|v.id==args.session_id&&v.generation==generation)
+            .ok_or_else(||s::refused(p::Reason::TargetChanged))?;
+        if private.retirement.is_some()||private.token.is_none()||now>=private.clock.end{return Err(s::refused(p::Reason::Expired));}
+        if self.cooldown_blocked||self.cooldown.is_some_and(|end|now<end){return Err(s::refused(p::Reason::RateLimited));}
+        let account=self.status.account.value.as_ref().filter(|v|self.status.account.state==FactState::Observed
+            &&private.account_pin.as_ref()==Some(&v.id)).ok_or_else(||s::refused(p::Reason::NotConnected))?;
+        let repository=self.status.repository.value.as_ref().filter(|v|self.status.repository.state==FactState::Observed
+            &&private.repository_pin.as_ref()==Some(&v.id)&&v.full_name.eq_ignore_ascii_case(&private.repository))
+            .ok_or_else(||s::refused(p::Reason::NotConnected))?;
+        let tooling_sha=crate::github_preflight_protocol::TOOLING_SHA.filter(|_|crate::github_preflight_protocol::publisher_bound())
+            .ok_or_else(||s::refused(p::Reason::PublisherUnconfigured))?;
+        if !args.selection.valid()||!p::hex(&binding,64)||!p::hex(&owner_generation,32)||!p::hex(&work_nonce,32){
+            return Err(s::refused(p::Reason::InvalidInput));
+        }
+        let nomination=std::sync::Arc::new(s::Nomination{session_id:private.id.clone(),project_id:private.project_id.clone(),
+            generation,root,edit_stamp,project_binding:binding,repository:repository.full_name.clone(),account_id:account.id.clone(),
+            repository_id:repository.id.clone(),tooling_sha:tooling_sha.into(),selection:args.selection,owner_generation,work_nonce});
+        Ok((nomination,private.clock.end))
+    }
+    pub(crate) fn history_start(&mut self,nomination:std::sync::Arc<crate::github_history_session::Nomination>,
+        admission:crate::supervisor::GitHubHistoryAdmission,supervisor:&Supervisor,now:Instant)
+        ->Result<crate::github_history_protocol::Status,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        if self.native_work_pending(){return Err(s::refused(p::Reason::Busy));}
+        if self.unknown||self.exhausted||self.history.exhausted{return Err(s::refused(p::Reason::CleanupUnknown));}
+        if !self.history_session_current(&nomination,now){return Err(s::refused(p::Reason::TargetChanged));}
+        // Allocate the bounded projection before registration. After this call
+        // succeeds only infallible moves publish the SAME original ticket.
+        let before=self.history.snapshot();
+        let ticket=supervisor.start_github_history(admission).map_err(history_admission_error)?;
+        let other=self.preflight.snapshot();self.preflight.revoke_consent();self.preflight.finish(other);
+        let other=self.release.snapshot();self.release.revoke_consent();self.release.finish(other);
+        let other=self.setup.snapshot();self.setup.revoke_consent();self.setup.finish(other);
+        self.history.start(s::Active{ticket,nomination},before);
+        let before=self.status.clone();self.capability(now,Reason::None);self.finish(before);Ok(self.history.snapshot())
+    }
+    fn history_session_current(&self,nomination:&crate::github_history_session::Nomination,now:Instant)->bool{
+        !self.unknown&&!self.exhausted&&!self.history.exhausted
+            &&!self.preflight.native_work_pending()&&!self.release.native_work_pending()&&!self.setup.native_work_pending()
+            &&!self.cooldown_blocked&&!self.cooldown.is_some_and(|end|now<end)
+            &&crate::github_preflight_protocol::TOOLING_SHA==Some(nomination.tooling_sha.as_str())
+            &&crate::github_preflight_protocol::publisher_bound()
+            &&self.private.as_ref().is_some_and(|v|v.id==nomination.session_id&&v.project_id==nomination.project_id
+                &&v.generation==nomination.generation&&v.ticket.is_none()&&v.retirement.is_none()&&v.token.is_some()&&now<v.clock.end
+                &&v.account_pin.as_ref()==Some(&nomination.account_id)&&v.repository_pin.as_ref()==Some(&nomination.repository_id)
+                &&v.repository.eq_ignore_ascii_case(&nomination.repository))
+    }
+    fn history_current(&self,generation:u32,root:&crate::asset_source::RegisteredRoot,
+        edit:&crate::edit_owner::SavedEditGuard<'_>,now:Instant)->bool{
+        self.history.active.as_ref().is_some_and(|v|v.nomination.generation==generation&& &v.nomination.root==root
+            &&edit.matches(&v.nomination.edit_stamp)&&self.history_session_current(&v.nomination,now))
+    }
+    pub(crate) fn history_go(&self,id:&str,digest:&str,nomination:&std::sync::Arc<crate::github_history_session::Nomination>,
+        generation:u32,root:&crate::asset_source::RegisteredRoot,edit:&crate::edit_owner::SavedEditGuard<'_>,
+        now:Instant,claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        if !self.history.active.as_ref().is_some_and(|v|v.ticket.operation_id()==id&&std::sync::Arc::ptr_eq(&v.nomination,nomination))
+            ||!self.history_current(generation,root,edit,now){return Err(s::refused(p::Reason::TargetChanged));}
+        let token=self.private.as_ref().and_then(|v|v.token.as_deref()).ok_or_else(||s::refused(p::Reason::Expired))?;
+        let bytes=p::encode_go(id,digest,token)?;
+        if !claim(){return Err(s::refused(p::Reason::Cancelled));}Ok(bytes)
+    }
+    pub(crate) fn history_cancel(&mut self,id:&str)->Result<crate::github_history_protocol::Status,BridgeError>{
+        self.history.cancel(id)?;Ok(self.history.snapshot())
+    }
+    pub(crate) fn reconcile_history(&mut self,now:Instant,external:Reason,
+        proof:Option<(u32,&crate::asset_source::RegisteredRoot,&crate::edit_owner::SavedEditGuard<'_>)>){
+        use crate::{github_history_protocol as p,supervisor::GitHubHistoryReceipt as R};
+        let before=self.status.clone();let history_before=self.history.snapshot();
+        if external==Reason::CleanupUnknown{self.unknown_inner();}
+        let current=proof.is_some_and(|(generation,root,edit)|self.history_current(generation,root,edit,now));
+        if !current&&self.history.active.is_some(){self.history.stop();}
+        let retiring=self.private.as_ref().is_none_or(|v|v.retirement.is_some()||v.token.is_none()||now>=v.clock.end);
+        // Do not turn a temporary Quit question/Busy gate into a false target
+        // change. This is only a mailbox read; the actual original stays owned.
+        if history_receipt_may_publish(external,current,retiring,self.unknown){
+            match self.history.receipt(){
+                Some(R::RetainedUnknown)=>self.unknown_inner(),
+                Some(R::Settled{outcome,was_unknown,..})=>{
+                    let outcome=outcome.and_then(|reply|{
+                        if reply.result.as_ref().is_none_or(|result|self.history.active.as_ref().is_some_and(|v|v.nomination.matches(&result.context))){
+                            Ok(reply)
+                        }else{Err(BridgeError::protocol())}
+                    });
+                    self.history.publish_settled(outcome,current&&external==Reason::None,was_unknown);
+                    if self.history.view.reason==p::Reason::CleanupUnknown{self.unknown_inner();}
+                    if retiring&&!self.history.native_work_pending(){self.complete_retirement();}
+                },
+                Some(R::Pending)|None=>{},
+            }
+        }else if matches!(self.history.receipt(),Some(R::RetainedUnknown)){self.unknown_inner();}
+        if self.unknown{self.history.unknown();}
+        self.history.finish(history_before);self.capability(now,external);self.finish(before);
+    }
+}
+// This mapper is only used on synchronous failures before original registration.
+// Preserve the fixed profile refusal produced by the actual native Supervisor;
+// generic native errors are projected through the existing finite reason map.
+pub(crate) fn history_admission_error(error:BridgeError)->BridgeError{
+    if error.code.starts_with("github_history_refused_"){error}
+    else{crate::github_history_session::refused(crate::github_history_session::outcome_reason(&error))}
+}
+fn history_receipt_may_publish(external:Reason,current:bool,retiring:bool,unknown:bool)->bool{
+    external==Reason::None||!current||retiring||unknown||external==Reason::CleanupUnknown
+}
+#[cfg(test)]
+pub(crate) fn github_history_connection_data_checks(){
+    use crate::github_history_protocol as p;
+    assert!(!history_receipt_may_publish(Reason::Busy,true,false,false));
+    assert!(history_receipt_may_publish(Reason::None,true,false,false));
+    assert!(history_receipt_may_publish(Reason::Busy,false,false,false));
+    assert!(history_receipt_may_publish(Reason::Busy,true,true,false));
+    assert!(history_receipt_may_publish(Reason::CleanupUnknown,true,false,false));
+    assert_eq!(history_admission_error(BridgeError::timeout()).code,"github_history_refused_expired");
+    assert_eq!(history_admission_error(BridgeError::new("busy","fixed DATA")).code,"github_history_refused_busy");
+    let fixed=crate::github_history_session::refused(p::Reason::ProviderUnavailable);
+    assert_eq!(history_admission_error(fixed).code,"github_history_refused_provider_unavailable");
+    let mut state=ConnectionState::new();let before=state.retained_heap_bytes_if_quiescent().unwrap();
+    state.history.view.session_id=Some(String::with_capacity(29));
+    state.history.view.session_id.as_mut().unwrap().push_str("session-data");
+    let retained=state.history.view.session_id.as_ref().unwrap().capacity();
+    assert!(retained>=29);assert_eq!(state.retained_heap_bytes_if_quiescent(),Some(before+retained));
+    assert!(state.history_has_retained_data());
+    state.history.view.operation=Some(p::Operation{id:"history-data".into(),phase:p::Phase::Settled,
+        reason:p::Reason::ArtifactMissing,selection:p::Selection{run_id:"1".into(),attempt:1,stage:p::Stage::Candidate,platform:p::Platform::Ios}});
+    let original=state.history.view.operation.clone();state.unknown();
+    assert_eq!(state.history.view.operation,original);assert!(state.retained_heap_bytes_if_quiescent().is_none());
+    assert!(state.history.view.fits_wire());
 }
 
 // Read-only retained DATA capacities for the document installation census.
@@ -1494,7 +1786,8 @@ impl ConnectionState {
         }
         let mut bytes = self.status.retained_heap_bytes()?
             .checked_add(self.preflight.retained_heap_bytes_if_quiescent()?)?
-            .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?;
+            .checked_add(self.release.retained_heap_bytes_if_quiescent()?.checked_add(self.setup.retained_heap_bytes_if_quiescent()?)?)?
+            .checked_add(self.history.retained_heap_bytes_if_quiescent()?)?;
         if let Some(private) = &self.private {
             if private.ticket.is_some() || private.retirement == Some(Reason::CleanupUnknown) { return None; }
             // Borrow the private original. Never clone its token or print bytes.

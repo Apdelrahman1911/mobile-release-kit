@@ -79,6 +79,222 @@ CREDENTIAL_ROLES = ("search-before", "default-before", "create", "search-created
                     "producer-adhoc", "producer-adhoc-verify", "producer-cdhash", "installer-chain")
 
 
+# Fixed current build/signed capsule nominations. DATA never selects a path,
+# keychain, executable identifier, command, credential or signing identity.
+TOOL_SIGNING_PHASES = ("sign-history-provider", "sign-github-seal")
+TOOL_SELECTION_PHASES = ("select-history-provider-build", "select-github-seal-build", "select-github-tools-signed")
+TOOL_PROJECT_PHASES = ("project-history-provider", "project-github-seal")
+TOOL_NOMINATION = "desktop/macos-installed-inputs/github-tool-signing.json"
+TOOL_REF = "refs/heads/verify/desktop-macos-github-tool-signing"
+TOOL_FIXED = {
+    "history-provider": ("gh", "dev.mobile-release-kit.desktop.github-history-provider", 64 * 1024 * 1024),
+    "github-seal": ("mrk-github-seal", "dev.mobile-release-kit.desktop.github-seal", 16 * 1024 * 1024),
+}
+TOOL_RECEIPT_LIMIT = 16384
+
+
+def tool_hex(value, size=64):
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{%d}" % size, value) is not None and value != "0" * size
+
+
+def tool_id(value):
+    return (type(value) is str and re.fullmatch(r"[1-9][0-9]{0,15}", value) is not None
+            and int(value) <= 9007199254740991)
+
+
+def tool_json(body):
+    need(type(body) is bytes and 0 < len(body) <= TOOL_RECEIPT_LIMIT, "tool-json-bound")
+    def pairs(items):
+        need(len(items) <= 64 and len({key for key, _ in items}) == len(items), "tool-json-keys")
+        return dict(items)
+    def integer(value):
+        need(len(value) <= 20, "tool-json-integer")
+        return int(value)
+    def reject(_value):
+        raise Refused("tool-json-number")
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=pairs, parse_int=integer,
+                           parse_float=reject, parse_constant=reject)
+    except (UnicodeError, ValueError, RecursionError):
+        raise Refused("tool-json-format") from None
+    pending, count = [(value, 0)], 0
+    while pending:
+        item, depth = pending.pop(); count += 1
+        need(depth <= 16 and count <= 4096, "tool-json-graph")
+        if type(item) is dict:
+            pending.extend((v, depth + 1) for v in item.values())
+        elif type(item) is list:
+            need(len(item) <= 128, "tool-json-list")
+            pending.extend((v, depth + 1) for v in item)
+    need(type(value) is dict, "tool-json-object")
+    return value
+
+
+def tool_canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def tool_nomination_data(body):
+    value = tool_json(body)
+    need(set(value) == {"schemaVersion", "tools"} and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and type(value["tools"]) is dict
+         and set(value["tools"]) == set(TOOL_FIXED), "tool-nomination-shape")
+    build_fields = {"state", "sourceCommit", "sourceManifestSha256", "binarySha256", "binaryBytes",
+                    "buildReceiptSha256", "runId", "runAttempt", "artifactId", "notices"}
+    signed_fields = {"state", "buildSha256", "signingSourceCommit", "signedSha256", "signedBytes", "receiptSha256",
+                     "runId", "runAttempt", "artifactId", "producerProfileSha256",
+                     "serviceProfileSha256", "entitlementsSha256"}
+    for purpose, targets in value["tools"].items():
+        need(type(targets) is dict and set(targets) == {ARM_TARGET, INTEL_TARGET}, "tool-nomination-targets")
+        for row in targets.values():
+            need(type(row) is dict and set(row) == {"build", "signed"}, "tool-nomination-row")
+            build, signed = row["build"], row["signed"]
+            need(type(build) is dict and type(signed) is dict, "tool-nomination-states")
+            if build != {"state": "unconfigured"}:
+                need(set(build) == build_fields and build["state"] == "configured"
+                     and tool_hex(build["sourceCommit"], 40)
+                     and all(tool_hex(build[k]) for k in ("sourceManifestSha256", "binarySha256", "buildReceiptSha256"))
+                     and all(tool_id(build[k]) for k in ("runId", "runAttempt", "artifactId"))
+                     and type(build["binaryBytes"]) is int and 0 < build["binaryBytes"] <= TOOL_FIXED[purpose][2],
+                     "tool-build-nomination")
+                notices = build["notices"]
+                if purpose == "history-provider":
+                    need(type(notices) is dict and set(notices) == {"manifestSha256", "contentSha256", "files", "modules"}
+                         and tool_hex(notices["manifestSha256"]) and tool_hex(notices["contentSha256"])
+                         and type(notices["files"]) is int and notices["files"] == 333
+                         and type(notices["modules"]) is int and notices["modules"] == 162, "tool-notices-complete-nomination")
+                else:
+                    need(notices is None, "tool-seal-no-gh-notices")
+            if signed != {"state": "unconfigured"}:
+                need(build["state"] == "configured" and set(signed) == signed_fields and signed["state"] == "configured"
+                     and signed["buildSha256"] == digest(tool_canonical(build))
+                     and tool_hex(signed["signingSourceCommit"], 40)
+                     and all(tool_hex(signed[k]) for k in ("signedSha256", "receiptSha256",
+                                                          "producerProfileSha256", "serviceProfileSha256", "entitlementsSha256"))
+                     and all(tool_id(signed[k]) for k in ("runId", "runAttempt", "artifactId"))
+                     and type(signed["signedBytes"]) is int and 0 < signed["signedBytes"] <= TOOL_FIXED[purpose][2],
+                     "tool-signed-nomination")
+    return value
+
+
+def tool_build_origin(value):
+    """Closed reference to the real local build, not a GitHub compiler run.
+
+    The complete normalized receipt is separately SOURCE-hash nominated after
+    the actual result adapter checks the referenced originals. These reference
+    fields alone do not authenticate arbitrary reports or grant finality.
+    """
+    references = {"result": 256 * 1024, "closedSummary": 16384, "crossbuild": 65536,
+                  "buildInfo": 65536}
+    true_fields = ("allJoinedZeroAndPipesClosed", "sourcePost", "dependencyPost", "toolchainPost", "embeddedNoticesComplete")
+    false_fields = ("noticeContentRuntimeExecuted", "nativeExecuted", "developerIdSigned", "notarized")
+    need(type(value) is dict and set(value) == set(references) | set(true_fields) | set(false_fields)
+         | {"kind", "sourceInventory", "dependencyInventorySha256", "toolchainInventorySha256", "childOriginals", "namespaceOriginals"}
+         and value["kind"] == "offline-owned-crossbuild"
+         and type(value["childOriginals"]) is int and value["childOriginals"] == 5
+         and type(value["namespaceOriginals"]) is int and value["namespaceOriginals"] == 1
+         and all(value[k] is True for k in true_fields) and all(value[k] is False for k in false_fields)
+         and tool_hex(value["dependencyInventorySha256"]) and tool_hex(value["toolchainInventorySha256"]), "tool-build-origin")
+    for name, limit in references.items():
+        row = value[name]
+        need(type(row) is dict and set(row) == {"bytes", "sha256"}
+             and type(row["bytes"]) is int and 0 < row["bytes"] <= limit and tool_hex(row["sha256"]), "tool-build-reference")
+    row = value["sourceInventory"]
+    need(type(row) is dict and set(row) == {"bytes", "sha256", "fileCount", "fileBytes"}
+         and tool_hex(row["sha256"]) and all(type(row[k]) is int for k in ("bytes", "fileCount", "fileBytes"))
+         and 0 < row["bytes"] <= 1024 * 1024 and 0 < row["fileCount"] <= 2048
+         and 0 < row["fileBytes"] <= 32 * 1024 * 1024, "tool-build-source-reference")
+
+
+def tool_build_receipt(body, build, purpose, target):
+    """Normalized, independently source-nominated FINAL build facts; not a raw probe."""
+    need(digest(body) == build["buildReceiptSha256"], "tool-build-receipt-anchor")
+    value = tool_json(body)
+    need(set(value) == {"schemaVersion", "kind", "purpose", "target", "sourceCommit", "sourceManifestSha256",
+                        "binary", "notices", "runId", "runAttempt", "sourcePost", "originalsClosed", "productsFinal"}
+         | ({"buildOrigin"} if purpose == "history-provider" else set())
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "current-tool-build-capsule" and value["purpose"] == purpose and value["target"] == target
+         and all(value[k] == build[k] for k in ("sourceCommit", "sourceManifestSha256", "notices", "runId", "runAttempt"))
+         and type(value["binary"]) is dict and value["binary"] == {"sha256": build["binarySha256"], "bytes": build["binaryBytes"]}
+         and type(value["binary"]["bytes"]) is int
+         and all(value[k] is True for k in ("sourcePost", "originalsClosed", "productsFinal")), "tool-build-final-facts")
+    if purpose == "history-provider":
+        tool_build_origin(value["buildOrigin"])
+    return value
+
+
+def tool_quote(purpose):
+    need(purpose in TOOL_FIXED, "tool-fixed-purpose")
+    limit = TOOL_FIXED[purpose][2]
+    owned = 12 * limit + 8 * 1024 * 1024 + 16 * 1024 * 1024 + 4 * 65536 + TOOL_RECEIPT_LIMIT
+    scratch = 3 * limit + 16 * 1024 * 1024 + 8 * 1024 * 1024 + 4 * 65536 + TOOL_RECEIPT_LIMIT
+    need(owned <= 1024 * 1024 * 1024, "tool-owned-data-quote")
+    return owned, scratch  # Conservative application-owned bytes, not RSS.
+
+
+def tool_sign_arguments(path, entitlements, purpose, identity):
+    need(purpose in TOOL_FIXED and isinstance(path, Path) and isinstance(entitlements, Path), "tool-sign-purpose")
+    identifier = TOOL_FIXED[purpose][1]
+    requirement = signing_requirement(identity, identifier)
+    return (["/usr/bin/codesign", "--force", "--sign", identity[1], "--identifier", identifier,
+             "--options", "runtime", "--entitlements", str(entitlements), "--timestamp", str(path)],
+            ["/usr/bin/codesign", "--verify", "--strict", "-R", requirement, str(path)])
+
+
+def tool_loader(body, purpose, target, stager, matcher):
+    need(purpose in TOOL_FIXED and type(body) is bytes and 0 < len(body) <= TOOL_FIXED[purpose][2], "tool-image-bound")
+    if purpose == "history-provider":
+        stager.history_provider_macho(body, target=target)
+    else:
+        # Existing fixed system-only macOS26 policy, with the canonical helper's
+        # explicit dynamic-sodium veto. This does not execute/load the image.
+        stager.macho(body, system_only=True, target=target)
+        machine = build_profile(target)[0]
+        need(not any("sodium" in row.get("text", "").lower() for row in matcher.macho_records(body, machine)),
+             "tool-no-dynamic-sodium")
+
+
+def tool_signed_receipt(body, row, purpose, target, producer, service, entitlements):
+    signed, build = row["signed"], row["build"]
+    need(signed["state"] == "configured" and digest(body) == signed["receiptSha256"]
+         and all(signed[k] == digest(v) for k, v in (("producerProfileSha256", producer), ("serviceProfileSha256", service),
+                                                   ("entitlementsSha256", entitlements))), "tool-signed-receipt-anchor")
+    value = tool_json(body)
+    need(value.get("schemaVersion") == 1 and type(value.get("schemaVersion")) is int
+         and value.get("phase") == "sign-" + purpose and value.get("target") == target
+         and value.get("source") == value.get("workflowSource") == signed["signingSourceCommit"]
+         and value.get("workflow") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml@" + TOOL_REF
+         and value.get("outerFinalityRequired") is True and value.get("productReady") is False
+         and value.get("runId") == signed["runId"]
+         and value.get("runAttempt") == signed["runAttempt"]
+         and type(value.get("tool")) is dict
+         and type(value["tool"].get("rawBytes")) is int and type(value["tool"].get("signedBytes")) is int
+         and value.get("tool") == {"purpose": purpose, "buildSha256": digest(tool_canonical(build)),
+             "sourceManifestSha256": build["sourceManifestSha256"], "rawSha256": build["binarySha256"],
+             "rawBytes": build["binaryBytes"], "signedSha256": signed["signedSha256"], "signedBytes": signed["signedBytes"],
+             "notices": build["notices"], "identifier": TOOL_FIXED[purpose][1],
+             "producerProfileSha256": digest(producer), "serviceProfileSha256": digest(service),
+             "entitlementsSha256": digest(entitlements)}
+         and all(value.get(k) is True for k in ("passed", "originalClosesKnown", "targetRetired", "toolFinal"))
+         and value.get("cleanupErrors") == [] and value.get("directStagerIOPending") is None
+         and "failure" not in value, "tool-signed-final-receipt")
+    credentials, contexts = value.get("credentialOriginals"), value.get("credentialContexts")
+    need(type(credentials) is list and 0 < len(credentials) <= 64
+         and all(type(c) is dict and c.get("returned") is True and c.get("settled") is True
+                 and type(c.get("status")) is int and c["status"] == 0 for c in credentials)
+         and type(contexts) is list and len(contexts) == 1 and type(contexts[0]) is dict
+         and contexts[0].get("purpose") == "sign-" + purpose
+         and all(contexts[0].get(k) is True for k in ("retired", "closed", "searchRestored", "defaultUnchanged")),
+         "tool-signed-credential-finality")
+    calls = value.get("originalCalls")
+    need(type(calls) is list and len(calls) == 2 and all(type(c) is dict for c in calls)
+         and tuple(c.get("role") for c in calls) == ("sign-" + purpose, "sign-" + purpose + "-verify")
+         and all(c.get("entered") is True and c.get("returned") is True and c.get("capturesSettled") is True
+                 and type(c.get("returncode")) is int and c["returncode"] == 0 for c in calls), "tool-signed-original-calls")
+    return value
+
+
 NOTARY_PHASES = ("notarize-payload",)
 NOTARY_PROFILE = "desktop/packaging/macos-notary-service.json"
 NOTARY_KEY_VARIABLE = "MRK_MACOS_NOTARY_API_KEY_BASE64"
@@ -680,7 +896,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -861,7 +1077,7 @@ def signing_requirement(identity, identifier):
          and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove"), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -1093,7 +1309,7 @@ class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
     def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
+        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
@@ -1157,6 +1373,10 @@ class Operation:
         self.profile_entry = self.source_entry = None
         self.target_name = "android-helper-target" if phase == "prepare" else "android-helper-" + phase
         self.stage, self.sha256 = "owned-directory-admission", None
+        self.tool_purpose = phase[len("sign-"):] if phase in TOOL_SIGNING_PHASES else None
+        self.tool_started = self.tool_observed = None
+        self.tool_quote_ready = self.tool_complete = False
+        self.tool_staged_roles = ()
         self.signing = self.service_profile = self.producer_profile = None
         self.package_started = self.package_observed = self.package_endpoint = None
         self.package_outputs, self.package_sources, self.package_roots = [], [], []
@@ -1355,6 +1575,14 @@ class Operation:
                  and all(row.get("returned") is True and row.get("capturesSettled") is True for row in self.calls),
                  "python-original-dispatch-boundary")
             self.python_clock()
+        if self.phase in TOOL_SIGNING_PHASES:
+            expected = (self.phase, self.phase + "-verify")
+            need(self.tool_quote_ready and not self.errors and self.stager_io_pending is None
+                 and len(self.calls) < 2 and role == expected[len(self.calls)]
+                 and self.signing_mutation_pending == (role == self.phase)
+                 and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
+                 "tool-original-dispatch-boundary")
+            self.tool_clock()
         recorded_role = self.removal_recorded_role(role)
         if self.phase == "prepare-removal-observers":
             roles = removal_preparation_roles(self.removal_case)
@@ -1429,6 +1657,8 @@ class Operation:
         context["observed"] = now
         if self.phase in PYTHON_PHASES:
             self.python_clock(work=not cleanup)
+        elif self.phase in TOOL_SIGNING_PHASES:
+            self.tool_clock(work=not cleanup)
         elif self.package_endpoint is not None:
             self.package_clock()
         elif self.phase in FINAL_PACKAGE_PHASES or self.phase == "prepare-removal-observers":
@@ -1441,6 +1671,9 @@ class Operation:
         endpoint = now + 240_000_000_000
         if self.phase in PYTHON_PHASES:
             _observed, outer = self.python_clock()
+            endpoint = min(endpoint, outer)
+        elif self.phase in TOOL_SIGNING_PHASES:
+            _observed, outer = self.tool_clock()
             endpoint = min(endpoint, outer)
         elif self.package_endpoint is not None:
             self.package_clock()
@@ -1665,13 +1898,13 @@ class Operation:
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
                  "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
-                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES}}
+                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
               or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
               or self.phase == "prepare-removal-observers" and purpose in ("observer-program", "installer", "producer", "distribution-image")
-              or purpose in SIGNING_PHASES and self.phase == purpose)
+              or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose)
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
         if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
             yield  # No secret read, directory, keychain or auxiliary call.
@@ -1857,6 +2090,183 @@ class Operation:
         self.stager_io_pending = None
         self.package_sources.append((entry, body))
         return matcher
+
+    def tool_clock(self, *, work=True):
+        now = time.monotonic_ns()
+        need(self.phase in TOOL_SIGNING_PHASES and type(now) is int and self.tool_started is not None
+             and self.tool_observed <= now, "tool-original-clock")
+        self.tool_observed = now
+        endpoint = self.tool_started + (300 if work else 360) * 1_000_000_000
+        need(now < endpoint, "tool-original-deadline")
+        return now, endpoint
+
+    def tool_sources(self):
+        source = self.source_original(TOOL_NOMINATION, "tool-source-nomination", TOOL_RECEIPT_LIMIT)
+        body = self.read(source)
+        nomination = tool_nomination_data(body)
+        self.package_sources.append((source, body))
+        return nomination
+
+    def tool_write(self, parent, name, body, mode, limit):
+        self.tool_clock()
+        need(self.tool_quote_ready and self.phase in TOOL_SIGNING_PHASES and type(body) is bytes
+             and 0 < len(body) <= limit and mode in (0o555, 0o755) and name == TOOL_FIXED[self.tool_purpose][0]
+             and self.stager_io_pending is None and not self.errors, "tool-exclusive-copy")
+        self.recheck_directory(parent)
+        self.stager_io_pending = "tool-exclusive-copy"
+        fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600, dir_fd=parent["fd"])
+        entry = self.register(fd, "tool-private-copy", "file", parent["fd"], name)
+        entry["parent_entry"] = parent
+        offset = 0
+        while offset < len(body):
+            written = os.write(fd, body[offset:])
+            need(type(written) is int and written > 0, "tool-copy-short-write")
+            offset += written
+        os.fchmod(fd, mode); os.fsync(fd)
+        info = os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == os.getuid()
+             and info.st_gid == os.getgid() and info.st_size == len(body) and stat.S_IMODE(info.st_mode) == mode,
+             "tool-copy-created-original")
+        entry["identity"] = signature(info)
+        need(self.read(entry) == body, "tool-copy-readback")
+        self.tool_clock()
+        self.stager_io_pending = None
+        return entry
+
+    def tool_roster(self, parent, expected):
+        self.tool_clock()
+        self.recheck_directory(parent)
+        need(self.stager_io_pending is None and not self.errors, "tool-roster-state")
+        self.stager_io_pending = "tool-roster"
+        row = self.register(None, "tool-roster", "iterator")
+        iterator = None
+        values = []
+        try:
+            iterator = os.scandir(parent["fd"])
+            row["iterator"] = iterator
+            for item in iterator:
+                self.tool_clock()
+                need(len(values) < len(expected) and item.name in expected and item.name not in values,
+                     "tool-capsule-roster")
+                values.append(item.name)
+            need(sorted(values) == sorted(expected), "tool-capsule-roster")
+        finally:
+            if iterator is not None:
+                iterator.close()  # A raised close leaves pending and this row unclosed.
+                row["closed"] = True
+                row["iterator"] = None
+        self.recheck_directory(parent)
+        self.tool_clock()
+        self.stager_io_pending = None
+
+    def tool_prepare(self):
+        purpose = self.tool_purpose
+        name, identifier, limit = TOOL_FIXED[purpose]
+        nomination = self.tool_sources()
+        build = nomination["tools"][purpose][self.target]["build"]
+        need(build["state"] == "configured" and self.signing is not None, "tool-build-unconfigured")
+        # Closed metadata/receipt first, before binary accumulation or mutation.
+        transport = self.directory(self.work_entry, "tool-transport", "tool-transport")
+        self.tool_roster(transport, (name, "tool-build-receipt.json"))
+        receipt = self.original(transport, "tool-build-receipt.json", "tool-build-receipt", TOOL_RECEIPT_LIMIT, (0o400, 0o600, 0o644))
+        receipt_body = self.read(receipt)
+        tool_build_receipt(receipt_body, build, purpose, self.target)
+        raw = self.original(transport, name, "tool-raw-original", limit, (0o400, 0o555, 0o600, 0o644, 0o755))
+        need(raw["identity"][6] == build["binaryBytes"], "tool-raw-size")
+        owned, scratch = tool_quote(purpose)
+        capacity = os.fstatvfs(self.work_entry["fd"])
+        need(capacity.f_frsize > 0 and capacity.f_bavail * capacity.f_frsize >= scratch, "tool-scratch-reserve")
+        self.tool_quote_ready = True
+        self.receipt["toolOwnedDataReserveBytes"] = owned
+        self.receipt["toolScratchReserveBytes"] = scratch
+        original = self.read(raw)
+        need(digest(original) == build["binarySha256"], "tool-raw-anchor")
+        matcher = self.signing_matcher()
+        tool_loader(original, purpose, self.target, self.stager, matcher)
+        entitlements = self.source_original("desktop/packaging/macos-empty-entitlements.plist", "tool-empty-entitlements", 1024)
+        empty = self.read(entitlements)
+        need(digest(empty) == self.stager.SIGNED_ENTITLEMENTS_SHA256, "tool-empty-profile")
+        self.package_sources.append((entitlements, empty))
+        old = self.tool_write(self.target_entry, name, original, 0o755, limit)
+        path = self.work / self.target_name / name
+        sign, verify = tool_sign_arguments(path, self.checkout / "desktop/packaging/macos-empty-entitlements.plist", purpose, self.signing)
+        with self.credential_scope(self.phase):
+            self.stage = self.phase
+            self.signing_mutation_pending = True
+            self.call(self.phase, sign, self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            self.recheck_directory(self.target_entry)
+            signed = self.original(self.target_entry, name, "tool-signed-original", limit, (0o755,))
+            body = self.read(signed)
+            matcher.macho_content_valid(original, body, self.arch, signing=True)
+            tool_loader(body, purpose, self.target, self.stager, matcher)
+            self.close(old)
+            need(old["closed"] and not self.errors, "tool-input-close-unknown")
+            self.signing_mutation_pending = False
+            result = self.call(self.phase + "-verify", verify, self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            need(not result.stdout and not result.stderr and self.read(signed) == body, "tool-strict-verification-post")
+            self.tool_clock()
+            self.signing_mutation_pending = True
+            os.fchmod(signed["fd"], 0o555)
+            signed["identity"] = signature(os.fstat(signed["fd"]))
+            need(stat.S_IMODE(signed["identity"][2]) == 0o555 and self.read(signed) == body, "tool-signed-mode-post")
+            self.signing_mutation_pending = False
+        need(self.read(raw) == original and self.read(receipt) == receipt_body, "tool-original-build-post")
+        for entry, data in self.package_sources:
+            need(self.read(entry) == data, "tool-source-post")
+        self.tool_roster(transport, (name, "tool-build-receipt.json"))
+        self.tool_clock()
+        self.tool_write(self.work_entry, name, body, 0o555, limit)
+        need(self.read(signed) == body and self.read(raw) == original, "tool-published-original-post")
+        self.sha256 = digest(body)
+        self.receipt["tool"] = {"purpose": purpose, "buildSha256": digest(tool_canonical(build)),
+            "sourceManifestSha256": build["sourceManifestSha256"], "rawSha256": build["binarySha256"],
+            "rawBytes": len(original), "signedSha256": self.sha256, "signedBytes": len(body), "notices": build["notices"],
+            "identifier": identifier, "producerProfileSha256": digest(self.producer_profile),
+            "serviceProfileSha256": digest(self.service_profile), "entitlementsSha256": digest(empty)}
+        self.tool_complete = True
+        self.tool_clock()
+
+    def tool_staged_inputs(self):
+        """Additional fixed originals only when SOURCE actually nominates them."""
+        need(self.phase in ("verify-before", "verify-after"), "tool-staged-purpose")
+        selection, source = tool_selected(self.stager, self.target, checkout=self.checkout)
+        # Four copies of each admitted tool plus the existing bounded helper,
+        # image/control working set. No runtime/child execution, no RSS claim.
+        need(sum(4 * TOOL_FIXED[p][2] for p, row in selection.items() if row is not None)
+             + 128 * 1024 * 1024 <= 1024 * 1024 * 1024, "tool-staged-owned-data-quote")
+        values = []
+        for purpose in TOOL_FIXED:
+            row = selection[purpose]
+            if row is None:
+                continue
+            name, identifier, limit = TOOL_FIXED[purpose]
+            path = ("runtime/tools/gh" if purpose == "history-provider" else
+                    "app/Mobile Release Kit.app/" + self.stager.GITHUB_SEAL)
+            parent = self.descend(self.work_entry, tuple(path.split("/")[:-1]))
+            original = self.original(parent, name, "tool-staged-" + purpose, limit, (0o555,))
+            body = self.read(original)
+            need(digest(body) == row["signed"]["signedSha256"] and len(body) == row["signed"]["signedBytes"],
+                 "tool-staged-signed-original")
+            capsule = self.directory(self.work_entry, purpose + "-capsule", "tool-staged-capsule")
+            receipt = self.original(capsule, "tool-signed-receipt.json", "tool-staged-signed-receipt", TOOL_RECEIPT_LIMIT, (0o444,))
+            receipt_body = self.read(receipt)
+            tool_signed_receipt(receipt_body, row, purpose, self.target, source[1][0], source[2][0], source[3][0])
+            tool_loader(body, purpose, self.target, self.stager, self.signing_matcher())
+            values.append((purpose, original, body, self.work / path, receipt, receipt_body))
+        self.tool_staged_roles = tuple(self.phase + "-" + row[0] for row in values)
+        return values, selection, source
+
+    def tool_staged_post(self, captured):
+        values, selection, source = captured
+        for purpose, original, body, path, receipt, receipt_body in values:
+            need(self.signing is not None, "tool-staged-configured-signing")
+            result = self.call(self.phase + "-" + purpose, ["/usr/bin/codesign", "--verify", "--strict", "-R",
+                signing_requirement(self.signing, TOOL_FIXED[purpose][1]), str(path)],
+                self.native_environment(), cwd=self.work, timeout=30, limit=65536)
+            need(not result.stdout and not result.stderr and self.read(original) == body
+                 and self.read(receipt) == receipt_body, "tool-staged-native-post")
+        need(tool_selected(self.stager, self.target, checkout=self.checkout) == (selection, source), "tool-staged-source-post")
 
     def fixed_sign(self):
         """Six fixed workflow roles, never a user-selected path/argv."""
@@ -2375,6 +2785,9 @@ class Operation:
         arguments = argparse.Namespace(target=self.target, package_role=self.environment["MRK_MACOS_PACKAGE_ROLE"], current_runtime=True,
             expected_entry=self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256"), expected_app_binary=self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
             expected_vault_helper=self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256"),
+            expected_github_seal=self.environment.get("MRK_MACOS_GITHUB_SEAL_SHA256"),
+            expected_github_seal_bytes=(int(self.environment["MRK_MACOS_GITHUB_SEAL_BYTES"])
+                if "MRK_MACOS_GITHUB_SEAL_BYTES" in self.environment else None),
             expected_remover=self.environment.get("MRK_MACOS_REMOVER_SHA256"), expected_android_helper=self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256"),
             expected_resident_image=self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"),
             expected_desktop_image=self.environment.get("MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256") if self.environment["MRK_MACOS_PACKAGE_ROLE"] == "ordinary-image" else None,
@@ -3934,6 +4347,7 @@ class Operation:
     def verify_staged(self, expected, expected_image):
         need(type(expected) is str and re.fullmatch(r"[0-9a-f]{64}", expected), "expected-helper-digest")
         need(type(expected_image) is str and re.fullmatch(r"[0-9a-f]{64}", expected_image), "expected-resident-image-digest")
+        tool_inputs = self.tool_staged_inputs()
         self.stage = "staged-helper-original"
         contents = self.descend(self.work_entry, ("app", "Mobile Release Kit.app", "Contents", "Helpers", "MobileReleaseKitPayload.app", "Contents"))
         helpers = self.directory(contents, "Helpers", "staged-helpers")
@@ -3960,6 +4374,7 @@ class Operation:
                            self.work / "app/Mobile Release Kit.app" / self.stager.RESIDENT_IMAGE)
         need(self.read(original) == body and self.read(image) == image_body
              and self.read(plist) == self.read(source_plist) == expected_plist, "staged-service-group-changed")
+        self.tool_staged_post(tool_inputs)
         self.sha256, self.resident_image_sha256 = expected, expected_image
         self.receipt.update(helperSha256=expected, helperBytes=len(body), helperOriginal=original["identity"],
                             residentImageSha256=expected_image, residentImageBytes=len(image_body),
@@ -5738,6 +6153,11 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if self.phase in TOOL_SIGNING_PHASES and self.tool_started is not None:
+            try:
+                self.tool_clock(work=False)
+            except BaseException as error:
+                self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
         if not self.removal_finish_ready():
             # SAME unresolved originals/mounts/thread remain retained. A
             # generic finally/known output close cannot grant fixture custody.
@@ -5774,7 +6194,11 @@ class Operation:
                     self.python_clock(work=False)
                 if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                     self.notary_clock(work=False)
+                if self.phase in TOOL_SIGNING_PHASES:
+                    self.tool_clock(work=False)
                 shutil.rmtree(self.target_name, dir_fd=work_fd)
+                if self.phase in TOOL_SIGNING_PHASES:
+                    self.tool_clock(work=False)
                 if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                     self.notary_clock(work=False)
                 if self.phase in PYTHON_PHASES:
@@ -5801,6 +6225,11 @@ class Operation:
             self.receipt["finalImageMount"] = {"attachEntered": self.mount_entered, "originalKnown": self.mount_known,
                 "detached": self.mount_detached, "retained": self.mount_entered and not self.mount_detached,
                 "installerEntered": self.installer_entered, "systemServiceExitClaimed": False}
+        if self.phase in TOOL_SIGNING_PHASES and self.tool_started is not None:
+            try:
+                self.tool_clock(work=False)
+            except BaseException as error:
+                self.errors.append({"stage": "tool-post-close-clock", "type": type(error).__name__})
         self.receipt["directStagerIOPending"] = self.stager_io_pending
         if self.phase in PYTHON_PHASES and self.python_started is not None:
             try:
@@ -5816,6 +6245,10 @@ class Operation:
 
     def execute(self, expected=None):
         try:
+            if self.phase in TOOL_SIGNING_PHASES:
+                self.tool_started = self.tool_observed = time.monotonic_ns()
+                self.tool_clock()
+                self.receipt.update(toolchain=None, helperIdentifier=None)
             if self.phase in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.phase == "prepare-removal-observers":
                 self.notary_started = self.notary_observed = time.monotonic_ns()
                 self.notary_clock()
@@ -5830,11 +6263,13 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
                 self.python_prepare()
+            elif self.phase in TOOL_SIGNING_PHASES:
+                self.tool_prepare()
             else:
                 need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") in self.stager.PACKAGE_ROLES, "source-package-role")
                 release_body = self.image_binding()
@@ -5861,7 +6296,7 @@ class Operation:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
                  and self.read(self.producer_profile_entry) == self.producer_profile, "source-signing-profile-changed")
-            if self.phase not in PYTHON_PHASES:
+            if self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
@@ -5888,7 +6323,7 @@ class Operation:
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
                  REMOVE_PACKAGE_ROLES if self.phase == "package-remove" else
                  PREPARE_ROLES if self.phase == "prepare" else
-                 (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES else (self.phase, self.phase + "-resident-image"))
+                 (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES + TOOL_SIGNING_PHASES else (self.phase, self.phase + "-resident-image") + self.tool_staged_roles)
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors and self.credential_known()
                                   and not self.credential_failed and self.credential_active is None
                                   and all(row["status"] == 0 for row in self.credential_calls)
@@ -5914,12 +6349,16 @@ class Operation:
                                         and not self.credential_calls and not self.credential_contexts
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
                                   and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
-                                       or (self.phase not in PYTHON_PHASES
+                                       or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
+                                       or (self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES
                                             and (self.phase in ("package-install", "package-remove") + REMOVAL_OWNER_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
+        if self.phase in TOOL_SIGNING_PHASES:
+            self.receipt["toolFinal"] = self.receipt["passed"] and self.tool_complete
+            self.tool_clock(work=False)
         if self.phase in REMOVAL_OWNER_PHASES:
             self.receipt["passed"] = self.receipt["passed"] and self.removal_finish_ready()
         if self.phase == "package-remove":
@@ -5950,6 +6389,8 @@ class Operation:
             self.python_clock(work=False)
         if self.phase in ("package-install", "package-remove", "package-removal-fixture") and self.receipt["passed"]:
             self.package_clock()  # Receipt write/readback/closes are inside the SAME original group.
+        if self.phase in TOOL_SIGNING_PHASES:
+            self.tool_clock(work=False)
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
 
@@ -5972,7 +6413,7 @@ class Operation:
         directory = os.open(self.work, READ_FLAGS | os.O_DIRECTORY)
         try:
             need(directory_identity(os.fstat(directory)) == directory_identity(self.work.lstat()) == self.work_entry["identity"], "receipt-work-changed")
-            fd = os.open("android-helper-" + self.phase + ".json", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            fd = os.open(("tool-signed-receipt.json" if self.phase in TOOL_SIGNING_PHASES and self.receipt["passed"] else "android-helper-" + self.phase + ".json"), os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
                          0o600, dir_fd=directory)
             try:
                 need(os.write(fd, body) == len(body), "receipt-short-write")
@@ -6007,11 +6448,14 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         raise Refused("removal-fixture-fixed-ref-only")
     if (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
+    tool_phase = phase in TOOL_SIGNING_PHASES
+    if tool_phase:
+        need(ref == TOOL_REF, "closed-tool-purpose-ref")
     python_phase = phase in PYTHON_PHASES
     if python_phase:
         need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
              "closed-python-purpose-ref")
-    workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase else
+    workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
                 "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF) else None)
     need(workflow is not None, "closed-workflow-route")
@@ -6023,7 +6467,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
                 "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
                 "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
-    if python_phase:
+    if python_phase or tool_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
         del required["RUSTUP_TOOLCHAIN"]
         need(environment.get("MRK_MACOS_PACKAGE_ROLE") is None, "python-no-install-package-role")
@@ -6033,19 +6477,178 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if workflow == "desktop-macos-aqua.yml":
         need(environment.get("MRK_MACOS_AQUA_SCOPE") in PACKAGE_SCOPES, "full-package-scope-only")
     work = Path(environment.get("MRK_MACOS_WORK", ""))
-    prefix = "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
+    prefix = "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
     need(work.parent == WORK_PARENT and re.fullmatch(re.escape(prefix) + r"\.[A-Za-z0-9]{8}", work.name), "owned-work-route")
     return work
+
+
+def tool_source_snapshot(stager, checkout=CHECKOUT):
+    rows = []
+    for path, limit in ((TOOL_NOMINATION, TOOL_RECEIPT_LIMIT), (PRODUCER_PROFILE, 1024), (PROFILE, 1024),
+                        ("desktop/packaging/macos-empty-entitlements.plist", 1024)):
+        with stager.parent(checkout / path) as (parent, leaf):
+            before = stager.current_directory_identity(os.fstat(parent))
+            body, info = stager.read_at(parent, leaf, limit)
+            need(stager.current_directory_identity(os.fstat(parent)) == before, "tool-selection-source-parent")
+            rows.append((body, signature(info), before))
+    return tuple(rows)
+
+
+def tool_selected(stager, target, *, signing_purpose=None, checkout=CHECKOUT):
+    before = tool_source_snapshot(stager, checkout)
+    nomination = tool_nomination_data(before[0][0])
+    selected = {}
+    for purpose in TOOL_FIXED:
+        row = nomination["tools"][purpose][target]
+        if signing_purpose is not None:
+            if purpose != signing_purpose:
+                continue
+            need(row["build"]["state"] == "configured", "tool-build-unconfigured")
+            stager.packaging_signing_data(before[1][0], before[2][0])
+            selected[purpose] = row["build"]
+        elif row["signed"]["state"] == "configured":
+            stager.packaging_signing_data(before[1][0], before[2][0])
+            need(all(row["signed"][key] == digest(body) for key, body in
+                     (("producerProfileSha256", before[1][0]), ("serviceProfileSha256", before[2][0]),
+                      ("entitlementsSha256", before[3][0]))), "tool-source-profile-anchor")
+            selected[purpose] = row
+        else:
+            selected[purpose] = None
+    if signing_purpose is None:
+        gh, provider_source = stager.history_provider_source(target=target)
+        need((gh is None) == (selected["history-provider"] is None), "tool-history-profile-presence")
+        if gh is not None:
+            for selected_target in (ARM_TARGET, INTEL_TARGET):
+                profile, _ = stager.history_provider_source(target=selected_target)
+                row = nomination["tools"]["history-provider"][selected_target]
+                need(row["signed"]["state"] == "configured" and profile is not None
+                     and profile["sha256"] == row["signed"]["signedSha256"]
+                     and profile["sourceManifestSha256"] == row["build"]["sourceManifestSha256"],
+                     "tool-history-profile-agreement")
+            need(stager.history_provider_source(target=target) == (gh, provider_source), "tool-history-source-post")
+    need(tool_source_snapshot(stager, checkout) == before, "tool-selection-source-post")
+    return selected, before
+
+
+def tool_data_context(environment, phase, target):
+    machine, architecture, _ = build_profile(target)
+    need(sys.platform == "darwin" and os.uname().machine == machine and os.getuid() != 0
+         and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
+    ref = environment.get("GITHUB_REF")
+    build_selection = phase in TOOL_SELECTION_PHASES[:2]
+    workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
+    need(ref == TOOL_REF if build_selection else ref in
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF), "tool-data-ref")
+    sha = environment.get("GITHUB_SHA")
+    need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
+         and all(environment.get(k) == v for k, v in {
+             "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": architecture,
+             "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+             "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_SHA": sha, "MRK_EXPECTED_SHA": sha,
+             "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
+             "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref}.items()),
+         "tool-data-source-context")
+    need(all(tool_id(environment.get(k)) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")), "tool-data-run-context")
+
+
+def tool_transport_roster(fd, expected):
+    # This same iterator is consumed/closed once. No full listdir allocation.
+    values = []
+    with os.scandir(fd) as iterator:
+        for entry in iterator:
+            need(len(values) < len(expected) and entry.name in expected and entry.name not in values, "tool-transport-roster")
+            values.append(entry.name)
+    need(sorted(values) == sorted(expected), "tool-transport-roster")
+
+
+def tool_project_signed(stager, purpose, target, environment):
+    selected, source = tool_selected(stager, target)
+    row = selected[purpose]
+    need(row is not None, "tool-signed-unconfigured")
+    work = Path(environment.get("MRK_MACOS_WORK", ""))
+    need(work.parent == WORK_PARENT and re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", work.name), "tool-project-work")
+    name, _identifier, limit = TOOL_FIXED[purpose]
+    transport, output = work / (purpose + "-transport"), work / (purpose + "-capsule")
+    output_parent = stager.current_output_absent(output)
+    owned, scratch = tool_quote(purpose)
+    with stager._parent_originals(transport) as (parents, parts):
+        outer, leaf = parents[-1], parts[-1]
+        parent_identities = tuple(stager.current_directory_identity(os.fstat(fd)) for fd in parents)
+        def parents_post():
+            for index, held in enumerate(parents):
+                named = (os.stat("/", follow_symlinks=False) if index == 0 else
+                         os.stat(parts[index - 1], dir_fd=parents[index - 1], follow_symlinks=False))
+                need(stager.current_directory_identity(os.fstat(held)) == stager.current_directory_identity(named)
+                     == parent_identities[index], "tool-transport-parent-post")
+        parents_post()
+        original_parent = stager.current_directory_identity(os.fstat(outer))
+        before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
+        need(stat.S_ISDIR(before.st_mode) and before.st_uid == os.getuid() and before.st_gid == os.getgid()
+             and stat.S_IMODE(before.st_mode) in (0o700, 0o755), "tool-transport-directory")
+        fd = os.open(leaf, READ_FLAGS | os.O_DIRECTORY, dir_fd=outer)
+        try:
+            capacity = os.fstatvfs(outer)
+            need(capacity.f_frsize > 0 and capacity.f_bavail * capacity.f_frsize >= scratch, "tool-project-reserve")
+            def snapshot():
+                parents_post()
+                need(signature(os.fstat(fd)) == signature(before)
+                     == signature(os.stat(leaf, dir_fd=outer, follow_symlinks=False))
+                     and stager.current_directory_identity(os.fstat(outer)) == original_parent, "tool-transport-directory-post")
+                stager.no_xattrs(fd)
+                tool_transport_roster(fd, (name, "tool-signed-receipt.json"))
+                files, originals = {}, {}
+                for member, maximum in ((name, limit), ("tool-signed-receipt.json", TOOL_RECEIPT_LIMIT)):
+                    body, info = stager.read_at(fd, member, maximum)
+                    need(info.st_uid == os.getuid() and info.st_gid == os.getgid() and info.st_nlink == 1
+                         and stat.S_IMODE(info.st_mode) in (0o400, 0o555, 0o600, 0o644), "tool-transport-file")
+                    files[member] = (body, 0o555 if member == name else 0o444)
+                    originals[member] = signature(info)
+                need(len(files[name][0]) == row["signed"]["signedBytes"]
+                     and digest(files[name][0]) == row["signed"]["signedSha256"], "tool-transport-signed-anchor")
+                tool_signed_receipt(files["tool-signed-receipt.json"][0], row, purpose, target,
+                                    source[1][0], source[2][0], source[3][0])
+                tool_transport_roster(fd, (name, "tool-signed-receipt.json"))
+                need(signature(os.fstat(fd)) == signature(before), "tool-transport-read-post")
+                parents_post()
+                return files, originals
+            captured = snapshot()
+            stager.current_output_absent(output, output_parent)
+            stager.write_tree(output, captured[0], current_owned=True)
+            need(snapshot() == captured and tool_selected(stager, target) == (selected, source), "tool-project-source-post")
+        finally:
+            os.close(fd)
+    return {"schemaVersion": 1, "purpose": purpose, "target": target,
+            "sha256": row["signed"]["signedSha256"], "bytes": row["signed"]["signedBytes"],
+            "ownedDataReserveBytes": owned, "nativeAuthority": False}
+
+
+def tool_data_main(phase, target):
+    tool_data_context(os.environ, phase, target)
+    stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_tool_stager")
+    need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "tool-detached-source")
+    if phase in TOOL_PROJECT_PHASES:
+        result = tool_project_signed(stager, phase[len("project-"):], target, os.environ)
+    else:
+        purpose = phase[len("select-"):-len("-build")] if phase in TOOL_SELECTION_PHASES[:2] else None
+        selected, _ = tool_selected(stager, target, signing_purpose=purpose)
+        result = {"schemaVersion": 1, "target": target, "tools": selected, "nativeAuthority": False}
+    body = tool_canonical(result) + b"\n"
+    need(len(body) <= TOOL_RECEIPT_LIMIT, "tool-selection-output-bound")
+    need(sys.stdout.write(body.decode("ascii")) == len(body), "tool-selection-short-output")
+    sys.stdout.flush()
+    return 0
 
 
 def main():
     try:
         phase, target = entrypoint(sys.argv)
+        if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
+            return tool_data_main(phase, target)
         work = admit(os.environ, target=target, phase=phase)
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
         if phase in FINAL_PACKAGE_PHASES or phase == "prepare-removal-observers":
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")

@@ -265,6 +265,24 @@ impl GitHubSetupInstalledProfile {
     }
 }
 
+// Fixed installed History SOURCE nomination. A profile is not an original
+// descriptor loan or a provider result; the actual sealed slots establish both.
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) struct GitHubHistoryInstalledProfile { _private: () }
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+impl GitHubHistoryInstalledProfile {
+    pub(crate) fn provider_nomination(&self)->Result<crate::installed_runtime::HistoryProviderNomination,BridgeError>{
+        if !macos_bindings(){return Err(unavailable());}
+        crate::installed_runtime::HistoryProviderNomination::compiled()?.ok_or_else(||
+            BridgeError::new("history_provider_unavailable","The fixed authenticated History provider is not configured."))
+    }
+    pub(crate) fn selection(&self)->Result<VerifiedRuntime,BridgeError>{
+        self.provider_nomination()?;
+        let cwd=crate::installed_runtime::runtime_root();
+        Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("github_history_bootstrap.py"),core:cwd.join("core.zip"),cwd})
+    }
+}
+
 // Two separate action families. Fixed installed selection is DATA, not
 // read-only authority, native/service qualification, or permission to dispatch.
 // No launch-time environment or renderer value selects a publisher binding.
@@ -378,6 +396,11 @@ pub(crate) fn macos_github_actions_profile_contract() {
     assert!(preflight_slots.never_started() && preflight_slots.no_child_effect() && preflight_slots.capability().is_err());
     assert!(release_slots.never_started() && release_slots.no_child_effect() && release_slots.capability().is_err());
     assert!(setup_slots.never_started() && setup_slots.no_child_effect() && setup_slots.capability().is_err());
+    crate::installed_runtime::history_installed_slot_data_checks();
+    crate::asset_source::HistorySources::data_checks();
+    let history=runtime.github_history_profile_reason();
+    assert_eq!(history==crate::github_history_protocol::Reason::None,
+        macos_bindings()&&crate::installed_runtime::HistoryProviderNomination::compiled().is_ok_and(|v|v.is_some()));
 }
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[test]
@@ -1631,6 +1654,27 @@ impl RuntimeConfig {
         end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
         // Original inspection worker only. Paths are DATA, never native custody.
         originals.inspect_once(self.github_readonly_installed_profile()?, end, stop)
+    }
+    pub(crate) fn github_history_profile_reason(&self)->crate::github_history_protocol::Reason{
+        use crate::github_history_protocol::Reason;
+        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+        {
+            if !macos_bindings(){return Reason::RuntimeUnavailable;}
+            return match crate::installed_runtime::HistoryProviderNomination::compiled(){
+                Ok(Some(_))=>Reason::None,Ok(None)=>Reason::ProviderUnavailable,Err(_)=>Reason::ResponseInvalid,
+            };
+        }
+        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+        {Reason::RuntimeUnavailable}
+    }
+    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+    pub(crate) fn resolve_github_history_installed(&self,originals:&mut crate::installed_runtime::GitHubHistoryRuntimeSlots,
+        nomination:&crate::github_history_session::Nomination,id:&str,clock:crate::github_history_protocol::Clock,
+        end:Instant,stop:&tokio::sync::watch::Receiver<bool>)->Result<VerifiedRuntime,BridgeError>{
+        if self.github_history_profile_reason()!=crate::github_history_protocol::Reason::None{
+            return Err(BridgeError::unavailable("The original managed History runtime is unavailable."));
+        }
+        originals.inspect_once(GitHubHistoryInstalledProfile{_private:()},nomination,id,clock,end,stop)
     }
     pub(crate) fn github_setup_profile_available(&self) -> bool {
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

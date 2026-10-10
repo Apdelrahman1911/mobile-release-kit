@@ -370,7 +370,37 @@ def without_install_product_workflow(source):
     return value.decode()
 
 
+TOOL_SIGNING_WORKFLOW_INVERSE = ((224, 49, 'df1dc25bada9ecadb21ae42acc54f1affa4b204a875cd8db47388675d91b8682', ''), (8011, 5947, '05574396aa916dcaeebfe7fd5cbd2576a6d3e5b4ccde1b0317fda11b3a10e88e', ''))
+
+def without_tool_signing_workflow(source):
+    value = source.encode()
+    for start, length, expected, prior in reversed(TOOL_SIGNING_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError('tool signing exact region changed')
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != 'f02a9f7ce848ac7c30c6926cd4c8d0cf03f04dd0662ffd32603921d53f5d8c68':
+        raise AssertionError('tool signing inverse changed original')
+    return value.decode()
+
+
+TOOL_ENROLLMENT_WORKFLOW_INVERSE = ((41577, 4155, 'e1ad3768ba7ed53f8217824d1348ca502b9bcf88b0562ce82ca66de2efd9cdfe', ''), (45965, 244, 'dec34c68710ed49677a78116d21f6c9a1eb3e13bc0c2bb83b26b78babeb76523', ''), (46419, 78, '251bd1dc99a992dba08e5aba35b0d7b67765f79b4da5679606da413e18ee08dd', '            --target "$MRK_MACOS_TARGET" \\\n'), (90916, 363, '4bec18b0387d401a0cb993bf2d1396cce3fe8ca432abcd966e1eef12317d3eab', ''), (91329, 163, '98ec04098231bc33c3a4fa0614ef46cbdd6057e9f58af89fa9e3bf332dd4258d', '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'), (95390, 368, '31da7f0d6c48b8dc93d41545e63747b4a170a208737daac4630c58b1e7cb105b', ''))
+
+
+def without_tool_enrollment_workflow(source):
+    if "      - name: Select only SOURCE-enrolled current signed GitHub tools" not in source:
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(TOOL_ENROLLMENT_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("tool enrollment workflow region changed")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00":
+        raise AssertionError("tool enrollment workflow inverse changed original")
+    return value.decode()
+
+
 def without_shipping_compile_workflow(source):
+    source = without_tool_enrollment_workflow(source)
     source = without_install_product_workflow(source)
     marker = "  shipping-image-compile:\n"
     if marker not in source:
@@ -471,6 +501,26 @@ def entry_macho_fixture(*extra, library=b"/usr/lib/libSystem.B.dylib", target="a
                        sum(map(len, commands)), 0x200084, 0) + b"".join(commands)
 
 
+def history_provider_macho_fixture(*extra, target="aarch64-apple-darwin", minimum=12, sdk=12,
+                                   tools=0, libraries=None, load_command=0xC):
+    """Tiny thin/load-command DATA only; no executable/signature/native proof."""
+    cpu, subtype = {"aarch64-apple-darwin": (0x0100000C, 0), "x86_64-apple-darwin": (0x01000007, 3)}[target]
+    if libraries is None:
+        libraries = (b"/usr/lib/libSystem.B.dylib", b"/usr/lib/libresolv.9.dylib",
+                     b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                     b"/System/Library/Frameworks/Security.framework/Versions/A/Security")
+    def named(command, value, prefix):
+        data = value + b"\0"
+        length = (prefix + len(data) + 7) // 8 * 8
+        header = struct.pack("<III", command, length, prefix)
+        return header + bytes(prefix - len(header)) + data + bytes(length - prefix - len(data))
+    commands = (struct.pack("<6I", 0x32, 24, 1, minimum << 16, sdk << 16, tools),
+                named(0xE, b"/usr/lib/dyld", 12),
+                *(named(load_command, name, 24) for name in libraries), *extra)
+    return struct.pack("<8I", 0xFEEDFACF, cpu, subtype, 2, len(commands),
+                       sum(map(len, commands)), 0, 0) + b"".join(commands)
+
+
 def image_macho_fixture(role="desktop", *extra, install_name=None, library=b"/usr/lib/libSystem.B.dylib", kind=6, target="aarch64-apple-darwin"):
     """Actual MH_DYLIB-shaped inert DATA, never a renamed executable/native pass."""
     cpu, subtype = {"aarch64-apple-darwin": (0x0100000C, 0), "x86_64-apple-darwin": (0x01000007, 3)}[target]
@@ -539,6 +589,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 (source / "desktop/macos-installed-inputs" / name).read_bytes())
         for name in ("macos_android_helper_package.py", "stage_macos_installed.py"):
             put(checkout / "desktop/tools" / name, (source / "desktop/tools" / name).read_bytes())
+        # The real stager reads this SOURCE even when both tools are unconfigured.
+        put(checkout / module.TOOL_NOMINATION, (source / module.TOOL_NOMINATION).read_bytes())
+        # Current runtime_tree also reads the real unconfigured provider profile.
+        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, (source / TOOL.HISTORY_PROVIDER_PROFILE).read_bytes())
         notary_profile = {"schemaVersion": 1, "mode": "app-store-connect-team-key", "teamId": "TEST000001",
                           "keyId": "DATA000001", "issuerId": "11111111-2222-3333-4444-555555555555"}
         put(checkout / module.NOTARY_PROFILE, TOOL.canonical(notary_profile))
@@ -1576,7 +1630,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
                      "desktop/native/macos-installed-entry/image_abi.h", "desktop/native/macos-installed-entry/desktop_facade.c",
                      "desktop/native/macos-installed-entry/resident_facade.c", release_path,
-                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs"):
+                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs", module.TOOL_NOMINATION, "desktop/packaging/macos-empty-entitlements.plist"):
             target = checkout / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
@@ -2907,6 +2961,117 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
 
+        # New two-purpose DATA contract. No signing owner/helper is executed.
+        nomination = {"schemaVersion": 1, "tools": {purpose: {target: {
+            "build": {"state": "unconfigured"}, "signed": {"state": "unconfigured"}}
+            for target in (module.ARM_TARGET, module.INTEL_TARGET)} for purpose in module.TOOL_FIXED}}
+        encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        self.assertEqual(module.tool_nomination_data(encode(nomination)), nomination)
+        for changed in (dict(nomination, schemaVersion=True), dict(nomination, unknown=1),
+                        {"schemaVersion": 1, "tools": {}}, {"schemaVersion": 1, "tools": []}):
+            with self.assertRaises(module.Refused): module.tool_nomination_data(encode(changed))
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            for purpose, (name, identifier, limit) in module.TOOL_FIXED.items():
+                value = copy.deepcopy(nomination)
+                build = {"state": "configured", "sourceCommit": "1" * 40, "sourceManifestSha256": "2" * 64,
+                    "binarySha256": "3" * 64, "binaryBytes": limit, "buildReceiptSha256": "4" * 64,
+                    "runId": "1", "runAttempt": "1", "artifactId": "2", "notices": None}
+                if purpose == "history-provider":
+                    build["notices"] = {"manifestSha256": "5" * 64, "contentSha256": "6" * 64, "files": 333, "modules": 162}
+                value["tools"][purpose][target]["build"] = build
+                self.assertEqual(module.tool_nomination_data(encode(value)), value)
+                for key, wrong in (("binaryBytes", limit + 1), ("binaryBytes", True), ("sourceManifestSha256", "0" * 64),
+                                   ("runId", "01"), ("artifactId", "0"), ("notices", {"files": 333})):
+                    changed = copy.deepcopy(value); changed["tools"][purpose][target]["build"][key] = wrong
+                    with self.assertRaises(module.Refused): module.tool_nomination_data(encode(changed))
+                sign, verify = module.tool_sign_arguments(Path("/owned") / name, Path("/source/empty.plist"),
+                                                          purpose, ("ABCDEFGHIJ", "a" * 40))
+                self.assertEqual(sign[:4], ["/usr/bin/codesign", "--force", "--sign", "a" * 40])
+                self.assertIn(identifier, sign); self.assertIn("--timestamp", sign)
+                self.assertEqual(verify[:4], ["/usr/bin/codesign", "--verify", "--strict", "-R"])
+                self.assertNotIn("--deep", sign + verify)
+                self.assertLessEqual(module.tool_quote(purpose)[0], 1024 * 1024 * 1024)
+                self.assertGreater(module.tool_quote(purpose)[1], 3 * limit)
+        # Actual offline build references are distinct from future publication
+        # identifiers. This DATA grammar alone cannot authenticate a report.
+        origin = {"kind": "offline-owned-crossbuild",
+            **{key: {"bytes": limit, "sha256": "a" * 64} for key, limit in
+               (("result", 256 * 1024), ("closedSummary", 16384), ("crossbuild", 65536), ("buildInfo", 65536))},
+            "sourceInventory": {"bytes": 1024 * 1024, "sha256": "b" * 64, "fileCount": 2048, "fileBytes": 32 * 1024 * 1024},
+            "dependencyInventorySha256": "c" * 64, "toolchainInventorySha256": "d" * 64,
+            "childOriginals": 5, "namespaceOriginals": 1,
+            **{key: True for key in ("allJoinedZeroAndPipesClosed", "sourcePost", "dependencyPost", "toolchainPost", "embeddedNoticesComplete")},
+            **{key: False for key in ("noticeContentRuntimeExecuted", "nativeExecuted", "developerIdSigned", "notarized")}}
+        self.assertIsNone(module.tool_build_origin(origin))
+        for key, wrong in (("childOriginals", True), ("namespaceOriginals", 2), ("embeddedNoticesComplete", False),
+                           ("nativeExecuted", True), ("sourcePost", 1), ("kind", "github-compiler-run")):
+            changed = copy.deepcopy(origin); changed[key] = wrong
+            with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        for key in ("result", "closedSummary", "crossbuild", "buildInfo", "sourceInventory"):
+            changed = copy.deepcopy(origin); changed[key]["bytes"] += 1
+            with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        changed = copy.deepcopy(origin); changed["sourceInventory"]["fileCount"] = 2049
+        with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        # Real local original admission, with inert native callbacks never
+        # entered: unconfigured profiles cannot borrow a credential context.
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+            operation = module.Operation(owner, checkout, work, "sign-github-seal", environment, TOOL)
+            with mock.patch.object(module.Operation, "credential_scope", side_effect=AssertionError("unconfigured credential borrow")):
+                with self.assertRaises(module.Refused): operation.execute()
+            self.assertFalse(observations or operation.calls or operation.credential_calls or operation.credential_contexts)
+            self.assertFalse(operation.receipt["passed"] or operation.tool_complete)
+            self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+            self.assertFalse((work / "tool-signed-receipt.json").exists())
+
+        # Source hash alone is not a substitute for the closed finality grammar.
+        purpose, target = "github-seal", module.ARM_TARGET
+        build = copy.deepcopy(value["tools"][purpose][module.INTEL_TARGET]["build"])
+        producer, service, entitlements = b"producer", b"service", b"empty"
+        signed = {"state": "configured", "buildSha256": module.digest(module.tool_canonical(build)),
+            "signingSourceCommit": "7" * 40, "signedSha256": "8" * 64, "signedBytes": 123,
+            "receiptSha256": "9" * 64, "runId": "3", "runAttempt": "1", "artifactId": "4",
+            "producerProfileSha256": module.digest(producer), "serviceProfileSha256": module.digest(service),
+            "entitlementsSha256": module.digest(entitlements)}
+        row = {"build": build, "signed": signed}
+        final = {"schemaVersion": 1, "phase": "sign-github-seal", "target": target,
+            "source": "7" * 40, "workflowSource": "7" * 40,
+            "workflow": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml@" + module.TOOL_REF,
+            "runId": "3", "runAttempt": "1", "outerFinalityRequired": True, "productReady": False,
+            "tool": {"purpose": purpose, "buildSha256": signed["buildSha256"], "sourceManifestSha256": build["sourceManifestSha256"],
+                "rawSha256": build["binarySha256"], "rawBytes": build["binaryBytes"], "signedSha256": "8" * 64,
+                "signedBytes": 123, "notices": None, "identifier": module.TOOL_FIXED[purpose][1],
+                "producerProfileSha256": module.digest(producer), "serviceProfileSha256": module.digest(service),
+                "entitlementsSha256": module.digest(entitlements)},
+            "passed": True, "originalClosesKnown": True, "targetRetired": True, "toolFinal": True,
+            "cleanupErrors": [], "directStagerIOPending": None,
+            "credentialOriginals": [{"returned": True, "settled": True, "status": 0}],
+            "credentialContexts": [{"purpose": "sign-github-seal", "retired": True, "closed": True,
+                                    "searchRestored": True, "defaultUnchanged": True}],
+            "originalCalls": [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0}
+                              for role in ("sign-github-seal", "sign-github-seal-verify")]}
+        raw = encode(final); signed["receiptSha256"] = module.digest(raw)
+        self.assertEqual(module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements), final)
+        for key, wrong in (("originalClosesKnown", False), ("targetRetired", False), ("toolFinal", False),
+                           ("directStagerIOPending", "copy"), ("credentialOriginals", []), ("originalCalls", [])):
+            changed = copy.deepcopy(final); changed[key] = wrong
+            raw = encode(changed); signed["receiptSha256"] = module.digest(raw)
+            with self.assertRaises(module.Refused): module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements)
+        self.assertEqual(module.MAX_HELPER, 32 * 1024 * 1024)
+        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload",
+            "sign-root-app", "sign-root-installer", "sign-remover"))
+        with self.assertRaises(module.Refused): module.tool_quote("arbitrary-tool")
+        # The original epoch is not restarted by a callback or cleanup switch.
+        clock = SimpleNamespace(phase="sign-github-seal", tool_started=100, tool_observed=100)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 299_000_000_000):
+            self.assertEqual(module.Operation.tool_clock(clock)[1], 100 + 300_000_000_000)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 300_000_000_000):
+            with self.assertRaisesRegex(module.Refused, "tool-original-deadline"): module.Operation.tool_clock(clock)
+            self.assertEqual(module.Operation.tool_clock(clock, work=False)[1], 100 + 360_000_000_000)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 360_000_000_000):
+            with self.assertRaisesRegex(module.Refused, "tool-original-deadline"): module.Operation.tool_clock(clock, work=False)
+
+
         with tempfile.TemporaryDirectory() as temporary:
             checkout, work, environment, owner, observations = self.fixture(Path(temporary))
             operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
@@ -3602,9 +3767,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 operation = state.operation
                 with self.notary_fixture_call(state), self.assertRaises(module.Refused):
                     operation.execute()
+                # Expose only finite failure labels before an observation mismatch;
+                # never print paths, credentials, command captures or the receipt.
+                notary_failure = operation.receipt.get("failure", {})
+                self.assertEqual(notary_failure.get("reason"), "original-nonzero-" + selected_role,
+                    {**{key: value[:96] if type(value) is str else None
+                        for key in ("stage", "type") for value in (notary_failure.get(key),)},
+                     "errno": notary_failure.get("errno") if type(notary_failure.get("errno")) is int
+                         and 0 < notary_failure["errno"] < 65536 else None})
                 self.assertEqual(len(state.observations), module.NOTARY_ROLES.index(selected_role) + 1)
                 self.assertFalse(operation.receipt["passed"])
-                self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-" + selected_role)
                 self.assertFalse((operation.work / "input").exists())
                 self.assertEqual(operation.receipt["targetRetired"], not selected_role.startswith("staple-"))
                 self.assertFalse((operation.work / operation.target_name / "notary-key").exists())
@@ -3855,6 +4027,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         removal=remove, environment={"MRK_MACOS_PACKAGE_ROLE": package_role},
                         calls=[{"role": role} for role in history], notary_key=object() if label == "key-held" else None,
                         notary_known=lambda: label != "unknown")
+                    # Use the real final-package predicate and original-role projection.
+                    state.removal_final_active = module.Operation.removal_final_active.__get__(state)
+                    state.removal_final_calls = module.Operation.removal_final_calls.__get__(state)
                     boundary = RuntimeError("INERT before private-key DATA")
                     with mock.patch.object(module, "notary_key_data", side_effect=boundary) as key_data:
                         if label == "valid":
@@ -4739,6 +4914,21 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
+        current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        restored = without_tool_enrollment_workflow(current)
+        self.assertNotEqual(current, restored)
+        self.assertNotIn("--github-seal", restored)
+        self.assertIn('--history-provider "$MRK_MACOS_WORK/history-provider-capsule/gh"', current)
+        self.assertIn('--expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES"', current)
+        signing = (root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text()
+        self.assertIn("verify/desktop-macos-github-tool-signing", signing)
+        tool_job = signing.split("  signed-github-tool:\n", 1)[1]
+        self.assertIn("environment: macos-developer-id", tool_job)
+        self.assertIn("digest-mismatch: error", tool_job)
+        self.assertIn("steps.sign.outcome == 'success'", tool_job)
+        self.assertNotIn("--deep", tool_job)
+        self.assertNotIn("signed-github-tool", without_tool_signing_workflow(signing))
+        self.assertEqual(tool_job.count("purpose:"), 4)
         actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
@@ -5030,7 +5220,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertIn("    environment: ${{ contains(fromJSON('" + fixed + "'), matrix.scope) && 'macos-developer-id' || 'macos-engineering' }}\n", workflow)
 
 
-        signing = (root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text()
+        signing = without_tool_signing_workflow((root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text())
         self.assertEqual(signing.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"), 1)
         self.assertEqual(signing.count("github-token:"), 1)
         self.assertIn("persist-credentials: false", signing)
@@ -5086,6 +5276,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "expected_entry": 'self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256")',
             "expected_app_binary": 'self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256")',
             "expected_vault_helper": 'self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256")',
+            "expected_github_seal": 'self.environment.get("MRK_MACOS_GITHUB_SEAL_SHA256")',
+            "expected_github_seal_bytes": 'int(self.environment["MRK_MACOS_GITHUB_SEAL_BYTES"]) if "MRK_MACOS_GITHUB_SEAL_BYTES" in self.environment else None',
             "expected_remover": 'self.environment.get("MRK_MACOS_REMOVER_SHA256")',
             "expected_android_helper": 'self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256")',
             "expected_resident_image": 'self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256")',
@@ -5465,7 +5657,7 @@ class MacInstalledData(unittest.TestCase):
         self.assertEqual(set(rows), {row["path"] for row in files})
         self.assertNotIn("project_recovery_bootstrap.py", rows)  # Historical supplier roster is unchanged.
         current_only = {"project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-                        "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py"}
+                        "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py"}
         self.assertEqual(TOOL.CURRENT_BOOTSTRAPS, TOOL.BOOTSTRAPS | current_only)
         self.assertEqual(len(TOOL.BOOTSTRAPS), 6)
         self.assertEqual(TOOL.PROTOCOL, "860d1cee0072730a487ac8e632206c69e3ba676cab849b144a61755c4b84e41e")
@@ -7305,6 +7497,65 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                 with self.subTest(target=target), self.assertRaises(TOOL.Refused): TOOL.macho(body, target=target)
             with self.assertRaises(TOOL.Refused): TOOL.macho(header + build, target=other)
             with self.assertRaises(TOOL.Refused): TOOL.entry_macho(entry_macho_fixture(target=other), target=target)
+        # Only the fixed history dependency admits its actual12/12 loader
+        # DATA; no old application/entry predicate is relaxed to that minimum.
+        for target, other in ((TOOL.ARM_TARGET, TOOL.INTEL_TARGET), (TOOL.INTEL_TARGET, TOOL.ARM_TARGET)):
+            image = history_provider_macho_fixture(target=target)
+            TOOL.history_provider_macho(image, target=target)
+            # Signature-command presence alone is deliberately not validity.
+            TOOL.history_provider_macho(history_provider_macho_fixture(
+                struct.pack("<4I", 0x1D, 16, 0, 0), target=target), target=target)
+            with self.assertRaisesRegex(TOOL.Refused, "macho-minimum"):
+                TOOL.macho(image, target=target)
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_macho(image, target=other)
+            libraries = (b"/usr/lib/libSystem.B.dylib", b"/usr/lib/libresolv.9.dylib",
+                         b"/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+                         b"/System/Library/Frameworks/Security.framework/Versions/A/Security")
+            invalid = [history_provider_macho_fixture(target=target, minimum=26, sdk=26),
+                       history_provider_macho_fixture(target=target, sdk=13),
+                       history_provider_macho_fixture(target=target, tools=1),
+                       history_provider_macho_fixture(target=target, libraries=libraries[:-1]),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], libraries[0])),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], b"/usr/lib/other.dylib")),
+                       history_provider_macho_fixture(target=target, libraries=(*libraries[:-1], b"@rpath/libbad.dylib")),
+                       history_provider_macho_fixture(struct.pack("<II", 0x8000001C, 8), target=target),
+                       image[:-1], b"\xca\xfe\xba\xbe" + image[4:]]
+            invalid.extend(history_provider_macho_fixture(target=target, load_command=command)
+                           for command in (0x80000018, 0x8000001F, 0x20, 0x80000023))
+            for body in invalid:
+                with self.subTest(provider_target=target, bytes=len(body)), self.assertRaises(TOOL.Refused):
+                    TOOL.history_provider_macho(body, target=target)
+
+        profile = {"schemaVersion": 1, "version": "2.88.1", "sourceManifestSha256": None,
+                   "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}
+        self.assertIsNone(TOOL.history_provider_profile_data(TOOL.canonical(profile)))
+        configured = copy.deepcopy(profile)
+        configured["sourceManifestSha256"] = "1" * 64
+        configured["targets"] = {TOOL.ARM_TARGET: "2" * 64, TOOL.INTEL_TARGET: "3" * 64}
+        for target in (TOOL.ARM_TARGET, TOOL.INTEL_TARGET):
+            self.assertEqual(TOOL.history_provider_profile_data(TOOL.canonical(configured), target=target),
+                {"version": "2.88.1", "target": target, "sourceManifestSha256": "1" * 64,
+                 "sha256": configured["targets"][target]})
+        for candidate in ({**profile, "sourceManifestSha256": "1" * 64},
+                          {**configured, "targets": {TOOL.ARM_TARGET: "2" * 64}},
+                          {**configured, "targets": {**configured["targets"], "other": "4" * 64}},
+                          {**configured, "version": "2.88.2"}, {**configured, "schemaVersion": True},
+                          {**configured, "extra": None}, {**configured, "sourceManifestSha256": "A" * 64}):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_profile_data(TOOL.canonical(candidate))
+        for body in (b"", b" " * 2049, TOOL.canonical(configured)[:-1] + b',"version":"2.88.1"}'):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.history_provider_profile_data(body)
+        generated = TOOL.CURRENT_CORE_BYTES + TOOL.MAX_FILES * 2048 + 1024 * 1024 + 17
+        self.assertEqual(TOOL.history_provider_capacity(supplier_bytes=0, supplier_files=2, fixed_bytes=17),
+                         128 * 1024 * 1024)
+        self.assertEqual(TOOL.history_provider_capacity(
+            supplier_bytes=TOOL.MAX_BYTES - generated - 1, supplier_files=2, fixed_bytes=17), 1)
+        for values in ({"supplier_bytes": TOOL.MAX_BYTES - generated, "supplier_files": 2, "fixed_bytes": 17},
+                       {"supplier_bytes": 0, "supplier_files": TOOL.MAX_FILES, "fixed_bytes": 17},
+                       {"supplier_bytes": True, "supplier_files": 2, "fixed_bytes": 17}):
+            with self.assertRaises(TOOL.Refused): TOOL.history_provider_capacity(**values)
 
     def test_archive_pins_are_the_existing_M_not_new_interpreter_inputs(self):
         self.assertEqual(TOOL.ZIP_SHA, "42a6abab90f9641ba1b8c4aa9bb4202b153d676cc6d135b8227d8690e18275be")
@@ -8583,6 +8834,12 @@ def current_data_fixture():
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("xb") as stream:
                 stream.write(body)
+        # Fixed unconfigured public SOURCE for the current command only. It
+        # is not an enabled source-projection member or a provider nomination.
+        provider_profile = checkout / TOOL.HISTORY_PROVIDER_PROFILE
+        provider_profile.parent.mkdir(parents=True)
+        provider_profile.write_bytes(TOOL.canonical({"schemaVersion": 1, "version": "2.88.1",
+            "sourceManifestSha256": None, "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}))
         archive = root / "supplier.zip"
         archive.write_bytes(b"No actual archive; supplier decoder is mocked.\n")
         supplier = {"python/bin/python3": b"INERT SUPPLIER DATA; NEVER EXECUTED\n",
@@ -8735,6 +8992,223 @@ class MacCurrentRuntimeData(unittest.TestCase):
                                (b"x" * len(projection["src/mobile_release/_desktop_engine.py"][0]), 0o444)}):
                 with self.assertRaises(TOOL.Refused):
                     TOOL.current_core_matches(files["core.zip"][0], candidate)
+            # Real tiny provider/profile originals and canonical preparation;
+            # neither these loader bytes nor the synthetic nomination is a
+            # signed/native provider or a Python signing receipt.
+            profile_path = fixture.checkout / TOOL.HISTORY_PROVIDER_PROFILE
+            profile_path.unlink()
+            with self.assertRaises(FileNotFoundError): TOOL.history_provider_source()
+            null_profile = {"schemaVersion": 1, "version": "2.88.1", "sourceManifestSha256": None,
+                            "targets": {TOOL.ARM_TARGET: None, TOOL.INTEL_TARGET: None}}
+            profile_path.write_bytes(TOOL.canonical(null_profile))
+            absent = SimpleNamespace(history_provider=None, command="describe-current-runtime")
+            self.assertIsNone(TOOL.history_provider_selection(absent, "fresh-public-source")[0])
+            provider_input = fixture.root / "provider-input"
+            provider_input.mkdir(mode=0o700)
+            provider_path = provider_input / "gh"
+            provider_body = history_provider_macho_fixture()
+            provider_path.write_bytes(provider_body)
+            provider_path.chmod(0o555)
+            supplied = SimpleNamespace(history_provider=provider_path, command="describe-current-runtime")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-input-required"):
+                TOOL.history_provider_selection(supplied, "fresh-public-source")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-fresh-only"):
+                TOOL.history_provider_selection(supplied, "historical")
+            configured = {**null_profile, "sourceManifestSha256": "1" * 64,
+                "targets": {TOOL.ARM_TARGET: TOOL.digest(provider_body),
+                            TOOL.INTEL_TARGET: TOOL.digest(history_provider_macho_fixture(target=TOOL.INTEL_TARGET))}}
+            profile_body = TOOL.canonical(configured)
+            profile_path.write_bytes(profile_body)
+            with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-roster"):
+                TOOL.runtime_tree(args.work / "runtime", TOOL.digest(files["manifest.json"][0]), current=True)
+            overlap = self.args(fixture, suffix="provider-overlap")
+            overlap.history_provider = overlap.work / "gh"
+            with self.assertRaisesRegex(TOOL.Refused, "current-path-overlap"):
+                TOOL.current_paths(overlap)
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-fresh-only"):
+                TOOL.history_provider_selection(absent, "historical")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-input-required"):
+                TOOL.history_provider_selection(absent, "fresh-public-source")
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-signed-input-required"):
+                TOOL.history_provider_selection(supplied, "fresh-public-source")
+            # Shape admission alone below does not call the genuine subsequent
+            # signed-Python receipt/source reader or claim its authority.
+            selected = SimpleNamespace(**vars(supplied), archive=None, python_root=fixture.root / "python-input",
+                signed_python=fixture.root / "signed-python", signing_receipt=fixture.root / "signing-receipt",
+                expected_signed_python="2" * 64, expected_signing_receipt="3" * 64,
+                expected_signing_source="4" * 40, expected_signing_run="5", expected_signing_attempt="1")
+            nomination, profile_snapshot = TOOL.history_provider_selection(selected, "fresh-public-source")
+            self.assertEqual(nomination["sha256"], TOOL.digest(provider_body))
+            selected.command = "current-runtime"
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-configured-final-required"):
+                TOOL.history_provider_selection(selected, "fresh-public-source")
+            selected.configured_signing = True
+            self.assertEqual(TOOL.history_provider_selection(selected, "fresh-public-source"),
+                             (nomination, profile_snapshot))
+            captured, provider_projection, provider_source_digest = TOOL.current_source(history_provider=True)
+            self.assertEqual(captured[TOOL.HISTORY_PROVIDER_PROFILE][0], profile_body)
+            self.assertEqual(provider_projection[TOOL.HISTORY_PROVIDER_PROFILE], (profile_body, 0o444))
+            self.assertNotEqual(provider_source_digest, TOOL.current_source()[2])
+            capacity = TOOL.history_provider_capacity(supplier_bytes=sum(len(body) for body, _ in supplier.values()),
+                supplier_files=len(supplier), fixed_bytes=sum(len(provider_projection["desktop/" + name][0])
+                    for name in TOOL.CURRENT_BOOTSTRAPS | {"github-ca.pem"}))
+            provider_work = fixture.root / "provider-work"
+            provider_work.mkdir(mode=0o700)
+            provider_runtime, provider_source = provider_work / "runtime", provider_work / "source"
+            final_runtime = fixture.root / "provider-final"
+            with TOOL.history_provider_original(provider_path, nomination, capacity) as (actual, post):
+                self.assertEqual(actual, provider_body)
+                self.assertEqual(post(), provider_body)
+                TOOL.write_tree(provider_source, provider_projection, current_owned=True)
+                TOOL.write_tree(provider_runtime, {**supplier, "tools/gh": (actual, 0o555)},
+                                root_mode=0o700, current_owned=True)
+                preparer = TOOL.current_preparer(captured)
+                old_mask = os.umask(0o077)
+                try:
+                    prepared = preparer.prepare_current(provider_source, provider_runtime, TOOL.ARM_TARGET,
+                                                         history_provider=True)
+                finally:
+                    os.umask(old_mask)
+                runtime_files, manifest = TOOL.current_runtime_files(provider_runtime, provider_projection,
+                    supplier, history_provider=actual)
+                self.assertEqual(runtime_files["tools/gh"], (provider_body, 0o555))
+                rows = [row for row in manifest["files"] if row["path"] == "tools/gh"]
+                self.assertEqual(rows, [{"path": "tools/gh", "sha256": TOOL.digest(provider_body),
+                                        "size": len(provider_body)}])
+                self.assertNotIn("tools/gh", supplier)
+                self.assertEqual(set(runtime_files), set(supplier) | TOOL.CURRENT_BOOTSTRAPS |
+                                 {"tools/gh", "core.zip", "github-ca.pem", "manifest.json"})
+                with self.assertRaisesRegex(TOOL.Refused, "current-runtime-complete-roster"):
+                    TOOL.current_runtime_files(provider_runtime, provider_projection, supplier)
+                normalized = {name: (body, TOOL.current_runtime_mode(name, body, nomination))
+                              for name, (body, _) in runtime_files.items()}
+                TOOL.write_tree(final_runtime, normalized, current_owned=True)
+                self.assertEqual(TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True), normalized)
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-nomination-required"):
+                    TOOL.current_runtime_mode("tools/gh", provider_body, None)
+                self.assertEqual(TOOL.history_provider_source(), (nomination, profile_snapshot))
+                self.assertEqual(post(), provider_body)
+            self.assertEqual(provider_path.read_bytes(), provider_body)
+
+            for path in (final_runtime / "tools/gh", final_runtime / "github-ca.pem"):
+                original_mode = stat.S_IMODE(path.stat().st_mode)
+                path.chmod(0o444 if original_mode == 0o555 else 0o555)
+                try:
+                    with self.assertRaisesRegex(TOOL.Refused, "runtime-mode"):
+                        TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+                finally:
+                    path.chmod(original_mode)
+            output_gh = final_runtime / "tools/gh"
+            output_gh.chmod(0o755)
+            output_gh.write_bytes(provider_body + b"changed")
+            output_gh.chmod(0o555)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-product-binding"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                output_gh.chmod(0o755)
+                output_gh.write_bytes(provider_body)
+                output_gh.chmod(0o555)
+            tools_dir = final_runtime / "tools"
+            tools_dir.chmod(0o755)
+            unknown = tools_dir / "other"
+            unknown.write_bytes(b"INERT extra payload")
+            unknown.chmod(0o444)
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "runtime-complete-roster"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                unknown.unlink()
+                tools_dir.chmod(0o555)
+
+            # The SOURCE profile's same-byte named replacement is not adopted
+            # at POST after a genuine complete payload read.
+            original_tree = TOOL.tree
+            old_profile = profile_path.with_name("old-profile")
+            def swap_profile(root, **options):
+                value = original_tree(root, **options)
+                profile_path.rename(old_profile)
+                profile_path.write_bytes(profile_body)
+                return value
+            try:
+                with mock.patch.object(TOOL, "tree", side_effect=swap_profile):
+                    with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-profile-post-changed"):
+                        TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                profile_path.unlink()
+                old_profile.rename(profile_path)
+            profile_path.rename(old_profile)
+            try:
+                with self.assertRaises(FileNotFoundError):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                old_profile.rename(profile_path)
+            profile_path.write_bytes(TOOL.canonical(null_profile))
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "runtime-provider-roster"):
+                    TOOL.runtime_tree(final_runtime, prepared["manifestSha256"], current=True)
+            finally:
+                profile_path.write_bytes(profile_body)
+
+            provider_path.chmod(0o444)
+            try:
+                with mock.patch.object(TOOL, "read_at") as reader:
+                    with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-mode-bound"):
+                        with TOOL.history_provider_original(provider_path, nomination, capacity): pass
+                    reader.assert_not_called()
+            finally:
+                provider_path.chmod(0o555)
+            with mock.patch.object(TOOL, "read_at") as reader:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-mode-bound"):
+                    with TOOL.history_provider_original(provider_path, nomination, len(provider_body) - 1): pass
+                reader.assert_not_called()
+            with self.assertRaisesRegex(TOOL.Refused, "history-provider-product-binding"):
+                with TOOL.history_provider_original(provider_path, {**nomination, "sha256": "f" * 64}, capacity): pass
+            retained = provider_input / "old-gh"
+            try:
+                with self.assertRaisesRegex(TOOL.Refused, "history-provider-original-changed"):
+                    with TOOL.history_provider_original(provider_path, nomination, capacity):
+                        provider_path.rename(retained)
+                        provider_path.write_bytes(provider_body)
+                        provider_path.chmod(0o555)
+            finally:
+                provider_path.unlink()
+                retained.rename(provider_path)
+            self.assertEqual(provider_path.read_bytes(), provider_body)
+
+            # Same-byte leaf preservation is insufficient after a directory is
+            # detached: check both an immediate and higher named ancestor, at
+            # explicit caller POST and the context's final publication POST.
+            for level in ("immediate", "higher"):
+                for checkpoint in ("caller", "final"):
+                    with self.subTest(provider_ancestor=level, checkpoint=checkpoint):
+                        top = fixture.root / ("provider-ancestor-" + level + "-" + checkpoint)
+                        top.mkdir(mode=0o700)
+                        named_parent = top / "nested"
+                        named_parent.mkdir(mode=0o700)
+                        named_provider = named_parent / "gh"
+                        named_provider.write_bytes(provider_body)
+                        named_provider.chmod(0o555)
+                        renamed = named_parent if level == "immediate" else top
+                        parked = renamed.with_name(renamed.name + "-retained")
+                        try:
+                            with self.assertRaisesRegex(TOOL.Refused, "^history-provider-parent-path-changed$"):
+                                with TOOL.history_provider_original(named_provider, nomination, capacity) as (actual, post):
+                                    self.assertEqual(actual, provider_body)
+                                    renamed.rename(parked)
+                                    if level == "higher": top.mkdir(mode=0o700)
+                                    named_parent.mkdir(mode=0o700)
+                                    named_provider.write_bytes(provider_body)
+                                    named_provider.chmod(0o555)
+                                    self.assertEqual(named_provider.read_bytes(), actual)
+                                    if checkpoint == "caller": post()
+                        finally:
+                            if parked.exists():
+                                named_provider.unlink()
+                                named_parent.rmdir()
+                                if level == "higher": top.rmdir()
+                                parked.rename(renamed)
+                        self.assertEqual(named_provider.read_bytes(), provider_body)
 
     @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0, "requires the reviewed nonroot POSIX DATA test owner")
     def test_manifest_mismatch_preserves_preparation_but_never_creates_final(self):
@@ -10159,6 +10633,12 @@ class MacNormalPreviewData(unittest.TestCase):
                                      TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target))
                     self.assertNotIn("desktopImageCargoArtifact", result)
                 self.assertEqual(TOOL.tree(output), expected)
+                seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
+                sealed_args = SimpleNamespace(**dict(vars(args), output=work / "with-seal.app"))
+                with mock.patch.object(TOOL, "github_seal_files", return_value=contextlib.nullcontext(seal)), \
+                     mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                    TOOL.app_command(sealed_args)
+                self.assertEqual(TOOL.tree(sealed_args.output), dict(expected, **seal))
                 self.assertEqual(result["packageRole"], role)
                 self.assertEqual(result["appBinarySha256BeforeSigning"], TOOL.digest(body))
                 self.assertEqual(result["vaultHelperSha256"], TOOL.digest(helper_body))
@@ -10181,7 +10661,45 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertFalse(wrong.output.exists())
 
     def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
-        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER)
+        # Actual private file/original boundary, not a native signature fixture.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            path = root / "mrk-github-seal"; path.write_bytes(b"inert-helper"); path.chmod(0o555)
+            with TOOL.github_tool_leaf(path, 16, executable=True) as body:
+                self.assertEqual(body, b"inert-helper")
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-original-changed"):
+                with TOOL.github_tool_leaf(path, 16, executable=True):
+                    replacement = root / "replacement"; replacement.write_bytes(b"inert-helper"); replacement.chmod(0o555)
+                    os.replace(replacement, path)  # Same bytes, genuinely different original.
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-original"):
+                with TOOL.github_tool_leaf(path, 1): pass
+            path.chmod(0o755)
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-executable"):
+                with TOOL.github_tool_leaf(path, 16, executable=True): pass
+            path.chmod(0o555)
+            real_close = TOOL.close_once
+            attempts = []
+            def close_lost(fd):
+                attempts.append(fd); real_close(fd)
+                if len(attempts) == 1:
+                    raise TOOL.Refused("original-close-unknown")
+            # Inject only the leaf close; parent context uses its existing path.
+            with mock.patch.object(TOOL, "close_once", side_effect=close_lost):
+                with self.assertRaisesRegex(TOOL.Refused, "original-close-unknown"):
+                    with TOOL.github_tool_leaf(path, 16, executable=True): pass
+            self.assertGreaterEqual(len(attempts), 1)
+            self.assertEqual(len(set(attempts)), len(attempts))
+            original_parent = root / "parent"; original_parent.mkdir()
+            held_file = original_parent / "mrk-github-seal"
+            held_file.write_bytes(b"inert-helper"); held_file.chmod(0o555)
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-parent-changed"):
+                with TOOL.github_tool_leaf(held_file, 16, executable=True):
+                    original_parent.rename(root / "detached")
+                    original_parent.mkdir()
+                    replacement = original_parent / held_file.name
+                    replacement.write_bytes(b"inert-helper"); replacement.chmod(0o555)
+
+        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER, TOOL.GITHUB_SEAL)
                       for mode in (0o755, 0o644, 0o444)) + (
                       (TOOL.DESKTOP_IMAGE, 0o555), (TOOL.DESKTOP_IMAGE, 0o644),
                       (TOOL.DESKTOP_IMAGE, 0o444), ("Contents/Helpers/other", 0o555))

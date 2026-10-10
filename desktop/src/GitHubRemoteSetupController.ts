@@ -1,16 +1,21 @@
 // Coordinates only the original native Setup session. No token, HTTP, polling,
 // retry, local workflow write or renderer-created consent is used here.
+import type { AssetDisplayState } from './assetSessionTypes.ts';
 import { sameConnectionData as same } from './githubConnectionProtocol.ts';
 import type { GitHubConnectionViewState } from './githubConnectionTypes.ts';
-import { GITHUB_REMOTE_SETUP_HELP, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from './GitHubRemoteSetupProtocol.ts';
+import { GITHUB_REMOTE_SETUP_HELP, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupSelection, githubRemoteSetupSecretReferences, githubRemoteSetupVariableReferences, parseGitHubRemoteSetupStatus } from './GitHubRemoteSetupProtocol.ts';
 import type { GitHubRemoteSetupApi, GitHubRemoteSetupConsent, GitHubRemoteSetupReason, GitHubRemoteSetupSelection,
   GitHubRemoteSetupStatus, GitHubRemoteSetupView } from './GitHubRemoteSetupTypes.ts';
+type MaterialBinding = { source: { recordId: string; recordRevision: number; contextRevision: number }; context: NonNullable<NonNullable<AssetDisplayState['status']>['context']>; mode: string; storage: string };
+function usesMaterial(s: GitHubRemoteSetupSelection | null | undefined): s is Extract<GitHubRemoteSetupSelection, { kind: 'environment_secret' | 'environment_variable' }> {
+  return s?.kind === 'environment_secret' || s?.kind === 'environment_variable';
+}
 type Port = GitHubRemoteSetupApi & { mode: 'native' | 'preview' | 'unavailable' };
 type Context = { documentId: string; projectId: string; projectGeneration: number; repository: string; sessionId: string; accountId: string; repositoryId: string };
 type Observer = { api: Port; active: boolean; unlisten: (() => void) | null; ready: Promise<void> | null; reading: Promise<void> | null; accepted: GitHubRemoteSetupStatus | null };
 type Pending = { observer: Observer; context: Context; epoch: object; selection: GitHubRemoteSetupSelection; kind: 'prepare' | 'apply';
-  revision: number; previousId: string | null; operationId: string | null; sent: boolean; cancelAfterAdmission: boolean; cancelRequested: boolean; reviewed: GitHubRemoteSetupConsent | null };
-type Review = { observer: Observer; context: Context; epoch: object; consent: GitHubRemoteSetupConsent };
+  revision: number; previousId: string | null; operationId: string | null; sent: boolean; cancelAfterAdmission: boolean; cancelRequested: boolean; reviewed: GitHubRemoteSetupConsent | null; asset: MaterialBinding | null };
+type Review = { observer: Observer; context: Context; epoch: object; consent: GitHubRemoteSetupConsent; asset: MaterialBinding | null };
 type Discard = { observer: Observer; session: string; consent: string; revision: number };
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) { Object.values(value).forEach(freeze); Object.freeze(value); } return value;
@@ -57,7 +62,32 @@ export class GitHubRemoteSetupController {
   private cancelObserver: Observer | null = null;
   private connection: () => GitHubConnectionViewState;
   private otherOperationReason: () => string | null;
-  constructor(connection: () => GitHubConnectionViewState, otherOperationReason: () => string | null = () => null) { this.connection = connection; this.otherOperationReason = otherOperationReason; }
+  private assets: () => AssetDisplayState | null;
+  private selectedAsset: MaterialBinding | null = null;
+  constructor(connection: () => GitHubConnectionViewState, otherOperationReason: () => string | null = () => null,
+    assets: () => AssetDisplayState | null = () => null) { this.connection = connection; this.otherOperationReason = otherOperationReason; this.assets = assets; }
+  private assetBinding(selection: GitHubRemoteSetupSelection): MaterialBinding | null {
+    if (!usesMaterial(selection)) return null;
+    const projectId = context(this.connection())?.projectId;
+    if (!projectId) return null;
+    const refs = (selection.kind === 'environment_secret' ? githubRemoteSetupSecretReferences(this.assets(), projectId, selection.requirement, selection.stage) :
+      githubRemoteSetupVariableReferences(this.assets(), projectId, selection.requirement, selection.stage)).filter((r) => same(r.source, selection.source));
+    const ref = refs[0];
+    if (refs.length !== 1 || !ref) return null;
+    const { source, context: c, mode, storage } = ref;
+    return { source, context: c, mode, storage }; // Label/status revision is not material identity.
+  }
+  private assetCurrent(selection: GitHubRemoteSetupSelection, captured: MaterialBinding | null): boolean {
+    return !usesMaterial(selection) || captured !== null && same(captured, this.assetBinding(selection));
+  }
+  syncAssetSession = (): void => {
+    if (this.disposed) return;
+    const selected = this.state.selection, p = this.pending, r = this.review;
+    const changed = usesMaterial(selected) && !this.assetCurrent(selected, this.selectedAsset) ||
+      p && usesMaterial(p.selection) && p.epoch === this.epoch && !this.assetCurrent(p.selection, p.asset) ||
+      r && usesMaterial(r.consent.prepared.target.selection) && !this.assetCurrent(r.consent.prepared.target.selection, r.asset);
+    if (changed) { this.selectedAsset = null; this.invalidate({ ...(usesMaterial(selected) ? { selection: null } : {}), error: 'material-changed' }); }
+  };
   getSnapshot = (): GitHubRemoteSetupView => this.state;
   subscribe = (fn: () => void): (() => void) => { this.listeners.add(fn); return () => { this.listeners.delete(fn); }; };
   private update(patch: Partial<GitHubRemoteSetupView>): void {
@@ -83,10 +113,11 @@ export class GitHubRemoteSetupController {
   syncContext = (): void => {
     if (this.disposed) return;
     const c = context(this.connection());
-    if (!same(c, this.current)) { this.current = c; this.invalidate({ selection: null, error: this.pending ? 'target-changed' : null }); }
+    if (!same(c, this.current)) { this.current = c; this.selectedAsset = null; this.invalidate({ selection: null, error: this.pending ? 'target-changed' : null }); }
   };
   setSelection(value: GitHubRemoteSetupSelection | null): void {
     if (this.disposed || value !== null && !githubRemoteSetupSelection(value) || same(value, this.state.selection)) return;
+    this.selectedAsset = value === null ? null : this.assetBinding(value);
     this.invalidate({ selection: value === null ? null : structuredClone(value), error: null });
   }
   setConfirmed(value: boolean): void { this.update({ confirmed: value === true && this.currentConsent() !== null }); }
@@ -125,7 +156,8 @@ export class GitHubRemoteSetupController {
     if (!p.sent || s.revision <= p.revision || s.sessionId !== p.context.sessionId || !op || op.kind !== p.kind ||
         op.id === p.previousId || p.operationId !== null && op.id !== p.operationId) return false;
     if (s.consent && (p.kind !== 'prepare' || !inContext(s.consent, p.context, p.selection))) return false;
-    if (p.kind === 'apply' && op.effect === 'readback-confirmed' && (!p.reviewed || !githubRemoteSetupObservationMatches(p.reviewed.prepared, s.observed))) return false;
+    if (p.kind === 'apply' && (op.effect === 'readback-confirmed' || op.effect === 'accepted-not-value-verified') &&
+        (!p.reviewed || (p.selection.kind === 'environment_secret') !== (op.effect === 'accepted-not-value-verified') || !githubRemoteSetupObservationMatches(p.reviewed.prepared, s.observed))) return false;
     return true;
   }
   private correlate(o: Observer, seen: GitHubRemoteSetupStatus): void {
@@ -138,13 +170,14 @@ export class GitHubRemoteSetupController {
     if (s.operation!.phase !== 'settled') { this.stopInvalidatedOriginal(); return; }
     this.pending = null;
     if (!this.blocked && p.kind === 'prepare' && s.consent && p.epoch === this.epoch && o.api === this.api &&
-        same(p.context, context(this.connection())) && same(p.selection, this.state.selection)) {
-      this.review = { observer: o, context: p.context, epoch: p.epoch, consent: s.consent };
+        same(p.context, context(this.connection())) && same(p.selection, this.state.selection) && this.assetCurrent(p.selection, p.asset)) {
+      this.review = { observer: o, context: p.context, epoch: p.epoch, consent: s.consent, asset: p.asset };
     }
     this.update({ pending: false, uncertain: this.blocked, error: this.blocked ? this.state.error : s.operation!.reason === 'none' ? null : s.operation!.reason });
   }
   private receive(o: Observer, value: unknown): GitHubRemoteSetupStatus | null {
     if (!o.active) return null;
+    this.syncAssetSession(); // Recheck even if an asset subscription was delayed.
     const parsed = parseGitHubRemoteSetupStatus(value);
     if (!parsed) { this.fail('response-invalid'); return null; }
     const s = freeze(structuredClone(parsed)), old = o.accepted;
@@ -176,7 +209,7 @@ export class GitHubRemoteSetupController {
   currentConsent(): GitHubRemoteSetupConsent | null {
     const r = this.review, c = context(this.connection()), s = this.state.status;
     return r && !this.blocked && !this.retired && !this.discard && r.epoch === this.epoch && r.observer === this.observer && r.observer.api === this.api &&
-      c && same(c, r.context) && s?.sessionId === c.sessionId && same(s.consent, r.consent) && same(this.state.selection, r.consent.prepared.target.selection) ? r.consent : null;
+      c && same(c, r.context) && s?.sessionId === c.sessionId && same(s.consent, r.consent) && same(this.state.selection, r.consent.prepared.target.selection) && this.assetCurrent(r.consent.prepared.target.selection, r.asset) ? r.consent : null;
   }
   // Discard is local native grant retirement, never a remote write or retry.
   private retireConsent(): void {
@@ -210,16 +243,17 @@ export class GitHubRemoteSetupController {
     if (!s.available) return GITHUB_REMOTE_SETUP_HELP[s.reason];
     return this.otherOperationReason();
   }
-  prepareReason(): string | null { return this.startReason() ?? (!this.state.selection ? 'Choose one repository setting and its intended values. No write is selected automatically.' : this.currentConsent() ? 'Apply or discard this exact review before preparing another.' : null); }
+  prepareReason(): string | null { return this.startReason() ?? (usesMaterial(this.state.selection) && !this.assetCurrent(this.state.selection, this.selectedAsset) ? 'Choose a current assigned credential for this project and stage in Credentials. Native configuration and field checks are still required. Only secret previews also require the sealing helper.' : null) ?? (!this.state.selection ? 'Choose one repository setting and its intended values. No write is selected automatically.' : this.currentConsent() ? 'Apply or discard this exact review before preparing another.' : null); }
   applyReason(): string | null { return this.startReason() ?? (!this.currentConsent() ? 'Prepare and review this exact setting first.' : !this.state.confirmed ? 'Explicitly confirm this one exact before/after change.' : null); }
   private begin(kind: 'prepare' | 'apply', invoke: (api: Port, c: Context, revision: number) => Promise<GitHubRemoteSetupStatus>): void {
-    if (this.startReason()) return;
+    this.syncAssetSession();
+    if (this.startReason() || !this.state.selection) return;
     const o = this.observer!, c = context(this.connection())!, s = this.state.status!, selection = this.state.selection!;
     const p: Pending = { observer: o, context: c, epoch: this.epoch, selection, kind, revision: s.revision,
-      previousId: s.operation?.id ?? null, operationId: null, sent: false, cancelAfterAdmission: false, cancelRequested: false, reviewed: this.currentConsent() };
+      previousId: s.operation?.id ?? null, operationId: null, sent: false, cancelAfterAdmission: false, cancelRequested: false, reviewed: this.currentConsent(), asset: this.selectedAsset };
     this.pending = p; this.review = null; this.update({ pending: true, confirmed: false, error: null,
       originalTarget: { repository: c.repository, accountId: c.accountId, repositoryId: c.repositoryId, selection: structuredClone(selection) } });
-    if (this.pending !== p || p.epoch !== this.epoch || o.api !== this.api || !same(c, context(this.connection())) || this.otherOperationReason()) {
+    if (this.pending !== p || p.epoch !== this.epoch || o.api !== this.api || !same(c, context(this.connection())) || !this.assetCurrent(p.selection, p.asset) || this.otherOperationReason()) {
       if (this.pending === p) { this.pending = null; this.update({ pending: false, error: 'target-changed' }); this.retireConsent(); } return;
     }
     p.sent = true;

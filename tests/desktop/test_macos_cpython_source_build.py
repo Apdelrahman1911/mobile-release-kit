@@ -6,7 +6,7 @@ tool/SDK discovery, source build or supplier activation occurs here.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
 import gzip
 import hashlib
@@ -7563,6 +7563,61 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 with self.subTest(target=target, prefix=body[:12]), self.assertRaises(PROBE.ProbeRefused):
                     PROBE.macho(body, target)
 
+        # Provider-only Go12 policy uses the existing load-table parser; old
+        # CPython/Seal26 above is unchanged. These are tiny inert headers.
+        seal_name, macho_name = "_mrk_provider_macho_data", "_mrk_provider_load_table_data"
+        self.assertNotIn(seal_name, sys.modules)
+        self.assertNotIn(macho_name, sys.modules)
+        seal = load(seal_name, "macos_github_seal_build.py")
+        parser = load(macho_name, "macos_cpython_orchestrator.py")
+        try:
+            def string_command(command, text):
+                raw = text.encode("ascii") + b"\0"
+                offset = 24 if command == 0xC else 12
+                size = (offset + len(raw) + 7) // 8 * 8
+                return struct.pack("<III", command, size, offset) + b"\0" * (offset - 12) + raw + b"\0" * (size - offset - len(raw))
+            def provider_header(target, *, minimum=12 << 16, loads=None, extra=b"", signed=None):
+                cpu, subtype = seal.TARGETS[target][3:]
+                commands = [struct.pack("<6I", 0x32, 24, 1, minimum, 12 << 16, 0),
+                            string_command(0xE, "/usr/lib/dyld")]
+                commands.extend(string_command(0xC, name) for name in (seal.PROVIDER_LOADS if loads is None else loads))
+                if extra:
+                    commands.append(extra)
+                if signed is None:
+                    signed = target == "aarch64-apple-darwin"
+                if signed:
+                    start = 32 + sum(map(len, commands)) + 16
+                    commands.append(struct.pack("<4I", 0x1D, 16, start, 8))
+                table = b"".join(commands)
+                return struct.pack("<8I", 0xFEEDFACF, cpu, subtype, 2, len(commands), len(table), 0, 0) + table + (b"signature"[:8] if signed else b"")
+            for target in seal.PROVIDER_PINS:
+                body = provider_header(target)
+                got = seal.provider_macho_data(body, len(body), target, parser)
+                self.assertEqual(got["minimumMacOS"], "12.0")
+                self.assertEqual(got["sdk"], "12.0")
+                self.assertEqual(tuple(got["loadDylibs"]), seal.PROVIDER_LOADS)
+                self.assertEqual(got["GoAdHocSignatureCommand"], target == "aarch64-apple-darwin")
+                self.assertIs(got["DeveloperIdQualified"], False)
+                other = next(name for name in seal.PROVIDER_PINS if name != target)
+                bad = [provider_header(other), provider_header(target, minimum=26 << 16),
+                       provider_header(target, loads=seal.PROVIDER_LOADS[:-1]),
+                       provider_header(target, loads=(*seal.PROVIDER_LOADS, seal.PROVIDER_LOADS[0])),
+                       provider_header(target, loads=("@rpath/foreign.dylib", *seal.PROVIDER_LOADS[1:])),
+                       provider_header(target, signed=target != "aarch64-apple-darwin"),
+                       provider_header(target, extra=struct.pack("<IIQ", 0x8000001C, 16, 0)),
+                       b"\xca\xfe\xba\xbe" + body[4:], body[:31]]
+                for changed in bad:
+                    with self.subTest(provider=target, mutated=changed[:16]), self.assertRaises(ValueError):
+                        seal.provider_macho_data(changed, len(changed), target, parser)
+                with self.assertRaises(ValueError):
+                    seal.provider_macho_data(body[:-1], len(body) - 1, target, parser)
+                # Provider12 acceptance is not permission for the old26 role.
+                with self.assertRaises(PROBE.ProbeRefused):
+                    PROBE.macho(body, target)
+        finally:
+            self.assertIs(sys.modules.pop(macho_name), parser)
+            self.assertIs(sys.modules.pop(seal_name), seal)
+
     def test_paired_native_host_and_report_data_do_not_cross_target_or_translation(self):
         # These are scalar observations only: no ctypes/sysctl/process or
         # simulated native receipt is executed or admitted by this DATA test.
@@ -8485,20 +8540,32 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             # stderr filtering, symbol-count weakening or fallback option.
             self.assertIn('        B.need(symbols.stderr == b"", "static-symbol-query")\n        lines = symbols.stdout.decode("ascii", "strict").splitlines()\n        for name in ("_sodium_init", "_crypto_box_seal", "_sodium_memzero", "_randombytes_close"):\n            B.need(sum(bool(re.fullmatch(r"[0-9a-fA-F]+ [A-Z] " + re.escape(name), line.strip())) for line in lines) == 1,\n                   "canonical-four-symbol-definition")\n', source_text)
             # New checks are SOURCE-only here; actual process/entropy/crypto
-            # evidence requires the same selected native1 original on each Mac.
+            # evidence requires both fixed selected native originals on each Mac.
             helper_root = ROOT / "desktop/helpers/macos-github-seal"
             for helper_leaf, expected_pin in seal.HELPER_PINS.items():
                 helper_body = (helper_root / helper_leaf).read_bytes()
                 self.assertEqual((len(helper_body), hashlib.sha256(helper_body).hexdigest()), expected_pin)
-            self.assertEqual(len(seal.ROLE_LIMITS), 22)
-            self.assertEqual(seal.ROLE_LIMITS[-1], ("helper-native-test", 10, seal.QUERY_LIMIT))
+            self.assertEqual(len(seal.ROLE_LIMITS), 23)
+            self.assertEqual(seal.ROLE_LIMITS[-2:], (("helper-native-test", 10, seal.QUERY_LIMIT),
+                ("helper-entropy-test", 10, seal.QUERY_LIMIT)))
             self.assertEqual(seal.NATIVE_TEST, "macos::tests::canonical_return_paths_wipe_input_and_refuse_low_order_key")
             native_source = (helper_root / "src/macos_tests.rs").read_text()
             self.assertEqual(native_source.count("#[test]"), 2)
-            self.assertIn("framed_build_parent_and_entropy_denial();", native_source)
+            self.assertIn("framed_build_parent_and_entropy_denial(phase);", native_source)
             self.assertIn("Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT)", native_source)
-            self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl, Case::DeviceDenied, Case::EntropyDenied", native_source)
-            self.assertIn("assert_eq!(closed_originals, 8);", native_source)
+            self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl]", native_source)
+            self.assertIn("TestPhase::Denied => &[Case::DeviceDenied, Case::EntropyDenied]", native_source)
+            self.assertIn("assert_eq!(closed_originals, match phase { TestPhase::Ordinary => 6, TestPhase::Denied => 2 });", native_source)
+            self.assertNotIn('Command::new("/usr/bin/sandbox-exec")', native_source)
+            self.assertIn('if phase == TestPhase::Ordinary { returned_canonical_checks(); }', native_source)
+            self.assertIn('Ok("ordinary6") => TestPhase::Ordinary', native_source)
+            self.assertIn('Ok("denied2") => TestPhase::Denied', native_source)
+            self.assertIn('_ => panic!("closed test-only owner phase")', native_source)
+            # Canonical name lookup also initializes/stirs the RNG: the denied
+            # parent must reach its children, not abort in this observation.
+            backend_observer = native_source.split('fn framed_build_parent_and_entropy_denial(phase: TestPhase) {', 1)[1].split('    let current =', 1)[0]
+            self.assertEqual(backend_observer, '\n    use std::os::unix::process::ExitStatusExt;\n    if phase == TestPhase::Ordinary {\n        // This API initializes/stirs the RNG. Only ordinary may call it;\n        // denied must reach its actual device probe before any entropy use.\n        let name = unsafe { randombytes_implementation_name() };\n        assert!(!name.is_null());\n        let mut backend = [0u8; 10];\n        for (offset, slot) in backend.iter_mut().enumerate() {\n            // Canonical API returns a static NUL-terminated C string. Stop at its\n            // actual NUL; never read beyond a shorter unexpected backend name.\n            *slot = unsafe { name.add(offset).read() } as u8;\n            if *slot == 0 { break; }\n        }\n        assert_eq!(&backend, b"sysrandom\\0");\n    }\n')
+            self.assertEqual(native_source.count('unsafe { randombytes_implementation_name() }'), 1)
             # Fixed diagnostic SOURCE only; no child/native/panic is executed.
             captured_at = native_source.index('let captured = capture_case(case, &current, &helper).expect("actual child IO/close/wait");')
             report_at = native_source.index('report_captured(case, &captured);')
@@ -8537,6 +8604,115 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertIn('"framedBuildParentRoundTrip": True', source_text)
             self.assertIn('"installedDesktopParentQualified": False', source_text)
             self.assertIn('"abortReturnedWipeClaim": False', source_text)
+            # Exercise the real fixed caller + run/remaining/parser bodies.
+            # The sole process port returns inert CompletedProcess DATA: this
+            # proves routing/refusal, NOT a sandbox, entropy or native receipt.
+            exact_output = ("running 1 test\ntest " + seal.NATIVE_TEST + " ... ok\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.01s\n").encode("ascii")
+            self.assertEqual(seal.NATIVE_PHASES, (("helper-native-test", "ordinary6", 6),
+                ("helper-entropy-test", "denied2", 2)))
+            self.assertEqual(seal.NATIVE_DENIED_POLICY,
+                '(version 1)(allow default)(deny network*)(deny file-read-data (literal "/dev/urandom") (literal "/dev/random"))')
+            for scenario in ("success", "first-nonzero", "second-nonzero", "first-stderr", "second-stderr",
+                             "second-bad-count", "expired-first", "capture-empty", "capture-overflow", "unknown-original"):
+                with self.subTest(native_pair=scenario):
+                    clock, calls, events = [100.0], [], []
+                    base_environment = {"LANG": "C", "LC_ALL": "C", "ZERO_AR_DATE": "1"}
+                    original_environment = dict(base_environment)
+                    verdict = SimpleNamespace(complete=True, fatal=False, contained=True)
+                    failure = OSError("inert original uncertainty")
+                    def returned(argv, **kwargs):
+                        calls.append((list(argv), kwargs))
+                        index = len(calls)
+                        if scenario == "unknown-original":
+                            verdict.complete = False
+                            raise failure
+                        clock[0] += 3 if index == 1 else 2
+                        if scenario == "expired-first" and index == 1: clock[0] = 110.0
+                        output, error, code = exact_output, b"", 0
+                        if scenario == "first-nonzero" and index == 1 or scenario == "second-nonzero" and index == 2: code = 1
+                        if scenario == "first-stderr" and index == 1 or scenario == "second-stderr" and index == 2: error = b"inert refusal"
+                        if scenario == "second-bad-count" and index == 2: output = output.replace(b"4 filtered", b"3 filtered")
+                        if scenario == "capture-empty" and index == 1: output += b"\n" * (seal.QUERY_LIMIT - len(output))
+                        if scenario == "capture-overflow" and index == 2: output = b"x" * (kwargs["output_limit"] + 1)
+                        return subprocess.CompletedProcess(argv, code, output, error)
+                    receiver = SimpleNamespace(deadline=200.0, native_deadline=None, native_capture_remaining=0,
+                        provider_mode=False, role_limits=seal.ROLE_LIMITS, entered=21, returned=21,
+                        native={}, commands=[], environment=base_environment, private=Path("/inert/private"),
+                        sandbox="/usr/bin/sandbox-exec", inflight=False, phase="inert",
+                        check=lambda: None, recheck_tools=lambda: events.append("tools-post"),
+                        census=lambda: {"inert": True}, evidence_bytes=lambda name, data: BUILD.digest(data),
+                        owner=SimpleNamespace(run_owned=returned),
+                        guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)))
+                    receiver.run = lambda *args, **kwargs: seal.SealBuild.run(receiver, *args, **kwargs)
+                    with patch.object(seal.time, "monotonic", side_effect=lambda: clock[0]):
+                        if scenario == "success":
+                            seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        elif scenario == "unknown-original":
+                            with self.assertRaises(OSError) as caught:
+                                seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                            self.assertIs(caught.exception, failure)
+                        else:
+                            with self.assertRaises(BUILD.BuildRefused):
+                                seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        # The pair cannot be restarted even after a known failure.
+                        count = len(calls)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^native-pair-admission$"):
+                            seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        self.assertEqual(len(calls), count)
+                    self.assertIs(receiver.environment, base_environment)
+                    self.assertEqual(base_environment, original_environment)
+                    self.assertEqual(receiver.native_deadline, 110.0)
+                    for index, (argv, kwargs) in enumerate(calls):
+                        self.assertEqual(argv, ["/usr/bin/sandbox-exec", "-p",
+                            BUILD.NETWORK_POLICY if index == 0 else seal.NATIVE_DENIED_POLICY,
+                            "/inert/test", seal.NATIVE_TEST, "--exact", "--test-threads=1"])
+                        self.assertEqual(kwargs["environ"], {**base_environment, seal.NATIVE_PHASE_ENV: "ordinary6" if index == 0 else "denied2"})
+                        self.assertIsNot(kwargs["environ"], base_environment)
+                        self.assertIs(kwargs["cancellation"], receiver.guard)
+                        self.assertEqual(kwargs["timeout"], 10 if index == 0 else 7)
+                        self.assertEqual(kwargs["output_limit"], seal.QUERY_LIMIT - index * len(exact_output))
+                        self.assertTrue(kwargs["capture"]); self.assertFalse(kwargs["text"])
+                        self.assertEqual(receiver.commands[index]["environmentSha256"], BUILD.digest(BUILD.canonical(kwargs["environ"])))
+                    if scenario == "success":
+                        self.assertEqual((receiver.entered, receiver.returned), (23, 23))
+                        self.assertEqual(receiver.native_capture_remaining, seal.QUERY_LIMIT - 2 * len(exact_output))
+                        combined = receiver.native["helperNativeTest"]
+                        self.assertEqual((combined["passed"], combined["selectedInvocations"], combined["nestedOriginalsClosed"]), (2, 2, 8))
+                        self.assertEqual(combined["phases"], [{"phase": "ordinary6", "passed": 1, "nestedOriginalsClosed": 6},
+                            {"phase": "denied2", "passed": 1, "nestedOriginalsClosed": 2}])
+                        self.assertFalse(combined["abortReturnedWipeClaim"])
+                        self.assertFalse(combined["installedDesktopParentQualified"])
+                        self.assertFalse(receiver.inflight)
+                    else:
+                        self.assertNotIn("helperNativeTest", receiver.native)
+                        if scenario in {"expired-first", "capture-empty", "unknown-original", "first-nonzero", "first-stderr"}:
+                            self.assertEqual(len(calls), 1)
+                        if scenario == "unknown-original":
+                            self.assertTrue(receiver.inflight)
+                            self.assertEqual((receiver.entered, receiver.returned), (22, 21))
+            # Other recipe/provider modes retain the original sandbox/env/limit.
+            for provider in (False, True):
+                role = "provider-version" if provider else "compiler-version"
+                calls, events = [], []
+                environment = {"LANG": "C"}
+                def other_returned(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    return subprocess.CompletedProcess(argv, 0, seal.PROVIDER_VERSION if provider else b"inert\n", b"")
+                receiver = SimpleNamespace(deadline=120.0, role_limits=((role, 30, seal.QUERY_LIMIT),),
+                    entered=0, returned=0, provider_mode=provider, environment=environment,
+                    sandbox="/usr/bin/sandbox-exec", private=Path("/inert/private"), commands=[],
+                    check=lambda: None, recheck_tools=lambda: None,
+                    provider_post=lambda: events.append("provider-post"), census=lambda: {},
+                    evidence_bytes=lambda name, data: BUILD.digest(data),
+                    owner=SimpleNamespace(run_owned=other_returned), guard=object())
+                with patch.object(seal.time, "monotonic", return_value=100.0):
+                    seal.SealBuild.run(receiver, role, ["/inert/program"])
+                self.assertEqual(calls[0][0], ["/usr/bin/sandbox-exec", "-p", BUILD.NETWORK_POLICY, "/inert/program"])
+                self.assertIs(calls[0][1]["environ"], environment)
+                self.assertEqual((calls[0][1]["timeout"], calls[0][1]["output_limit"]), (20, seal.QUERY_LIMIT))
+                self.assertEqual(events, ["provider-post", "provider-post"] if provider else [])
+
             # Production helper and binary wire source remain exactly unchanged.
             for fixed, fixed_digest in {
                 "src/main.rs": "14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310",
@@ -8620,6 +8796,701 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Four closed entry forms, not a purpose/path/run selector. The
+            # two old modes retain their exact probe_mode contract below.
+            for arguments, reference, expected in (
+                    ([], seal.REFERENCE, False),
+                    (["--history-provider-probe"], seal.PROVIDER_REFERENCE, False),
+                    (["--publish-build-capsule"], seal.REFERENCE, True),
+                    (["--history-provider-probe", "--publish-build-capsule"], seal.PROVIDER_REFERENCE, True)):
+                with self.subTest(capsule_entry=(arguments, reference)):
+                    self.assertIs(seal.capsule_mode(arguments, reference), expected)
+            for arguments, reference in (
+                    (["--publish-build-capsule"], seal.PROVIDER_REFERENCE),
+                    (["--history-provider-probe", "--publish-build-capsule"], seal.REFERENCE),
+                    (["--publish-build-capsule", "--history-provider-probe"], seal.PROVIDER_REFERENCE),
+                    (["--publish-build-capsule", "--publish-build-capsule"], seal.REFERENCE),
+                    (["--publish-build-capsule", "extra"], seal.REFERENCE),
+                    (["--publish-build-capsule"], "refs/heads/main"),
+                    ("--publish-build-capsule", seal.REFERENCE),
+                    (("--publish-build-capsule",), seal.REFERENCE)):
+                with self.subTest(capsule_entry_refusal=(arguments, reference)), self.assertRaises(ValueError):
+                    seal.capsule_mode(arguments, reference)
+            self.assertEqual(seal.CAPSULE_PURPOSES, {
+                "history-provider": ("gh", 64 * 1024 * 1024),
+                "github-seal": ("mrk-github-seal", 16 * 1024 * 1024)})
+            self.assertEqual(seal.CAPSULE_RECEIPT_LIMIT, 16384)
+            # Exact public prepared DATA returned by the genuine LOCAL owner;
+            # no raw LOCAL reports, copied products or invented publication IDs.
+            # Embedded bytes keep this SOURCE group independent of a binary-
+            # bearing verification branch. Production pins are NOT patched here.
+            prepared_bodies = {'aarch64-apple-darwin': b'{"facts":{"binary":{"bytes":37471938,"sha256":"a704813e4e64f8814e5fa21677f7dab51d9b77d045ded75dd11bcdc1a53d5516"},"buildOrigin":{"allJoinedZeroAndPipesClosed":true,"buildInfo":{"bytes":15522,"sha256":"964a1f69d320598576c66cd488fdde3263d086ce4585ec8bd2d27acd07805a27"},"childOriginals":5,"closedSummary":{"bytes":1305,"sha256":"08097318d2bf066e92d605a2c56b250e4232685986b32cf882ca8b32884f8602"},"crossbuild":{"bytes":9544,"sha256":"4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f"},"dependencyInventorySha256":"b89f11a408a83d5447361c297940da11b9f7b86e7426d4416e4bf0ed7592155b","dependencyPost":true,"developerIdSigned":false,"embeddedNoticesComplete":true,"kind":"offline-owned-crossbuild","namespaceOriginals":1,"nativeExecuted":false,"notarized":false,"noticeContentRuntimeExecuted":false,"result":{"bytes":144446,"sha256":"b0163a148c227bc6973790d96cd2171f44c1d204560c8a9378322634e7a3b8fd"},"sourceInventory":{"bytes":624960,"fileBytes":24177947,"fileCount":1918,"sha256":"8b255198a701d0cc48a53ec76c226231689d5ab2c528ce8599b694da8434914d"},"sourcePost":true,"toolchainInventorySha256":"ed83e96ad8c3327bb6056086809e97f07a3419690a5b601b04f552126b8d824e","toolchainPost":true},"notices":{"contentSha256":"3dc7d2cd021d654387e5be71603869a039a3d2adf8b97a6fd0dda4ef3743a44d","files":333,"manifestSha256":"ed34b914139709ddccdedc1d3cd779b28eab05c55f7575266a479af858235294","modules":162},"sourceManifestSha256":"d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd","target":"aarch64-apple-darwin"},"nativeAuthority":false,"schemaVersion":1,"state":"unconfigured-publication","uploadAuthorized":false}\n', 'x86_64-apple-darwin': b'{"facts":{"binary":{"bytes":39889552,"sha256":"aca3bcfd4fc35d9bcd800f06fe09f7d6c50ab4d2428f04c4ba081a32bfebbe4e"},"buildOrigin":{"allJoinedZeroAndPipesClosed":true,"buildInfo":{"bytes":15520,"sha256":"cc3137dcf5ad6a9092a525d3ca8eacdcb8899f3256194b67c7f7e190c0731102"},"childOriginals":5,"closedSummary":{"bytes":1305,"sha256":"08097318d2bf066e92d605a2c56b250e4232685986b32cf882ca8b32884f8602"},"crossbuild":{"bytes":9544,"sha256":"4f52eddccf96170bf27d6f217e820279a893e4dd711b49cafae783387bc4016f"},"dependencyInventorySha256":"b89f11a408a83d5447361c297940da11b9f7b86e7426d4416e4bf0ed7592155b","dependencyPost":true,"developerIdSigned":false,"embeddedNoticesComplete":true,"kind":"offline-owned-crossbuild","namespaceOriginals":1,"nativeExecuted":false,"notarized":false,"noticeContentRuntimeExecuted":false,"result":{"bytes":144446,"sha256":"b0163a148c227bc6973790d96cd2171f44c1d204560c8a9378322634e7a3b8fd"},"sourceInventory":{"bytes":624960,"fileBytes":24177947,"fileCount":1918,"sha256":"8b255198a701d0cc48a53ec76c226231689d5ab2c528ce8599b694da8434914d"},"sourcePost":true,"toolchainInventorySha256":"ed83e96ad8c3327bb6056086809e97f07a3419690a5b601b04f552126b8d824e","toolchainPost":true},"notices":{"contentSha256":"087592d4d366fcf2c49851571542959bb91607408c6e677ffdc2484fd7293c2e","files":333,"manifestSha256":"ed34b914139709ddccdedc1d3cd779b28eab05c55f7575266a479af858235294","modules":162},"sourceManifestSha256":"d7587f1290e72781bd65cfce96c397e1e37850c62b50d2cb4259ca006e9332dd","target":"x86_64-apple-darwin"},"nativeAuthority":false,"schemaVersion":1,"state":"unconfigured-publication","uploadAuthorized":false}\n'}
+            expected_records = tuple((seal.PROVIDER_INPUT_ROOT + "/" + target + "/build-facts.json",
+                                      seal.PROVIDER_FACTS_PINS[target]) for target in seal.TARGETS)
+            self.assertEqual(seal.provider_fact_records(), expected_records)
+            for target, body in prepared_bodies.items():
+                with self.subTest(prepared_target=target):
+                    self.assertEqual((len(body), hashlib.sha256(body).hexdigest()), seal.PROVIDER_FACTS_PINS[target])
+                    decoded = json.loads(body)
+                    actual = seal.capsule_prepared(body, target)
+                    self.assertEqual(actual, decoded["facts"])
+                    self.assertEqual(actual["target"], target)
+                    self.assertEqual(actual["binary"], {"bytes": seal.PROVIDER_PINS[target][0],
+                                                       "sha256": seal.PROVIDER_PINS[target][1]})
+                    self.assertIsNone(seal.capsule_origin(actual["buildOrigin"]))
+                    self.assertEqual(actual["buildOrigin"]["childOriginals"], 5)
+                    self.assertEqual(actual["buildOrigin"]["namespaceOriginals"], 1)
+                    self.assertIs(decoded["nativeAuthority"], False)
+                    self.assertIs(decoded["uploadAuthorized"], False)
+                    self.assertNotIn("sourceCommit", actual)
+                    self.assertNotIn("runId", actual)
+                    other = next(t for t in prepared_bodies if t != target)
+                    for changed in (body + b" ", body[:-1], bytearray(body), b"{}\n"):
+                        with self.assertRaisesRegex(ValueError, "^capsule-facts-pin$"):
+                            seal.capsule_prepared(changed, target)
+                    with self.assertRaisesRegex(ValueError, "^capsule-facts-pin$"):
+                        seal.capsule_prepared(body, other)
+            with self.assertRaisesRegex(ValueError, "^capsule-facts-target$"):
+                seal.capsule_prepared(next(iter(prepared_bodies.values())), "other-target")
+            target = next(iter(prepared_bodies))
+            for pin in (None, [1, "a" * 64], (True, "a" * 64), (0, "a" * 64),
+                        (16385, "a" * 64), (1, "0" * 64), (1, "A" * 64), (1, "a" * 63)):
+                with self.subTest(unbound_facts=pin), patch.dict(seal.PROVIDER_FACTS_PINS, {target: pin}):
+                    with self.assertRaisesRegex(ValueError, "^capsule-facts-unbound$"):
+                        seal.provider_fact_records()
+            # Rebind ONLY an inert mutated fixture's whole SOURCE hash so these
+            # cases reach the real closed parser instead of stopping at hash.
+            # This is not a successful production SOURCE or publication grant.
+            for path, replacement in (
+                    (("schemaVersion",), True), (("nativeAuthority",), 0),
+                    (("uploadAuthorized",), True), (("state",), "published"),
+                    (("extra",), None), (("facts", "target"), "wrong-target"),
+                    (("facts", "sourceManifestSha256"), "0" * 64),
+                    (("facts", "binary", "bytes"), True),
+                    (("facts", "notices", "files"), True),
+                    (("facts", "notices", "extra"), None),
+                    (("facts", "buildOrigin", "childOriginals"), 6),
+                    (("facts", "buildOrigin", "namespaceOriginals"), True),
+                    (("facts", "buildOrigin", "sourcePost"), 1),
+                    (("facts", "buildOrigin", "nativeExecuted"), 0),
+                    (("facts", "buildOrigin", "result", "bytes"), 262145),
+                    (("facts", "buildOrigin", "result", "sha256"), "0" * 64),
+                    (("facts", "buildOrigin", "sourceInventory", "fileCount"), 2049),
+                    (("facts", "buildOrigin", "runId"), "123")):
+                with self.subTest(prepared_shape=path):
+                    value = json.loads(prepared_bodies[target])
+                    node = value
+                    for key in path[:-1]: node = node[key]
+                    node[path[-1]] = replacement
+                    changed = BUILD.canonical(value) + b"\n"
+                    with patch.dict(seal.PROVIDER_FACTS_PINS, {target: (len(changed), hashlib.sha256(changed).hexdigest())}):
+                        with self.assertRaises(ValueError): seal.capsule_prepared(changed, target)
+            # Same fixed owner route, not a second native/process test. The
+            # expected rc1 is accepted only for one exact provider observation.
+            self.assertIs(seal.probe_mode([], seal.REFERENCE), False)
+            self.assertIs(seal.probe_mode(["--history-provider-probe"], seal.PROVIDER_REFERENCE), True)
+            for args, reference in (([], seal.PROVIDER_REFERENCE), (["--history-provider-probe"], seal.REFERENCE),
+                                    (["--history-provider-probe", "extra"], seal.PROVIDER_REFERENCE), ([], "refs/heads/main")):
+                with self.assertRaises(ValueError):
+                    seal.probe_mode(args, reference)
+            self.assertEqual(len(seal.ROLE_LIMITS), 23)
+            self.assertEqual(seal.PROVIDER_ROLES, (("network-denial", 15, 65536),
+                ("provider-version", 15, 65536), ("provider-invalid-controls", 15, 65536)))
+            self.assertEqual((seal.WORK_SECONDS, seal.CLEANUP_SECONDS, seal.WORK_ENTRIES, seal.WORK_BYTES),
+                             (900, 60, 8192, 512 * 1024 * 1024))
+            # Actual both-architecture output and the unchanged upstream
+            # changelogURL rule: the modified version's second hyphen chooses
+            # /latest, not a fabricated upstream release tag. Keep every byte.
+            observed_version = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
+                                b"https://github.com/cli/cli/releases/latest\n")
+            self.assertEqual(len(observed_version), 88)
+            self.assertEqual(seal.PROVIDER_VERSION, observed_version)
+            self.assertTrue(seal.provider_output("provider-version", 0, observed_version, b""))
+            for changed_version_output in (
+                    observed_version.replace(b"releases/latest", b"releases/tag/v2.88.1-mrk-history.1"),
+                    observed_version.replace(b"2.88.1-mrk-history.1", b"2.88.1"),
+                    observed_version.replace(b"2026-10-09", b"2026-10-10"),
+                    observed_version + b"extra\n"):
+                self.assertFalse(seal.provider_output("provider-version", 0, changed_version_output, b""))
+            self.assertFalse(seal.provider_output("provider-version", 0, observed_version, b"unexpected\n"))
+            self.assertTrue(seal.provider_output("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL))
+            for role, code, stdout, stderr in (("provider-version", 1, seal.PROVIDER_VERSION, b""),
+                    ("provider-invalid-controls", 0, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", True, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", -9, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", 1, b"", b"authentication required\n"),
+                    ("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL + b"extra"),
+                    ("provider-invalid-controls", 1, b"unexpected", seal.PROVIDER_REFUSAL),
+                    ("helper-native-test", 1, b"", seal.PROVIDER_REFUSAL)):
+                self.assertFalse(seal.provider_output(role, code, stdout, stderr))
+            # Actual streaming/copy/POST over tiny test-owned inert bytes. A
+            # replaced same-content name is not the retained source original.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                original = root / "input"
+                original.write_bytes(b"inert provider bytes; never launched")
+                pin = (original.stat().st_size, hashlib.sha256(original.read_bytes()).hexdigest())
+                receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                invoke = lambda **kw: seal.SealBuild.provider_stream(receiver, original, pin, **kw)
+                identity, prefix, no_copy = invoke()
+                self.assertIsNone(no_copy)
+                self.assertEqual(prefix, original.read_bytes())
+                copy_path = root / "copied"
+                sentinel = object()
+                receiver.provider_copy_identity = sentinel
+                same_original, copy_prefix, private_copy = invoke(original=identity, destination=copy_path)
+                self.assertEqual((same_original, copy_prefix), (identity, prefix))
+                self.assertEqual(private_copy, BUILD.identity(copy_path.stat()))
+                self.assertIs(receiver.provider_copy_identity, sentinel)
+                self.assertEqual(copy_path.read_bytes(), prefix)
+                self.assertEqual(copy_path.stat().st_mode & 0o777, 0o555)
+                seal.SealBuild.provider_stream(receiver, copy_path, pin, original=private_copy)
+                capsule_copy_path = root / "capsule-copy"
+                _, _, capsule_copy = invoke(original=identity, destination=capsule_copy_path)
+                self.assertNotEqual(capsule_copy, private_copy)
+                self.assertEqual(capsule_copy, BUILD.identity(capsule_copy_path.stat()))
+                self.assertIs(receiver.provider_copy_identity, sentinel)
+                seal.SealBuild.provider_stream(receiver, capsule_copy_path, pin, original=capsule_copy)
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"):
+                    seal.SealBuild.provider_stream(receiver, original, (pin[0], "0" * 64))
+                saved = root / "saved"
+                original.rename(saved)
+                original.write_bytes(saved.read_bytes())
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"):
+                    invoke(original=identity)
+                saved.unlink()
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
+            # A dispatched failed create has no returned original: the SAME
+            # existing DATA ledger conservatively remains unknown, even though
+            # O_EXCL preserved the prior destination bytes. Never reset it just
+            # to continue positive tests in this isolated fixture.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                original, existing = root / "input", root / "existing"
+                original.write_bytes(b"abc"); existing.write_bytes(b"kept")
+                pin = (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False,
+                    provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                with self.assertRaises(FileExistsError):
+                    seal.SealBuild.provider_stream(receiver, original, pin, destination=existing)
+                self.assertEqual(existing.read_bytes(), b"kept")
+                self.assertFalse(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 1)
+            for fault in ("named-post", "close-unknown"):
+                with self.subTest(provider_stream=fault), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    path = root / "input"
+                    path.write_bytes(b"post-bound inert bytes")
+                    pin = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                    receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents={str(root): BUILD.custody(root.lstat())})
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    real_read, real_close = os.read, os.close
+                    if fault == "named-post":
+                        def changed(fd, size):
+                            value = real_read(fd, size)
+                            if value == b"":
+                                path.rename(root / "retained")
+                                path.write_bytes(b"post-bound inert bytes")
+                            return value
+                        with patch.object(seal.os, "read", changed), self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-post"):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertTrue(BUILD.DATA.known)
+                    else:
+                        def closed_unknown(fd):
+                            real_close(fd)  # Real consuming close; no descriptor leak or retry.
+                            raise OSError("inert close-observation failure")
+                        with patch.object(seal.os, "close", closed_unknown), self.assertRaises(OSError):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertFalse(BUILD.DATA.known)
+                        self.assertEqual(BUILD.DATA._pending, 1)
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Exactly two descriptive sidecars use the actual existing stream
+            # originals; neither byte equality nor a replacement name is custody.
+            for scenario in ("ordinary", "wrong-hash", "replaced", "symlink", "missing", "read-fault", "close-fault"):
+                with self.subTest(provider_notices=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    directory = root / "provider-inputs"
+                    directory.mkdir()
+                    notice_pins, notice_originals = {}, {}
+                    parents = {str(root): BUILD.custody(root.lstat()), str(directory): BUILD.custody(directory.lstat())}
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = directory / target
+                        target_dir.mkdir()
+                        path = target_dir / "NOTICES.txt"
+                        path.write_bytes(b"Complete inert notice bytes; not executable\n")
+                        notice_pins[target] = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                        notice_originals[target] = BUILD.identity(path.stat())
+                        parents[str(target_dir)] = BUILD.custody(target_dir.lstat())
+                    receiver = SimpleNamespace(check=lambda: None, provider_private_retired=False, provider_parents=parents,
+                                               provider_notice_originals=notice_originals)
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    receiver.provider_stream = lambda path, pin, **kw: seal.SealBuild.provider_stream(receiver, path, pin, **kw)
+                    invoke = lambda: seal.SealBuild.provider_notices_post(receiver)
+                    target = next(iter(seal.PROVIDER_PINS))
+                    path = directory / target / "NOTICES.txt"
+                    original_identity = notice_originals[target]
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(seal, "PROVIDER_NOTICE_PINS", notice_pins):
+                        if scenario == "ordinary":
+                            invoke()
+                            self.assertEqual(notice_originals[target], original_identity)
+                        elif scenario == "wrong-hash":
+                            notice_pins[target] = (notice_pins[target][0], "0" * 64)
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"): invoke()
+                        elif scenario in {"replaced", "symlink"}:
+                            kept = path.with_name("retained")
+                            path.rename(kept)
+                            if scenario == "replaced": path.write_bytes(kept.read_bytes())
+                            else: path.symlink_to("retained")
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"): invoke()
+                        elif scenario == "missing":
+                            path.unlink()
+                            with self.assertRaises(FileNotFoundError): invoke()
+                        elif scenario == "read-fault":
+                            with patch.object(seal.os, "read", side_effect=OSError("inert read refusal")), self.assertRaises(OSError): invoke()
+                        else:
+                            actual_close = os.close
+                            def notice_close_unknown(fd):
+                                actual_close(fd)
+                                raise OSError("inert consuming close uncertainty")
+                            with patch.object(seal.os, "close", notice_close_unknown), self.assertRaises(OSError): invoke()
+                    self.assertEqual(BUILD.DATA.known, scenario != "close-fault")
+                    self.assertEqual(BUILD.DATA._pending, 1 if scenario == "close-fault" else 0)
+                    self.assertEqual(notice_originals[target], original_identity)
+                    if scenario == "close-fault":
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Real production input roster refuses before the intentionally
+            # unavailable stream port; no dummy binary is admitted or launched.
+            for scenario in ("missing-notice", "unexpected-leaf"):
+                with self.subTest(provider_notice_roster=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    inputs = root / "provider-inputs"
+                    inputs.mkdir()
+                    for fixture_name in ("source-manifest.json", "crossbuild.json"): (inputs / fixture_name).write_bytes(b"inert")
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = inputs / target
+                        target_dir.mkdir()
+                        (target_dir / "gh").write_bytes(b"inert-not-launched")
+                        (target_dir / "NOTICES.txt").write_bytes(b"inert")
+                    target = next(iter(seal.PROVIDER_PINS))
+                    if scenario == "missing-notice": (inputs / target / "NOTICES.txt").unlink()
+                    else: (inputs / target / "unexpected").write_bytes(b"refuse")
+                    receiver = SimpleNamespace(check=lambda: None, target=target, capsule_mode=False)
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
+                        with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
+                        stream.assert_not_called()
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            # Capsule inputs have exactly two target directories and exactly
+            # gh/NOTICES/facts within each: no old compact-record fallback. The
+            # first stream is deliberately unavailable, so malformed rosters
+            # must refuse before any binary or native-tool admission.
+            for scenario in ("missing-facts", "extra-target-file", "old-root-record"):
+                with self.subTest(capsule_input_roster=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    inputs = root / "provider-inputs"
+                    inputs.mkdir()
+                    for target in seal.TARGETS:
+                        target_dir = inputs / target
+                        target_dir.mkdir()
+                        (target_dir / "gh").write_bytes(b"inert-not-launched")
+                        (target_dir / "NOTICES.txt").write_bytes(b"inert")
+                        (target_dir / "build-facts.json").write_bytes(prepared_bodies[target])
+                    target = next(iter(seal.TARGETS))
+                    if scenario == "missing-facts": (inputs / target / "build-facts.json").unlink()
+                    elif scenario == "extra-target-file": (inputs / target / "extra").write_bytes(b"refuse")
+                    else: (inputs / "crossbuild.json").write_bytes(b"no raw evidence fallback")
+                    receiver = SimpleNamespace(check=lambda: None, target=target, capsule_mode=True)
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
+                        with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
+                        stream.assert_not_called()
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            # Production run loop with an inert returned-value port, never a
+            # subprocess. Wrong role refuses before that port, wrong return
+            # shape cannot increment a successful command observation.
+            for scenario in ("exact", "wrong-role", "wrong-exit", "wrong-output", "wrong-original"):
+                trace = []
+                receiver = SimpleNamespace(provider_mode=True, role_limits=seal.PROVIDER_ROLES, entered=2, returned=2,
+                    sandbox="/fixed/sandbox", private=Path("/fixed/private"), environment={}, commands=[],
+                    check=lambda: None, provider_post=lambda: trace.append("post"), recheck_tools=lambda: None,
+                    evidence_bytes=lambda n, b: hashlib.sha256(b).hexdigest(), census=lambda: {"entries": 0, "bytes": 0},
+                    deadline=time.monotonic() + 60, guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda:
+                        SimpleNamespace(complete=True, fatal=False, contained=True))))
+                def returned(argv, **kwargs):
+                    trace.append("run")
+                    return subprocess.CompletedProcess(argv if scenario != "wrong-original" else [],
+                        0 if scenario == "wrong-exit" else 1, b"", b"wrong" if scenario == "wrong-output" else seal.PROVIDER_REFUSAL)
+                receiver.owner = SimpleNamespace(run_owned=returned)
+                if scenario == "exact":
+                    result = seal.SealBuild.run(receiver, "provider-invalid-controls", ["/fixed/gh", "api"])
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual((receiver.entered, receiver.returned), (3, 3))
+                    self.assertEqual(trace, ["post", "run", "post"])
+                else:
+                    with self.assertRaises(BUILD.BuildRefused):
+                        seal.SealBuild.run(receiver, "provider-version" if scenario == "wrong-role" else "provider-invalid-controls", ["/fixed/gh", "api"])
+                    if scenario == "wrong-role":
+                        self.assertEqual(trace, [])
+                # No parser return is an actual entry/publication grant.
+                self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                    ledger={"complete": False, "fatal": False, "contained": True}, handlers="RESTORED",
+                    scratch_retired=True, data_finality=True))
+            workflow = (ROOT / ".github/workflows/desktop-macos-github-seal.yml").read_text()
+            self.assertIn("      - verify/desktop-macos-github-seal\n      - verify/desktop-macos-history-provider-probe\n", workflow)
+            self.assertEqual(workflow.count("--history-provider-probe --publish-build-capsule\n"), 1)
+            self.assertEqual(workflow.count("macos_github_seal_build.py --publish-build-capsule\n"), 1)
+            self.assertIn("test \"$GITHUB_REF\" = refs/heads/verify/desktop-macos-github-seal", workflow)
+            self.assertIn("timeout-minutes: 25", workflow)
+            self.assertIn("if-no-files-found: ignore", workflow)
+            self.assertNotIn("workflow_dispatch", workflow)
+            # Only two success-gated capsules; diagnostic upload remains
+            # separate and cannot turn an original failure into product evidence.
+            for title, purpose, ref, prefix, binary in (
+                    ("History provider", "history-provider", seal.PROVIDER_REFERENCE, "mrk-history-provider", "gh"),
+                    ("sealed-box helper", "github-seal", seal.REFERENCE, "mrk-github-seal", "mrk-github-seal")):
+                marker = "      - name: Publish finalized " + title + " build capsule\n"
+                self.assertEqual(workflow.count(marker), 1)
+                step = workflow.split(marker, 1)[1].split("      - name:", 1)[0]
+                self.assertIn("        if: success() && github.ref == '" + ref
+                    + "' && steps.build.outcome == 'success' && steps.sourcepost.outcome == 'success'\n", step)
+                self.assertIn("        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", step)
+                self.assertIn("          name: tool-build-" + purpose
+                    + "-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}\n", step)
+                directory = "/Users/runner/work/_temp/" + prefix + "-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/capsule/"
+                self.assertIn("          path: |\n            " + directory + binary
+                    + "\n            " + directory + "tool-build-receipt.json\n", step)
+                self.assertEqual(step.count(directory), 2)
+                for line in ("if-no-files-found: error", "compression-level: 0", "retention-days: 7"):
+                    self.assertIn("          " + line + "\n", step)
+                self.assertNotIn("/public/", step)
+                self.assertNotIn("always()", step)
+            self.assertEqual(workflow.count("          if-no-files-found: error\n"), 2)
+            # Receipt DATA comes from the actual method, with checked publication
+            # IDs distinct from the offline provider build origin. No receipt
+            # by itself proves the enclosing original returned successfully.
+            receipt_fields = {"schemaVersion", "kind", "purpose", "target", "sourceCommit",
+                "sourceManifestSha256", "binary", "notices", "runId", "runAttempt",
+                "sourcePost", "originalsClosed", "productsFinal"}
+            source_rows = {"inert-source.py": {"size": 3, "sha256": hashlib.sha256(b"abc").hexdigest()}}
+            source_commit = "a" * 40
+            source_evidence = BUILD.canonical({"sourceCommit": source_commit, "rows": source_rows})
+            for purpose in seal.CAPSULE_PURPOSES:
+                provider = purpose == "history-provider"
+                facts = json.loads(prepared_bodies[target])["facts"]
+                pin = (facts["binary"]["bytes"], facts["binary"]["sha256"]) if provider else (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(target=target, source=source_commit, run_id="9007199254740991", attempt="9007199254740991",
+                    source_binding=source_rows, evidence={"source-binding.json": source_evidence},
+                    capsule_purpose=purpose, provider_mode=provider, capsule_pin=pin, provider_prepared={target: facts})
+                body = seal.SealBuild.capsule_receipt(receiver)
+                value = json.loads(body)
+                self.assertLessEqual(len(body), 16384)
+                self.assertEqual(set(value), receipt_fields | ({"buildOrigin"} if provider else set()))
+                self.assertEqual((value["sourceCommit"], value["runId"], value["runAttempt"]),
+                                 (source_commit, "9007199254740991", "9007199254740991"))
+                self.assertEqual(value["purpose"], purpose)
+                self.assertTrue(all(value[key] is True for key in ("sourcePost", "originalsClosed", "productsFinal")))
+                if provider:
+                    self.assertEqual(value["buildOrigin"], facts["buildOrigin"])
+                    self.assertEqual(value["notices"], facts["notices"])
+                    self.assertEqual(value["sourceManifestSha256"], facts["sourceManifestSha256"])
+                else:
+                    self.assertIsNone(value["notices"])
+                    self.assertNotIn("buildOrigin", value)
+                    self.assertEqual(value["sourceManifestSha256"], hashlib.sha256(source_evidence).hexdigest())
+                for field, bad in (("run_id", "0"), ("run_id", "01"), ("run_id", "1" * 17),
+                        ("run_id", 1), ("attempt", True), ("attempt", "1" * 17),
+                        ("run_id", "9007199254740992"), ("attempt", "9007199254740992"),
+                        ("source", "0" * 40), ("source", "A" * 40), ("target", "wrong-target")):
+                    with self.subTest(capsule_context=(purpose, field, bad)), patch.object(receiver, field, bad):
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-publication-context$"):
+                            seal.SealBuild.capsule_receipt(receiver)
+                for changed_source in (BUILD.canonical({"sourceCommit": source_commit, "rows": {}}),
+                                       source_evidence + b" ", BUILD.canonical(source_rows)):
+                    with patch.object(receiver, "evidence", {"source-binding.json": changed_source}):
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-full-source-binding$"):
+                            seal.SealBuild.capsule_receipt(receiver)
+
+            # Tiny real files exercise the existing streaming/copy/readback,
+            # parent originals, same-task census and consuming retirement. No
+            # executable or native build is admitted; only prerequisite source
+            # and provider observations are inert ports, kept explicit here.
+            def capsule_fixture(root, purpose):
+                work = root / "work"
+                work.mkdir(mode=0o700)
+                private = work / "private"
+                private.mkdir(mode=0o700)
+                (private / "bounded-work").write_bytes(b"five!")
+                export = work / "export-pending"
+                export.mkdir(mode=0o700)
+                provider = purpose == "history-provider"
+                if provider:
+                    original = root / "inert-provider"
+                else:
+                    (export / "helper").mkdir(mode=0o700)
+                    original = export / "helper/mrk-github-seal"
+                original.write_bytes(b"abc")
+                original.chmod(0o555)
+                pin = (3, hashlib.sha256(b"abc").hexdigest())
+                receiver = SimpleNamespace(work=work, private=private, public=work / "public", export=export,
+                    work_identity=BUILD.custody(work.lstat()), private_identity=BUILD.custody(private.lstat()),
+                    export_identity=BUILD.custody(export.lstat()),
+                    export_helper_identity=None if provider else BUILD.custody((export / "helper").lstat()),
+                    export_promoted=False, capsule_promoted=False, capsule_mode=True, capsule_purpose=purpose,
+                    capsule_pending=work / "capsule-pending", capsule_public=work / "capsule",
+                    capsule_identity=None, capsule_copy_identity=None, capsule_receipt_identity=None,
+                    provider_mode=provider, provider_private_retired=False, provider_parents={}, provider_source_parents={},
+                    provider_original=original, provider_pin=pin, provider_identity=BUILD.identity(original.lstat()),
+                    success_ready=True, failure=None, source_post=True, inflight=False, cleaning=True,
+                    deadline=time.monotonic() + 60, cleanup_deadline=time.monotonic() + 60,
+                    source=source_commit, target=target, run_id="123", attempt="1", source_binding=source_rows,
+                    native={"helperExecutable": {"bytes": 3, "sha256": pin[1]}},
+                    export_rows={} if provider else {"helper/mrk-github-seal": {"size": 3, "sha256": pin[1]}},
+                    evidence={"source-binding.json": source_evidence}, commands=[], cleanup_errors=[], scratch_retired=False,
+                    entered=3 if provider else 23, returned=3 if provider else 23,
+                    role_limits=seal.PROVIDER_ROLES if provider else seal.ROLE_LIMITS,
+                    guard=SimpleNamespace(handler_state="RESTORED", lifetime_ledger=SimpleNamespace(
+                        verdict=lambda: SimpleNamespace(complete=True, fatal=False, contained=True))))
+                receiver.provider_post = lambda **kwargs: None  # Previously admitted provider observation, not a probe.
+                for method in ("check", "final_check", "mkdir", "census", "evidence_bytes", "evidence_json",
+                        "provider_parents_post", "provider_stream", "capsule_reserve", "capsule_parents_post",
+                        "capsule_products_post", "capsule_source_post", "prepare_capsule", "capsule_receipt",
+                        "retire_capsule", "publish_capsule", "publish"):
+                    setattr(receiver, method, getattr(seal.SealBuild, method).__get__(receiver))
+                return receiver
+
+            # Positive tiny-file cases supply bounded free-space DATA for the
+            # unchanged full-size production reservation; they do not allocate
+            # that capacity in the 32MiB scratch. Zero-space refusal stays below.
+            for purpose in seal.CAPSULE_PURPOSES:
+                with self.subTest(capsule_copy=purpose), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, purpose)
+                    with patch.object(seal, "source_snapshot", return_value=source_rows) as snapshot, \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)) as storage:
+                        receiver.prepare_capsule()
+                        storage.assert_called_once_with(receiver.work)
+                        self.assertEqual(receiver.capsule_reservation["bytes"], seal.CAPSULE_PURPOSES[purpose][1] + 16384)
+                        expected = (sum(row["size"] for row in receiver.export_rows.values())
+                            + sum(map(len, receiver.evidence.values())) + seal.QUERY_LIMIT
+                            + seal.CAPSULE_PURPOSES[purpose][1] + 16384)
+                        self.assertEqual(receiver.capsule_reservation["combinedBytes"], expected)
+                        self.assertEqual(receiver.capsule_reservation["combinedEntries"],
+                            1 + len(receiver.export_rows) + len(receiver.evidence)
+                            + (2 if receiver.provider_mode else 3) + 6)
+                        self.assertEqual(snapshot.call_args.kwargs, {"provider": receiver.provider_mode, "capsule": True})
+                        self.assertNotEqual(receiver.capsule_copy_identity, receiver.provider_identity)
+                        binary = receiver.capsule_pending / seal.CAPSULE_PURPOSES[purpose][0]
+                        self.assertEqual(binary.read_bytes(), b"abc")
+                        self.assertEqual(binary.stat().st_mode & 0o777, 0o555)
+                        self.assertEqual(receiver.capsule_copy_identity, BUILD.identity(binary.lstat()))
+                        self.assertEqual(sorted(p.name for p in receiver.capsule_pending.iterdir()), [binary.name])
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-output-collision$"):
+                            receiver.prepare_capsule()
+                        receiver.capsule_products_post()
+                        if purpose == "github-seal":
+                            BUILD.retire_tree(receiver.private, receiver.cleanup_deadline)
+                            receiver.scratch_retired = True
+                            receiver.publish(receiver.guard.lifetime_ledger.verdict())
+                            self.assertFalse(receiver.capsule_pending.exists())
+                            self.assertTrue(receiver.capsule_promoted)
+                            self.assertEqual(sorted(p.name for p in receiver.capsule_public.iterdir()),
+                                ["mrk-github-seal", "tool-build-receipt.json"])
+                            receipt = receiver.capsule_public / "tool-build-receipt.json"
+                            self.assertEqual(receipt.stat().st_mode & 0o777, 0o444)
+                            self.assertEqual(json.loads(receipt.read_bytes())["sourceManifestSha256"], hashlib.sha256(source_evidence).hexdigest())
+                            receiver.capsule_products_post(receipt=True)
+                        receiver.retire_capsule()
+                        self.assertIsNone(receiver.capsule_identity)
+                        self.assertFalse(receiver.capsule_pending.exists() or receiver.capsule_public.exists())
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+
+            # Budget refusals happen before mkdir/copy. Large amounts are scalar
+            # DATA, never giant fixture allocations or independent quota pools.
+            for scenario in ("public", "combined-work", "combined-entries", "space", "census-bool"):
+                with self.subTest(capsule_quota=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    if scenario == "public": receiver.export_rows["oversized"] = {"size": seal.PUBLIC_BYTES}
+                    if scenario == "combined-work": receiver.census = lambda: {"entries": 0, "bytes": seal.WORK_BYTES}
+                    if scenario == "combined-entries": receiver.census = lambda: {"entries": seal.WORK_ENTRIES, "bytes": 0}
+                    if scenario == "census-bool": receiver.census = lambda: {"entries": True, "bytes": 0}
+                    usage = SimpleNamespace(free=0 if scenario == "space" else 2 * seal.WORK_BYTES)
+                    with patch.object(seal.shutil, "disk_usage", return_value=usage), patch.object(receiver, "mkdir", side_effect=AssertionError("copy must not start")) as mkdir:
+                        with self.assertRaises(BUILD.BuildRefused): receiver.prepare_capsule()
+                        mkdir.assert_not_called()
+                    self.assertFalse(receiver.capsule_pending.exists())
+                    self.assertIsNone(receiver.capsule_identity)
+                    self.assertTrue(BUILD.DATA.known)
+
+            for scenario in ("binary-substitute", "parent-substitute", "unexpected-member", "source-post", "close-unknown"):
+                with self.subTest(capsule_refusal=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)):
+                        receiver.prepare_capsule()
+                    binary = receiver.capsule_pending / "mrk-github-seal"
+                    if scenario == "binary-substitute":
+                        binary.rename(root / "kept-original")
+                        binary.write_bytes(b"abc"); binary.chmod(0o555)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^provider-input-original$"):
+                            receiver.capsule_products_post()
+                    elif scenario == "parent-substitute":
+                        receiver.capsule_pending.rename(receiver.work / "kept-directory")
+                        receiver.capsule_pending.mkdir(mode=0o700)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-directory-original$"):
+                            receiver.capsule_products_post()
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-directory-original$"):
+                            receiver.retire_capsule()
+                    elif scenario == "unexpected-member":
+                        (receiver.capsule_pending / "extra").write_bytes(b"x")
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-member-roster$"):
+                            receiver.capsule_products_post()
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-member-roster$"):
+                            receiver.retire_capsule()
+                    elif scenario == "source-post":
+                        with patch.object(seal, "source_snapshot", return_value={}):
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "^verification-source-final-post$"):
+                                receiver.capsule_source_post()
+                    else:
+                        actual_close = os.close
+                        def capsule_close_unknown(fd):
+                            actual_close(fd)
+                            raise OSError("inert consuming close uncertainty")
+                        with patch.object(seal.os, "close", capsule_close_unknown), self.assertRaises(OSError):
+                            receiver.capsule_products_post()
+                        self.assertFalse(BUILD.DATA.known)
+                        with patch.object(receiver, "final_check", side_effect=AssertionError("unknown cannot retire")) as check:
+                            receiver.retire_capsule()
+                            check.assert_not_called()
+                        self.assertTrue(binary.exists())
+                    self.assertFalse(receiver.capsule_public.exists())
+
+            # Exercise the actual cleanup branch after a real copy failure.
+            # Retained export bytes are already represented by the tiny fixture;
+            # only the earlier compiler/product-retention stage is an inert port.
+            # Known custody permits exact retirement before rethrowing the first
+            # failure. Unknown close cannot claim scratch retirement or discover
+            # a new cleanup capability from the visible pending path.
+            for scenario in ("known-copy", "unknown-close", "pending-retirement", "export-retirement"):
+                with self.subTest(capsule_cleanup=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    receiver = capsule_fixture(root, "github-seal")
+                    receiver.libtool_alias_originals = {}
+                    receiver.retain_products = lambda: None
+                    observed = []
+                    actual_prepare = receiver.prepare_capsule
+                    def observed_prepare():
+                        try: actual_prepare()
+                        except BaseException as error:
+                            observed.append(error)
+                            raise
+                    receiver.prepare_capsule = observed_prepare
+                    retired = []
+                    actual_retire = BUILD.retire_tree
+                    retirement_error = OSError("inert consuming retirement failure")
+                    def retiring(path, deadline):
+                        retired.append(path)
+                        if (scenario == "pending-retirement" and path == receiver.capsule_pending
+                                or scenario == "export-retirement" and path == receiver.export):
+                            raise retirement_error
+                        return actual_retire(path, deadline)
+                    actual_close = os.close
+                    close_error = OSError("inert consuming close uncertainty")
+                    close_failed = [False]
+                    def closing(fd):
+                        actual_close(fd)
+                        if scenario == "unknown-close" and not close_failed[0]:
+                            close_failed[0] = True
+                            raise close_error
+                    actual_write = os.write
+                    def writing(fd, data):
+                        return actual_write(fd, data) if scenario == "unknown-close" else 0
+                    with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                            patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)), \
+                            patch.object(seal.os, "write", side_effect=writing), \
+                            patch.object(seal.os, "close", side_effect=closing), \
+                            patch.object(BUILD, "retire_tree", side_effect=retiring):
+                        with self.assertRaises((BUILD.BuildRefused, OSError)) as raised:
+                            seal.SealBuild.cleanup(receiver)
+                    self.assertEqual(len(observed), 1)
+                    self.assertIs(raised.exception, observed[0])
+                    self.assertFalse(receiver.capsule_public.exists())
+                    if scenario == "unknown-close":
+                        self.assertIs(raised.exception, close_error)
+                        self.assertFalse(BUILD.DATA.known)
+                        self.assertFalse(receiver.scratch_retired)
+                        self.assertEqual(retired, [])
+                        self.assertTrue(receiver.private.exists())
+                        self.assertTrue(receiver.export.exists())
+                        self.assertTrue(receiver.capsule_pending.exists())
+                        self.assertIsNotNone(receiver.capsule_identity)
+                    else:
+                        self.assertEqual(str(raised.exception), "provider-copy-short")
+                        self.assertTrue(BUILD.DATA.known)
+                        self.assertEqual(BUILD.DATA._pending, 0)
+                        self.assertTrue(receiver.scratch_retired)
+                        self.assertFalse(receiver.private.exists())
+                        if scenario == "known-copy":
+                            self.assertEqual(retired, [receiver.private, receiver.capsule_pending, receiver.export])
+                            self.assertFalse(receiver.capsule_pending.exists() or receiver.export.exists())
+                            self.assertIsNone(receiver.capsule_identity)
+                            self.assertIsNone(receiver.export_identity)
+                            self.assertIsNone(receiver.export_helper_identity)
+                            self.assertEqual(receiver.export_rows, {})
+                        else:
+                            self.assertIs(raised.exception.__cause__, retirement_error)
+                            self.assertTrue(receiver.export.exists())
+                            if scenario == "pending-retirement":
+                                self.assertEqual(retired, [receiver.private, receiver.capsule_pending])
+                                self.assertTrue(receiver.capsule_pending.exists())
+                                self.assertIsNotNone(receiver.capsule_identity)
+                            else:
+                                self.assertEqual(retired, [receiver.private, receiver.capsule_pending, receiver.export])
+                                self.assertFalse(receiver.capsule_pending.exists())
+                                self.assertIsNone(receiver.capsule_identity)
+                            self.assertIsNotNone(receiver.export_identity)
+                            self.assertTrue(receiver.export_rows)
+            # A late capsule refusal AFTER the real evidence directory was
+            # promoted still raises. A diagnostic report that says passed is
+            # not the enclosing original's exit and cannot permit an upload.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                receiver = capsule_fixture(root, "github-seal")
+                with patch.object(seal, "source_snapshot", return_value=source_rows), \
+                        patch.object(seal.shutil, "disk_usage", return_value=SimpleNamespace(free=2 * seal.WORK_BYTES)):
+                    receiver.prepare_capsule()
+                BUILD.retire_tree(receiver.private, receiver.cleanup_deadline)
+                receiver.scratch_retired = True
+                def late_source(*args, **kwargs):
+                    return {} if receiver.export_promoted else source_rows
+                with patch.object(seal, "source_snapshot", side_effect=late_source):
+                    with self.assertRaisesRegex(BUILD.BuildRefused, "^verification-source-final-post$"):
+                        receiver.publish(receiver.guard.lifetime_ledger.verdict())
+                self.assertTrue(receiver.export_promoted)
+                report = json.loads((receiver.public / "report.json").read_bytes())
+                self.assertEqual(report["status"], "passed")
+                self.assertEqual(report["transportState"], "pending-original-entry-exit")
+                self.assertFalse(receiver.capsule_public.exists())
+                self.assertTrue(receiver.capsule_pending.exists())
+                receiver.retire_capsule()
+                self.assertFalse(receiver.capsule_pending.exists())
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
+            # No later SOURCE/copy/receipt port is entered unless the SAME
+            # original has all required finality observations, including bools.
+            for scenario in ("passed-false", "passed-int", "failure", "source", "inflight", "counts",
+                             "ledger", "fatal", "contained", "handlers", "scratch", "data"):
+                with self.subTest(capsule_finality=scenario), patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    verdict = SimpleNamespace(complete=scenario != "ledger", fatal=scenario == "fatal", contained=scenario != "contained")
+                    receiver = SimpleNamespace(success_ready=True, source_post=scenario != "source", inflight=scenario == "inflight",
+                        entered=3, returned=2 if scenario == "counts" else 3, role_limits=seal.PROVIDER_ROLES,
+                        failure={} if scenario == "failure" else None, scratch_retired=scenario != "scratch",
+                        guard=SimpleNamespace(handler_state="OWNED" if scenario == "handlers" else "RESTORED",
+                            lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)))
+                    if scenario == "data": BUILD.DATA.unknown()
+                    passed = False if scenario == "passed-false" else 1 if scenario == "passed-int" else True
+                    with patch.object(receiver, "capsule_source_post", create=True, side_effect=AssertionError("no source port")) as post:
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^capsule-original-finality$"):
+                            seal.SealBuild.publish_capsule(receiver, passed)
+                        post.assert_not_called()
             # All nine fixed official metadata aliases are ordinary generated
             # work, including eight convenience archives on both Darwin CPUs.
             self.assertEqual(set(seal.LIBTOOL_ARCHIVES), {
@@ -8812,7 +9683,8 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                         seal.python_entry_binding(invalid, "/not-read")
             # SOURCE/host facts below are inert DATA to enter only the actual
             # early main guards. No builder bootstrap, file IO or native runs.
-            with patch.object(seal.os, "environ", {
+            with ExitStack() as host_patches:
+                host_patches.enter_context(patch.object(seal.os, "environ", {
                 "MRK_SEAL_TARGET": "aarch64-apple-darwin",
                 "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1",
                 "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
@@ -8823,21 +9695,22 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 "GITHUB_WORKFLOW_REF": seal.REPOSITORY + "/" + seal.WORKFLOW + "@" + seal.REFERENCE,
                 "GITHUB_WORKSPACE": str(seal.CHECKOUT), "RUNNER_TEMP": str(seal.WORK_PARENT),
                 "DEVELOPER_DIR": str(seal.DEVELOPER), "MRK_SEAL_PYTHON": "/fixture/python",
-            }), patch.object(seal.sys, "argv", ["fixed-entry"]), \
-                 patch.object(seal.sys, "platform", "darwin"), \
-                 patch.object(seal.sys, "version_info", (3, 14, 7)), \
-                 patch.object(seal.sys, "flags", SimpleNamespace(isolated=True, no_site=True)), \
-                 patch.object(seal.sys, "dont_write_bytecode", True), \
-                 patch.object(seal.sys, "executable", "/fixture/python"), \
-                 patch.object(seal.os, "uname", return_value=SimpleNamespace(machine="arm64")), \
-                 patch.object(seal.platform, "mac_ver", return_value=("26.6.2", (), "arm64")), \
-                 patch.object(seal.os, "getuid", return_value=65534), \
-                 patch.object(seal.os, "geteuid", return_value=65534), \
-                 patch.object(seal.os, "getgid", return_value=65534), \
-                 patch.object(seal.os, "getegid", return_value=65534), \
-                 patch.object(seal, "python_entry_binding", side_effect=lambda selected, reported:
-                     seal.need(selected == reported, "actual-setup-python-entry")), \
-                 patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")) as bootstrap:
+            }))
+                host_patches.enter_context(patch.object(seal.sys, "argv", ["fixed-entry"]))
+                host_patches.enter_context(patch.object(seal.sys, "platform", "darwin"))
+                host_patches.enter_context(patch.object(seal.sys, "version_info", (3, 14, 7)))
+                host_patches.enter_context(patch.object(seal.sys, "flags", SimpleNamespace(isolated=True, no_site=True)))
+                host_patches.enter_context(patch.object(seal.sys, "dont_write_bytecode", True))
+                host_patches.enter_context(patch.object(seal.sys, "executable", "/fixture/python"))
+                host_patches.enter_context(patch.object(seal.os, "uname", return_value=SimpleNamespace(machine="arm64")))
+                host_patches.enter_context(patch.object(seal.platform, "mac_ver", return_value=("26.6.2", (), "arm64")))
+                host_patches.enter_context(patch.object(seal.os, "getuid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "geteuid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "getgid", return_value=65534))
+                host_patches.enter_context(patch.object(seal.os, "getegid", return_value=65534))
+                host_patches.enter_context(patch.object(seal, "python_entry_binding", side_effect=lambda selected, reported:
+                     seal.need(selected == reported, "actual-setup-python-entry")))
+                bootstrap = host_patches.enter_context(patch.object(seal, "bootstrap_builder", side_effect=ValueError("builder-source-hash")))
                 cases = (("MRK_SEAL_TARGET", "bad", "target", "fixed-seal-target"),
                          ("GITHUB_SHA", "0" * 40, "run", "fixed-seal-run"),
                          ("GITHUB_JOB", "bad", "context", "fixed-seal-workflow-context"),
@@ -8857,6 +9730,28 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     seal.main()
                 bootstrap.assert_called_once_with()
                 self.assertIn("stage=bootstrap reason=builder-source-hash", seal.failure_diagnostic(caught.exception))
+                # Drive the actual early main guards for all four modes under
+                # the same inert pre-bootstrap stop. New receipts cap IDs at
+                # 9007199254740991; legacy modes keep their original20 digits. No host,
+                # filesystem, source/bootstrap or native action actually runs.
+                for flags, reference, digits in (
+                        ([], seal.REFERENCE, 20),
+                        (["--history-provider-probe"], seal.PROVIDER_REFERENCE, 20),
+                        (["--publish-build-capsule"], seal.REFERENCE, 16),
+                        (["--history-provider-probe", "--publish-build-capsule"], seal.PROVIDER_REFERENCE, 16)):
+                    for field in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+                        for identifier, admitted in (("1", True), ("9" * digits if digits == 20 else "9007199254740991", True),
+                                ("1" * (digits + 1), False), ("0", False), ("01", False), ("", False)) + (
+                                    (("9007199254740992", False),) if digits == 16 else ()):
+                            with self.subTest(capsule_main=(flags, field, identifier)), \
+                                    patch.object(seal.sys, "argv", ["fixed-entry", *flags]), \
+                                    patch.dict(seal.os.environ, {"GITHUB_REF": reference,
+                                        "GITHUB_WORKFLOW_REF": seal.REPOSITORY + "/" + seal.WORKFLOW + "@" + reference,
+                                        field: identifier}):
+                                bootstrap.reset_mock()
+                                with self.assertRaisesRegex(ValueError, "^" + ("builder-source-hash" if admitted else "fixed-seal-run") + "$"):
+                                    seal.main()
+                                self.assertEqual(bootstrap.call_count, int(admitted))
             # Formatting never stringifies an exception, prints a path/message,
             # adopts a fake build owner or upgrades unknown DATA finality.
             class HostileError(Exception):
@@ -8896,16 +9791,23 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     for value in (True, False, "private-value", None, -(2 ** 31) - 1, 2 ** 31):
                         receiver.commands = [{"returned": True, "returncode": value}]
                         self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
-                    for commands in ([{"returned": 1, "returncode": 0}], [{}] * 23, (), None):
+                    for commands in ([{"returned": 1, "returncode": 0}], [{"returned": True, "returncode": 0}] * 24, (), None):
                         receiver.commands = commands
                         self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
                     receiver.inflight, receiver.scratch_retired, receiver.source_post = 1, 0, "private-value"
                     self.assertIn("inflight=unavailable scratchRetired=unavailable sourcePost=unavailable", seal.failure_diagnostic(HostileError()))
-                    for reason in ("original-command-failed", "work-entry", "static-libtool-metadata"):
+                    for reason in ("original-command-failed", "work-entry", "static-libtool-metadata", "capsule-combined-bound"):
                         line = seal.failure_diagnostic(BUILD.BuildRefused(reason))
                         self.assertIn("reason=" + reason + " ", line)
                         self.assertLessEqual(len(line.encode("ascii")), 512)
                     self.assertIn("reason=unclassified ", seal.failure_diagnostic(BUILD.BuildRefused("/private/unknown")))
+                    receiver.phase, receiver.entered, receiver.returned = "helper-entropy-test", 23, 23
+                    receiver.commands = [{"returned": True, "returncode": 0}] * 23
+                    line = seal.failure_diagnostic(HostileError())
+                    self.assertIn("phase=helper-entropy-test calls=23/23", line)
+                    self.assertIn("lastRc=0 ", line)
+                    self.assertLessEqual(len(line.encode("ascii")), 512)
+                    receiver.entered = 22
                     receiver.phase, receiver.returned = "private-value", 23
                     self.assertIn("phase=unknown calls=unavailable data=unknown", seal.failure_diagnostic(HostileError()))
                     receiver.entered, receiver.returned = True, False

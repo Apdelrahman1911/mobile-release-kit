@@ -64,8 +64,17 @@ class _ResponseRole(Enum):
     SETUP_ENVIRONMENT_CUSTOM_READ = "setup-environment-custom-read"
     SETUP_ENVIRONMENT_REVIEWER_READ = "setup-environment-reviewer-read"
     SETUP_ENVIRONMENT_WRITE = "setup-environment-write"
+    SETUP_SECRET_METADATA_READ = "setup-secret-metadata-read"
+    SETUP_SECRET_KEY_READ = "setup-secret-key-read"
+    SETUP_SECRET_METADATA_AFTER = "setup-secret-metadata-after"
+    SETUP_SECRET_WRITE = "setup-secret-write"
+    SETUP_VARIABLE_READ = "setup-variable-read"
+    SETUP_VARIABLE_CREATE = "setup-variable-create"
+    SETUP_VARIABLE_REPLACE = "setup-variable-replace"
 
 
+_VARIABLE_ROLES = frozenset({_ResponseRole.SETUP_VARIABLE_READ, _ResponseRole.SETUP_VARIABLE_CREATE, _ResponseRole.SETUP_VARIABLE_REPLACE})
+_SECRET_READ_ROLES = frozenset({_ResponseRole.SETUP_SECRET_METADATA_READ, _ResponseRole.SETUP_SECRET_KEY_READ, _ResponseRole.SETUP_SECRET_METADATA_AFTER})
 _ENVIRONMENT_READ_ROLES = frozenset({_ResponseRole.SETUP_ENVIRONMENT_READ, _ResponseRole.SETUP_ENVIRONMENT_LIST,
     _ResponseRole.SETUP_ENVIRONMENT_CUSTOM_READ, _ResponseRole.SETUP_ENVIRONMENT_REVIEWER_READ})
 _ENVIRONMENT_ROLES = _ENVIRONMENT_READ_ROLES | {_ResponseRole.SETUP_ENVIRONMENT_WRITE}
@@ -77,7 +86,7 @@ def _role_limits(profile: _ExchangeProfile, role: _ResponseRole) -> tuple[int, i
         raise ValueError("Invalid fixed GitHub response role")
     if (role in {_ResponseRole.RELEASE_CONFIG, _ResponseRole.RELEASE_VERSION}
             and profile is not _ExchangeProfile.RELEASE_PREPARE
-            or role in ({_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE} | _ENVIRONMENT_ROLES)
+            or role in ({_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE} | _ENVIRONMENT_ROLES | _SECRET_READ_ROLES | {_ResponseRole.SETUP_SECRET_WRITE} | _VARIABLE_ROLES)
             and profile is not _ExchangeProfile.SETUP):
         raise ValueError("Fixed GitHub response role belongs to another action")
     return (768 * 1024 if role is _ResponseRole.RELEASE_CONFIG else MAX_BODY_BYTES,
@@ -101,6 +110,20 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
             tail = parts[4:]
             if role is _ResponseRole.STANDARD:
                 valid = method == "GET" and tail in ([], ["actions", "permissions"], ["actions", "permissions", "workflow"])
+            elif role in _VARIABLE_ROLES:
+                from .github_setup_variables import VARIABLE_FIELDS, ENVIRONMENT_NAMES
+                collection = len(tail) in (3, 4) and tail[0] == "environments" and tail[1] in ENVIRONMENT_NAMES.values() and tail[2] == "variables"
+                if role is _ResponseRole.SETUP_VARIABLE_CREATE:
+                    valid = collection and len(tail) == 3 and method == "POST"
+                else:
+                    valid = (collection and len(tail) == 4 and tail[3] in {row[0] for row in VARIABLE_FIELDS}
+                             and method == ("GET" if role is _ResponseRole.SETUP_VARIABLE_READ else "PATCH"))
+            elif role in _SECRET_READ_ROLES | {_ResponseRole.SETUP_SECRET_WRITE}:
+                from .github_setup_remote import SECRET_REQUIREMENTS, ENVIRONMENT_NAMES
+                valid = (method == ("PUT" if role is _ResponseRole.SETUP_SECRET_WRITE else "GET") and len(tail) == 4 and tail[0] == "environments"
+                         and tail[1] in ENVIRONMENT_NAMES.values() and tail[2] == "secrets"
+                         and (tail[3] == "public-key" if role is _ResponseRole.SETUP_SECRET_KEY_READ
+                              else tail[3] in SECRET_REQUIREMENTS))
             elif role in _ENVIRONMENT_ROLES:
                 from .github_setup_remote import _ENVIRONMENT_NAMES, _environment_login
                 names = dict(_ENVIRONMENT_NAMES).values()
@@ -130,11 +153,31 @@ def _request_limits(profile: _ExchangeProfile, role: _ResponseRole, method: str,
     return limits
 
 
-def _setup_body(profile: _ExchangeProfile, role: _ResponseRole, body: object) -> None:
+def _setup_body(profile: _ExchangeProfile, role: _ResponseRole, body: object, *, path: str | None = None) -> None:
     _role_limits(profile, role)
-    if role is _ResponseRole.STANDARD or role in _ENVIRONMENT_READ_ROLES:
+    if role is _ResponseRole.STANDARD or role in _ENVIRONMENT_READ_ROLES | _SECRET_READ_ROLES | {_ResponseRole.SETUP_VARIABLE_READ}:
         if body is not None:
             raise ValueError("Fixed Setup GET has a body")
+        return
+    if profile is _ExchangeProfile.SETUP and role in {_ResponseRole.SETUP_VARIABLE_CREATE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
+        from .github_setup_variables import MAX_BODY_BYTES as MAX_VARIABLE_BODY, VARIABLE_FIELDS, _desired
+        creating = role is _ResponseRole.SETUP_VARIABLE_CREATE
+        _request_limits(profile, role, "POST" if creating else "PATCH", path)
+        if type(body) is not bytes or not 1 <= len(body) <= MAX_VARIABLE_BODY:
+            raise ValueError("Invalid fixed variable body bound")
+        value = _decode_json(body, limit=MAX_VARIABLE_BODY, nodes=8, depth=2, exact=True)
+        if type(value) is not dict or set(value) != ({"name", "value"} if creating else {"value"}):
+            raise ValueError("Invalid fixed variable body")
+        name = value["name"] if creating else path.rsplit("/", 1)[1]
+        if type(name) is not str or name not in {row[0] for row in VARIABLE_FIELDS}:
+            raise ValueError("Invalid fixed variable name")
+        _desired(name, value["value"])
+        return
+    if profile is _ExchangeProfile.SETUP and role is _ResponseRole.SETUP_SECRET_WRITE:
+        from .github_setup_remote import SECRET_WRITE_BYTES, secret_write_policy
+        if type(body) is not bytes or not 1 <= len(body) <= SECRET_WRITE_BYTES:
+            raise ValueError("Invalid fixed secret body bound")
+        secret_write_policy(_decode_json(body, limit=SECRET_WRITE_BYTES, nodes=8, depth=2, exact=True))
         return
     if profile is not _ExchangeProfile.SETUP or role not in {
             _ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_ENVIRONMENT_WRITE}:
@@ -608,8 +651,13 @@ def _header_control(head: _Head, budget: _Budget, *,
     delay = None if blocked else max(delays) if delays else 60 if recognized else None
     base = _status_reason(head.status)
     if (head.status == 204 and _role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}
+            or head.status in {201, 204} and _role is _ResponseRole.SETUP_SECRET_WRITE
+            or head.status == 201 and _role is _ResponseRole.SETUP_VARIABLE_CREATE
+            or head.status == 204 and _role is _ResponseRole.SETUP_VARIABLE_REPLACE
+            or head.status == 404 and _role is _ResponseRole.SETUP_VARIABLE_READ
             or head.status == 409 and _role is _ResponseRole.SETUP_WORKFLOW_WRITE
-            or head.status == 422 and _role is _ResponseRole.SETUP_ENVIRONMENT_WRITE):
+            or head.status == 422 and _role is _ResponseRole.SETUP_ENVIRONMENT_WRITE
+            or head.status == 404 and _role is _ResponseRole.SETUP_SECRET_METADATA_READ):
         base = "none"  # Only these already-bound response roles admit the status.
     if invalid:
         reason = "response-invalid"
@@ -630,7 +678,7 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
         return _failed(head.error, control)
     if control["reason"] == "response-invalid":
         return _failed("response-invalid", control)
-    if head.status == 204 and response.role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE}:
+    if head.status == 204 and response.role in {_ResponseRole.SETUP_ACTIONS_WRITE, _ResponseRole.SETUP_WORKFLOW_WRITE, _ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_REPLACE}:
         try:
             # No body/chunk stream is allowed by this exact successful role.
             # Even CL0 must observe the same original's clean TLS EOF once.
@@ -645,6 +693,44 @@ def _response_result(response: _ResponseBody, budget: _Budget) -> ReadResult:
                 raise ReadFailure("response-invalid")
             response.done = True
             return ReadResult({"status": 204, "body": None, "failure": "none"}, control)
+        except ReadFailure as error:
+            return _failed(error.reason, control)
+    if head.status == 201 and response.role in {_ResponseRole.SETUP_SECRET_WRITE, _ResponseRole.SETUP_VARIABLE_CREATE}:
+        try:
+            # The documented response is absent or the empty JSON object, not
+            # arbitrary success JSON. Bound retained spelling before every read.
+            if head.length is not None and head.length > 64:
+                raise ReadFailure("response-invalid")
+            body = bytearray()
+            while True:
+                block = response.read(min(64 + 1 - len(body), _READ_CHUNK))
+                if not block: break
+                if len(block) > 64 - len(body): raise ReadFailure("response-invalid")
+                body.extend(block)
+            if head.framing != "eof":
+                probe = response._raw(1)
+                response.body_bytes += len(probe); budget.body_bytes += len(probe)
+                if budget.body_bytes > budget.body_total_limit: raise ReadFailure("response-limit")
+                if probe: raise ReadFailure("response-invalid")
+            if body:
+                media, present, valid = _single(head.headers, "content-type")
+                if (not present or not valid or re.fullmatch(
+                        r"application/(?:json|vnd\.github\+json)(?: *; *charset=utf-8)?", media, re.ASCII | re.IGNORECASE) is None):
+                    raise ReadFailure("response-invalid")
+                value = _decode_json(bytes(body), limit=64, nodes=1, depth=1, exact=True)
+                if type(value) is not dict or value: raise ReadFailure("response-invalid")
+            else:
+                # Empty EOF with an optional well-formed JSON type, never a
+                # conflicting/duplicate or unsupported content-type claim.
+                media, present, valid = _single(head.headers, "content-type")
+                if not valid or present and re.fullmatch(
+                        r"application/(?:json|vnd\.github\+json)(?: *; *charset=utf-8)?", media, re.ASCII | re.IGNORECASE) is None:
+                    raise ReadFailure("response-invalid")
+                value = None
+            budget.remaining()
+            return ReadResult({"status": 201, "body": value, "failure": "none"}, control)
+        except (_JsonLimit, _JsonError):
+            return _failed("response-invalid", control)
         except ReadFailure as error:
             return _failed(error.reason, control)
     if head.status != 200:
@@ -877,7 +963,8 @@ def _wrap_fixed_tls(context: Any, source: Any, *, ignore_eof_option: int) -> Any
 
 
 def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_version: str,
-                        _profile: _ExchangeProfile = _ExchangeProfile.STANDARD) -> Callable[..., ReadResult]:
+                        _profile: _ExchangeProfile = _ExchangeProfile.STANDARD,
+                        _setup_budget: _Budget | None = None) -> Callable[..., ReadResult]:
     """Private bounded TLS/framing shared by two closed native action profiles.
 
     This is not a renderer/API URL interface. The calling profile separately
@@ -889,12 +976,21 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
     _role_limits(_profile, _ResponseRole.STANDARD)
     if _profile is _ExchangeProfile.SETUP and api_version != "2026-03-10":
         raise ValueError("Fixed Setup API version differs")
+    if _setup_budget is not None:
+        if (type(_setup_budget) is not _Budget or _profile is not _ExchangeProfile.SETUP
+                or _setup_budget.profile is not _ExchangeProfile.SETUP
+                or _setup_budget.started != started or _setup_budget.end != started + READ_SECONDS
+                or getattr(_setup_budget, "_secret_exchange_claimed", False)):
+            raise ValueError("Invalid same-original Setup budget")
+        _setup_budget._secret_exchange_claimed = True
     # http.client itself imports ssl. Both must stay inside this original live
     # entry, not at pure frame/schedule import or fixture construction time.
     import http.client
     import ssl
 
-    budget = _Budget(started, _profile=_profile)
+    # SAME instance and absolute endpoint; optional owner was claimed once
+    # before even the lazy network module imports above.
+    budget = _Budget(started, _profile=_profile) if _setup_budget is None else _setup_budget
     budget.remaining()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.verify_mode = ssl.CERT_REQUIRED
@@ -910,13 +1006,16 @@ def _make_live_exchange(token: str, *, started: float, runtime_dir: str, api_ver
                  _role: _ResponseRole = _ResponseRole.STANDARD) -> ReadResult:
         _, path_limit = _request_limits(_profile, _role, method, path)
         if _profile is _ExchangeProfile.SETUP:
-            _setup_body(_profile, _role, body)
+            _setup_body(_profile, _role, body, path=path)
         methods = {"GET", "PUT"} if _profile is _ExchangeProfile.SETUP else {"GET", "POST"}
+        if _profile is _ExchangeProfile.SETUP and _role in _VARIABLE_ROLES:
+            methods = {"GET", "POST", "PATCH"}  # Exact method/path was already checked above.
         if (method not in methods or type(path) is not str or not path.startswith("/")
                 or len(path) > path_limit or any(not 0x21 <= ord(c) <= 0x7e for c in path)
                 or "#" in path or "\\" in path
                 or method == "GET" and body is not None
-                or method == "POST" and (type(body) is not bytes or not 1 <= len(body) <= 2048)):
+                or method == "POST" and _profile is not _ExchangeProfile.SETUP
+                and (type(body) is not bytes or not 1 <= len(body) <= 2048)):
             raise ValueError("Invalid fixed GitHub transport request")
         original_response: list[Any] = [None]
         close_failed = [False]

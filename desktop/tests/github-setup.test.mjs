@@ -2,6 +2,7 @@
 // native GUI, file observation, credential lookup, network or template renderer.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import resource from '../../src/mobile_release/api/data/github-setup-v1.json' with { type: 'json' };
 import credentialGuide from '../../src/mobile_release/api/data/credential-guide-v1.json' with { type: 'json' };
 import connectionGuide from '../../src/mobile_release/api/data/github-connection-v1.json' with { type: 'json' };
@@ -12,7 +13,7 @@ import { GitHubSetupController, githubSetupStartReason, githubSnapshotFromInputs
 import { GITHUB_WORKFLOWS, githubSetupError, githubSetupRequestFits, githubSetupResultMatches, parseCatalogGitHubSetup, parseGitHubSetupHelp, parseGitHubSetupResult } from '../src/githubSetupProtocol.ts';
 import { previewApi } from '../src/preview.ts';
 import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from '../src/GitHubRemoteSetupController.ts';
-import { GITHUB_REMOTE_SETUP_ENVIRONMENT_CONFIRMATION, GITHUB_REMOTE_SETUP_ENVIRONMENTS, githubRemoteSetupConfirmation, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupRequestFits, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from '../src/GitHubRemoteSetupProtocol.ts';
+import { GITHUB_REMOTE_SETUP_VARIABLE_FIELDS, GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION, GITHUB_REMOTE_SETUP_VARIABLE_PREVIOUS, GITHUB_REMOTE_SETUP_VARIABLE_ACCEPTANCE, githubRemoteSetupVariableReferences, GITHUB_REMOTE_SETUP_SECRET_FIELDS, GITHUB_REMOTE_SETUP_SECRET_CONFIRMATION, GITHUB_REMOTE_SETUP_SECRET_ACCEPTANCE, githubRemoteSetupSecretReferences, GITHUB_REMOTE_SETUP_ENVIRONMENT_CONFIRMATION, GITHUB_REMOTE_SETUP_ENVIRONMENTS, githubRemoteSetupConfirmation, githubRemoteSetupError, githubRemoteSetupObservationMatches, githubRemoteSetupRequestFits, githubRemoteSetupSelection, parseGitHubRemoteSetupStatus } from '../src/GitHubRemoteSetupProtocol.ts';
 
 
 const repository = 'inert/toolkit';
@@ -777,20 +778,69 @@ function rsEnvironmentReview(selected = rsEnvironmentSelection()) {
   const result = rsReview(); result.observed = structuredClone(before); result.consent.prepared = { ...result.consent.prepared, target: { ...result.consent.prepared.target, selection: selected }, before, after, reviewer,
     observedAt: rsTime, confirmation: GITHUB_REMOTE_SETUP_ENVIRONMENT_CONFIRMATION }; return result;
 }
+function rsSecretSelection(mode = 'create', requirement = 'MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64') {
+  return { kind: 'environment_secret', mode, stage: 'candidate', requirement, source: { recordId: 'c'.repeat(32), recordRevision: 4, contextRevision: 5 } };
+}
+function rsSecretReview(selection = rsSecretSelection()) {
+  const result = rsReview(), before = { environmentName: GITHUB_REMOTE_SETUP_ENVIRONMENTS[selection.stage], environmentId: '33', name: selection.requirement,
+    metadata: selection.mode === 'create' ? null : { createdAt: rsTime, updatedAt: rsTime } };
+  result.observed = structuredClone(before);
+  result.consent.prepared = { target: { ...result.consent.prepared.target, selection }, before,
+    after: { name: selection.requirement, encoding: GITHUB_REMOTE_SETUP_SECRET_FIELDS[selection.requirement].encoding, plaintextBytes: 49152 },
+    configuration: { savedConfig: { bytes: 524288, sha256: 'd'.repeat(64) }, canonicalConfig: { bytes: 4000, sha256: 'e'.repeat(64) } },
+    observedAt: rsTime, confirmation: GITHUB_REMOTE_SETUP_SECRET_CONFIRMATION };
+  return result;
+}
+function rsAssets(selection = rsSecretSelection()) {
+  const f = (selection.kind === 'environment_variable' ? GITHUB_REMOTE_SETUP_VARIABLE_FIELDS : GITHUB_REMOTE_SETUP_SECRET_FIELDS)[selection.requirement], { source } = selection;
+  return { mode: 'native', contextCurrent: true, busy: null, updatingContext: false, observing: false, observationFailed: false, blocked: false, error: null, originPending: false,
+    status: { schemaVersion: 3, statusRevision: 12, mode: 'session', persistence: null, capability: { available: true, reason: 'none' }, operation: null,
+      context: { revision: source.contextRevision, projectId: 'project', platform: f.platform, stage: selection.stage, purpose: 'full' },
+      records: [{ recordId: source.recordId, revision: source.recordRevision, kind: f.kind, availability: 'assigned', storage: 'session', label: null, payloadState: 'assessed' }],
+      assignments: [{ recordId: source.recordId, recordRevision: source.recordRevision, contextRevision: source.contextRevision, kind: f.kind, availability: 'available' }] } };
+}
+const rsVariableValues = {
+  MOBILE_RELEASE_ANDROID_KEY_ALIAS: 'release.key-1',
+  MOBILE_RELEASE_GOOGLE_WIF_PROVIDER: 'projects/123/locations/global/workloadIdentityPools/release/providers/github',
+  MOBILE_RELEASE_GOOGLE_SERVICE_ACCOUNT: 'release-bot@example-project.iam.gserviceaccount.com',
+  MOBILE_RELEASE_ASC_KEY_ID: 'A1B2C3D4E5',
+  MOBILE_RELEASE_ASC_ISSUER_ID: '12345678-1234-5678-abcd-123456789abc',
+};
+function rsValue(text) { return { text, bytes: Buffer.byteLength(text), sha256: createHash('sha256').update(text).digest('hex') }; }
+function rsVariableSelection(mode = 'create', requirement = 'MOBILE_RELEASE_ANDROID_KEY_ALIAS') {
+  return { ...rsSecretSelection(mode), kind: 'environment_variable', requirement };
+}
+function rsVariableReview(selection = rsVariableSelection()) {
+  const result = rsReview(), original = rsValue('previous-public-identifier');
+  const before = { environmentName: GITHUB_REMOTE_SETUP_ENVIRONMENTS[selection.stage], environmentId: '33', name: selection.requirement,
+    value: selection.mode === 'create' ? null : { bytes: original.bytes, sha256: original.sha256 },
+    metadata: selection.mode === 'create' ? null : { createdAt: rsTime, updatedAt: rsTime } };
+  result.observed = structuredClone(before);
+  result.consent.prepared = { target: { ...result.consent.prepared.target, selection }, before,
+    after: { name: selection.requirement, value: rsValue(rsVariableValues[selection.requirement]) },
+    configuration: { savedConfig: { bytes: 524288, sha256: 'd'.repeat(64) }, canonicalConfig: { bytes: 4000, sha256: 'e'.repeat(64) } },
+    observedAt: rsTime, confirmation: GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION };
+  return result;
+}
+function rsVariableObserved(review) {
+  const v = review.consent.prepared.after.value;
+  return { ...review.observed, value: { bytes: v.bytes, sha256: v.sha256 }, metadata: { createdAt: rsTime, updatedAt: rsTime } };
+}
 function rsConnection() { return { mode: 'native', context: { documentId: 'doc', projectId: 'project', projectGeneration: 1, repository: 'owner/app' }, status: { revision: 12,
   session: { id: 'session-a', projectId: 'project', targetRepository: 'owner/app', state: 'connected' }, account: { state: 'observed', value: { id: '11' } },
   repository: { state: 'observed', value: { id: '22', fullName: 'owner/app' } } }, busy: null, uncertain: false, blocked: false, retirementPending: false }; }
 function rsDeferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function rsFlush() { for (let i = 0; i < 16; i += 1) await Promise.resolve(); }
 function rsHarness() {
-  let current = rsIdle(), view = rsConnection(), listener = null, detached = 0, other = null; const calls = [];
+  let current = rsIdle(), view = rsConnection(), listener = null, detached = 0, other = null, assets = null; const calls = [];
   const request = (kind, args) => { const d = rsDeferred(); calls.push({ kind, args: structuredClone(args), ...d }); return d.promise; };
   const api = { mode: 'native', githubRemoteSetupStatus: async () => structuredClone(current), subscribeGitHubRemoteSetup: async (f) => { listener = f; return () => { detached += 1; listener = null; }; },
     githubRemoteSetupPrepare: (v) => request('prepare', v), githubRemoteSetupApply: (v) => request('apply', v), githubRemoteSetupDiscard: (v) => request('discard', v), githubRemoteSetupCancel: (v) => request('cancel', v) };
-  const controller = new GitHubRemoteSetupController(() => view, () => other);
+  const controller = new GitHubRemoteSetupController(() => view, () => other, () => assets);
   return { api, controller, calls, get state() { return controller.getSnapshot(); }, get detached() { return detached; },
     last: (kind) => calls.filter((c) => c.kind === kind).at(-1), count: (kind) => calls.filter((c) => c.kind === kind).length,
     emit(s) { current = structuredClone(s); listener?.(structuredClone(s)); }, reply(kind, s) { current = structuredClone(s); this.last(kind).resolve(structuredClone(s)); },
+    assets(v, notify = true) { assets = structuredClone(v); if (notify) controller.syncAssetSession(); },
     context(v) { view = v ?? { ...rsConnection(), context: null }; controller.syncContext(); }, block(v) { other = v; } };
 }
 async function rsAttached() { const h = rsHarness(); await h.controller.connect(h.api); h.controller.setSelection(rsSelection()); return h; }
@@ -821,6 +871,11 @@ test('remote setup closed policy and consent preserve untouched fields and disti
   const error = githubRemoteSetupError({ code: 'github_remote_setup_refused_forbidden', message: 'PRIVATE' });
   assert.equal(error.admission, 'not-admitted'); assert.equal(error.message.includes('PRIVATE'), false);
   assert.equal(githubRemoteSetupError({ code: 'anything', admission: 'not-admitted' }).admission, 'unknown');
+  const resources = githubRemoteSetupError({ code: 'github_remote_setup_refused_resources_unavailable', message: 'PRIVATE' });
+  assert.equal(resources.admission, 'not-admitted'); assert.equal(resources.reason, 'resources-unavailable');
+  assert.match(resources.message, /fixed operation resource budget/); assert.equal(resources.message.includes('PRIVATE'), false);
+  assert.equal(githubRemoteSetupError({ code: 'github_remote_setup_refused_resources_available' }).admission, 'unknown');
+  assert.ok(parseGitHubRemoteSetupStatus({ ...rsIdle(), available: false, reason: 'resources-unavailable' }));
   // Actual normalized environment wire; six preserved User/Team identities remain
   // exact strings, while create resolves one explicit user without trusting login.
   for (const mode of ['configure', 'create']) for (const stage of ['candidate', 'external-testing', 'production']) {
@@ -860,6 +915,87 @@ test('remote setup closed policy and consent preserve untouched fields and disti
   for (const minutes of [0, 43200]) assert.ok(githubRemoteSetupSelection({ ...rsEnvironmentSelection('create'), waitTimerMinutes: minutes }));
   for (const permission of ['triage', 'maintain', 'none']) { const bad = rsEnvironmentReview(rsEnvironmentSelection('create')); bad.consent.prepared.reviewer.permission = permission; assert.equal(parseGitHubRemoteSetupStatus(bad), null); }
   const mismatch = rsEnvironmentReview(rsEnvironmentSelection('create')); mismatch.consent.prepared.reviewer.login = 'another-user'; assert.equal(parseGitHubRemoteSetupStatus(mismatch), null);
+  // Fixed secret public wire contains references/config bindings, never material.
+  assert.equal(Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS).length, 10);
+  for (const requirement of Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS)) for (const mode of ['create', 'replace']) {
+    const selected = rsSecretSelection(mode, requirement), good = rsSecretReview(selected);
+    assert.ok(githubRemoteSetupSelection(selected)); assert.ok(parseGitHubRemoteSetupStatus(good));
+    assert.equal(githubRemoteSetupConfirmation('environment_secret', 'owner/app'), GITHUB_REMOTE_SETUP_SECRET_CONFIRMATION);
+    assert.ok(githubRemoteSetupRequestFits('github_remote_setup_prepare', { sessionId: 'session-a', expectedRevision: 1, expectedConnectionRevision: 12, selection: selected }));
+    for (const mutate of [(s) => { s.consent.prepared.before.environmentId = '9223372036854775808'; },
+      (s) => { s.consent.prepared.before.environmentName = 'mobile-production'; }, (s) => { s.consent.prepared.before.name = 'ARBITRARY'; },
+      (s) => { s.consent.prepared.after.encoding = 'secret'; }, (s) => { s.consent.prepared.after.plaintextBytes = 49153; },
+      (s) => { s.consent.prepared.after.plaintextBytes = true; }, (s) => { s.consent.prepared.after.plaintextBytes = 0; },
+      (s) => { s.consent.prepared.configuration.savedConfig.bytes = 524289; }, (s) => { s.consent.prepared.configuration.canonicalConfig.sha256 = 'wrong'; },
+      (s) => { s.consent.prepared.confirmation += ' atomic'; }, (s) => { s.consent.prepared.key = 'PRIVATE'; },
+      (s) => { s.consent.prepared.after.plaintext = 'PRIVATE'; }, (s) => { s.consent.prepared.configuration = Object.values(s.consent.prepared.configuration); },
+      (s) => { s.consent.prepared.target.selection.source.recordRevision = -1; }, (s) => { s.consent.prepared.target.selection.source.contextRevision = true; },
+      (s) => { s.consent.prepared.before.metadata = mode === 'create' ? { createdAt: rsTime, updatedAt: rsTime } : null; }]) {
+      const bad = structuredClone(good); mutate(bad); bad.observed = structuredClone(bad.consent.prepared.before); assert.equal(parseGitHubRemoteSetupStatus(bad), null);
+    }
+    const observed = { ...good.observed, metadata: { createdAt: rsTime, updatedAt: rsTime } };
+    const accepted = { ...rsOp('apply', 'settled', 6, { effect: 'accepted-not-value-verified', writeClaimed: true, writeAcknowledged: true }), observed };
+    assert.ok(parseGitHubRemoteSetupStatus(accepted)); assert.ok(githubRemoteSetupObservationMatches(good.consent.prepared, observed));
+    for (const patch of [{ name: 'MOBILE_RELEASE_PROJECT_READ_TOKEN' }, { environmentId: '34' }, { environmentName: 'mobile-production' }, { metadata: null }]) {
+      if (patch.name === selected.requirement) continue;
+      assert.equal(githubRemoteSetupObservationMatches(good.consent.prepared, { ...observed, ...patch }), false);
+    }
+    assert.equal(parseGitHubRemoteSetupStatus({ ...accepted, operation: { ...accepted.operation, effect: 'readback-confirmed' } }), null);
+    assert.equal(parseGitHubRemoteSetupStatus({ ...accepted, operation: { ...accepted.operation, phase: 'running' } }), null);
+    assert.equal(parseGitHubRemoteSetupStatus({ ...accepted, observed: { ...observed, metadata: null } }), null);
+  }
+  for (const value of [0, 4294967295]) assert.ok(githubRemoteSetupSelection({ ...rsSecretSelection(), source: { recordId: 'c'.repeat(32), recordRevision: value, contextRevision: value } }));
+  for (const value of [-1, 4294967296, 1.5, true, '1']) assert.equal(githubRemoteSetupSelection({ ...rsSecretSelection(), source: { recordId: 'c'.repeat(32), recordRevision: value, contextRevision: 5 } }), false);
+  for (const name of ['ARBITRARY', 'MOBILE_RELEASE_ANDROID_KEYSTORE_PATH', 'MOBILE_RELEASE_GOOGLE_WIF_PROVIDER', 'MOBILE_RELEASE_APP_REVIEW_PASSWORD']) assert.equal(githubRemoteSetupSelection({ ...rsSecretSelection(), requirement: name }), false);
+  const notSecret = { ...rsOp('apply', 'settled', 6, { effect: 'accepted-not-value-verified', writeClaimed: true, writeAcknowledged: true }), observed: rsReview().consent.prepared.after };
+  assert.equal(parseGitHubRemoteSetupStatus(notSecret), null);
+
+  // Fixed nonsecret variables: actual value text is public ONLY in desired preview.
+  assert.deepEqual(Object.keys(GITHUB_REMOTE_SETUP_VARIABLE_FIELDS), Object.keys(rsVariableValues));
+  assert.equal(GITHUB_REMOTE_SETUP_VARIABLE_FIELDS.MOBILE_RELEASE_ANDROID_KEY_ALIAS.field, 'keyAlias');
+  for (const requirement of Object.keys(rsVariableValues)) for (const mode of ['create', 'replace']) {
+    const selected = rsVariableSelection(mode, requirement), review = rsVariableReview(selected), prepared = review.consent.prepared;
+    assert.ok(githubRemoteSetupSelection(selected)); assert.ok(parseGitHubRemoteSetupStatus(review));
+    assert.equal(prepared.after.value.text, rsVariableValues[requirement]);
+    assert.equal(githubRemoteSetupConfirmation('environment_variable', 'owner/app'), GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION);
+    const observed = rsVariableObserved(review);
+    assert.ok(githubRemoteSetupObservationMatches(prepared, observed));
+    assert.equal(githubRemoteSetupObservationMatches(prepared, { ...observed, environmentId: '999' }), false);
+    assert.equal(githubRemoteSetupObservationMatches(prepared, { ...observed, value: { ...observed.value, sha256: 'f'.repeat(64) } }), false);
+    const done = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed };
+    assert.ok(parseGitHubRemoteSetupStatus(done));
+    assert.equal(parseGitHubRemoteSetupStatus({ ...done, operation: { ...done.operation, effect: 'accepted-not-value-verified' } }), null);
+    for (const mutate of [(v) => { v.consent.prepared.after.value.bytes += 1; }, (v) => { v.consent.prepared.after.value.text = ''; },
+      (v) => { v.consent.prepared.after.value.sha256 = 'not-digest'; }, (v) => { v.consent.prepared.after.value.extra = true; },
+      (v) => { v.consent.prepared.before.environmentId = '9223372036854775808'; }, (v) => { v.consent.prepared.before.environmentName = 'mobile-production'; },
+      (v) => { v.consent.prepared.after.name = 'ARBITRARY'; }, (v) => { v.consent.prepared.confirmation += ' atomic'; },
+      (v) => { v.consent.prepared.configuration.savedConfig.bytes = 524289; }, (v) => { v.consent.prepared.configuration = []; },
+      (v) => { v.consent.prepared.target.selection.source.recordRevision = true; }, (v) => { v.consent.prepared.after = { name: requirement, encoding: 'utf8', plaintextBytes: 2 }; }]) {
+      const bad = structuredClone(review); mutate(bad); assert.equal(parseGitHubRemoteSetupStatus(bad), null);
+    }
+    const absentAfter = { ...done, observed: { ...observed, value: null, metadata: null } }; assert.equal(parseGitHubRemoteSetupStatus(absentAfter), null);
+  }
+  for (const requirement of ['ARBITRARY', 'MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD', 'MOBILE_RELEASE_OPERATION_COMMITMENT_KEY_VERSION']) assert.equal(githubRemoteSetupSelection(rsVariableSelection('create', requirement)), false);
+  for (const patch of [{ mode: 'upsert' }, { value: 'RAW' }, { source: { ...rsVariableSelection().source, field: 'keyAlias' } }]) assert.equal(githubRemoteSetupSelection({ ...rsVariableSelection(), ...patch }), false);
+  const boundary = rsVariableReview(rsVariableSelection('create', 'MOBILE_RELEASE_GOOGLE_WIF_PROVIDER'));
+  const prefix = 'projects/123/locations/global/workloadIdentityPools/release/providers/';
+  boundary.consent.prepared.after.value = rsValue(prefix + 'a'.repeat(4096 - prefix.length)); assert.ok(parseGitHubRemoteSetupStatus(boundary));
+  boundary.consent.prepared.after.value = rsValue(prefix + 'a'.repeat(4097 - prefix.length)); assert.equal(parseGitHubRemoteSetupStatus(boundary), null);
+  // Hostile wire exercises escaped serialized bound, not core format eligibility.
+  boundary.consent.prepared.after.value = rsValue('"'.repeat(4096)); assert.equal(parseGitHubRemoteSetupStatus(boundary), null);
+  for (const text of ['line\nbreak', 'control\u007f', '\ud800', 'é']) { const bad = rsVariableReview(); bad.consent.prepared.after.value = rsValue(text); assert.equal(parseGitHubRemoteSetupStatus(bad), null); }
+  const paired = rsVariableReview(rsVariableSelection('replace'));
+  paired.observed.value = paired.consent.prepared.before.value = { bytes: 0, sha256: createHash('sha256').update('').digest('hex') }; assert.ok(parseGitHubRemoteSetupStatus(paired));
+  paired.observed.value = paired.consent.prepared.before.value = { bytes: 49152, sha256: 'f'.repeat(64) }; assert.ok(parseGitHubRemoteSetupStatus(paired));
+  paired.observed.value.bytes = 49153; assert.equal(parseGitHubRemoteSetupStatus(paired), null);
+  const pairBad = rsVariableReview(); pairBad.observed.metadata = pairBad.consent.prepared.before.metadata = { createdAt: rsTime, updatedAt: rsTime }; assert.equal(parseGitHubRemoteSetupStatus(pairBad), null);
+  const noDifference = rsVariableReview(rsVariableSelection('replace')); noDifference.observed = noDifference.consent.prepared.before = rsVariableObserved(noDifference); assert.equal(parseGitHubRemoteSetupStatus(noDifference), null);
+  const unchanged = { ...rsOp('prepare', 'settled', 3, { reason: 'no-change', writeClaimed: false, writeAcknowledged: false }), observed: rsVariableObserved(rsVariableReview()) }; assert.ok(parseGitHubRemoteSetupStatus(unchanged)); assert.equal(unchanged.consent, null);
+  assert.match(GITHUB_REMOTE_SETUP_VARIABLE_PREVIOUS, /Previous value is not displayed/);
+  assert.match(GITHUB_REMOTE_SETUP_VARIABLE_PREVIOUS, /not a full before-value diff/);
+  assert.match(GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION, /Variables are not secrets/); assert.match(GITHUB_REMOTE_SETUP_VARIABLE_CONFIRMATION, /no atomic compare-and-set/);
+  assert.match(GITHUB_REMOTE_SETUP_VARIABLE_ACCEPTANCE, /does not prove a build or release/);
+
 });
 
 test('remote setup original controller consumes explicit review and retires stale or uncertain originals without retries', async () => {
@@ -923,6 +1059,84 @@ test('remote setup original controller consumes explicit review and retires stal
   wrongIdentity.controller.setConfirmed(true); wrongIdentity.controller.apply(); wrongIdentity.reply('apply', { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }),
     observed: { name: 'mobile-candidate', id: '999', policy: rsEnvironmentReview().consent.prepared.after } }); await rsFlush();
   assert.equal(wrongIdentity.state.pending, true); assert.equal(wrongIdentity.state.uncertain, true); wrongIdentity.controller.apply(); assert.equal(wrongIdentity.count('apply'), 1); wrongIdentity.controller.dispose();
+  for (const mode of ['create', 'replace']) {
+    const secret = await rsAttached(), selected = rsSecretSelection(mode), review = rsSecretReview(selected);
+    secret.assets(rsAssets(selected)); secret.controller.setSelection(selected); secret.controller.prepare();
+    assert.deepEqual(secret.last('prepare').args.selection, selected); secret.reply('prepare', review); await rsFlush();
+    assert.ok(secret.controller.currentConsent()); secret.controller.setConfirmed(true); secret.controller.apply(); secret.controller.apply(); assert.equal(secret.count('apply'), 1);
+    secret.reply('apply', { ...rsOp('apply', 'settled', 6, { effect: 'accepted-not-value-verified', writeClaimed: true, writeAcknowledged: true }), observed: { ...review.observed, metadata: { createdAt: rsTime, updatedAt: rsTime } } }); await rsFlush();
+    assert.equal(secret.state.pending, false); assert.equal(secret.state.uncertain, false); assert.equal(secret.controller.currentConsent(), null); secret.controller.dispose();
+  }
+  for (const mutate of [(a) => { a.contextCurrent = false; }, (a) => { a.status.context.projectId = 'other'; }, (a) => { a.status.context.revision += 1; },
+    (a) => { a.status.context.purpose = 'signing'; }, (a) => { a.status.assignments[0].availability = 'unavailable'; },
+    (a) => { a.status.records[0].revision += 1; }, (a) => { a.status.records[0].availability = 'mutation-pending'; },
+    (a) => { a.status.mode = 'closed'; }, (a) => { a.blocked = true; }, (a) => { a.observationFailed = true; },
+    (a) => { a.status.persistence = { state: 'locked', keyAccess: 'locked', reason: 'closed' }; }]) {
+    const secret = await rsAttached(), assets = rsAssets(); secret.assets(assets); secret.controller.setSelection(rsSecretSelection()); secret.controller.prepare();
+    secret.reply('prepare', rsSecretReview()); await rsFlush(); secret.controller.setConfirmed(true); const changed = structuredClone(assets); mutate(changed); secret.assets(changed);
+    assert.equal(secret.controller.currentConsent(), null); assert.equal(secret.state.confirmed, false); assert.equal(secret.count('discard'), 1); secret.controller.apply(); assert.equal(secret.count('apply'), 0); secret.controller.dispose();
+  }
+  const lateSecret = await rsAttached(); lateSecret.assets(rsAssets()); lateSecret.controller.setSelection(rsSecretSelection()); lateSecret.controller.prepare();
+  lateSecret.assets(null); lateSecret.assets(rsAssets()); lateSecret.controller.setSelection(rsSecretSelection());
+  lateSecret.emit(rsOp('prepare', 'running', 2)); assert.equal(lateSecret.count('cancel'), 1); assert.equal(lateSecret.last('cancel').args, 'prepare-a');
+  lateSecret.reply('prepare', rsSecretReview()); await rsFlush(); assert.equal(lateSecret.controller.currentConsent(), null); assert.equal(lateSecret.count('discard'), 1); assert.equal(lateSecret.count('prepare'), 1);
+  lateSecret.reply('cancel', rsSecretReview()); lateSecret.reply('discard', { ...rsSecretReview(), revision: 4, consent: null }); await rsFlush(); lateSecret.controller.dispose();
+  const silent = await rsAttached(); silent.assets(rsAssets()); silent.controller.setSelection(rsSecretSelection()); silent.controller.prepare(); silent.assets(null, false);
+  silent.reply('prepare', rsSecretReview()); await rsFlush(); assert.equal(silent.controller.currentConsent(), null); assert.equal(silent.count('discard'), 1); silent.controller.dispose();
+  const refresh = await rsAttached(); refresh.assets(rsAssets()); refresh.controller.setSelection(rsSecretSelection()); refresh.controller.prepare(); refresh.reply('prepare', rsSecretReview()); await rsFlush();
+  const renamed = rsAssets(); renamed.status.statusRevision += 1; renamed.status.records[0].label = 'Public display label'; renamed.observing = true; refresh.assets(renamed); assert.ok(refresh.controller.currentConsent()); refresh.controller.dispose();
+  for (const selected of [rsSelection(), rsEnvironmentSelection()]) {
+    const oldMode = await rsAttached(); oldMode.controller.setSelection(selected); oldMode.controller.prepare(); oldMode.reply('prepare', selected.kind === 'environment_protection' ? rsEnvironmentReview(selected) : rsReview()); await rsFlush();
+    oldMode.assets(rsAssets()); oldMode.assets(null); assert.ok(oldMode.controller.currentConsent()); assert.equal(oldMode.count('discard'), 0); oldMode.controller.dispose();
+  }
+  const noHelper = await rsAttached(); noHelper.assets(rsAssets()); noHelper.controller.setSelection(rsSecretSelection()); noHelper.controller.prepare();
+  noHelper.last('prepare').reject({ code: 'github_remote_setup_refused_runtime_unavailable' }); await rsFlush(); assert.equal(noHelper.state.pending, false); assert.equal(noHelper.state.uncertain, false); assert.equal(noHelper.controller.currentConsent(), null); assert.equal(noHelper.count('apply'), 0); noHelper.controller.dispose();
+  const wrongSecret = await rsAttached(); wrongSecret.assets(rsAssets()); wrongSecret.controller.setSelection(rsSecretSelection()); wrongSecret.controller.prepare(); wrongSecret.reply('prepare', rsSecretReview()); await rsFlush(); wrongSecret.controller.setConfirmed(true); wrongSecret.controller.apply();
+  wrongSecret.reply('apply', { ...rsOp('apply', 'settled', 6, { effect: 'accepted-not-value-verified', writeClaimed: true, writeAcknowledged: true }), observed: { ...rsSecretReview().observed, environmentId: '999', metadata: { createdAt: rsTime, updatedAt: rsTime } } }); await rsFlush();
+  assert.equal(wrongSecret.state.pending, true); assert.equal(wrongSecret.state.uncertain, true); wrongSecret.controller.dispose();
+
+  for (const mode of ['create', 'replace']) {
+    const variable = await rsAttached(), selected = rsVariableSelection(mode), review = rsVariableReview(selected);
+    variable.assets(rsAssets(selected)); variable.controller.setSelection(selected); variable.controller.prepare();
+    assert.deepEqual(variable.last('prepare').args.selection, selected); variable.reply('prepare', review); await rsFlush();
+    assert.ok(variable.controller.currentConsent()); variable.controller.setConfirmed(true); variable.controller.apply(); variable.controller.apply(); assert.equal(variable.count('apply'), 1);
+    variable.reply('apply', { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed: rsVariableObserved(review) }); await rsFlush();
+    assert.equal(variable.state.pending, false); assert.equal(variable.state.uncertain, false); assert.equal(variable.controller.currentConsent(), null); variable.controller.dispose();
+  }
+  for (const mutate of [(a) => { a.status.context.revision += 1; }, (a) => { a.status.assignments[0].availability = 'unavailable'; },
+    (a) => { a.status.records[0].revision += 1; }, (a) => { a.status.persistence = { state: 'locked' }; }, (a) => { a.status.context.projectId = 'other'; }]) {
+    const variable = await rsAttached(), selected = rsVariableSelection(), assets = rsAssets(selected);
+    variable.assets(assets); variable.controller.setSelection(selected); variable.controller.prepare(); variable.reply('prepare', rsVariableReview(selected)); await rsFlush();
+    variable.controller.setConfirmed(true); const changed = structuredClone(assets); mutate(changed); variable.assets(changed);
+    assert.equal(variable.controller.currentConsent(), null); assert.equal(variable.state.confirmed, false); assert.equal(variable.count('discard'), 1);
+    variable.controller.apply(); assert.equal(variable.count('apply'), 0); variable.controller.dispose();
+  }
+  const lateVariable = await rsAttached(), variableSelected = rsVariableSelection();
+  lateVariable.assets(rsAssets(variableSelected)); lateVariable.controller.setSelection(variableSelected); lateVariable.controller.prepare();
+  lateVariable.assets(null); lateVariable.assets(rsAssets(variableSelected)); lateVariable.controller.setSelection(variableSelected);
+  lateVariable.emit(rsOp('prepare', 'running', 2)); assert.equal(lateVariable.count('cancel'), 1);
+  lateVariable.reply('prepare', rsVariableReview()); await rsFlush(); assert.equal(lateVariable.controller.currentConsent(), null); assert.equal(lateVariable.count('discard'), 1);
+  lateVariable.reply('cancel', rsVariableReview()); lateVariable.reply('discard', { ...rsVariableReview(), revision: 4, consent: null }); await rsFlush(); assert.equal(lateVariable.count('prepare'), 1); lateVariable.controller.dispose();
+  for (const reason of ['variable-exists', 'variable-missing', 'variable-changed', 'runtime-unavailable']) {
+    const rejected = await rsAttached(), selected = rsVariableSelection(); rejected.assets(rsAssets(selected)); rejected.controller.setSelection(selected); rejected.controller.prepare();
+    rejected.last('prepare').reject({ code: 'github_remote_setup_refused_' + reason.replaceAll('-', '_') }); await rsFlush();
+    assert.equal(rejected.state.pending, false); assert.equal(rejected.state.uncertain, false); assert.equal(rejected.state.error, reason); assert.equal(rejected.controller.currentConsent(), null); rejected.controller.dispose();
+  }
+  for (const mismatch of ['environment', 'digest', 'effect', 'failed-readback']) {
+    const variable = await rsAttached(), selected = rsVariableSelection(), review = rsVariableReview();
+    variable.assets(rsAssets(selected)); variable.controller.setSelection(selected); variable.controller.prepare(); variable.reply('prepare', review); await rsFlush(); variable.controller.setConfirmed(true); variable.controller.apply();
+    const outcome = { ...rsOp('apply', 'settled', 6, { effect: 'readback-confirmed', writeClaimed: true, writeAcknowledged: true }), observed: rsVariableObserved(review) };
+    if (mismatch === 'environment') outcome.observed.environmentId = '999';
+    else if (mismatch === 'digest') outcome.observed.value.sha256 = 'f'.repeat(64);
+    else if (mismatch === 'effect') outcome.operation.effect = 'accepted-not-value-verified';
+    else { outcome.operation.reason = 'network-unavailable'; outcome.operation.effect = 'unknown'; outcome.observed = null; }
+    variable.reply('apply', outcome); await rsFlush();
+    assert.equal(variable.controller.currentConsent(), null); variable.controller.apply(); assert.equal(variable.count('apply'), 1);
+    if (mismatch === 'failed-readback') { assert.equal(variable.state.pending, false); assert.equal(variable.state.status.operation.effect, 'unknown'); assert.equal(variable.state.status.operation.writeAcknowledged, true); }
+    else { assert.equal(variable.state.uncertain, true); assert.equal(variable.state.pending, true); }
+    variable.controller.dispose();
+  }
+
 });
 
 test('remote setup bridge admits only five fixed commands and preview never synthesizes remote results', async () => {
@@ -945,4 +1159,32 @@ test('remote setup bridge admits only five fixed commands and preview never synt
     await assert.rejects(api.githubRemoteSetupPrepare({ ...prepareArgs, selection: selected }), (e) => e.admission === 'not-admitted');
   }
   assert.equal(calls.length, count + 2); // No new command, endpoint or token transport.
+  // Same IPC command and actual reference selector; no plaintext/file intake.
+  for (const requirement of Object.keys(GITHUB_REMOTE_SETUP_SECRET_FIELDS)) {
+    const selected = rsSecretSelection('create', requirement), assets = rsAssets(selected), refs = githubRemoteSetupSecretReferences(assets, 'project', requirement, 'candidate');
+    assert.equal(refs.length, 1); assert.deepEqual(refs[0].source, selected.source); assert.equal(Object.hasOwn(refs[0], 'field'), false);
+    assert.deepEqual(githubRemoteSetupSecretReferences(assets, 'other', requirement, 'candidate'), []);
+    assert.deepEqual(githubRemoteSetupSecretReferences(assets, 'project', requirement, 'production'), []);
+    assert.deepEqual(githubRemoteSetupSecretReferences(null, 'project', requirement, 'candidate'), []);
+    const args = { ...prepareArgs, selection: selected }; await api.githubRemoteSetupPrepare(args); assert.deepEqual(calls.at(-1), ['github_remote_setup_prepare', args]);
+    for (const patch of [{ plaintext: 'PRIVATE' }, { path: '/private/never-read' }, { field: 'file' }, { ciphertext: 'PRIVATE' }, { keyId: 'PRIVATE' }]) {
+      await assert.rejects(api.githubRemoteSetupPrepare({ ...args, selection: { ...selected, source: { ...selected.source, ...patch } } }), (e) => e.admission === 'not-admitted');
+    }
+  }
+  assert.match(GITHUB_REMOTE_SETUP_SECRET_CONFIRMATION, /no atomic compare-and-set/); assert.match(GITHUB_REMOTE_SETUP_SECRET_CONFIRMATION, /Cancel does not undo/);
+  assert.match(GITHUB_REMOTE_SETUP_SECRET_ACCEPTANCE, /secret value was not verified/); assert.match(GITHUB_REMOTE_SETUP_SECRET_ACCEPTANCE, /does not prove a build or release/);
+
+  for (const requirement of Object.keys(rsVariableValues)) {
+    const selected = rsVariableSelection('create', requirement), assets = rsAssets(selected), refs = githubRemoteSetupVariableReferences(assets, 'project', requirement, 'candidate');
+    assert.equal(refs.length, 1); assert.deepEqual(refs[0].source, selected.source); assert.equal(Object.hasOwn(refs[0], 'field'), false);
+    assert.deepEqual(githubRemoteSetupVariableReferences(null, 'project', requirement, 'candidate'), []);
+    assert.deepEqual(githubRemoteSetupVariableReferences(assets, 'other', requirement, 'candidate'), []);
+    assert.deepEqual(githubRemoteSetupVariableReferences(assets, 'project', requirement, 'production'), []);
+    const args = { ...prepareArgs, selection: selected }; await api.githubRemoteSetupPrepare(args); assert.deepEqual(calls.at(-1), ['github_remote_setup_prepare', args]);
+    const beforeInvalid = calls.length;
+    for (const patch of [{ value: 'RAW' }, { text: 'RAW' }, { field: GITHUB_REMOTE_SETUP_VARIABLE_FIELDS[requirement].field }, { path: '/not-read' }]) await assert.rejects(api.githubRemoteSetupPrepare({ ...args, selection: { ...selected, ...patch } }), (e) => e.admission === 'not-admitted');
+    assert.equal(calls.length, beforeInvalid);
+    await assert.rejects(previewApi.githubRemoteSetupPrepare(args), (e) => e.reason === 'runtime-unavailable');
+  }
+
 });

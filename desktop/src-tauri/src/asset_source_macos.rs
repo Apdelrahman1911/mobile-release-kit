@@ -6,6 +6,9 @@
 #![forbid(unsafe_code)]
 
 use super::*;
+#[path = "github_history_sources_macos.rs"]
+mod history_sources;
+pub(crate) use history_sources::HistorySources;
 use std::{ffi::OsStr, os::{fd::{AsFd, OwnedFd}, unix::ffi::OsStrExt}};
 use nix::{fcntl::{self, AtFlags, OFlag}, mount::MntFlags,
     sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};

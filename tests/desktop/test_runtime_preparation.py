@@ -150,7 +150,7 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_current_roster_is_explicit_complete_and_missing_entry_is_no_partial_output(self):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
-            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py",
+            "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS),
@@ -188,6 +188,76 @@ class RuntimePreparationTests(unittest.TestCase):
                 self.assertEqual(archive.namelist(), ["mobile_release/__init__.py",
                     "mobile_release/_desktop_engine.py", "mobile_release/github_workflow_recovery.py"])
                 self.assertEqual(archive.read("mobile_release/github_workflow_recovery.py"), recovery_source)
+            # This internal opt-in changes only the canonical inventory, not
+            # Mach-O/signature/native admission (owned by the containing stager).
+            provider_bytes = b"INERT tools/gh DATA; NEVER EXECUTED\n"
+            def provider_input(label):
+                runtime = base / label
+                (runtime / "python/bin").mkdir(parents=True)
+                (runtime / "python/bin/python3").write_bytes(b"INERT SUPPLIER DATA\n")
+                (runtime / "tools").mkdir()
+                gh = runtime / "tools/gh"
+                gh.write_bytes(provider_bytes)
+                gh.chmod(0o555)
+                return runtime, gh
+            for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+                runtime, gh = provider_input("provider-" + target)
+                initial = preparation._state(gh.stat())
+                prepared = preparation.prepare_current(source, runtime, target, history_provider=True)
+                encoded = (runtime / "manifest.json").read_bytes()
+                current_manifest = json.loads(encoded)
+                self.assertEqual(prepared["manifestSha256"], hashlib.sha256(encoded).hexdigest())
+                self.assertEqual(current_manifest["target"], target)
+                self.assertEqual(current_manifest["files"], sorted(current_manifest["files"], key=lambda row: row["path"]))
+                self.assertEqual({row["path"] for row in current_manifest["files"]},
+                    set(preparation.CURRENT_BOOTSTRAPS) | {"core.zip", "github-ca.pem", "python/bin/python3", "tools/gh"})
+                self.assertEqual([row for row in current_manifest["files"] if row["path"] == "tools/gh"],
+                    [{"path": "tools/gh", "size": len(provider_bytes), "sha256": hashlib.sha256(provider_bytes).hexdigest()}])
+                self.assertEqual(gh.read_bytes(), provider_bytes)
+                self.assertEqual(preparation._state(gh.stat()), initial)
+                self.assertEqual(stat.S_IMODE(gh.stat().st_mode), 0o555)
+
+            for case in ("default", "historical", "linux", "not-bool", "unknown-sibling", "empty-directory",
+                         "wrong-mode", "zero-bytes", "file-capacity", "byte-capacity"):
+                runtime, gh = provider_input("refuse-provider-" + case)
+                call = preparation.prepare_current
+                target, options = "aarch64-apple-darwin", {"history_provider": True}
+                if case == "default": options = {}
+                if case == "historical": call, options = preparation.prepare, {}
+                if case == "linux": target = "x86_64-unknown-linux-gnu"
+                if case == "not-bool": options = {"history_provider": 1}
+                if case == "unknown-sibling": (runtime / "tools/other").write_bytes(b"unknown")
+                if case == "empty-directory": (runtime / "tools/empty").mkdir()
+                if case == "wrong-mode": gh.chmod(0o444)
+                if case == "zero-bytes":
+                    gh.chmod(0o755)
+                    gh.write_bytes(b"")
+                    gh.chmod(0o555)
+                bound, limit = (("MAX_FILES", len(preparation.CURRENT_BOOTSTRAPS) + 4) if case == "file-capacity"
+                                else ("MAX_TOTAL_BYTES", 1) if case == "byte-capacity" else
+                                ("MAX_TOTAL_BYTES", preparation.MAX_TOTAL_BYTES))
+                with self.subTest(history_provider=case), patch.object(preparation, bound, limit):
+                    with self.assertRaises(preparation.PreparationError):
+                        call(source, runtime, target, **options)
+                self.assertEqual({path.name for path in runtime.iterdir()}, {"python", "tools"})
+                self.assertFalse((runtime / "manifest.json").exists())
+
+            runtime, gh = provider_input("provider-post-swap")
+            original_read = preparation.read_checked
+            observed = []
+            def change_after_read(path, *, limit):
+                value = original_read(path, limit=limit)
+                if path == gh and not observed:
+                    observed.append(path)
+                    gh.chmod(0o755)
+                    gh.write_bytes(provider_bytes + b"changed")
+                    gh.chmod(0o555)
+                return value
+            with patch.object(preparation, "read_checked", side_effect=change_after_read):
+                with self.assertRaisesRegex(preparation.PreparationError, "Current provider original changed"):
+                    preparation.prepare_current(source, runtime, "aarch64-apple-darwin", history_provider=True)
+            self.assertEqual(observed, [gh])
+            self.assertFalse((runtime / "manifest.json").exists())
 
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:
