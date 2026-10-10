@@ -42,6 +42,7 @@ from mobile_release.provenance import (
 )
 from mobile_release.workflow import (
     Context,
+    ReadOnlyEvidenceContext,
     GitHub,
     MAX_EVIDENCE,
     Resolver,
@@ -363,6 +364,70 @@ class WorkflowRecoveryTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--method") + 1], "GET")
             self.assertNotIn("--custom-trusted-root", command)
             self.assertFalse(set(command) & {"gradle", "xcodebuild", "fastlane", "upload", "DELETE", "POST", "PATCH"})
+
+    def test_readonly_context_preserves_trust_checks_without_current_job_authority(self):
+        selected = context()
+        repository = dict(selected.repository)
+        readonly = ReadOnlyEvidenceContext(repository, selected.platform,
+            selected.authority["reusableRepository"], selected.authority["reusableCommit"])
+        repository["id"] = "999"
+        self.assertEqual(dict(readonly.repository), dict(selected.repository))
+        with self.assertRaises(TypeError):
+            readonly.repository["id"] = "999"
+        self.assertFalse(hasattr(readonly, "authority"))
+        self.assertFalse(hasattr(readonly, "current_job"))
+        for value in (selected, readonly):
+            self.assertEqual(value.trusted_tooling_repository, selected.authority["reusableRepository"])
+            self.assertEqual(value.trusted_tooling_commit, selected.authority["reusableCommit"])
+        self.assertTrue(selected.is_current_job(dict(selected.authority), selected.current_job))
+        self.assertFalse(selected.is_current_job(dict(selected.authority, attempt=2), selected.current_job))
+        self.assertFalse(selected.is_current_job(selected.authority, "different"))
+        self.assertFalse(readonly.is_current_job(selected.authority, selected.current_job))
+        active = self.api.register(selected, active=True)
+        self.assertEqual(self.api.client(selected).job(selected.authority, selected.stage,
+            selected.current_job, constructing=True), active)
+        reader = GitHub(readonly, self.api)
+        with self.assertRaisesRegex(WorkflowError, "actual active protected Store job"):
+            reader.job(selected.authority, selected.stage, selected.current_job, constructing=True)
+        completed = self.api.register(selected, active=False)
+        self.assertEqual(reader.job(selected.authority, selected.stage, selected.current_job), completed)
+        for bad in ({"id": True, "fullName": "owner/repo"},
+                    {"id": "18446744073709551616", "fullName": "owner/repo"},
+                    {"id": "1", "fullName": "owner/repo", "authority": {}},
+                    {"id": "1", "fullName": "owner/repo\n"}):
+            with self.assertRaises(WorkflowError):
+                ReadOnlyEvidenceContext(bad, "android", readonly.tooling_repository, readonly.tooling_commit)
+        self.assert_read_only()
+
+        from mobile_release.github_history import HistoryBudget
+        api = self.api
+        class CountActualVerifierCalls(Transport):
+            def __init__(self):
+                self.budget = HistoryBudget()
+                self.budget.reserve_verifiers()
+            def run(self, arguments, **keywords):
+                if arguments[:3] == ["gh", "attestation", "verify"]:
+                    self.budget.claim_verifier()
+                else:
+                    self.budget.claim_call()
+                return api.run(arguments, **keywords)
+        lifecycle = self.lifecycle()
+        for stage, maximum in (("candidate", 3), ("external-testing", 8), ("production-submit", 19)):
+            package = lifecycle.create(stage)
+            selected = lifecycle.contexts[stage]
+            transport = CountActualVerifierCalls()
+            reader = GitHub(ReadOnlyEvidenceContext(dict(selected.repository), selected.platform,
+                selected.trusted_tooling_repository, selected.trusted_tooling_commit), transport)
+            artifact = reader.artifact(selected.authority["runId"], artifact_name(stage, selected.platform, "evidence"))
+            self.assertIsNotNone(artifact)
+            Verifier(reader, allow_current=False).final(package, stage, artifact=artifact)
+            self.assertEqual(transport.budget._verifiers, maximum, stage)
+            self.assertLessEqual(transport.budget._calls, 128)
+        before = len(api.requests)
+        with self.assertRaises(ValidationError):
+            transport.run(["gh", "attestation", "verify", "must-not-enter-provider"])
+        self.assertEqual(len(api.requests), before)
+        self.assertEqual(transport.budget._verifiers, 19)
 
     def test_complete_final_reuses_original_without_handoff_standalone_intent_or_store(self):
         lifecycle = self.lifecycle()

@@ -103,7 +103,8 @@ impl Inventory {
                 && (item.path.starts_with("app/Contents/") || item.path.starts_with("runtime/"))
                 && item.path.as_str() > previous && hex(&item.sha256, 64), "inventory-path")?;
             check(item.executable == matches!(item.path.as_str(),
-                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"),
+                ENTRY_BINARY | APP_BINARY | VAULT_HELPER | ANDROID_HELPER | REMOVER | DESKTOP_IMAGE | RESIDENT_IMAGE | "runtime/python/bin/python3"
+                | paths::HISTORY_PROVIDER_INVENTORY_PATH | paths::GITHUB_SEAL_INVENTORY_PATH),
                 "inventory-executable-scope")?;
             total = total.checked_add(item.size).ok_or("inventory-bound")?;
             check(total <= PAYLOAD_LIMIT, "inventory-bound")?;
@@ -486,6 +487,10 @@ mod tests {
         // new fixed executable joins the closed list; current-role admission
         // must separately require its genuine signed original.
         for (path,executable,accepted) in [(REMOVER,true,true),(REMOVER,false,false),
+            (paths::HISTORY_PROVIDER_INVENTORY_PATH,true,true),(paths::HISTORY_PROVIDER_INVENTORY_PATH,false,false),
+            (paths::GITHUB_SEAL_INVENTORY_PATH,true,true),(paths::GITHUB_SEAL_INVENTORY_PATH,false,false),
+            ("runtime/tools/gh-other",true,false),
+            ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-github-seal-other",true,false),
             ("app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove-other",true,false)] {
             let mut changed=original.clone();let rows=changed["files"].as_array_mut().unwrap();
             rows.push(json!({"path":path,"sha256":"b".repeat(64),"size":1,"executable":executable}));

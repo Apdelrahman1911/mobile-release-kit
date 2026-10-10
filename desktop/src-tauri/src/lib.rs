@@ -202,6 +202,8 @@ mod github_release_protocol;
 mod github_release_session;
 mod github_setup_protocol;
 mod github_setup_session;
+mod github_history_protocol;
+mod github_history_session;
 pub mod edit_owner;
 #[cfg(feature = "desktop-shell")]
 pub mod shell;

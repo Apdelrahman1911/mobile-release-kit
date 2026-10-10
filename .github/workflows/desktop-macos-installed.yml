@@ -583,6 +583,81 @@ jobs:
             --target "$MRK_MACOS_TARGET" \
             --transport-root "$MRK_MACOS_WORK/signed-python-transport" \
             --output "$MRK_MACOS_WORK/signed-python-capsule" > "$MRK_MACOS_WORK/signed-python-transport-result.json"
+      - name: Select only SOURCE-enrolled current signed GitHub tools
+        id: github_tools
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py select-github-tools-signed --target "$MRK_MACOS_TARGET")
+          [[ ${#selection} -le 16384 ]] || exit 1
+          "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_TOOL_SELECTION'
+          import json, os, re, sys
+          value = json.loads(sys.argv[1]); output = {}; environment = {}
+          for purpose, key in [('history-provider', 'history'), ('github-seal', 'seal')]:
+              row = value['tools'][purpose]; output[key + '-enabled'] = 'false' if row is None else 'true'
+              if row is not None:
+                  signed = row['signed']
+                  for field, suffix in [('runId', 'run-id'), ('artifactId', 'artifact-id')]:
+                      item = signed[field]
+                      if type(item) is not str or not re.fullmatch(r'[1-9][0-9]{0,15}', item): raise ValueError('tool transport binding')
+                      output[key + '-' + suffix] = item
+                  if key == 'seal':
+                      environment['MRK_MACOS_GITHUB_SEAL_SHA256'] = signed['signedSha256']
+                      environment['MRK_MACOS_GITHUB_SEAL_BYTES'] = str(signed['signedBytes'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as out:
+              for key, value in output.items(): out.write(key + '=' + value + '\n')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='ascii') as out:
+              for key, value in environment.items(): out.write(key + '=' + value + '\n')
+          PY_TOOL_SELECTION
+      - name: Download exactly the nominated signed history provider
+        if: steps.github_tools.outputs.history-enabled == 'true'
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.github_tools.outputs.history-artifact-id }}
+          run-id: ${{ steps.github_tools.outputs.history-run-id }}
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/history-provider-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Download exactly the nominated signed seal helper
+        if: steps.github_tools.outputs.seal-enabled == 'true'
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.github_tools.outputs.seal-artifact-id }}
+          run-id: ${{ steps.github_tools.outputs.seal-run-id }}
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/github-seal-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Project current signed tools without executing either program
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          HISTORY_ENABLED: ${{ steps.github_tools.outputs.history-enabled }}
+          SEAL_ENABLED: ${{ steps.github_tools.outputs.seal-enabled }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          case "$HISTORY_ENABLED" in
+            true) "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py project-history-provider --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/history-provider-result.json" ;;
+            false) ;; *) exit 1 ;;
+          esac
+          case "$SEAL_ENABLED" in
+            true) "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py project-github-seal --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/github-seal-result.json" ;;
+            false) ;; *) exit 1 ;;
+          esac
       - name: Prepare the current payload from the independently accepted fresh Python supplier
         timeout-minutes: 3
         shell: bash
@@ -590,9 +665,13 @@ jobs:
           set -euo pipefail
           set -o noclobber
           umask 077
+          history_provider_arguments=()
+          if [[ '${{ steps.github_tools.outputs.history-enabled }}' == true ]]; then
+            history_provider_arguments=(--history-provider "$MRK_MACOS_WORK/history-provider-capsule/gh")
+          fi
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
             "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py current-runtime \
-            --target "$MRK_MACOS_TARGET" \
+            --target "$MRK_MACOS_TARGET" "${history_provider_arguments[@]}" \
             --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
             --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
             --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
@@ -1219,8 +1298,13 @@ jobs:
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle && "$MRK_MACOS_REMOVAL_CASE" == abrupt ]]; then
             removal_arguments=(--removal-abrupt-fixture)
           fi
+          github_seal_arguments=()
+          if [[ '${{ steps.github_tools.outputs.seal-enabled }}' == true ]]; then
+            github_seal_arguments=(--github-seal "$MRK_MACOS_WORK/github-seal-capsule/mrk-github-seal"
+              --expected-github-seal "$MRK_MACOS_GITHUB_SEAL_SHA256" --expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES")
+          fi
           /bin/mkdir -m 700 "$MRK_MACOS_WORK/app"
-          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" "${github_seal_arguments[@]}" \
             --package-role ordinary-image \
             --entry-binary "$MRK_MACOS_WORK/mrk-macos-entry" --expected-entry "$MRK_MACOS_ENTRY_SHA256" \
             --vault-helper "$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain" \
@@ -1268,6 +1352,12 @@ jobs:
           # verify-after independently rebinds the unchanged signed resident image.
           /usr/bin/codesign --verify --strict "$desktop_image"
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-vault-keychain"
+          if [[ '${{ steps.github_tools.outputs.seal-enabled }}' == true ]]; then
+            /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-github-seal"
+          fi
+          if [[ '${{ steps.github_tools.outputs.history-enabled }}' == true ]]; then
+            /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/runtime/tools/gh"
+          fi
           /usr/bin/codesign --verify --strict "$payload/Contents/Helpers/mrk-macos-remove"
           /usr/bin/codesign --verify --strict "$payload"
           /usr/bin/codesign --verify --strict "$MRK_MACOS_WORK/app/Mobile Release Kit.app"

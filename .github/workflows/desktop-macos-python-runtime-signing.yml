@@ -5,6 +5,7 @@ on:
     branches:
       - verify/desktop-macos-python-runtime-signing-engineering
       - verify/desktop-macos-python-runtime-signing-shipping
+      - verify/desktop-macos-github-tool-signing
 
 permissions:
   contents: read
@@ -146,4 +147,129 @@ jobs:
             ${{ steps.work.outputs.root }}/python-signed-receipt.json
           if-no-files-found: error
           compression-level: 0
+          retention-days: 7
+
+  signed-github-tool:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-github-tool-signing'
+    environment: macos-developer-id
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            purpose: history-provider
+            name: gh
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+            purpose: history-provider
+            name: gh
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            purpose: github-seal
+            name: mrk-github-seal
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+            purpose: github-seal
+            name: mrk-github-seal
+    env:
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      MRK_TOOL_TARGET: ${{ matrix.target }}
+      MRK_TOOL_PURPOSE: ${{ matrix.purpose }}
+    steps:
+      - name: Check out exact current tool signing source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select owner interpreter, never a nominated executable
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Admit fixed build nomination before download or credential access
+        id: nomination
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+          case "$MRK_TOOL_PURPOSE" in history-provider|github-seal) ;; *) exit 1 ;; esac
+          selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py "select-$MRK_TOOL_PURPOSE-build" --target "$MRK_TOOL_TARGET")
+          [[ ${#selection} -le 16384 ]] || exit 1
+          "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_TOOL_SELECTION'
+          import json, os, re, sys
+          value = json.loads(sys.argv[1]); row = value['tools'][os.environ['MRK_TOOL_PURPOSE']]
+          fields = {'run-id': row['runId'], 'artifact-id': row['artifactId']}
+          if not all(type(v) is str and re.fullmatch(r'[1-9][0-9]{0,15}', v) for v in fields.values()): raise ValueError('fixed tool nomination')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as out:
+              for key, value in fields.items(): out.write(key + '=' + value + '\n')
+          PY_TOOL_SELECTION
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-tool-signing.XXXXXXXX")
+          /bin/chmod 700 "$work"
+          printf 'MRK_MACOS_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+      - name: Download only the nominated current build capsule
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.nomination.outputs.artifact-id }}
+          run-id: ${{ steps.nomination.outputs.run-id }}
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ env.MRK_MACOS_WORK }}/tool-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Sign and strictly verify exactly one current tool with the existing owner
+        id: sign
+        timeout-minutes: 7
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          ulimit -n 1024
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py "sign-$MRK_TOOL_PURPOSE" --target "$MRK_TOOL_TARGET"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Retain only bounded public failure facts, never raw credential transcripts
+        if: failure() && env.MRK_MACOS_WORK != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-signing-failure-${{ matrix.purpose }}-${{ matrix.target }}
+          path: ${{ env.MRK_MACOS_WORK }}/android-helper-sign-${{ matrix.purpose }}.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Retain only the finalized signed capsule after the original caller succeeds
+        if: success() && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-signed-${{ matrix.purpose }}-${{ matrix.target }}
+          path: |
+            ${{ env.MRK_MACOS_WORK }}/${{ matrix.name }}
+            ${{ env.MRK_MACOS_WORK }}/tool-signed-receipt.json
+          if-no-files-found: error
           retention-days: 7

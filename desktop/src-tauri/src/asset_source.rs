@@ -224,7 +224,7 @@ fn roster_limit(counts: impl IntoIterator<Item = usize>, leaf: usize) -> Result<
 // The credential entry always selects Private; only the closed image entry
 // can select PublicImage, and both still require an actual regular file.
 #[derive(Clone, Copy)]
-enum LeafPolicy { Private, PublicImage, Artifact }
+enum LeafPolicy { Private, PublicImage, Artifact, SavedConfiguration }
 impl LeafPolicy {
     fn permits(self, identity: FileIdentity) -> bool {
         match self {
@@ -233,7 +233,7 @@ impl LeafPolicy {
             // excludes mount aliases from later target replacement too.
             // Read permission is checked by the original read-only open;
             // ordinary public 0644/0664 files need not be credential-private.
-            Self::PublicImage | Self::Artifact => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
+            Self::PublicImage | Self::Artifact | Self::SavedConfiguration => identity.nlink == 1 && identity.common.mode & 0o7000 == 0,
         }
     }
 }
@@ -1114,6 +1114,8 @@ mod macos;
 pub(crate) use macos::{SourceBook, capture, capture_public_images, probe_artifact, probe_project, probe_project_path, probe_project_excluding_vault, probe_vault_exclusion, suffix, path_hint};
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
+#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use macos::HistorySources;
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use macos::assert_installed_macos_images_source_contract;
 

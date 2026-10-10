@@ -395,6 +395,35 @@ class AquaDataTests(unittest.TestCase):
         self.assertEqual(ast.literal_eval(assigned(runner_tree, "LOADER_SHA")),
                          M.digest((root / loader_relative).read_bytes()))
 
+        # Current-only downstream source bindings form one exact DAG. Parse
+        # their literal DATA; never import another runner or invoke its owner.
+        def bounded_source(relative):
+            source_path = root / relative
+            source_info = source_path.lstat()
+            self.assertTrue(stat.S_ISREG(source_info.st_mode), relative)
+            self.assertLessEqual(source_info.st_size, 1024 * 1024, relative)
+            body = source_path.read_bytes()
+            self.assertEqual(len(body), source_info.st_size, relative)
+            return body
+
+        intel_tree = ast.parse(bounded_source("desktop/tools/macos_intel_os_providers.py"))
+        intel_pins = ast.literal_eval(assigned(intel_tree, "SOURCE_PINS"))
+        self.assertEqual(len(intel_pins), 11)
+        for relative, (source_size, source_digest) in intel_pins.items():
+            body = bounded_source(relative)
+            self.assertEqual((len(body), M.digest(body)), (source_size, source_digest), relative)
+        seal_tree = ast.parse(bounded_source("desktop/tools/macos_github_seal_build.py"))
+        reuse_pins = ast.literal_eval(assigned(seal_tree, "REUSE_PINS"))
+        loader_body = bounded_source(loader_relative)
+        self.assertEqual(reuse_pins["macos_aqua_qualification.py"],
+                         (len(loader_body), M.digest(loader_body)))
+        dependency_tree = ast.parse(bounded_source("desktop/tools/macos_android_dependency_preparation.py"))
+        dependency_pins = ast.literal_eval(assigned(dependency_tree, "PINS"))
+        runner_body = bounded_source(runner_relative)
+        runner_pin = [len(runner_body), M.digest(runner_body)]
+        self.assertEqual(dependency_pins[runner_relative], runner_pin)
+        self.assertEqual(ast.literal_eval(assigned(dependency_tree, "UI_NORMAL_PIN")), runner_pin)
+
         # The positive check above reads only DATA. The actual loader is entered
         # only with the known stale pin, under a blocker installed before entry.
         def core_modules():

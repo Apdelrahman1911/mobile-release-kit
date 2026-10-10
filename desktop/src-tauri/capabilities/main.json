@@ -42,6 +42,7 @@
     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",
     "allow-github-release-reconcile", "allow-github-release-pending", "allow-github-release-cancel",
     "allow-github-remote-setup-status", "allow-github-remote-setup-prepare", "allow-github-remote-setup-apply", "allow-github-remote-setup-discard", "allow-github-remote-setup-cancel",
+    "allow-github-history-status", "allow-github-history-start", "allow-github-history-cancel",
     "allow-vault-status", "allow-vault-open", "allow-vault-prepare-initialize", "allow-vault-unlock", "allow-asset-context", "allow-asset-choose", "allow-credential-prepare",
     "allow-vault-prepare-delete", "allow-vault-commit", "allow-vault-bind", "allow-vault-discard", "allow-vault-lock",
     "core:event:allow-listen", "core:event:allow-unlisten"

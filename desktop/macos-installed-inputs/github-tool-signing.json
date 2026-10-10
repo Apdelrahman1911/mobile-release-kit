@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "tools": {
+    "history-provider": {
+      "aarch64-apple-darwin": {
+        "build": {
+          "state": "unconfigured"
+        },
+        "signed": {
+          "state": "unconfigured"
+        }
+      },
+      "x86_64-apple-darwin": {
+        "build": {
+          "state": "unconfigured"
+        },
+        "signed": {
+          "state": "unconfigured"
+        }
+      }
+    },
+    "github-seal": {
+      "aarch64-apple-darwin": {
+        "build": {
+          "state": "unconfigured"
+        },
+        "signed": {
+          "state": "unconfigured"
+        }
+      },
+      "x86_64-apple-darwin": {
+        "build": {
+          "state": "unconfigured"
+        },
+        "signed": {
+          "state": "unconfigured"
+        }
+      }
+    }
+  }
+}

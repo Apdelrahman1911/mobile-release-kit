@@ -276,13 +276,14 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/desktop/environment_bootstrap.py', 'size': 1077, 'sha256': 'e737c9bf570358025e17d4413f1a567d41b9132142855226572e8a06cd141965'},
     {'path': '/work/inputs/core-source/desktop/github-ca.pem', 'size': 240216, 'sha256': '9cc2a774b5198dcff14d9be1e66091f538975d867ce029a96bce15a55dfd730f'},
     {'path': '/work/inputs/core-source/desktop/github_connection_bootstrap.py', 'size': 1249, 'sha256': '442137c076170a8f5df291503961e0e67e2edad9ae3c44905075f61204dc4668'},
+    {'path': '/work/inputs/core-source/desktop/github_history_bootstrap.py', 'size': 801, 'sha256': '759dbcb7b3bef35a5ba22536d79d9f5007d759835212a7e66f5651765c2feb92'},
     {'path': '/work/inputs/core-source/desktop/github_preflight_bootstrap.py', 'size': 831, 'sha256': '5c28892a457c6a8ea946c43774dd53c1f61a179b3136e63a52cf6eb1d32447db'},
     {'path': '/work/inputs/core-source/desktop/github_release_bootstrap.py', 'size': 911, 'sha256': '96868532859a696a72868ec8fe2c327b3f81769f6c57ea8d4de92147d038c07d'},
     {'path': '/work/inputs/core-source/desktop/github_setup_bootstrap.py', 'size': 806, 'sha256': '0ab443416343692b6c5cf7ad123f68f319cbd64a3bd762c6430f6dccf39fa4a4'},
     {'path': '/work/inputs/core-source/desktop/ios_archive_bootstrap.py', 'size': 738, 'sha256': '1c750ecd088f2bf33985a1bdf62a3a9fd0df19fd9563f4f443e605b272661c19'},
     {'path': '/work/inputs/core-source/desktop/offline_preflight_bootstrap.py', 'size': 1081, 'sha256': '0864d0d24de1d5be64781b7cb5378ebeb77c528352927f31609786fb12be8750'},
     {'path': '/work/inputs/core-source/desktop/project_recovery_bootstrap.py', 'size': 750, 'sha256': '596edfd308abe327a9a255c82d8ea181e3b607e55db40406cb39a1675bd9edbf'},
-    {'path': '/work/inputs/core-source/desktop/tools/prepare_runtime.py', 'size': 13593, 'sha256': '37f2bf9d8644ab0e1826ea591b6b73ea618aa6dc8a04573053e41fca11371294'},
+    {'path': '/work/inputs/core-source/desktop/tools/prepare_runtime.py', 'size': 17503, 'sha256': 'eae52fcfed95cf177bcfd4db4f00157b6f07047be54df28ad77c2a16387152d8'},
     {'path': '/work/inputs/core-source/src/mobile_release/__init__.py', 'size': 144, 'sha256': '557bcb0cdcf7f7ef329f04f82cf388c746bb73eba34857b97782a8bcf2e596b2'},
     {'path': '/work/inputs/core-source/src/mobile_release/__main__.py', 'size': 115, 'sha256': '50fd328dfe5b5339a9958444940e9ce45b9764dbb7b130cc25f3a966ccb706a8'},
     {'path': '/work/inputs/core-source/src/mobile_release/_command_process.py', 'size': 172299, 'sha256': '30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69'},
@@ -304,8 +305,10 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_engine.py', 'size': 6574, 'sha256': '0f99c422928fd7aa955e5c6d63682ef29c0e226e09ce51d25141bee98d44e6bc'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_environment_protocol.py', 'size': 19517, 'sha256': '1316e980200e63741340c2545a2a6d93adf9cf4a8e2f37f379768f33d445f39b'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_engine.py', 'size': 14149, 'sha256': 'a468ce5b3ccf18606a0968817299bebeaee63299268430f9a52a1de7bf02483c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_history_control.py', 'size': 4451, 'sha256': 'c3120112579e4bc3b3cb9ba1fa09b401e9f9bf3db1bf883a2c75f460bf28955f'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_history_protocol.py', 'size': 8115, 'sha256': '285e49e31195d56bafc18880d3e3467a76948132152d0e59f1c3c58f6a3b4a28'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_preflight_engine.py', 'size': 11006, 'sha256': '93d25c01506dd3db36e18d6157b23b122c37db4f21b8ae4716e9ea1799063dda'},
-    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 3977, 'sha256': '10f6f1947f42b22096c197bbc79ce9d4edcd73860ea56d54c46a28823404a022'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_github_setup_engine.py', 'size': 8467, 'sha256': '741f4873c0e527511a9c3a5589658be9142ac662849d89b89d6126fd6d83b01c'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_images_protocol.py', 'size': 9003, 'sha256': 'd4b8aa46d95ec7447c8e6a879f021ef8b82fa936020133c62508a75d18e99e63'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_initialization_protocol.py', 'size': 15547, 'sha256': 'e72c015f5d1fece9fd8bcd4ef2b910a457491e89a8b0eeaab866260e7d4b85d0'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_ios_archive_control.py', 'size': 5216, 'sha256': '64a22a771783a0a5e0ae800be9ddeabe6a2f4d0441814664b4ffa1e572b67c45'},
@@ -322,10 +325,10 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_control.py', 'size': 1430, 'sha256': '97b8b5cc938fcaf2b432a3dc8bc82a05989113525b0739be538807abeb869790'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_engine.py', 'size': 494, 'sha256': '430d9938a7b93094d5f078af5aa83d19dbc289ec4f8a3a66ba3a26169273a231'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_project_recovery_protocol.py', 'size': 11539, 'sha256': 'e0d7227470502cce0f59bd9d978b76f2e39b561afb4646899680c01fffd3fae8'},
-    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py', 'size': 13949, 'sha256': 'e21d3e6ad0d99bf0750e8b08e6c884aa2cb50e3155c7d0fa894d66fe529fa49d'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_control.py', 'size': 14436, 'sha256': '6c71ddc4c4d3151edece9364785c11c9baf2db6f75d904cefb279153c60ce875'},
     {'path': '/work/inputs/core-source/src/mobile_release/_desktop_saved_command_engine.py', 'size': 17536, 'sha256': '2671a28e5bc05c509a576283c3c6f0d2c5bd655cbe1652c14aaabd95bc111411'},
     {'path': '/work/inputs/core-source/src/mobile_release/_github_action_family.py', 'size': 634, 'sha256': '999d1be9a50f2a2eda0bc64234e1e9102f7387af7bef50643889b45b4c60dbbc'},
-    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 50422, 'sha256': 'd96e60dab1041665de0c1236a164e7858fae55baee16dbd4590b5a7c3f1550a8'},
+    {'path': '/work/inputs/core-source/src/mobile_release/_github_connection_transport.py', 'size': 57820, 'sha256': '91e9dba49d38f1fc518d1a21dca6a27be1d4f5355ac206e9d8d60b407ba1526d'},
     {'path': '/work/inputs/core-source/src/mobile_release/_github_preflight_journal.py', 'size': 17327, 'sha256': 'c2f6e0385adbcb61d92daa6d81f4f19c46b27c13263428e8db36f8e7cc134638'},
     {'path': '/work/inputs/core-source/src/mobile_release/_lifetime_evidence.py', 'size': 19514, 'sha256': 'fcac01b5fefc60927cc6c1ebb4d14bb77df0de964c9965900313c573da92826d'},
     {'path': '/work/inputs/core-source/src/mobile_release/_native_process.py', 'size': 62175, 'sha256': '70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4'},
@@ -356,7 +359,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/api/_metadata_text.py', 'size': 10878, 'sha256': '759c3124d807fd768883c50b15e05b0040e114414ef5f92045a536d2aba4d8a7'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/_preview.py', 'size': 10213, 'sha256': 'ed5ea4c2777ea36b34816ec66603cf2453aeab22bf98764b82ea0db07ab6beae'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/_release_version.py', 'size': 8391, 'sha256': '54706d38280f898d80418e9402038712e7f66610c6d64930286a8405e0e3370c'},
-    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot.py', 'size': 33629, 'sha256': '54a4872db61696c3312a30ef5d9ea539506bdd9a86718d7b2da6af89fe8d08ee'},
+    {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot.py', 'size': 35648, 'sha256': 'a8aff7a4fe940491bdc6788b657649168ff918a98b33cfafb8cdad045f26a66e'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows.py', 'size': 19049, 'sha256': 'c96e29786f986811f211ec8679336fc665a06fcb918c056260fa77ea2b0696a0'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/_snapshot_windows_native.py', 'size': 26733, 'sha256': 'a4b1303e6cdc73053a1c22dc109f9925d5babf612ec4041453dad876a5db4d17'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/contracts.py', 'size': 29210, 'sha256': '28430514789c40b873e27efc0c8af0c23d1d71d38bff131d59df7e3509faae0c'},
@@ -370,8 +373,8 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/api/data/project.schema.json', 'size': 12407, 'sha256': '2c59a6a3d0c90188db5800898db2c42612960616f30d84aecf25a4611ec5fbd7'},
     {'path': '/work/inputs/core-source/src/mobile_release/api/data/release-version-help-v1.json', 'size': 5157, 'sha256': 'd4ee75cba9accb83ce0982de1fbe4359e9744b38c40856831dea111c1739ff09'},
     {'path': '/work/inputs/core-source/src/mobile_release/artifact_inspection.py', 'size': 9104, 'sha256': 'c350c6fa35c034afab172b6b659acb0915d4534e5ac5eb5cd01bc2b485057e47'},
-    {'path': '/work/inputs/core-source/src/mobile_release/build_inputs.py', 'size': 162278, 'sha256': '514a5b899fbdb9e8043965baa6316d2e46efbc6e5afff4424f919d5f48943ea4'},
-    {'path': '/work/inputs/core-source/src/mobile_release/cancellation.py', 'size': 31723, 'sha256': 'e71c7063e2652e3ce539c95c0b667ab13275f7ce01559b460585e99e1550f916'},
+    {'path': '/work/inputs/core-source/src/mobile_release/build_inputs.py', 'size': 162796, 'sha256': 'd5407cca9d0ce9aae6bd5634b0ac6bb461142c6043f011989a75a64ff0a4832c'},
+    {'path': '/work/inputs/core-source/src/mobile_release/cancellation.py', 'size': 32351, 'sha256': 'eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a'},
     {'path': '/work/inputs/core-source/src/mobile_release/checked_files.py', 'size': 22382, 'sha256': '803b9a0767231426243c0be423a6eb94bcc512ada3bbc132f0798b76a0baedc3'},
     {'path': '/work/inputs/core-source/src/mobile_release/cli.py', 'size': 63460, 'sha256': '7962b6916a632521378a6d76f163ad4796890cdb262e0bdc37a8ce3e66fbd246'},
     {'path': '/work/inputs/core-source/src/mobile_release/config.py', 'size': 39869, 'sha256': '1e7c192fb46d49bee34a316eb4714079b38aa68a1188462e612d815d8117e1ed'},
@@ -384,6 +387,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/data/apple-profile-roots.pem', 'size': 4539, 'sha256': 'c704ce9bc7d65280e2893c2235c2434dba8cbce00f659787492714ca441b1e93'},
     {'path': '/work/inputs/core-source/src/mobile_release/desktop_android_build.py', 'size': 16867, 'sha256': '86caa7a953fbd3a68e4627a0074669d29b85186a74d580964103726932fb93f5'},
     {'path': '/work/inputs/core-source/src/mobile_release/desktop_artifact_inspection.py', 'size': 81442, 'sha256': 'e3ed183182d5220acb12e5fca6b53f55a4d103b3312c2b0c036b0101dc4bc9e5'},
+    {'path': '/work/inputs/core-source/src/mobile_release/desktop_github_history.py', 'size': 40304, 'sha256': '0b286e29e3e1cb665b179a41f49a19054bb23ef4d8ddaf0b8b9c2c134a66d03f'},
     {'path': '/work/inputs/core-source/src/mobile_release/desktop_ios_archive.py', 'size': 22552, 'sha256': 'c8e8c564dd22826c31028557a35741e6fbf002c25de0e6cc22f3d77e9177658b'},
     {'path': '/work/inputs/core-source/src/mobile_release/desktop_preflight.py', 'size': 8915, 'sha256': '2f1b3fc4aae8c55e80954ff578cf97116bba246c759cf183bd13578fafc13581'},
     {'path': '/work/inputs/core-source/src/mobile_release/desktop_project_recovery.py', 'size': 7245, 'sha256': 'f86353181b260e45d8c748e0dda0653fe7317b571b95c117682d3476067a9611'},
@@ -392,9 +396,14 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/environment_diagnostics_tools.py', 'size': 24700, 'sha256': 'a45822d5d237c224164dcec35ff7a91703a49f032f3b4993d9bcdf9b90454da0'},
     {'path': '/work/inputs/core-source/src/mobile_release/errors.py', 'size': 749, 'sha256': '26427cedbd05945c1a869af20228f9a04fe1e30d950a2dc246dd0795708a0853'},
     {'path': '/work/inputs/core-source/src/mobile_release/evidence_layout.py', 'size': 2011, 'sha256': 'e39ed2fb0c63f5cb6d3fd076e684ce8285332864d4ac20f60dd68f9dcfd2464e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_history.py', 'size': 16080, 'sha256': 'ba30d719e050db3b203b5c2119475c9e570d3f2ef34521c53a8d29034903fd15'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_history_engine.py', 'size': 7481, 'sha256': '26ab570b1d8df0c760f3ab58a09db2be1b0fc846669c2d928f4bfc1f2157cfc2'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_preflight.py', 'size': 23244, 'sha256': '9d326639f15c50397f110385b5aa6b215f31d5330c5c29e9a4fcf0ea9cacca34'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_release.py', 'size': 37400, 'sha256': '5862c2989f2818e8d6c9faef277fbd5b8608bdfd5e1b63e22dc9057bb51b8cfa'},
-    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 49306, 'sha256': 'e587661c31c456cbfbfecb68ebe3763c63c1ac9ee6c50edb43ae24532bbbf462'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_remote.py', 'size': 80116, 'sha256': '867e8c97238e8c5c88fef980531604b273ef2aa7fe77d193ba0829521035a428'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_secret_inputs.py', 'size': 18087, 'sha256': '43ada1ec119c3e1d61ee8cb07fc144164b800cd245cc220ef75b116702c8ebd6'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_variable_runtime.py', 'size': 12779, 'sha256': 'e7e6c690ef818823db257c8469496a719740e8867b21c9d521025eb73c39717e'},
+    {'path': '/work/inputs/core-source/src/mobile_release/github_setup_variables.py', 'size': 23192, 'sha256': 'b01e794bffcbb82c4a4ec72d67c240a6fcb3bba6513a34ee5057a312f8c7f154'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_edit.py', 'size': 22213, 'sha256': '138d38e2379ae7c2d04142862232dd9adf4e2b7165b708c3a80500c02be411d4'},
     {'path': '/work/inputs/core-source/src/mobile_release/github_workflow_recovery.py', 'size': 42208, 'sha256': '946dd7427df669228d2674202fa3063d5e539e6dc844636349c9d35633a032ab'},
     {'path': '/work/inputs/core-source/src/mobile_release/init_transaction.py', 'size': 124739, 'sha256': 'e31438ba7b62d147a5d2df5567b5fc796ad7c917fcf32155c41d4df731a80ce0'},
@@ -435,7 +444,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/toolchain_policy.py', 'size': 517, 'sha256': '1b48e5c7e08864ff8ee63bcb3a91bf6782259fbe91f413ba707510bc631f2f61'},
     {'path': '/work/inputs/core-source/src/mobile_release/tooling.py', 'size': 7495, 'sha256': '3bc69d9522c563fa1cb7403976f1cf6c1c2b5ad3e042a4a88dfbc7db06932c4d'},
     {'path': '/work/inputs/core-source/src/mobile_release/version_text.py', 'size': 10275, 'sha256': '408c9fbc1ba4b101230ff271050ef75ef2b34f2e7656869f88006f8101687eb1'},
-    {'path': '/work/inputs/core-source/src/mobile_release/workflow.py', 'size': 128551, 'sha256': '095d2c7dbca450c6dbbb79c9cdd4332073a134aa3150cc51ce2d3b5bb378dd52'},
+    {'path': '/work/inputs/core-source/src/mobile_release/workflow.py', 'size': 136165, 'sha256': '087e6c0c6e18214551500afebff281864ed9573b13d488444384d93068cacff2'},
     {'path': '/work/inputs/core-source/src/mobile_release/workflow_payloads.py', 'size': 4997, 'sha256': 'c485569cc573cf2ec99971370eee18bc0d54be7c1eac4edc344d89160fc06ea9'},
 ]
 CONVENTIONAL_SMOKE_INPUTS: dict | None = {
@@ -767,6 +776,32 @@ MAC_COMPILE_VAULT_GRAPH = (
 MAC_COMPILE_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata", "node-version", "npm-locked-no-scripts"),
     "compile": ("rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only", "node-version", "typescript-no-emit", "vite-assets", *(row[0] for row in MAC_COMPILE_GRAPHS)),
+}
+# Closed two-architecture DATA + shipping compile mode, not a runtime grant.
+MAC_HISTORY_MODE = "history-app4"
+MAC_HISTORY_EVIDENCE = "desktop-macos-history-app-data-v1"
+MAC_HISTORY_TESTS = (
+    "github_history_protocol::tests::closed_history_commands_frames_and_original_context",
+    "github_history_protocol::tests::complete_history_result_shapes_and_retained_status_are_bounded",
+    "runtime::macos_github_actions_profile_data_contract",
+    "supervisor::macos_github_actions_original_data_contract",
+)
+MAC_HISTORY_GRAPH = ("headless-test-compile-only", "desktop/src-tauri/Cargo.toml", "test",
+                     "development-runtime", "lib")
+MAC_HISTORY_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-source-slots-locked-metadata",
+                "mac-normal-locked-metadata", "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "headless-test-compile-only",
+                "mac-source-slots-data-test", "node-version", "typescript-no-emit", "vite-assets",
+                "mac-normal-bin-compile-only"),
+}
+# Same shipping graph only; no auxiliary compiler or test original is entered.
+MAC_APP_MODE = "app-only"
+MAC_APP_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only"),
 }
 # One debug, embedded-frontend main application for a credential-free UI smoke.
 # This is a compiler profile only; the existing XCTest owner is a separate lane.
@@ -2863,8 +2898,12 @@ def mac_compile_target(environment: dict[str, str]) -> str:
 def mac_compile_graphs(target: str, mode: str) -> tuple:
     """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
     require(target in MAC_COMPILE_HOSTS and type(mode) is str
-            and (mode == "full4" or mode == "vault-only" and target == "aarch64-apple-darwin"),
+            and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) or mode == "vault-only" and target == "aarch64-apple-darwin"),
             "Normal Mac compiler graph mode differs")
+    if mode == MAC_APP_MODE:
+        return MAC_COMPILE_GRAPHS[:1]
+    if mode == MAC_HISTORY_MODE:
+        return (MAC_HISTORY_GRAPH, MAC_COMPILE_GRAPHS[0])
     return (MAC_COMPILE_VAULT_GRAPH, *MAC_COMPILE_GRAPHS) if mode == "full4" else (MAC_COMPILE_VAULT_GRAPH,)
 
 
@@ -2873,11 +2912,15 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
     selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
     mac_compile_graphs(target, mode)
     require(environment.get("MRK_MACOS_TARGET") == target
-            and selection in ("both", "arm", "intel", "remaining")
+            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE)
             and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                  or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
             "Normal Mac compiler selection differs")
-    require((selection == "both" and mode == "full4")
+    require((selection == MAC_APP_MODE and mode == MAC_APP_MODE
+             and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_HISTORY_MODE and mode == MAC_HISTORY_MODE
+             and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == "both" and mode == "full4")
             or (selection == "arm" and target == "aarch64-apple-darwin" and mode == "full4")
             or (selection == "intel" and target == "x86_64-apple-darwin" and mode == "full4")
             or (selection == "remaining" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
@@ -2888,6 +2931,10 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
 
 def mac_compile_checks(target: str, mode: str) -> dict:
     mac_compile_graphs(target, mode)
+    if mode == MAC_APP_MODE:
+        return MAC_APP_CHECKS
+    if mode == MAC_HISTORY_MODE:
+        return MAC_HISTORY_CHECKS
     if mode == "full4":
         return MAC_COMPILE_CHECKS
     return {
@@ -2944,6 +2991,8 @@ def mac_compile_inputs(source: Path, target: str, mode: str) -> dict:
              "desktop/helpers/macos-vault-helper/Cargo.toml", "desktop/helpers/macos-vault-helper/Cargo.lock",
              "desktop/helpers/macos-vault-helper/src/main.rs", "desktop/native/macos-installed-native/Cargo.toml",
              "desktop/macos-installed-inputs/" + MAC_COMPILE_HOSTS[target][3])
+    if mode == MAC_HISTORY_MODE:
+        paths = (*paths[:-1], "desktop/packaging/macos-history-provider.profile", paths[-1])
     bodies, rows = {}, []
     for name in paths:
         path = source / name
@@ -2955,7 +3004,9 @@ def mac_compile_inputs(source: Path, target: str, mode: str) -> dict:
         rows.append({"path": name, "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
     release = mac_compile_release(bodies[paths[-1]], target, bodies[paths[0]], bodies[paths[4]])
     return {"target": target, "mode": mode, "release": release, "sources": rows,
-            "graphs": [list(row) for row in graphs], "execution": "compile-only"}
+            "graphs": [list(row) for row in graphs],
+            **({"execution": "compile-and-selected-data", "tests": list(MAC_HISTORY_TESTS)}
+               if mode == MAC_HISTORY_MODE else {"execution": "compile-only"})}
 
 
 def mac_compile_source_guard(source: Path, root: Path) -> None:
@@ -3118,8 +3169,14 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
                 "Normal Mac compiler receipt graphs differ")
         selected = mac_compile_checks(mac["target"], mac["mode"])
         expected.update(sourceTree=context["sourceTree"], macCompile=mac,
-                        node=NODE if mac["mode"] == "full4" else None,
+                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else None,
                         checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
+        if mac["mode"] == MAC_HISTORY_MODE:
+            require(mac.get("execution") == "compile-and-selected-data" and type(mac.get("tests")) is list
+                    and mac["tests"] == list(MAC_HISTORY_TESTS), "Mac History receipt selection differs")
+            expected["scope"] = MAC_HISTORY_EVIDENCE
+            if phase == "compile":
+                expected["testResult"] = validate_mac_history_result(value.get("testResult"))
     if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
         expected.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if phase == "compile":
@@ -7232,7 +7289,8 @@ def clean_github_tls(context: dict) -> None:
 
 def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | None = None,
                   scope: str = "passive-development-foundation-only", compiled: dict | None = None,
-                  main_compiled: dict | None = None, source_slots_result: dict | None = None) -> None:
+                  main_compiled: dict | None = None, source_slots_result: dict | None = None,
+                  mac_history_result: dict | None = None) -> None:
     # Only called after the fixed phase and final source check actually succeed.
     # Missing files on failed/skipped phases cannot become passing evidence.
     value = {
@@ -7241,6 +7299,12 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
         "rust": compiler_binding(context), "node": node,
         "checks": [{"check": check, "exitCode": 0} for check in checks],
     }
+    if mac_history_result is not None:
+        require(context.get("executionScope") == MAC_COMPILE_SCOPE and name == "compile"
+                and context.get("macCompile", {}).get("mode") == MAC_HISTORY_MODE
+                and node == NODE and compiled is None and main_compiled is None and source_slots_result is None,
+                "Unexpected Mac History DATA result")
+        value["testResult"] = validate_mac_history_result(mac_history_result)
     if source_slots_result is not None:
         require(context.get("executionScope") == SOURCE_SLOTS_SCOPE and name == "compile"
                 and node is None and compiled is None and main_compiled is None, "Unexpected SourceSlots DATA result")
@@ -7268,6 +7332,8 @@ def phase_receipt(context: dict, name: str, checks: list[str], *, node: str | No
                      **{key: context[key] for key in ("workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")})
         if context["executionScope"] == MAC_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], macCompile=context["macCompile"])
+            if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
+                value["scope"] = MAC_HISTORY_EVIDENCE
         if context["executionScope"] == ENGINEERING_COMPILE_SCOPE:
             value.update(sourceTree=context["sourceTree"], engineeringWork=context["engineeringWork"])
         if context["executionScope"] == SOURCE_SLOTS_SCOPE:
@@ -7788,7 +7854,7 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
         }
     if profile:
         public.update(binding)
-        if scope != SOURCE_SLOTS_SCOPE:
+        if scope != SOURCE_SLOTS_SCOPE and not (scope == MAC_COMPILE_SCOPE and mac_mode == MAC_HISTORY_MODE):
             public["notQualified"].append("test-execution")
     if scope == SOURCE_SLOTS_SCOPE:
         compiler = compiler_binding(context)
@@ -7808,6 +7874,9 @@ def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     if scope == MAC_COMPILE_SCOPE:
         compiler = compiler_binding(context)
         public.update(expectedRust=compiler["release"], compiler=compiler, macCompile=context["macCompile"])
+        if context["macCompile"]["mode"] == MAC_HISTORY_MODE:
+            public["scope"] = MAC_HISTORY_EVIDENCE
+            public["notQualified"].extend(("other-tests", "live-History", "remote-Apply", "provider-deployment"))
         public["notQualified"].extend(("signed-runtime", "Developer-ID-identity", "service-registration", "ordinary-UI"))
     if scope == ENGINEERING_COMPILE_SCOPE:
         compiler = compiler_binding(context)
@@ -9156,7 +9225,13 @@ def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, c
         return source_slots_diagnostic_unavailable(code, "deadline-unavailable")
     short = False
     try:
-        short = source_slots_is_removal(context)
+        # New normal-owner DATA mode uses the same JSON decoder, not an
+        # invented source-slots context. Existing source-slots branch is exact.
+        if context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") == MAC_HISTORY_MODE:
+            require(context.get("workflowPath") == MAC_COMPILE_WORKFLOW, "Mac History diagnostic workflow differs")
+            short = False
+        else:
+            short = source_slots_is_removal(context)
         if short:
             require(type(code) is int and 0 < code <= 255, "Short diagnostics require a returned nonzero original")
             errors = source_slots_short_diagnostic_records(raw, stderr, context["source"])
@@ -9399,6 +9474,113 @@ def phase_source_slots(name: str, context: dict) -> None:
         raise
 
 
+def validate_mac_history_result(value: object) -> dict:
+    require(type(value) is dict and set(value) == {"tests", "running", "passed", "failed", "ignored", "measured", "filtered"},
+            "Mac History DATA result fields differ")
+    require(type(value["tests"]) is list and value["tests"] == list(MAC_HISTORY_TESTS)
+            and all(type(value[name]) is int and value[name] == expected for name, expected in
+                    (("running", 4), ("passed", 4), ("failed", 0), ("ignored", 0), ("measured", 0)))
+            and type(value["filtered"]) is int and 0 <= value["filtered"] <= 65535,
+            "Mac History DATA did not pass exactly its four selected tests")
+    return value
+
+
+def mac_history_test_result(raw: bytes) -> dict:
+    require(type(raw) is bytes and 0 < len(raw) <= 1024 * 1024, "Mac History DATA stdout exceeds its bound")
+    try:
+        text = raw.decode("ascii")
+    except UnicodeError:
+        raise CheckFailure("Mac History DATA stdout is not the fixed libtest result") from None
+    rows = "".join("test " + re.escape(name) + r" \.\.\. ok\n" for name in MAC_HISTORY_TESTS)
+    match = re.fullmatch(r"\n?running 4 tests\n" + rows
+                         + r"\ntest result: ok\. 4 passed; 0 failed; 0 ignored; 0 measured; "
+                         + r"(0|[1-9][0-9]{0,4}) filtered out; finished in (?:0|[1-9][0-9]{0,2})\.[0-9]{2}s\n{1,2}", text)
+    require(match is not None, "Mac History DATA stdout is missing, extra, ignored or failed")
+    return validate_mac_history_result({"tests": list(MAC_HISTORY_TESTS), "running": 4, "passed": 4,
+                                       "failed": 0, "ignored": 0, "measured": 0, "filtered": int(match[1])})
+
+
+def mac_history_data_checks(cargo: str, root: Path, source: Path, target: str, environment: dict, remaining, context: dict) -> dict:
+    """Two literal originals in the containing normal Mac phase, no new owner."""
+    require(target in MAC_COMPILE_HOSTS, "Mac History target differs")
+    common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--features", "development-runtime",
+              "--target", target, "--manifest-path", str(source / "desktop/src-tauri/Cargo.toml"),
+              "--target-dir", str(root / "target"), "--lib"]
+    commands = (
+        ("headless-test-compile-only", [cargo, "test", *common, "--message-format=json,json-diagnostic-short", "--no-run"],
+         "source-slots-compile", 600),
+        ("mac-source-slots-data-test", [cargo, "test", *common, "--", "--exact", "--test-threads=1",
+                                      "--format", "pretty", "--color", "never", *MAC_HISTORY_TESTS],
+         "source-slots-test", 150),
+    )
+    result = None
+    for check, argv, stem, cap in commands:
+        remaining(30)
+        output_path, stderr_path = root / ("target/" + stem + ".stdout"), root / ("target/" + stem + ".stderr")
+        primary, returned_code, compiler_diagnostic = None, None, None
+        try:
+            with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+                before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(row[6] == 0 for row in before), "Mac History private output was not fresh")
+                try:
+                    run(argv, check=check, cwd=root, env=environment, timeout=remaining(cap), output=output, diagnostics=diagnostics)
+                    returned_code = 0
+                except BaseException as error:
+                    primary = error
+                    witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                    if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                            and type(witness[1]) is int and 0 < witness[1] <= 255):
+                        returned_code = witness[1]
+                output.flush()
+                diagnostics.flush()
+                originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+                require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "Mac History output identity changed")
+            # Both consuming closes precede readers and any positive DATA fact.
+            if primary is not None:
+                if check == "headless-test-compile-only" and returned_code is not None:
+                    compiler_diagnostic = source_slots_diagnostic_unavailable(returned_code, "capture-unavailable")
+                    remaining(30)
+                    failed_raw = source_slots_read(output_path, originals[0], retain=True)
+                    failed_stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(context, failed_raw, failed_stderr,
+                                                                          returned_code, timeout_for=remaining)
+                raise primary
+            remaining(30)
+            raw = source_slots_read(output_path, originals[0])
+            source_slots_read(stderr_path, originals[1])
+            remaining(30)
+            if check == "mac-source-slots-data-test":
+                result = mac_history_test_result(raw)
+        except BaseException:
+            # Finite failure DATA occupies the already retained compile receipt
+            # path. Its status/shape cannot pass validate_compile_receipt/clean.
+            failure = {"schemaVersion": 1, "scope": MAC_HISTORY_EVIDENCE, "phase": "compile",
+                       "status": "failed-or-unknown", "lastFixedStage": check,
+                       "originalCommandReturnCode": returned_code, "macCompile": context["macCompile"],
+                       **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                       "workflowRef", "workflowSha256", "runId", "attempt")}}
+            if check == "headless-test-compile-only":
+                failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
+                    returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
+            try:
+                if "compilerDiagnostic" in failure and failure["compilerDiagnostic"]["state"] == "complete":
+                    try:
+                        remaining(30)
+                    except Exception:
+                        failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "deadline-unavailable")
+                if len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384 and "compilerDiagnostic" in failure:
+                    failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "output-bound")
+                require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                        "Mac History diagnostic exceeds the existing receipt bound")
+                write_json(root / "compile-checks.json", failure)
+            except Exception:
+                pass  # Optional diagnostic never replaces the original failure.
+            if primary is not None:
+                raise primary from None
+            raise
+    return validate_mac_history_result(result)
+
+
 def phase_mac_compile(name: str, context: dict) -> None:
     """Fixed vault-first graphs through the SAME existing run/cleanup owner."""
     require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos",
@@ -9421,7 +9603,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     started = time.monotonic()
     # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
     # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
-    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode == "full4" else 1500
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else 1500
     deadline = started + budget
     previous = started
     def remaining(cap: int) -> int:
@@ -9445,6 +9627,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     desktop, manifest = source / "desktop", source / "desktop/src-tauri/Cargo.toml"
     image_manifest = source / "desktop/helpers/macos-desktop-image/Cargo.toml"
     vault_manifest = source / MAC_COMPILE_VAULT_GRAPH[1]
+    history_result = None
     if name == "acquire":
         # Distinct locked graphs never unify their incompatible native roles.
         # The actual vault metadata supplies the existing root slot when alone.
@@ -9455,6 +9638,14 @@ def phase_mac_compile(name: str, context: dict) -> None:
                 ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[1][3]], root / "metadata.json"),
                 ("mac-image-locked-metadata", image_manifest, [], root / "target/mac-image-metadata.json"),
             ))
+        if mode == MAC_HISTORY_MODE:
+            metadata = [
+                ("mac-source-slots-locked-metadata", manifest, ["--features", "development-runtime"], root / "target/mac-history-metadata.json"),
+                ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json"),
+            ]
+        if mode == MAC_APP_MODE:
+            metadata = [("mac-normal-locked-metadata", manifest,
+                         ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json")]
         for check, cargo_manifest, features, output_path in metadata:
             with output_path.open("x", encoding="utf-8") as output:
                 run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -9466,11 +9657,14 @@ def phase_mac_compile(name: str, context: dict) -> None:
         common = ["--locked", "--offline", "--jobs", "1", "--no-default-features", "--target", target,
                   "--target-dir", str(root / "target")]
         # Fail fast on the small separate helper BEFORE frontend or app linkage.
-        run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
-            check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
+        if mode == MAC_HISTORY_MODE:
+            history_result = mac_history_data_checks(cargo, root, source, target, environment, remaining, context)
+        elif mode != MAC_APP_MODE:
+            run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
+                check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
         remaining(30)
     observed = None
-    if mode == "full4":
+    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE):
         node = shutil.which("node")
         require(node is not None, "Selected Node unavailable")
         observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
@@ -9488,7 +9682,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
             run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                  str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                 check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
-            for check, relative, profile, features, artifact in MAC_COMPILE_GRAPHS:
+            for check, relative, profile, features, artifact in (MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
                 argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
                 if profile == "test":
                     argv += ["--features", features, "--test", artifact, "--no-run"]
@@ -9505,7 +9699,10 @@ def phase_mac_compile(name: str, context: dict) -> None:
     remaining(30)
     source_unchanged(context, timeout_for=remaining)
     remaining(30)
-    phase_receipt(context, name, list(selected_checks[name]), node=observed)
+    if mode == MAC_HISTORY_MODE:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed, mac_history_result=history_result)
+    else:
+        phase_receipt(context, name, list(selected_checks[name]), node=observed)
     # Retained receipt bytes never override a late original phase failure.
     remaining(30)
 

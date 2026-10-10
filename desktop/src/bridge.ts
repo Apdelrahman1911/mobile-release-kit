@@ -36,6 +36,9 @@ import type { GitHubPreflightCommand } from './githubPreflightProtocol.ts';
 import type { GitHubReleaseCommand } from './githubReleaseProtocol.ts';
 import type { GitHubPreflightStatus } from './githubPreflightTypes.ts';
 import type { GitHubReleaseStatus } from './githubReleaseTypes.ts';
+import { GITHUB_HISTORY_EVENT, githubHistoryError, githubHistoryRequestFits, parseGitHubHistoryStatus } from './githubHistoryProtocol.ts';
+import type { GitHubHistoryCommand } from './githubHistoryProtocol.ts';
+import type { GitHubHistoryStatus } from './githubHistoryTypes.ts';
 import { metadataTextError, metadataTextRequestFits, parseMetadataTextEditStatus, parseMetadataTextGuide, parseMetadataTextObservation, parseMetadataTextValidation } from './metadataTextProtocol.ts';
 import type { MetadataTextCommand } from './metadataTextProtocol.ts';
 import { VERSION_EDIT_EVENT, parseVersionEditGuide, parseVersionEditStatus, versionEditError, versionEditRequestFits } from './releaseVersionEdit.ts';
@@ -64,7 +67,7 @@ import type { ProjectRecoveryStatus } from './projectRecoveryTypes.ts';
 import { parseProjectPathRequest, parseProjectPathSelection, projectPathError } from './projectPaths.ts';
 
 export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
-export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+export type NativeEditListen = (event: 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
 
 function connectionReply(value: unknown): GitHubConnectionStatus {
   const status = parseGitHubConnectionStatus(value);
@@ -107,6 +110,17 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
       if (!status) throw { code: 'github_remote_setup_unknown' };
       return status;
     } catch (error) { throw githubRemoteSetupError(error); }
+  };
+  const githubHistoryCall = async (command: GitHubHistoryCommand, value: unknown): Promise<GitHubHistoryStatus> => {
+    try {
+      if (mode !== 'native' || (command === 'github_history_start' && !listen)) throw { code: 'github_history_refused_runtime_unavailable' };
+      if (!githubHistoryRequestFits(command, value)) throw { code: 'github_history_refused_invalid_input' };
+      // The closed request carries correlation DATA only, not a root, hash,
+      // token or provider choice. Native independently admits the saved original.
+      const status = parseGitHubHistoryStatus(await invoke<unknown>(command, structuredClone(value)));
+      if (!status) throw { code: 'github_history_unknown' };
+      return status;
+    } catch (error) { throw githubHistoryError(error); }
   };
   const githubPreflightCall = async (command: GitHubPreflightCommand, value: unknown): Promise<GitHubPreflightStatus> => {
     try {
@@ -619,6 +633,15 @@ export function createNativeApi(mode: Exclude<BridgeMode, 'preview'>, invoke: Na
         if (mode !== 'native' || !listen) throw { code: 'github_remote_setup_refused_runtime_unavailable' };
         return await listen(GITHUB_REMOTE_SETUP_EVENT, (value) => onStatus(parseGitHubRemoteSetupStatus(value)));
       } catch (error) { throw githubRemoteSetupError(error); }
+    },
+    githubHistoryStatus: () => githubHistoryCall('github_history_status', {}),
+    startGitHubHistory: (args) => githubHistoryCall('github_history_start', args),
+    cancelGitHubHistory: (args) => githubHistoryCall('github_history_cancel', args),
+    subscribeGitHubHistory: async (onStatus) => {
+      try {
+        if (mode !== 'native' || !listen) throw { code: 'github_history_refused_runtime_unavailable' };
+        return await listen(GITHUB_HISTORY_EVENT, (value) => onStatus(parseGitHubHistoryStatus(value)));
+      } catch (error) { throw githubHistoryError(error); }
     },
     githubPreflightStatus: () => githubPreflightCall('github_preflight_status', {}),
     prepareGitHubPreflight: (args) => githubPreflightCall('github_preflight_prepare', args),

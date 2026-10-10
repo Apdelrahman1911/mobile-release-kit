@@ -585,6 +585,78 @@ class GitHubConnectionTransportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 transport._ResponseBody(io.BytesIO(_wire()), transport._Budget(100.0, monotonic=lambda: 100.0, _profile=ordinary), _role=env_role)
 
+        # Secret metadata404 is the sole newly admitted absence; key/environment
+        # 404 never becomes absence. No upstream error text is consumed/emitted.
+        metadata_role=transport._ResponseRole.SETUP_SECRET_METADATA_READ
+        key_role=transport._ResponseRole.SETUP_SECRET_KEY_READ
+        for role in (metadata_role,key_role):
+            row, selected, source=parse_setup(_wire(b'{"key_id":"x"}'),role)
+            self.assertEqual(row.observation["body"],{"key_id":"x"})
+            self.assertEqual(selected.body_bytes,len(b'{"key_id":"x"}'))
+            row, _, source=parse_setup(setup_raw(404,body=_SENTINEL.encode()),role)
+            self.assertEqual(row.observation,{"status":404,"body":None,"failure":"none"})
+            self.assertEqual(row.control["reason"],"none" if role is metadata_role else "not-found-or-inaccessible")
+            self.assertEqual(source.read(),_SENTINEL.encode())
+            for ordinary in (transport._ExchangeProfile.STANDARD,transport._ExchangeProfile.RELEASE_PREPARE):
+                with self.assertRaises(ValueError):
+                    transport._ResponseBody(io.BytesIO(_wire()),transport._Budget(100.0,monotonic=lambda:100.0,_profile=ordinary),_role=role)
+
+        secret_role = transport._ResponseRole.SETUP_SECRET_WRITE
+        for status in (201, 204):
+            for headers in ((), (("Content-Length", "0"),)):
+                accepted, used, source = parse_setup(setup_raw(status, headers), secret_role)
+                self.assertEqual(accepted.observation, {"status": status, "body": None, "failure": "none"})
+                self.assertEqual(accepted.control["reason"], "none")
+                self.assertEqual((used.body_bytes, source.read()), (0, b""))
+        for framing_headers, body in (((("Content-Type", "application/json"), ("Content-Length", "2")), b"{}"),
+                                      ((("Content-Type", "application/json"),), b"{}"),
+                                      ((("Content-Type", "application/json"), ("Transfer-Encoding", "chunked")), b"2\r\n{}\r\n0\r\n\r\n")):
+            accepted, used, source = parse_setup(setup_raw(201, framing_headers, body), secret_role)
+            self.assertEqual(accepted.observation, {"status": 201, "body": {}, "failure": "none"})
+            self.assertEqual(used.body_bytes, 2)
+            self.assertEqual(source.read(), b"")
+        for headers, body in (((), b"{}"), ((("Content-Type", "text/plain"),), b"{}"),
+                              ((("Content-Type", "application/json"),), b"[]"),
+                              ((("Content-Type", "application/json"),), b'{"x":1}'),
+                              ((("Content-Type", "application/json"), ("Content-Length", "2")), b"{}x"),
+                              ((("Content-Type", "application/json"), ("Content-Length", "3")), b"{}"),
+                              ((("Content-Type", "application/json"), ("Content-Length", "65")), b" " * 65),
+                              ((("Content-Length", "0"),), b"x")):
+            failed, _, _ = parse_setup(setup_raw(201, headers, body), secret_role)
+            self.assertNotEqual(failed.control["reason"], "none")
+        for role in roles + (transport._ResponseRole.STANDARD,):
+            ordinary, _, _ = parse_setup(setup_raw(201), role)
+            self.assertNotEqual(ordinary.control["reason"], "none")
+        after, _, _ = parse_setup(setup_raw(404), transport._ResponseRole.SETUP_SECRET_METADATA_AFTER)
+        self.assertNotEqual(after.control["reason"], "none")
+
+        # Variable roles reuse exact actual empty-body readers, not JSON-null
+        # approximations; no other role gains POST/PATCH success or absence.
+        create = transport._ResponseRole.SETUP_VARIABLE_CREATE
+        replace = transport._ResponseRole.SETUP_VARIABLE_REPLACE
+        read = transport._ResponseRole.SETUP_VARIABLE_READ
+        for role, status in ((create, 201), (replace, 204)):
+            for headers in ((), (("Content-Length", "0"),)):
+                accepted, used, source = parse_setup(setup_raw(status, headers), role)
+                self.assertEqual(accepted.observation, {"status": status, "body": None, "failure": "none"})
+                self.assertEqual(accepted.control["reason"], "none")
+                self.assertEqual((used.body_bytes, source.read()), (0, b""))
+            for payload in (b"null", b"[]", b'{"extra":true}', b" " * 65):
+                failed, _, _ = parse_setup(setup_raw(status, (("Content-Type", "application/json"),), payload), role)
+                self.assertNotEqual(failed.control["reason"], "none")
+        accepted, _, _ = parse_setup(setup_raw(201, (("Content-Type", "application/json"),), b"{}"), create)
+        self.assertEqual(accepted.observation, {"status": 201, "body": {}, "failure": "none"})
+        for role, status in ((create, 204), (replace, 201), (read, 201), (read, 204)):
+            failed, _, _ = parse_setup(setup_raw(status), role)
+            self.assertNotEqual(failed.control["reason"], "none")
+        absent, _, raw = parse_setup(setup_raw(404, body=_SENTINEL.encode()), read)
+        self.assertEqual(absent.observation, {"status": 404, "body": None, "failure": "none"})
+        self.assertEqual(absent.control["reason"], "none")
+        self.assertEqual(raw.read(), _SENTINEL.encode())
+        for role in (create, replace):
+            refused, _, _ = parse_setup(setup_raw(404), role)
+            self.assertNotEqual(refused.control["reason"], "none")
+
     def test_initial_metadata_is_bounded_during_reads_and_never_loops_informationals(self):
         for status in (100, 101, 199):
             prefix = f"HTTP/1.1 {status} Inert\r\n".encode()
@@ -799,6 +871,26 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         self.assertEqual(result.control["reason"], "network-unavailable")
         self.assertEqual(selected.end, 110.0)
 
+        for role in (transport._ResponseRole.SETUP_SECRET_METADATA_READ,transport._ResponseRole.SETUP_SECRET_KEY_READ):
+            now=[100.0]
+            selected=transport._Budget(100.0,monotonic=lambda:now[0],_profile=transport._ExchangeProfile.SETUP)
+            response=transport._ResponseBody(EnvironmentLate(env_wire),selected,_role=role)
+            self.assertEqual(transport._response_result(response,selected).control["reason"],"network-unavailable")
+            self.assertEqual(selected.end,110.0)
+
+        for status in (201, 204):
+            now = [100.0]
+            raw = f"HTTP/1.1 {status} fixed\r\nContent-Length: 0\r\n\r\n".encode()
+            class LateSecretEOF(io.BytesIO):
+                def read1(self, size=-1):
+                    block = super().read1(size)
+                    if not block: now[0] = 110.0
+                    return block
+            budget = transport._Budget(100.0, monotonic=lambda: now[0], _profile=transport._ExchangeProfile.SETUP)
+            response = transport._ResponseBody(LateSecretEOF(raw), budget, _role=transport._ResponseRole.SETUP_SECRET_WRITE)
+            self.assertEqual(transport._response_result(response, budget).control["reason"], "network-unavailable")
+            self.assertEqual(budget.end, 110.0)
+
     def test_pure_schedule_does_not_enter_live_factory_or_trust_reader(self):
         original_factory, original_ca = transport._make_live_reader, transport._fixed_ca
         before = {name: sys.modules.get(name) for name in ("http.client", "ssl", "_ssl")}
@@ -923,3 +1015,177 @@ class GitHubConnectionTransportTests(unittest.TestCase):
         for old_role in (R.SETUP_ACTIONS_WRITE, R.SETUP_WORKFLOW_WRITE):
             with self.assertRaises(ValueError):
                 transport._setup_body(P.SETUP, old_role, _json(body))
+
+        selected={"kind":"environment_secret","mode":"create","stage":"candidate",
+            "requirement":"MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD","source":{"recordId":"1"*32,"recordRevision":2,"contextRevision":3}}
+        source={"root":"/inert/project","rootIdentity":{"device":"1","inode":"2","mode":0o40700,"uid":1,"gid":1},
+            "draft":{"bytes":27,"sha256":"b"*64},"platform":"android","purpose":"signing",
+            "material":{"encoding":"utf8","plaintextBytes":4}}
+        action=setup.SecretAction.parse({"kind":"prepare","target":{**target.value(),"selection":selected},"prepared":None,"source":source})
+        budget=transport._Budget(100.0,monotonic=lambda:100.0,_profile=P.SETUP)
+        checkpoints=[]
+        class Configuration:
+            def checkpoint(self):
+                checkpoints.append(budget.remaining())
+        configuration=Configuration();calls.clear();factories.clear()
+        with patch.object(transport,"_make_live_exchange",side_effect=factory):
+            reader=setup._make_secret_reader(action,_SENTINEL,started=100.0,runtime_dir="/inert/runtime",budget=budget,configuration=configuration)
+            for step in ("account","repository-before","environment-before","secret-before","key-before","repository-after"):
+                reader.read(step)
+            with self.assertRaises(ValueError):reader.read("account")
+        self.assertIs(factories[0][1]["_setup_budget"],budget)
+        # Bad/reused typed owners refuse before lazy TLS modules/CA/processes.
+        for supplied,start,profile in ((object(),100.0,P.SETUP),(budget,101.0,P.SETUP),(budget,100.0,P.STANDARD)):
+            with self.assertRaises(ValueError):
+                transport._make_live_exchange(_SENTINEL,started=start,runtime_dir="/inert/runtime",
+                    api_version="2026-03-10",_profile=profile,_setup_budget=supplied)
+        budget._secret_exchange_claimed=True
+        with self.assertRaises(ValueError):
+            transport._make_live_exchange(_SENTINEL,started=100.0,runtime_dir="/inert/runtime",
+                api_version="2026-03-10",_profile=P.SETUP,_setup_budget=budget)
+        self.assertEqual([v[3] for v in calls],[R.STANDARD,R.STANDARD,R.SETUP_ENVIRONMENT_READ,R.SETUP_SECRET_METADATA_READ,R.SETUP_SECRET_KEY_READ,R.STANDARD])
+        self.assertEqual(len(calls),6);self.assertEqual(len(checkpoints),13) # failed next claim still checks same source first
+        self.assertTrue(all(v[0]=="GET" and v[2] is None for v in calls))
+        for role,last in ((R.SETUP_SECRET_METADATA_READ,selected["requirement"]),(R.SETUP_SECRET_KEY_READ,"public-key")):
+            path="/repos/owner/app/environments/mobile-candidate/secrets/"+last
+            transport._request_limits(P.SETUP,role,"GET",path)
+            for method,path2 in (("PUT",path),("GET",path+"?x=1"),("GET",path.replace("mobile-candidate","other")),
+                                 ("GET",path.replace(last,"arbitrary"))):
+                with self.assertRaises(ValueError):transport._request_limits(P.SETUP,role,method,path2)
+            with self.assertRaises(ValueError):transport._setup_body(P.SETUP,role,b"{}")
+
+        from mobile_release.github_setup_secret_inputs import SecretConfigurationError
+        for actual_control in (transport._control("unauthorized"), transport._control("rate-limited", 37),
+                               transport._control("rate-limited", blocked=True)):
+            class ChangedConfiguration:
+                def __init__(self): self.count = 0
+                def checkpoint(self):
+                    self.count += 1
+                    if self.count == 2: raise SecretConfigurationError("configuration-changed")
+            post_configuration = ChangedConfiguration()
+            returned = transport.ReadResult({"status": 401 if actual_control["reason"] == "unauthorized" else 429,
+                "body": None, "failure": actual_control["reason"]}, actual_control)
+            invoked = []
+            def controlled_factory(_token, **kwargs):
+                self.assertIs(kwargs["_setup_budget"], budget)
+                def exchange(method, path, body, *, _role):
+                    invoked.append((method, path, body, _role))
+                    return returned
+                return exchange
+            with patch.object(transport, "_make_live_exchange", side_effect=controlled_factory):
+                reader = setup._make_secret_reader(action, _SENTINEL, started=100.0,
+                    runtime_dir="/inert/runtime", budget=budget, configuration=post_configuration)
+                with self.assertRaises(SecretConfigurationError) as failed_source:
+                    setup.execute_secret_read(action, reader,
+                        {"savedConfig": source["draft"], "canonicalConfig": source["draft"]}, observed_at=_TIME)
+                self.assertEqual(failed_source.exception.reason, "configuration-changed")
+                self.assertFalse(failed_source.exception.cleanup_unknown)
+            self.assertEqual(len(invoked), 1)
+            self.assertEqual(post_configuration.count, 2)
+            self.assertEqual(reader.control, actual_control)
+            self.assertIsNot(reader.control, actual_control)
+            failed = setup.secret_configuration_failure("configuration-changed", reader.control)
+            self.assertEqual((failed["reason"], failed["control"]), (actual_control["reason"], actual_control))
+            self.assertEqual((failed["writeClaimed"], failed["writeAcknowledged"]), (False, False))
+
+        import base64
+        from mobile_release import _desktop_github_setup_engine as setup_engine
+        secret_name = selected["requirement"]
+        write_role = R.SETUP_SECRET_WRITE
+        fixed_path = "/repos/owner/app/environments/mobile-candidate/secrets/" + secret_name
+        body = _json({"encrypted_value": base64.b64encode(bytes(52)).decode("ascii"), "key_id": "inert-key"})
+        transport._request_limits(P.SETUP, write_role, "PUT", fixed_path)
+        transport._setup_body(P.SETUP, write_role, body)
+        for wrong in (R.STANDARD, R.SETUP_ACTIONS_WRITE, R.SETUP_SECRET_METADATA_READ, R.SETUP_SECRET_METADATA_AFTER):
+            with self.assertRaises(ValueError): transport._request_limits(P.SETUP, wrong, "PUT", fixed_path)
+            with self.assertRaises(ValueError): transport._setup_body(P.SETUP, wrong, body)
+        for bad in (b"{}", _json({"encrypted_value": "x", "key_id": "inert"}),
+                    _json({"encrypted_value": base64.b64encode(bytes(49201)).decode("ascii"), "key_id": "inert"}),
+                    _json({"encrypted_value": base64.b64encode(bytes(52)).decode("ascii"), "key_id": "bad key"}),
+                    body + b" " * setup.SECRET_WRITE_BYTES):
+            with self.assertRaises(ValueError): transport._setup_body(P.SETUP, write_role, bad)
+        # Real fixed private cursor; only read/time ports are inert. No child,
+        # socket, stdin ownership or alternate generic input reader is entered.
+        source_bytes = b"x" * setup.SECRET_APPLY_GO_BYTES
+        source_io = io.BytesIO(source_bytes)
+        with patch.object(setup_engine.os, "read", side_effect=lambda _fd,n: source_io.read(n)), patch.object(setup_engine.time, "monotonic", return_value=100.0):
+            self.assertEqual(setup_engine._read_secret_apply_go(99, 110.0), source_bytes)
+        source_io = io.BytesIO(source_bytes + b"x")
+        with patch.object(setup_engine.os, "read", side_effect=lambda _fd,n: source_io.read(n)), patch.object(setup_engine.time, "monotonic", return_value=100.0):
+            with self.assertRaises(ValueError): setup_engine._read_secret_apply_go(99, 110.0)
+
+        binding = {"savedConfig": source["draft"], "canonicalConfig": source["draft"]}
+        prepared = {"target": action.target, "before": {"environmentName": "mobile-candidate", "environmentId": "3",
+            "name": secret_name, "metadata": None}, "after": {"name": secret_name, **source["material"]},
+            "configuration": binding, "observedAt": _TIME, "confirmation": setup.SECRET_CONFIRMATION}
+        applying = setup.SecretAction.parse({**action.value(), "kind": "apply", "prepared": prepared})
+        sealed = {"key": {"id": "inert-key", "value": "A" * 43 + "="}, "encryptedValue": base64.b64encode(bytes(52)).decode("ascii")}
+        for write_status in (201, 429):
+            class WritePostFailure:
+                def __init__(self): self.count = 0
+                def checkpoint(self):
+                    self.count += 1
+                    if self.count == 12: raise SecretConfigurationError("configuration-changed")
+            config = WritePostFailure(); progress = setup.SecretApplyProgress(); original_calls = []
+            def apply_factory(_token, **kwargs):
+                def exchange(method, path, body, *, _role):
+                    transport._request_limits(P.SETUP, _role, method, path)
+                    transport._setup_body(P.SETUP, _role, body)
+                    original_calls.append((method, path))
+                    if method == "PUT":
+                        return transport.ReadResult({"status": write_status, "body": {} if write_status == 201 else None, "failure": "none"},
+                            transport._control() if write_status == 201 else transport._control("rate-limited", 29))
+                    if path == "/user": value = {"id": 7, "login": "owner"}
+                    elif path == "/repos/owner/app": value = _repo()
+                    elif path.endswith("public-key"): value = {"key_id": "inert-key", "key": "A" * 43 + "="}
+                    elif path.endswith("/secrets/" + secret_name):
+                        return transport.ReadResult({"status": 404, "body": None, "failure": "none"}, transport._control())
+                    else: value = {"name": "mobile-candidate", "id": 3}
+                    return transport.ReadResult({"status": 200, "body": value, "failure": "none"}, transport._control())
+                return exchange
+            budget = transport._Budget(100.0, monotonic=lambda: 100.0, _profile=P.SETUP)
+            with patch.object(transport, "_make_live_exchange", side_effect=apply_factory):
+                reader = setup._make_secret_reader(applying, _SENTINEL, started=100.0, runtime_dir="/inert/runtime",
+                    budget=budget, configuration=config, sealed=sealed, progress=progress)
+                with self.assertRaises(SecretConfigurationError):
+                    setup.execute_secret_apply(applying, reader, binding, key=sealed["key"], progress=progress)
+            self.assertEqual(len(original_calls), 6)
+            self.assertTrue(progress.claimed)
+            self.assertEqual(progress.acknowledged, write_status == 201)
+            converted = setup.secret_configuration_failure("configuration-changed", reader.control, progress=progress)
+            self.assertEqual(converted["effect"], "unknown")
+            self.assertEqual(converted["reason"], "configuration-changed" if write_status == 201 else "rate-limited")
+            self.assertEqual(converted["control"]["cooldownSeconds"], None if write_status == 201 else 29)
+
+        # Strict shared role/method/path/body dispatch. No live factory runs.
+        from mobile_release import github_setup_variables as variables
+        names = {row[0] for row in variables.VARIABLE_FIELDS}
+        collection = "/repos/owner/app/environments/mobile-candidate/variables"
+        name = "MOBILE_RELEASE_ANDROID_KEY_ALIAS"
+        for role, method, path, payload in (
+            (R.SETUP_VARIABLE_READ, "GET", collection + "/" + name, None),
+            (R.SETUP_VARIABLE_CREATE, "POST", collection, {"name": name, "value": "release.alias"}),
+            (R.SETUP_VARIABLE_REPLACE, "PATCH", collection + "/" + name, {"value": "release.alias"}),
+        ):
+            transport._request_limits(P.SETUP, role, method, path)
+            encoded = None if payload is None else _json(payload)
+            transport._setup_body(P.SETUP, role, encoded, path=path)
+            for wrong_profile in (P.STANDARD, P.RELEASE_PREPARE):
+                with self.assertRaises(ValueError): transport._request_limits(wrong_profile, role, method, path)
+            for wrong_method in {"GET", "PUT", "POST", "PATCH", "DELETE"} - {method}:
+                with self.assertRaises(ValueError): transport._request_limits(P.SETUP, role, wrong_method, path)
+            for wrong_path in (path + "?page=2", path.replace("mobile-candidate", "other"), path.replace("variables", "secrets")):
+                with self.assertRaises(ValueError): transport._request_limits(P.SETUP, role, method, wrong_path)
+            for wrong_role in (R.STANDARD, R.SETUP_SECRET_WRITE, R.SETUP_ENVIRONMENT_WRITE):
+                with self.assertRaises(ValueError): transport._request_limits(P.SETUP, wrong_role, method, path)
+            if payload is not None:
+                for wrong in (None, b"null", b"[]", _json({**payload, "arbitrary": "x"}), _json({**payload, "value": 1}),
+                              _json({**payload, "value": "x" * 4097}), b" " * 8193):
+                    with self.assertRaises(ValueError): transport._setup_body(P.SETUP, role, wrong, path=path)
+        for foreign in ("OPERATION_COMMITMENT_KEY_VERSION", "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD", "arbitrary"):
+            self.assertNotIn(foreign, names)
+            with self.assertRaises(ValueError): transport._request_limits(P.SETUP, R.SETUP_VARIABLE_READ, "GET", collection + "/" + foreign)
+            with self.assertRaises(ValueError): transport._setup_body(P.SETUP, R.SETUP_VARIABLE_CREATE,
+                _json({"name": foreign, "value": "inert"}), path=collection)
+        with self.assertRaises(ValueError): transport._setup_body(P.SETUP, R.SETUP_VARIABLE_REPLACE,
+            _json({"value": "not-an-issuer-uuid"}), path=collection + "/MOBILE_RELEASE_ASC_ISSUER_ID")

@@ -62,6 +62,13 @@ pub(crate) use vault::KeyringInitializationAdmission;
 #[path = "asset_session_ios_signing.rs"]
 mod ios_signing;
 pub(crate) use ios_signing::{IOSSigningMaterial, MATERIAL_PREFIX as IOS_MATERIAL_PREFIX, MATERIAL_SUFFIX as IOS_MATERIAL_SUFFIX};
+#[path = "asset_session_github_secret.rs"]
+mod github_secret;
+pub(crate) use github_secret::{GitHubSecretMaterial, GitHubSecretFrame};
+#[path = "asset_session_github_variable.rs"]
+mod github_variable;
+pub(crate) use github_variable::GitHubVariableMaterial;
+
 #[path = "asset_session_android_signing.rs"]
 mod android_signing;
 pub(crate) use android_signing::{AndroidSigningMaterial, MATERIAL_PREFIX as ANDROID_MATERIAL_PREFIX, MATERIAL_SUFFIX as ANDROID_MATERIAL_SUFFIX};
@@ -1032,9 +1039,158 @@ impl GitHubSetupGoGate {
             .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::TargetChanged }))?;
         // The SAME document and actual edit registry stay borrowed through all
         // target/stamp/expiry checks, one-use original claim and token transfer.
+        if let Some(material)=state.github.setup_secret_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
+        if let Some(material)=state.github.setup_variable_material(){
+            if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        }
         state.github.setup_go(id, digest, request, generation, &root, &edit, Instant::now(), claim)
     }
 }
+impl GitHubSetupGoGate {
+    // The first GO remains consumed. This checks the SAME current document,
+    // assignment, registry and edit stamp while the fixed helper is spawned.
+    pub(crate) fn claim_secret<T>(&self,id:&str,request:&crate::github_setup_protocol::Request,
+        material:&Arc<GitHubSecretMaterial>,claim:impl FnOnce()->Result<T,BridgeError>)->Result<T,BridgeError>{
+        use crate::{github_setup_protocol as p,github_setup_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)))}
+        let project=state.github.setup_registered_project().map(str::to_owned).ok_or_else(||s::refused(p::Reason::TargetChanged))?;
+        let(generation,root)=document.registry_result(&mut state,document.inner.bridge.native_project(&project),None)
+            .map_err(|e|s::refused(if e.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        let edit=document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity)
+            .map_err(|e|s::refused(if e.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}))?;
+        if !material.current(&state,&project,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+        state.github.setup_secret_current(id,request,material,generation,&root,&edit,Instant::now())?;
+        claim()
+    }
+}
+/// Same document claim after the original History slot's source POST. This
+/// weak reference contains no credential, renderer path or alternate clock.
+pub(crate) struct GitHubHistoryGoGate { inner: Weak<Inner> }
+impl GitHubHistoryGoGate {
+    pub(crate) fn claim(&self,id:&str,digest:&str,nomination:&Arc<crate::github_history_session::Nomination>,
+        claim:impl FnOnce()->bool)->Result<Vec<u8>,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let document=DocumentBinding{inner:self.inner.upgrade().ok_or_else(||s::refused(p::Reason::Cancelled))?};
+        let mut state=document.lock();document.expire(&mut state,Instant::now());
+        let external=document.github_gate(&state);
+        if external!=GitHubReason::None{return Err(s::refused(s::connection_reason(external)));}
+        let profile=document.inner.bridge.supervisor.github_history_profile_reason();
+        if profile!=p::Reason::None{return Err(s::refused(profile));}
+        let current=document.registry_result(&mut state,document.inner.bridge.native_project(&nomination.project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        let edit=match document.inner.bridge.edits.saved_registration_guard(&document.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        // The actual document and edit registry remain held through the one-use
+        // original claim and bounded private token encoding; no await/callback
+        // acquires a second document or substitutes a public revision for IO.
+        state.github.history_go(id,digest,nomination,generation,&root,&edit,Instant::now(),claim)
+    }
+}
+fn github_history_project_binding(root:&asset_source::RegisteredRoot)->Result<String,BridgeError>{
+    use sha2::{Digest,Sha256};
+    let identity=root.identity.posix().map_err(|_|BridgeError::invalid())?.preflight_identity();
+    let encoded=serde_json::to_vec(&identity).map_err(|_|BridgeError::invalid())?;
+    let mut hash=Sha256::new();hash.update(b"mrk-github-history-project/1\0");
+    hash.update(root.path.as_os_str().as_encoded_bytes());hash.update(b"\0");hash.update(encoded);
+    Ok(format!("{:x}",hash.finalize()))
+}
+impl DocumentBinding {
+    fn github_history_observe_locked(&self,state:&mut DocumentState,now:Instant,external:GitHubReason){
+        let project=state.github.history_registered_project().map(str::to_owned);
+        let original=project.as_deref().and_then(|project|{
+            // SAME classifier as Setup: a newly failed second registry lookup
+            // must latch containing unknown before receipt acceptance.
+            self.github_setup_registry_result(state,self.inner.bridge.native_project(project))
+        });
+        if let Some((generation,root))=original{
+            match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+                Ok(edit)=>state.github.reconcile_history(now,external,Some((generation,&root,&edit))),
+                Err(error)=>{
+                    if error.code=="cleanup_unknown"{state.github.unknown();}
+                    state.github.reconcile_history(now,external,None);
+                },
+            }
+        }else{state.github.reconcile_history(now,external,None);}
+    }
+    pub(crate) fn github_history_status(&self)->crate::github_history_protocol::Status{
+        let mut state=self.lock();let now=Instant::now();self.expire(&mut state,now);
+        let external=self.github_gate(&state);
+        state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),now,external)
+    }
+    pub(crate) fn github_history_command(&self,name:&str,value:&Value)->Result<crate::github_history_protocol::Status,BridgeError>{
+        use crate::{github_history_protocol as p,github_history_session as s};
+        let command=p::decode_command(name,value).map_err(|_|s::refused(p::Reason::InvalidInput))?;
+        if matches!(command,p::Command::Status){return Ok(self.github_history_status());}
+        // Bounded private metadata only. The native source/work originals are
+        // not opened until the containing Supervisor registers the real owner.
+        let nonces=if matches!(command,p::Command::Start(_)){
+            let mut raw=[0u8;32];getrandom::fill(&mut raw).map_err(|_|s::refused(p::Reason::RuntimeUnavailable))?;
+            Some((raw[..16].iter().map(|b|format!("{b:02x}")).collect::<String>(),
+                raw[16..].iter().map(|b|format!("{b:02x}")).collect::<String>()))
+        }else{None};
+        let mut state=self.lock();self.expire(&mut state,Instant::now());
+        if let p::Command::Cancel(args)=&command{return state.github.history_cancel(&args.operation_id);}
+        let p::Command::Start(args)=command else{return Err(s::refused(p::Reason::InvalidInput));};
+        let external=self.github_gate(&state);
+        let available=state.github.history_status(self.inner.bridge.supervisor.github_history_profile_reason(),Instant::now(),external);
+        if !available.available{return Err(s::refused(available.reason));}
+        let(project_id,original_generation)=state.github.registration().map(|(id,generation)|(id.to_owned(),generation))
+            .ok_or_else(||s::refused(p::Reason::NotConnected))?;
+        let current=self.registry_result(&mut state,self.inner.bridge.native_project(&project_id),None);
+        let(generation,root)=match current{
+            Ok(v)=>v,Err(error)=>{
+                if error.reason==Reason::CleanupUnknown{state.github.unknown();}
+                return Err(s::refused(if error.reason==Reason::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::TargetChanged}));
+            },
+        };
+        if generation!=original_generation{return Err(s::refused(p::Reason::TargetChanged));}
+        let binding=github_history_project_binding(&root).map_err(|_|s::refused(p::Reason::TargetChanged))?;
+        let edit=match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity){
+            Ok(v)=>v,Err(error)=>{
+                if error.code=="cleanup_unknown"{state.github.unknown();}
+                return Err(s::refused(if error.code=="cleanup_unknown"{p::Reason::CleanupUnknown}else{p::Reason::Busy}));
+            },
+        };
+        let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+        let(owner_generation,work_nonce)=nonces.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+        let(nomination,credential_end)=state.github.history_nomination(args,generation,root,stamp,binding,owner_generation,work_nonce,Instant::now())?;
+        let gate=GitHubHistoryGoGate{inner:Arc::downgrade(&self.inner)};
+        let admission=crate::supervisor::GitHubHistoryAdmission::reserve(nomination.clone(),gate,credential_end)
+            .map_err(crate::github_connection_session::history_admission_error)?;
+        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+        lookup_memory::history_admission_bytes(&self.inner,&state,admission.bytes()).map_err(|error|
+            s::refused(if error==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+        return Err(s::refused(p::Reason::Unqualified));
+        // Document+EditGuard remain borrowed from actual source nomination,
+        // through complete capacity admission and synchronous owner install.
+        state.github.history_start(nomination,admission,&self.inner.bridge.supervisor,Instant::now())
+    }
+}
+#[cfg(test)]
+pub(crate) fn github_history_document_data_checks(){
+    // The production reciprocal predicate is used by all large asset/copy
+    // admissions; History participates without blocking stop/status/lock.
+    assert!(allocation_conflict_gate(false,false).is_ok());
+    assert!(allocation_conflict_gate(false,true).is_err());
+    assert!(allocation_conflict_gate(true,false).is_err());
+    assert!(allocation_conflict_gate(true,true).is_err());
+}
+
 fn github_setup_project_binding(root: &asset_source::RegisteredRoot) -> Result<String, BridgeError> {
     use sha2::{Digest, Sha256};
     let identity = root.identity.posix().map_err(|_| BridgeError::invalid())?.preflight_identity();
@@ -1437,15 +1593,15 @@ mod lookup_memory {
     }
 
     struct Census<'a> {
-        current: &'a Arc<OriginalWork>, current_source: &'a SourceBook, current_retirement: &'a Retirement,
-        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen,
+        current: Option<(&'a Arc<OriginalWork>, &'a SourceBook, &'a Retirement)>,
+        bytes: usize, payloads: Seen, materials: Seen, contexts: Seen, sources: Seen, owners: Seen, assessments: Seen, secret_loans: Seen,
         vault_stores: Seen, vault_keys: Seen,
     }
     impl<'a> Census<'a> {
         fn new(current: &'a Arc<OriginalWork>, source: &'a SourceBook, retirement: &'a Retirement) -> Self {
-            Self { current, current_source: source, current_retirement: retirement, bytes: 0,
+            Self { current: Some((current, source, retirement)), bytes: 0,
                 payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(), sources: Seen::new(), owners: Seen::new(),
-                assessments: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
+                assessments: Seen::new(), secret_loans: Seen::new(), vault_stores: Seen::new(), vault_keys: Seen::new() }
         }
         fn add(&mut self, bytes: usize) -> Result<(), Problem> {
             self.bytes = self.bytes.checked_add(bytes).ok_or(Problem::Capacity)?; Ok(())
@@ -1526,9 +1682,13 @@ mod lookup_memory {
             for loan in value.bound.iter().flatten() { self.vault_loan(loan)?; } Ok(())
         }
         fn artifact_inputs(&mut self)->Result<(),Problem>{
-            let Some(document)=self.current.gui.document.upgrade()else{return Ok(());};
+            let Some((current,_,_))=self.current else{return Err(Problem::CleanupUnknown)};
+            let Some(document)=current.gui.document.upgrade()else{return Ok(());};
             // DATA-only snapshots may have no containing Document. The real
             // enter below separately requires its live, bound original slot.
+            self.artifact_document(&document)
+        }
+        fn artifact_document(&mut self,document:&Arc<Inner>)->Result<(),Problem>{
             let snapshot=document.bridge.artifact_inspection.artifact_census().map_err(|_|Problem::Capacity)?;
             self.add(snapshot.data_bytes().ok_or(Problem::Capacity)?)?;
             for (original,proof) in snapshot.members(){
@@ -1626,9 +1786,9 @@ mod lookup_memory {
                 self.cells::<std::path::PathBuf>(paths.capacity())?;
                 for path in paths { self.add(path.capacity())?; }
             }
-            if Arc::ptr_eq(owner, self.current) {
-                retirement_known(owner, self.current_retirement)?;
-                self.source(&owner.source, self.current_source)?; self.retirement(self.current_retirement)
+            if let Some((_, source, retirement)) = self.current.filter(|(current, _, _)| Arc::ptr_eq(owner, current)) {
+                retirement_known(owner, retirement)?;
+                self.source(&owner.source, source)?; self.retirement(retirement)
             } else {
                 // A retained old/quit owner has no remaining original which may
                 // allocate after this snapshot. Busy/failed/ambiguous is refusal.
@@ -1644,6 +1804,18 @@ mod lookup_memory {
                 self.source(&owner.source, &source)?; self.retirement(&retirement)
             }
         }
+        fn secret_loan(&mut self,loan:&Arc<GitHubSecretMaterial>)->Result<(),Problem>{
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubSecretMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
+        fn variable_loan(&mut self,loan:&Arc<GitHubVariableMaterial>)->Result<(),Problem>{
+            // Same finite set for the mutually exclusive Setup material kinds.
+            // Live distinct Arc allocations cannot share a data address.
+            if !self.secret_loans.insert(loan)?{return Ok(())}
+            let(context,payload)=loan.census_parts();self.context(context)?;self.payload(payload)?;
+            self.arc_cells::<GitHubVariableMaterial>()?;self.add(loan.own_retained_heap_bytes().ok_or(Problem::Capacity)?)
+        }
         fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
             if state.retiring { return Err(Problem::CleanupUnknown); }
             self.add(std::mem::size_of::<DocumentState>())?;
@@ -1651,9 +1823,71 @@ mod lookup_memory {
             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
             self.records(&state.records)?; self.assignments(&state.assignments)?;
             if let Some(context) = &state.context { self.context(context)?; }
+            if let Some(loan)=state.github.setup_secret_material(){self.secret_loan(loan)?;}
+            if let Some(loan)=state.github.setup_variable_material(){self.variable_loan(loan)?;}
+            if state.github.setup_has_material() || state.github.history_has_retained_data() {
+                // One containing Connection projection, even when an idle
+                // Setup consent and a prior History result are both retained.
+                self.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+            }
             if let Some(slot) = &state.slot { self.slot(slot)?; }
             if let Some(quit) = &state.quit { self.owner(quit)?; } Ok(())
         }
+    }
+
+    // There is no fabricated current keyring owner for Setup. With None every
+    // retained asset owner must satisfy the same positive settled branch above.
+    pub(super) fn secret_admission_bytes(document:&Arc<Inner>,state:&DocumentState, loan:&Arc<GitHubSecretMaterial>,
+        helper_bytes:usize,applying:bool)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        census.secret_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            // Otherwise document() already charged the same complete buffers.
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        // All capacities above are from original buffers, shared Arcs visited
+        // once. Below are distinct future child-work and framing reservations.
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        census.add(helper_bytes)?;
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(if applying {crate::github_setup_protocol::SECRET_APPLY_BUFFERS}
+            else{crate::github_setup_protocol::SECRET_PREPARE_BUFFERS})?;
+        // The same existing committed-session cap, not the larger keyring
+        // allowance, bounds this operation's complete retained working set.
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}
+        Ok(census.bytes)
+    }
+
+    // No fabricated current OriginalWork. All previously retained asset
+    // owners must be positively quiescent before this independent readonly IO.
+    pub(super) fn history_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+        let mut census=Census{current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){
+            census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;
+        }
+        census.add(std::mem::size_of::<Census<'_>>())?;
+        // Includes native source reservation, raw saved config and the fixed
+        // simultaneous framing/receipt/Status-copy term. Not a process RSS claim.
+        census.add(future)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
+    }
+
+    pub(super) fn variable_admission_bytes(document:&Arc<Inner>,state:&DocumentState,loan:&Arc<GitHubVariableMaterial>,
+        original_bytes:usize)->Result<usize,Problem>{
+        let mut census=Census {current:None,bytes:0,payloads:Seen::new(),materials:Seen::new(),contexts:Seen::new(),
+            sources:Seen::new(),owners:Seen::new(),assessments:Seen::new(),secret_loans:Seen::new(),vault_stores:Seen::new(),vault_keys:Seen::new()};
+        census.artifact_document(document)?;census.document(state)?;census.variable_loan(loan)?;
+        if !state.github.setup_has_material() && !state.github.history_has_retained_data(){census.add(state.github.retained_heap_bytes_if_quiescent().ok_or(Problem::CleanupUnknown)?)?;}
+        census.add(std::mem::size_of::<Census<'_>>())?;census.add(original_bytes)?;
+        // Same original Config wrapper and explicitly distinct wire buffers.
+        // No secret helper allocation, second native original or renewed quota.
+        census.add(crate::github_setup_protocol::SECRET_CONFIGURATION_WORK_BYTES)?;
+        census.add(crate::github_setup_protocol::VARIABLE_WIRE_BUFFERS)?;
+        if census.bytes>SESSION_BYTES{return Err(Problem::Capacity)}Ok(census.bytes)
     }
 
     pub(super) fn live_bytes(state: &DocumentState, owner: &Arc<OriginalWork>, source: &SourceBook, retirement: &Retirement) -> Result<usize, Problem> {
@@ -1723,6 +1957,88 @@ mod lookup_memory {
         }
         #[test]
         fn lookup_allowance_checks_boundary_overflow_and_capture_overlap() {
+            // No fabricated current owner exemption in the Setup census.
+            let old=OriginalWork::new(3,false,Weak::new());let source=SourceBook::new();let retirement=Retirement::default();
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));
+            old.coordinator.lock().unwrap().receipt=JoinReceipt::Returned;
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            let busy=old.source.lock().unwrap();assert_eq!(none.owner(&old),Err(Problem::CleanupUnknown));drop(busy);
+            let mut none=Census::new(&old,&source,&retirement);none.current=None;
+            assert!(none.owner(&old).is_ok());
+            let native=data_context();let payload=Arc::new(Payload{kind:Kind::AndroidKeystore,material:None,
+                fields:Some(commands::own_fields(Kind::AndroidKeystore,&serde_json::json!({"storePassword":"test","keyPassword":null,"keyAlias":null})).unwrap())});
+            let loan=github_secret::data_loan(native.clone(),payload.clone());
+            let mut census=Census::new(&old,&source,&retirement);census.current=None;
+            census.context(&native).unwrap();census.payload(&payload).unwrap();let before=census.bytes;
+            census.secret_loan(&loan).unwrap();let once=census.bytes;
+            assert_eq!(once-before,std::mem::size_of::<GitHubSecretMaterial>()+ARC_CELLS+loan.own_retained_heap_bytes().unwrap());
+            census.secret_loan(&loan.clone()).unwrap();assert_eq!(census.bytes,once);
+            let cipher=crate::supervisor::SecretSealed::retained_data(loan.clone());
+            let cipher_bytes=cipher.retained_heap_bytes().unwrap();
+            assert_eq!(cipher_bytes,crate::github_setup_protocol::RESPONSE_LIMIT+31+71);
+            census.add(cipher_bytes).unwrap();let idle=census.bytes;
+            census.secret_loan(&cipher.material).unwrap();assert_eq!(census.bytes,idle);
+            let mut boundary=Census::new(&old,&source,&retirement);boundary.bytes=SESSION_BYTES-cipher_bytes;
+            boundary.add(cipher_bytes).unwrap();assert_eq!(boundary.bytes,SESSION_BYTES);
+            assert_eq!(boundary.bytes.checked_add(1).is_some_and(|v|v<=SESSION_BYTES),false);
+            drop(cipher);
+            // Real nonsecret borrowed-field and original Arc census, not a
+            // fake SecretSealed. Same backing is charged once across clones.
+            let variable_payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).unwrap())});
+            let variable=github_variable::data_loan(native.clone(),variable_payload.clone(),crate::github_setup_protocol::VariableRequirement::GoogleWifProvider);
+            census.context(&native).unwrap();census.payload(&variable_payload).unwrap();let before_variable=census.bytes;
+            census.variable_loan(&variable).unwrap();let variable_bytes=census.bytes;
+            assert_eq!(variable_bytes-before_variable,std::mem::size_of::<GitHubVariableMaterial>()+ARC_CELLS+variable.own_retained_heap_bytes().unwrap());
+            census.variable_loan(&variable.clone()).unwrap();assert_eq!(census.bytes,variable_bytes);
+            assert_eq!(variable.value().unwrap(),"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            // Actual lookup/current predicates against the existing inert
+            // DocumentState fixture. No GUI/provider/runtime is constructed.
+            let mut current=crate::asset_session::tests::empty_state();
+            current.lifetime.crash_hook_installed();current.lifetime.started(true);current.lifetime.finished(true);
+            current.context=Some(native.clone());
+            current.records.push(Record{key:RecordKey{id:Token("1".repeat(32)),revision:2},payload:variable_payload.clone(),mutation_pending:false});
+            current.assignments.push(Assignment{kind:Kind::GoogleWif,record_id:Token("1".repeat(32)),record_revision:2,
+                context_revision:1,availability:AssignmentAvailability::Available});
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            assert!(!variable.current(&current,"changed-project",native.registry_generation,&native.project));
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation+1,&native.project));
+            current.records[0].payload=Arc::new(Payload{kind:Kind::GoogleWif,material:None,fields:Some(commands::own_fields(
+                Kind::GoogleWif,&serde_json::json!({"provider":"projects/123/locations/global/workloadIdentityPools/release/providers/github","serviceAccount":"release@example-project.iam.gserviceaccount.com"})).unwrap())});
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.records[0].payload=variable_payload.clone();current.records[0].mutation_pending=true;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.records[0].mutation_pending=false;
+            current.assignments[0].record_revision=3;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].record_revision=2;
+            current.assignments[0].availability=AssignmentAvailability::Unavailable;
+            assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.assignments[0].availability=AssignmentAvailability::Available;
+            current.lock_pending=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.lock_pending=false;
+            current.unknown=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.unknown=false;
+            current.stopping=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.stopping=false;
+            current.retiring=true;assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));current.retiring=false;
+            assert!(variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            current.lifetime.invalidate();assert!(!variable.current(&current,&native.project_id,native.registry_generation,&native.project));
+            let consent=crate::github_setup_session::ConsentMaterial::Variable(variable.clone());
+            assert!(consent.secret().is_none()&&consent.variable().is_some_and(|v|Arc::ptr_eq(v,&variable)));
+            // A child cannot turn another fingerprint into current NoChange.
+            let wire=crate::github_setup_protocol::Request{kind:crate::github_setup_protocol::Kind::Prepare,
+                target:crate::github_setup_protocol::Target{project_binding:"a".repeat(64),repository:"Owner/Repo".into(),account_id:"11".into(),
+                    repository_id:"22".into(),selection:crate::github_setup_protocol::Selection::Variable(variable.selection().clone())},prepared:None};
+            let hash=variable.source().material.sha256.clone();
+            let mut value=serde_json::json!({"schemaVersion":1,"action":"prepare","reason":"no-change","effect":"not-started",
+                "writeClaimed":false,"writeAcknowledged":false,"prepared":null,
+                "observed":{"environmentName":"mobile-candidate","environmentId":"33","name":"MOBILE_RELEASE_GOOGLE_WIF_PROVIDER",
+                    "value":{"bytes":variable.value().unwrap().len(),"sha256":hash},"metadata":{"createdAt":"2026-10-09T00:00:00Z","updatedAt":"2026-10-09T00:00:00Z"}},
+                "control":{"reason":"none","credentialExpiresAt":null,"cooldownSeconds":null,"cooldownBlocked":false}});
+            let observed=serde_json::from_value(value.clone()).unwrap();assert!(variable.outcome_matches(&wire,&observed));
+            value["observed"]["value"]["sha256"]=serde_json::json!("e".repeat(64));
+            assert!(!variable.outcome_matches(&wire,&serde_json::from_value(value).unwrap()));
+            let input=variable.go_frame("setup-1",&"a".repeat(64),"inert-token").unwrap();
+            let decoded:serde_json::Value=serde_json::from_slice(&input).unwrap();assert_eq!(decoded["go"]["value"],"projects/123/locations/global/workloadIdentityPools/release/providers/github");
+            assert!(decoded["go"].get("sealed").is_none());
+            let frame=loan.frame(&[0;32]).unwrap();assert_eq!(frame.retained_heap_bytes(),crate::github_setup_protocol::SECRET_REQUEST_LIMIT);
+            assert_eq!(&frame.bytes()[44..],b"test");assert_eq!(&frame.bytes()[..8],b"MRKSEAL1");
             let reserved = zbus::connection::OwnedConnectionAttempt::KEYRING_WIRE_BYTES
                 + secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES;
             assert_eq!(secret_service::checked_lookup::RETRIEVAL_CRYPTO_BYTES, 32 * 1024);
@@ -1820,9 +2136,12 @@ pub(crate) use lookup_memory::Admission as KeyringMemoryAdmission;
 fn lookup_allocation_gate(state: &DocumentState) -> Result<(), AssetError> {
     // All large/copy admissions share the current document mutex. STOP, status,
     // lock/loss and reconciliation intentionally do not call this predicate.
-    if state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()) {
-        return Err(AssetError::new(Reason::Busy));
-    }
+    allocation_conflict_gate(
+        state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+        state.github.setup_secret_work_pending() || state.github.history_work_pending())
+}
+fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+    if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
     Ok(())
 }
 fn passive_document_gate(state: &DocumentState) -> Result<(), BridgeError> {
@@ -3066,6 +3385,7 @@ impl DocumentBinding {
         let gate = self.github_gate(state);
         state.github.reconcile(now, gate);
         self.github_setup_observe_locked(state, now, gate);
+        self.github_history_observe_locked(state, now, gate);
     }
     fn github_setup_registry_result<T>(&self, state: &mut DocumentState, result: Result<T, AssetError>) -> Option<T> {
         match self.registry_result(state, result, None) {
@@ -3087,6 +3407,11 @@ impl DocumentBinding {
         // A real fresh Edit registry guard is held until this same original
         // receipt is correlated. No boolean status or cloned stamp substitutes.
         if let Some((generation, root)) = original {
+            let material_current=state.github.setup_secret_material().is_none_or(|material|
+                state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)))
+                &&state.github.setup_variable_material().is_none_or(|material|
+                    state.github.setup_registered_project().is_some_and(|project|material.current(state,project,generation,&root)));
+            if !material_current{state.github.setup_context_changed();}
             match self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity) {
                 Ok(edit) => state.github.reconcile_setup(now, external, Some((generation, &root, &edit))),
                 Err(error) => {
@@ -3128,12 +3453,76 @@ impl DocumentBinding {
         let binding = github_setup_project_binding(&root).map_err(|_| s::refused(p::Reason::TargetChanged))?;
         let edit = self.inner.bridge.edits.saved_registration_guard(&self.inner.session_identity)
             .map_err(|error| s::refused(if error.code == "cleanup_unknown" { p::Reason::CleanupUnknown } else { p::Reason::Busy }))?;
+        let setup_material=if let p::Command::Prepare(args)=&command {
+            if let p::Selection::Secret(selected)=&args.selection {
+                let material=self.review_github_secret_material(&state,selected,&project_id,generation,&root)?;
+                let admission=crate::supervisor::SecretNativeAdmission::reserve(material.clone())?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::secret_admission_bytes(&self.inner,&state,&material,admission.bytes(),false).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown {p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Secret(admission))
+            }else if let p::Selection::Variable(selected)=&args.selection{
+                let material=self.review_github_variable_material(&state,selected,&project_id,generation,&root)?;
+                let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Prepare)?;
+                #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                lookup_memory::variable_admission_bytes(&self.inner,&state,&material,admission.bytes()).map_err(|e|
+                    s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                return Err(s::refused(p::Reason::Unqualified));
+                Some(crate::supervisor::SetupNativeAdmission::Variable(admission))
+            }else{None}
+        }else{None};
         let gate = GitHubSetupGoGate { inner: Arc::downgrade(&self.inner) };
         let supervisor = &self.inner.bridge.supervisor; let now = Instant::now();
         match command {
-            p::Command::Prepare(args) => state.github.setup_prepare(args, generation, root, &binding,
-                edit.stamp().map_err(|_| s::refused(p::Reason::Busy))?, nonce.ok_or_else(|| s::refused(p::Reason::InvalidInput))?, gate, supervisor, now),
-            p::Command::Apply(args) => state.github.setup_apply(args, generation, root, &binding, &edit, gate, supervisor, now),
+            p::Command::Prepare(args) => {
+                let stamp=edit.stamp().map_err(|_|s::refused(p::Reason::Busy))?;
+                let nonce=nonce.ok_or_else(||s::refused(p::Reason::InvalidInput))?;
+                match setup_material {
+                    Some(crate::supervisor::SetupNativeAdmission::Secret(admission))=>state.github.setup_secret_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    Some(crate::supervisor::SetupNativeAdmission::Variable(admission))=>state.github.setup_variable_prepare(args,generation,root,&binding,stamp,nonce,admission,gate,supervisor,now),
+                    None=>state.github.setup_prepare(args,generation,root,&binding,stamp,nonce,gate,supervisor,now)}
+            },
+            p::Command::Apply(args) => {
+                if state.github.setup_has_material(){
+                    let(target,mut consent)=state.github.setup_take_apply(args,generation,&root,&binding,&edit,now)?;
+                    // Consume exactly once before later admission. No relookup or
+                    // replacement Arc is allowed to renew this reviewed field.
+                    let retained=consent.retained_heap_bytes().ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    match consent.material.take().ok_or_else(||s::refused(p::Reason::MaterialChanged))?{
+                    s::ConsentMaterial::Secret(sealed)=>{
+                    let material=sealed.material.clone();
+                    if !self.native_qualified()||!material.current(&state,&project_id,generation,&root){return Err(s::refused(p::Reason::MaterialChanged))}
+                    let admission=crate::supervisor::SecretNativeAdmission::reserve_apply(sealed)?;
+                    let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                        .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                    #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                    lookup_memory::secret_admission_bytes(&self.inner,&state,&material,future,true).map_err(|e|
+                        s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                    #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                    return Err(s::refused(p::Reason::Unqualified));
+                    state.github.setup_secret_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    s::ConsentMaterial::Variable(material)=>{
+                        if !self.native_qualified()||!material.current(&state,&project_id,generation,&root)
+                            ||!matches!(&consent.prepared,p::Prepared::Variable(v) if material.prepared_matches(v)){
+                            return Err(s::refused(p::Reason::MaterialChanged))
+                        }
+                        let admission=crate::supervisor::VariableNativeAdmission::reserve(material.clone(),p::Kind::Apply)?;
+                        let future=admission.bytes().checked_add(retained).and_then(|v|v.checked_add(target.retained_heap_bytes()?))
+                            .ok_or_else(||s::refused(p::Reason::ResourcesUnavailable))?;
+                        #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+                        lookup_memory::variable_admission_bytes(&self.inner,&state,&material,future).map_err(|e|
+                            s::refused(if e==keyring::Problem::CleanupUnknown{p::Reason::CleanupUnknown}else{p::Reason::ResourcesUnavailable}))?;
+                        #[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+                        return Err(s::refused(p::Reason::Unqualified));
+                        state.github.setup_variable_apply(target,consent,root,admission,gate,supervisor,Instant::now())
+                    },
+                    }
+                }else{state.github.setup_apply(args,generation,root,&binding,&edit,gate,supervisor,now)}
+            },
             p::Command::Status | p::Command::Discard(_) | p::Command::Cancel(_) => Err(s::refused(p::Reason::InvalidInput)),
         }
     }
@@ -3810,6 +4199,7 @@ fn project_path_idle_gate(state: &DocumentState, installed_profile: bool) -> Res
     idle(state)
 }
 fn invalidate_all(state: &mut DocumentState) {
+    if state.github.setup_has_material(){state.github.setup_context_changed();}
     for assignment in &mut state.assignments { assignment.availability = AssignmentAvailability::Unavailable; }
     if let Some(slot) = state.slot.as_mut() { slot.selection = None; slot.preview = None; }
 }
@@ -8021,6 +8411,14 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[test]
     fn lookup_charge_blocks_context_copy_and_same_owner_child_before_dispatch() {
+        // Same production reciprocal decision: an original secret worker's
+        // debit blocks fresh copies, while idle consent/ordinary Setup does not.
+        for (lookup,secret,blocked) in [(false,false,false),(true,false,true),(false,true,true),(true,true,true)]{
+            assert_eq!(allocation_conflict_gate(lookup,secret).err().map(|v|v.reason),blocked.then_some(Reason::Busy));
+        }
+        let mut unknown=empty_state();unknown.lifetime.crash_hook_installed();unknown.lifetime.started(true);unknown.lifetime.finished(true);
+        unknown.unknown=true;
+        assert_eq!(common_document_gate(&unknown,true,||Ok(())).err().map(|v|v.reason),Some(Reason::CleanupUnknown));
         let (mut state, owner) = keyring_memory_model();
         *owner.keyring.lock().unwrap() = crate::vault_keyring_linux::LookupBook::constructor_refusal_data();
         let copied = std::cell::Cell::new(false);
