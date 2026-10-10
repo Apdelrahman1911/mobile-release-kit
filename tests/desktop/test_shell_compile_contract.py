@@ -513,6 +513,96 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(helper.mac_compile_graphs("aarch64-apple-darwin", "observer-only"), helper.MAC_COMPILE_GRAPHS[1:2])
         self.assertEqual(helper.mac_compile_checks("aarch64-apple-darwin", "observer-only")["compile"][-1], "mac-observer-compile-only")
 
+        # Keep pure graph/receipt fixtures, but never start the unbound shortcut.
+        reason = ("Standalone observer-data lacks source-bound runtime anchors; "
+                  "use the genuine desktop-macos-installed preview Rust+84 DATA gate")
+        forbidden = ("Path", "compile_profile", "compile_workflow_binding", "load_context",
+                     "tools", "run", "phase_mac_compile", "clean_compile")
+        for selection, mode in [("observer-data", "observer-data"), ("observer-data", "full4"),
+                                ("both", "observer-data"), ("observer-data", "observer-only"),
+                                ("observer-only", "observer-data"), ("observer-data", None), (None, "observer-data")]:
+            blocked_env = dict(env)
+            for key, value in (("MRK_COMPILE_SELECTION", selection), ("MRK_MACOS_COMPILE_MODE", mode)):
+                if value is None:
+                    blocked_env.pop(key)
+                else:
+                    blocked_env[key] = value
+            with self.subTest(blocked_selection=selection, blocked_mode=mode), \
+                    patch.dict(helper.os.environ, blocked_env, clear=True), contextlib.ExitStack() as stack:
+                work = [stack.enter_context(patch.object(helper, name, side_effect=AssertionError("unexpected work: " + name)))
+                        for name in forbidden]
+                for operation in ("prepare", "acquire", "compile"):
+                    with self.assertRaises(helper.CheckFailure) as caught:
+                        if operation == "prepare":
+                            helper.prepare("macos", helper.MAC_COMPILE_SCOPE)
+                        else:
+                            helper.phase(operation, "macos", helper.MAC_COMPILE_SCOPE)
+                    self.assertEqual(str(caught.exception), reason)
+                for port in work:
+                    port.assert_not_called()
+
+        class NextBoundary(Exception):
+            pass
+        # Every other offered mode still reaches its unchanged next boundary.
+        rows = [("aarch64-apple-darwin", "vault-only"), ("aarch64-apple-darwin", "observer-only")]
+        rows += [(target, mode) for target in MAC_RUST_EXPECTED for mode in ("full4", "history-app4", "app-only")]
+        for target, mode in rows:
+            other = history_app_environment(target) if mode == "history-app4" else mac_environment(target, mode)
+            self.assertEqual(helper.mac_compile_mode(other, target), mode)
+            with self.subTest(unchanged_target=target, unchanged_mode=mode), patch.dict(helper.os.environ, other, clear=True), \
+                    patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                    patch.object(helper, "run", side_effect=AssertionError("unexpected process")):
+                with patch.object(helper, "compile_profile", side_effect=NextBoundary) as profile:
+                    with self.assertRaises(NextBoundary):
+                        helper.prepare("macos", helper.MAC_COMPILE_SCOPE)
+                    profile.assert_called_once_with(helper.MAC_COMPILE_SCOPE)
+                for operation in ("acquire", "compile"):
+                    with patch.object(helper, "load_context", side_effect=NextBoundary) as load:
+                        with self.assertRaises(NextBoundary):
+                            helper.phase(operation, "macos", helper.MAC_COMPILE_SCOPE)
+                        load.assert_called_once_with("macos", helper.MAC_COMPILE_SCOPE)
+        # Stale environment fields do not broaden the guard to other scopes.
+        for scope, platform in [(helper.COMPILE_SCOPE, "linux"), (helper.SOURCE_SLOTS_SCOPE, "macos"),
+                                (helper.ENGINEERING_COMPILE_SCOPE, "macos")]:
+            with self.subTest(unchanged_scope=scope), patch.dict(helper.os.environ, env, clear=True), \
+                    patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                    patch.object(helper, "run", side_effect=AssertionError("unexpected process")):
+                with patch.object(helper, "compile_profile", side_effect=NextBoundary) as profile:
+                    with self.assertRaises(NextBoundary):
+                        helper.prepare(platform, scope)
+                    profile.assert_called_once_with(scope)
+                for operation in ("acquire", "compile"):
+                    with patch.object(helper, "load_context", side_effect=NextBoundary) as load:
+                        with self.assertRaises(NextBoundary):
+                            helper.phase(operation, platform, scope)
+                        load.assert_called_once_with(platform, scope)
+        # Clean still forwards to its original handler; no cleanup is executed.
+        cleanup_context = {"inert": "original-context-only"}
+        with patch.dict(helper.os.environ, env, clear=True), \
+                patch.object(helper, "Path", side_effect=AssertionError("unexpected path")), \
+                patch.object(helper, "run", side_effect=AssertionError("unexpected process")), \
+                patch.object(helper, "load_context", return_value=cleanup_context) as load, \
+                patch.object(helper, "phase_mac_compile") as clean:
+            helper.phase("clean", "macos", helper.MAC_COMPILE_SCOPE)
+            load.assert_called_once_with("macos", helper.MAC_COMPILE_SCOPE)
+            clean.assert_called_once_with("clean", cleanup_context)
+        with patch.dict(helper.os.environ, env, clear=True):
+            with self.assertRaisesRegex(helper.CheckFailure, "Normal Mac compilation requires macOS"):
+                helper.prepare("linux", helper.MAC_COMPILE_SCOPE)
+            with self.assertRaisesRegex(helper.CheckFailure, "Compiler-only scope cannot execute a native phase"):
+                helper.phase("native", "macos", helper.MAC_COMPILE_SCOPE)
+
+        workflow = (HELPER.parents[2] / helper.MAC_COMPILE_WORKFLOW).read_text(encoding="utf-8")
+        checkout = "      - name: Check out exact source without persisted credentials\n"
+        admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(checkout, 1)[0]
+        tombstone = "              observer-data) printf '%s\\n' '" + reason + "' >&2; exit 1 ;;\n"
+        self.assertEqual(admission.count(tombstone), 1)
+        self.assertLess(workflow.index(tombstone), workflow.index(checkout))
+        self.assertLess(workflow.index(checkout), workflow.index("      - name: Select fixed helper Python\n"))
+        self.assertIn("inputs.target == 'observer-data' && '[{\"platform\":\"macos\",\"os\":\"macos-26\",\"target\":\"aarch64-apple-darwin\",\"mode\":\"observer-data\"}]'", workflow)
+        self.assertIn("        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]\n", workflow)
+        self.assertNotIn("observer-data", workflow.split("    inputs:\n", 1)[1].split("permissions:\n", 1)[0])
+
     def test_observer_data_child_admission_and_containing_clock(self):
         _, body, bound, private = observer_data_fixture()
         functions = observer_data_child_functions(body)
@@ -1229,11 +1319,11 @@ class ShellCompileContractTests(unittest.TestCase):
                   "inputs.target == 'arm' && '[" + arm_row + "]' || inputs.target == 'intel' && '[" + intel_row + "]' || '[" + arm_row + ',' + intel_row + "]') }}\n")
         self.assertEqual(workflow.count(matrix), 1)
         self.assertIn("      target:\n"
-                      "        description: Fixed compiler rows; History DATA, app-only both architectures, observer-only ARM compile, or observer-data ARM fixed five-phase DATA\n"
+                      "        description: Fixed compiler rows; History DATA, app-only both architectures, or observer-only ARM compile\n"
                       "        required: false\n"
                       "        type: choice\n"
                       "        default: both\n"
-                      "        options: [both, arm, intel, remaining, history-app4, app-only, observer-only, observer-data]\n", workflow)
+                      "        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]\n", workflow)
         self.assertIn("      MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}\n", workflow)
         self.assertIn("      MRK_MACOS_COMPILE_MODE: ${{ matrix.mode }}\n", workflow)
         admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(
@@ -1241,7 +1331,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then\n'
                       '            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]\n'
                       '            case "$MRK_COMPILE_SELECTION" in\n'
-                      '              observer-data) [[ "$MRK_MACOS_COMPILE_MODE" == observer-data && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;\n'
+                      "              observer-data) printf '%s\\n' 'Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate' >&2; exit 1 ;;\n"
                       '              observer-only) [[ "$MRK_MACOS_COMPILE_MODE" == observer-only && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;\n'
                       '              app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
                       '              history-app4) [[ "$MRK_MACOS_COMPILE_MODE" == history-app4 && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
@@ -1641,7 +1731,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(tuple(HISTORY_APP_CASES), helper.MAC_HISTORY_TESTS)
         self.assertEqual(HISTORY_APP_CASES, sorted(HISTORY_APP_CASES))
         workflow = (HELPER.parents[2] / ".github/workflows/desktop-macos-normal-compile.yml").read_text()
-        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only, observer-only, observer-data]", workflow)
+        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only, observer-only]", workflow)
         self.assertIn("history-app4) [[", workflow)
         for target in MAC_RUST_EXPECTED:
             env, bound = history_app_environment(target), history_app_context(target)

@@ -11,15 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed verification commit (no app launch; history-app4 and observer-data run fixed DATA only)
+        description: Exact reviewed verification commit (no app launch; history-app4 runs fixed DATA only)
         required: true
         type: string
       target:
-        description: Fixed compiler rows; History DATA, app-only both architectures, observer-only ARM compile, or observer-data ARM fixed five-phase DATA
+        description: Fixed compiler rows; History DATA, app-only both architectures, or observer-only ARM compile
         required: false
         type: choice
         default: both
-        options: [both, arm, intel, remaining, history-app4, app-only, observer-only, observer-data]
+        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]
 
 permissions:
   contents: read
@@ -60,7 +60,7 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
             case "$MRK_COMPILE_SELECTION" in
-              observer-data) [[ "$MRK_MACOS_COMPILE_MODE" == observer-data && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;
+              observer-data) printf '%s\n' 'Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate' >&2; exit 1 ;;
               observer-only) [[ "$MRK_MACOS_COMPILE_MODE" == observer-only && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;
               app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;
               history-app4) [[ "$MRK_MACOS_COMPILE_MODE" == history-app4 && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;

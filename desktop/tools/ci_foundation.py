@@ -7758,6 +7758,10 @@ def engineering_main_work() -> Path:
 def prepare(platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, "prepare")
     admit_platform(scope, platform)
+    if scope == MAC_COMPILE_SCOPE:
+        require(os.environ.get("MRK_COMPILE_SELECTION") != MAC_OBSERVER_DATA_MODE
+                and os.environ.get("MRK_MACOS_COMPILE_MODE") != MAC_OBSERVER_DATA_MODE,
+                "Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate")
     if scope in ENVIRONMENT_NATIVE_SCOPES:
         prepare_environment_native(platform)
         return
@@ -10315,6 +10319,10 @@ def phase_mac_compile(name: str, context: dict) -> None:
 def phase(name: str, platform: str, scope: str = BOUNDARY_SCOPE) -> None:
     admit_phase(scope, name)
     admit_platform(scope, platform)
+    if scope == MAC_COMPILE_SCOPE and name in {"acquire", "compile"}:
+        require(os.environ.get("MRK_COMPILE_SELECTION") != MAC_OBSERVER_DATA_MODE
+                and os.environ.get("MRK_MACOS_COMPILE_MODE") != MAC_OBSERVER_DATA_MODE,
+                "Standalone observer-data lacks source-bound runtime anchors; use the genuine desktop-macos-installed preview Rust+84 DATA gate")
     context = (load_context(platform, scope, retention_only=True) if (scope in {METADATA_NATIVE_SCOPE, VERSION_NATIVE_SCOPE} and name == "clean"
                or scope == ENVIRONMENT_NATIVE_SCOPE and name == "retain" or scope == OFFLINE_NATIVE_SCOPE)
                else load_context(platform, scope))
