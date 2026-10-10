@@ -50,6 +50,31 @@ fn ios_mode_gate_keeps_matched_non_ios_pass_through_and_exact_mode_selection() {
         assert_eq!(ios.inner.ios_mode_qualified(&selected, None), modes.supports(operation));
     }
     assert!(!ios.inner.ios_mode_qualified(&context(SavedCommandDomain::OfflinePreflight), None));
+    // Linux deliberately has no iOS profile. Check the actual native gate's
+    // busy branch in SOURCE, rather than inventing platform qualification.
+    let source = include_str!("asset_session.rs");
+    let gate = source.split_once("    fn ios_archive_gate(").unwrap().1
+        .split_once("    pub(crate) fn ios_archive_subscribe").unwrap().0;
+    let peer_contract = |value: &str| {
+        let calls = ["self.inner.bridge.artifact_inspection.disabled()",
+            "self.inner.bridge.artifact_inspection.stopping()",
+            "self.inner.bridge.artifact_inspection.busy()"];
+        if calls.iter().any(|call| value.matches(*call).count() != 1) { return false; }
+        let disabled = value.find(calls[0]).unwrap();
+        let stopping = value.find(calls[1]).unwrap();
+        let busy = value.find(calls[2]).unwrap();
+        let Some(platform) = value.find("ios_archive_document_gate(state,") else { return false; };
+        disabled < stopping && stopping < platform && platform < busy
+            && value[disabled..stopping].contains("return Availability::CleanupUnknown;")
+            && value[stopping..platform].contains("return Availability::Shutdown;")
+            && value[busy..].contains("return Availability::Busy;")
+    };
+    assert!(peer_contract(gate));
+    for call in ["self.inner.bridge.artifact_inspection.disabled()",
+        "self.inner.bridge.artifact_inspection.stopping()",
+        "self.inner.bridge.artifact_inspection.busy()"] {
+        assert!(!peer_contract(&gate.replacen(call, "false", 1)));
+    }
     assert_eq!((modes.unsigned, modes.signed, modes.recovery),
         (ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected(), ios.inner.ios_installed_selected()));
 }
@@ -144,14 +169,14 @@ fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_se
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration_callback() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
             SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
-            SavedCommandDomain::ArtifactInspection => bridge.artifact_inspection.clone(),
+            SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
         };
         original.inner.lock().prepared = Some(Prepared { projection: projection(domain),
             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
@@ -179,6 +204,10 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
         // Removing the redundant shell idle check does not bypass shutdown or
         // document loss: the same admission method must still refuse callback.
         entered.set(false); original.request_shutdown();
+        if domain == SavedCommandDomain::ArtifactInspection {
+            // Actual original peer shutdown precedes unsupported-platform DATA.
+            assert_eq!(document.ios_archive_status().unwrap().availability, ios_wire::Availability::Shutdown);
+        }
         assert_eq!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).err().unwrap().code, "shutting_down");
         document.lost();
         assert!(document.configuration_edit_admit(|_| { entered.set(true); Ok(()) }).is_err());
@@ -189,14 +218,14 @@ fn document_prepared_saved_domains_exclude_peers_and_retire_before_configuration
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 #[test]
 fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_and_cancel() {
-    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive] {
+    for domain in [SavedCommandDomain::OfflinePreflight, SavedCommandDomain::AndroidBuild, SavedCommandDomain::ProjectRecovery, SavedCommandDomain::IOSArchive, SavedCommandDomain::ArtifactInspection] {
         let (bridge, document) = bound_document_model();
         let original = match domain {
             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
             SavedCommandDomain::AndroidBuild => bridge.android_build.original_for_test(),
             SavedCommandDomain::ProjectRecovery => bridge.project_recovery.original_for_test(),
             SavedCommandDomain::IOSArchive => bridge.ios_archive.original_for_test(),
-            SavedCommandDomain::ArtifactInspection => bridge.artifact_inspection.clone(),
+            SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
         };
         let (application, owner) = active_in(original.clone());
         assert!(Arc::ptr_eq(&application.inner, &original.inner));
@@ -227,6 +256,10 @@ fn document_active_saved_domains_stop_before_writes_and_unknown_retains_status_a
         };
         drop(watchdog);
         assert!(!application.can_exit() && application.disabled());
+        if domain == SavedCommandDomain::ArtifactInspection {
+            // Missing actual joins become retained Unknown, not a new iOS run.
+            assert_eq!(document.ios_archive_status().unwrap().availability, ios_wire::Availability::CleanupUnknown);
+        }
         assert_eq!(document.offline_preflight_status().unwrap().availability, wire::Availability::CleanupUnknown);
         assert_eq!(document.android_build_status().unwrap().availability, android_wire::Availability::CleanupUnknown);
         assert_eq!(document.project_recovery_status().unwrap().availability, recovery_wire::Availability::CleanupUnknown);
@@ -1154,6 +1187,32 @@ fn earlier_actual_native_failure_shortens_original_cutoff_even_when_observed_aft
 
 #[test]
 fn artifact_two_frames_without_selected_originals_never_publish_and_first_stop_never_renews() {
+    // Same real registry and shutdown method, with an inert unstarted intent.
+    // No selected-original/worker custody is invented by this DATA fixture.
+    let prepared = application(SavedCommandDomain::ArtifactInspection);
+    assert!(prepared.can_exit() && !prepared.stopping());
+    let intent = projection(SavedCommandDomain::ArtifactInspection);
+    let intent_id = intent.operation_id.clone();
+    let intent_generation = intent.owner_generation.clone();
+    prepared.inner.lock().prepared = Some(Prepared { projection: intent,
+        expires: Instant::now() + INTENT, registration: 1, project: project(),
+        recovery_stamp: None, material: None, recovery: None, android_selection: None,
+        artifact_selection: None, artifact_tools: None });
+    assert!(prepared.busy() && !prepared.can_exit());
+    prepared.request_shutdown();
+    assert!(prepared.stopping() && prepared.can_exit());
+    for _ in 0..2 {
+        let registry = prepared.inner.lock();
+        assert!(registry.prepared.is_none() && registry.active.is_none());
+        let retired = registry.last.as_ref().unwrap();
+        assert_eq!((&retired.operation_id, &retired.owner_generation), (&intent_id, &intent_generation));
+        assert_eq!(retired.reason, Reason::Shutdown);
+        assert!(!retired.intent_usable && retired.result.is_none());
+        drop(registry);
+        prepared.request_shutdown();
+    }
+    assert!(prepared.can_exit() && prepared.stopping());
+
     let (application,owner)=active(SavedCommandDomain::ArtifactInspection);
     let t=owner.clocks.admitted;
     assert_eq!(owner.clocks.work,t+Duration::from_secs(900));
@@ -1180,6 +1239,8 @@ fn artifact_two_frames_without_selected_originals_never_publish_and_first_stop_n
     assert!(Arc::ptr_eq(&active.owner,&owner)&&active.unknown&&!active.final_join_seen);
     assert_eq!(active.first_stop,first);assert!(active.projection.public().result.is_none());
     assert!(r.last.is_none()&&r.prepared.is_none());
+    drop(r);
+    assert!(application.stopping() && !application.can_exit());
 }
 
 #[test]
