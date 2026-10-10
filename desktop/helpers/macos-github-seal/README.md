@@ -1,7 +1,7 @@
 # Fixed canonical sealed-box helper
 
-This is an **inactive, separately built helper**, not secret provisioning or
-remote-write qualification. Desktop must never link or call sodium, including
+This is a **separately built helper with an unconfigured signing nomination**,
+not secret provisioning or remote-write qualification. Desktop must never link or call sodium, including
 its initializer: the default canonical entropy path can abort the calling
 process. This standalone package has no dependency/build-script graph and does
 not use the acquired `libsodium-sys-stable` crate. No alternate algorithm, RNG,
@@ -24,15 +24,16 @@ low-order-key table, signature implementation or HTTP client is present.
 - Only `aarch64-apple-darwin` and `x86_64-apple-darwin`. The proposed fixed Rust
   command is `cargo rustc --frozen --offline --release --target <actual-target>
   --bin mrk-github-seal -- -L native=<actual-owned-target-library-directory>`.
-  This is documentation, **not an approved executable build control**. Static
+  The dedicated canonical helper build workflow supplies reviewed controls. Static
   linking is required by the source attribute. The owner must bind the actual
   `libsodium.a`, complete library-directory roster, header bytes and resulting
   Mach-O, not trust the supplied directory string. Strip uncontrolled Cargo,
   linker and Rust environment overrides. No `build.rs` is provided.
 - Actual per-target linking, absence of a dynamic sodium dependency, signed
   packaged helper identity and original-custody checks remain required. The
-  target location is `Contents/Helpers/mrk-github-seal`; this package alone does
-  not add it to any app, runtime inventory, native registry or workflow.
+  target location is `Contents/Helpers/mrk-github-seal` within the nested payload
+  app. The separate signing/enrollment route below supplies it only after an
+  actual configured build and signed-capsule nomination.
 
 ## One-shot private protocol
 
@@ -101,7 +102,11 @@ non-Mac helper build is refused. Do not call these tests native crypto evidence.
 
 `macos_tests.rs` retains that **actual canonical-library** group, including all
 returned wiping/low-order/first-error assertions, and extends it with eight
-sequential real child originals under the existing build owner's10-second cap.
+sequential real child originals. The existing build owner runs the same exact
+selected test twice: ordinary6 then denied2, sharing ONE absolute10-second
+endpoint and ONE64KiB captured-output allowance, not two renewed budgets.
+The complete build now has23 ordered command originals; both selected test
+invocations must pass before any combined eight-case evidence is published.
 Three unchanged release-helper children receive public0/3/max binary frames
 through actual pipes, close stdin, return exact ciphertext+EOF, close both
 reader originals and exit0. Canonical test-only `crypto_box_seal_open` must
@@ -110,8 +115,10 @@ helper children really refuse trailing input and the low-order public key.
 
 One additional fixed-device probe test runs as two child controls: normal
 opens/checked closes of both `/dev/urandom` and `/dev/random`, then actual
-EPERM/EACCES for both under one fixed child-only sandbox policy. The eighth
-unchanged helper uses that same policy and valid frame: actual SIGABRT, no
+EPERM/EACCES for both under the second top-level original's fixed network-and-
+device-denied policy. The test parent and its two direct children inherit that
+policy; no nested sandbox-exec is attempted. The eighth unchanged helper uses
+that same policy and valid frame: actual SIGABRT, no
 ciphertext, all parent pipe closes/EOF/wait. The canonical backend must be
 `sysrandom`; no RNG override/interposer or production protocol is added.
 Abort does NOT prove returned erasure, randombytes_close or child-FD closes.
@@ -124,3 +131,47 @@ checks and independent public compatibility evidence remain required.
 
 No native phase slot, material loan, secret transport, UI, packaging selector or
 secret feature is activated by these files.
+
+
+## Fixed signing and package enrollment (SOURCE implemented, not qualified)
+
+`desktop/macos-installed-inputs/github-tool-signing.json` has exactly the seal
+helper and GitHub history provider, each for ARM64 and Intel. All nominations
+start **unconfigured**. The existing Python-signing workflow has a separate
+fixed `verify/desktop-macos-github-tool-signing` push route; it does not run the
+Python supplier branch or execute either tool. Each original signing operation
+uses the existing Developer ID credential owner and performs one timestamped
+sign plus one strict identifier/team/certificate verification, then checks the
+unchanged loader/content and every original's retirement. Gh is capped at64MiB,
+seal at16MiB; existing Python32MiB and credential limits are unchanged.
+
+A SOURCE-enrolled build capsule has only the fixed binary and
+`tool-build-receipt.json`. The normalized receipt must derive from **actual
+finalized build evidence**, not a hand-authored success assertion. The gh-only
+`buildOrigin` distinguishes the real offline crossbuild from subsequent capsule
+publication. Top-level sourceCommit/runId/runAttempt identify that later real
+publication; they must not be described as the offline compiler's GitHub run.
+The gh source manifest, notice-complete content, actual result/child/namespace
+and source/dependency/toolchain POST records remain bound. Existing accepted
+notice-complete products can be reused through that reviewed adapter: an
+identical rebuild is not intrinsically required. Old PLACEHOLDER-notice probes
+cannot be nominated. Real transport artifact IDs are required before download.
+
+After successful original signing and publication, independently enroll the
+signed capsule's exact binary and receipt hashes/lengths and profile hashes.
+The download action checks its artifact digest and the owner checks the two
+exact members; no independent raw-ZIP hash verification is claimed. Neither a
+raw binary nor artifact existence is a signing receipt. Do not invent hashes,
+replace a SOURCE row with a runtime-discovered value, or mark null profiles ready.
+
+The installed caller passes signed gh to the existing current-runtime overlay
+and pairs seal's SHA256/bytes before desktop compilation. App staging preserves
+seal0555 and includes the verbatim ISC notice; fixed executable inventory paths
+and original-bound verification include both tools. All unchanged signed-input,
+Developer ID Installer and notarization requirements still apply. Canonical
+runtime/source bindings and current owner/source-pin closure must be enrolled
+from real returned artifacts in a subsequent reviewed change. Current helper
+`macos_aqua_qualification.load_owner` pins need deliberate reconciliation with
+the current cancellation source; this source slice does not relax that check.
+No target build, credential use, signing, installed journey or remote provisioning
+is claimed by this implementation or its DATA-only regressions.

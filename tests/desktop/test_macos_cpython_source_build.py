@@ -7563,6 +7563,61 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 with self.subTest(target=target, prefix=body[:12]), self.assertRaises(PROBE.ProbeRefused):
                     PROBE.macho(body, target)
 
+        # Provider-only Go12 policy uses the existing load-table parser; old
+        # CPython/Seal26 above is unchanged. These are tiny inert headers.
+        seal_name, macho_name = "_mrk_provider_macho_data", "_mrk_provider_load_table_data"
+        self.assertNotIn(seal_name, sys.modules)
+        self.assertNotIn(macho_name, sys.modules)
+        seal = load(seal_name, "macos_github_seal_build.py")
+        parser = load(macho_name, "macos_cpython_orchestrator.py")
+        try:
+            def string_command(command, text):
+                raw = text.encode("ascii") + b"\0"
+                offset = 24 if command == 0xC else 12
+                size = (offset + len(raw) + 7) // 8 * 8
+                return struct.pack("<III", command, size, offset) + b"\0" * (offset - 12) + raw + b"\0" * (size - offset - len(raw))
+            def provider_header(target, *, minimum=12 << 16, loads=None, extra=b"", signed=None):
+                cpu, subtype = seal.TARGETS[target][3:]
+                commands = [struct.pack("<6I", 0x32, 24, 1, minimum, 12 << 16, 0),
+                            string_command(0xE, "/usr/lib/dyld")]
+                commands.extend(string_command(0xC, name) for name in (seal.PROVIDER_LOADS if loads is None else loads))
+                if extra:
+                    commands.append(extra)
+                if signed is None:
+                    signed = target == "aarch64-apple-darwin"
+                if signed:
+                    start = 32 + sum(map(len, commands)) + 16
+                    commands.append(struct.pack("<4I", 0x1D, 16, start, 8))
+                table = b"".join(commands)
+                return struct.pack("<8I", 0xFEEDFACF, cpu, subtype, 2, len(commands), len(table), 0, 0) + table + (b"signature"[:8] if signed else b"")
+            for target in seal.PROVIDER_PINS:
+                body = provider_header(target)
+                got = seal.provider_macho_data(body, len(body), target, parser)
+                self.assertEqual(got["minimumMacOS"], "12.0")
+                self.assertEqual(got["sdk"], "12.0")
+                self.assertEqual(tuple(got["loadDylibs"]), seal.PROVIDER_LOADS)
+                self.assertEqual(got["GoAdHocSignatureCommand"], target == "aarch64-apple-darwin")
+                self.assertIs(got["DeveloperIdQualified"], False)
+                other = next(name for name in seal.PROVIDER_PINS if name != target)
+                bad = [provider_header(other), provider_header(target, minimum=26 << 16),
+                       provider_header(target, loads=seal.PROVIDER_LOADS[:-1]),
+                       provider_header(target, loads=(*seal.PROVIDER_LOADS, seal.PROVIDER_LOADS[0])),
+                       provider_header(target, loads=("@rpath/foreign.dylib", *seal.PROVIDER_LOADS[1:])),
+                       provider_header(target, signed=target != "aarch64-apple-darwin"),
+                       provider_header(target, extra=struct.pack("<IIQ", 0x8000001C, 16, 0)),
+                       b"\xca\xfe\xba\xbe" + body[4:], body[:31]]
+                for changed in bad:
+                    with self.subTest(provider=target, mutated=changed[:16]), self.assertRaises(ValueError):
+                        seal.provider_macho_data(changed, len(changed), target, parser)
+                with self.assertRaises(ValueError):
+                    seal.provider_macho_data(body[:-1], len(body) - 1, target, parser)
+                # Provider12 acceptance is not permission for the old26 role.
+                with self.assertRaises(PROBE.ProbeRefused):
+                    PROBE.macho(body, target)
+        finally:
+            self.assertIs(sys.modules.pop(macho_name), parser)
+            self.assertIs(sys.modules.pop(seal_name), seal)
+
     def test_paired_native_host_and_report_data_do_not_cross_target_or_translation(self):
         # These are scalar observations only: no ctypes/sysctl/process or
         # simulated native receipt is executed or admitted by this DATA test.
@@ -8485,20 +8540,57 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             # stderr filtering, symbol-count weakening or fallback option.
             self.assertIn('        B.need(symbols.stderr == b"", "static-symbol-query")\n        lines = symbols.stdout.decode("ascii", "strict").splitlines()\n        for name in ("_sodium_init", "_crypto_box_seal", "_sodium_memzero", "_randombytes_close"):\n            B.need(sum(bool(re.fullmatch(r"[0-9a-fA-F]+ [A-Z] " + re.escape(name), line.strip())) for line in lines) == 1,\n                   "canonical-four-symbol-definition")\n', source_text)
             # New checks are SOURCE-only here; actual process/entropy/crypto
-            # evidence requires the same selected native1 original on each Mac.
+            # evidence requires both fixed selected native originals on each Mac.
             helper_root = ROOT / "desktop/helpers/macos-github-seal"
             for helper_leaf, expected_pin in seal.HELPER_PINS.items():
                 helper_body = (helper_root / helper_leaf).read_bytes()
                 self.assertEqual((len(helper_body), hashlib.sha256(helper_body).hexdigest()), expected_pin)
-            self.assertEqual(len(seal.ROLE_LIMITS), 22)
-            self.assertEqual(seal.ROLE_LIMITS[-1], ("helper-native-test", 10, seal.QUERY_LIMIT))
+            self.assertEqual(len(seal.ROLE_LIMITS), 23)
+            self.assertEqual(seal.ROLE_LIMITS[-2:], (("helper-native-test", 10, seal.QUERY_LIMIT),
+                ("helper-entropy-test", 10, seal.QUERY_LIMIT)))
             self.assertEqual(seal.NATIVE_TEST, "macos::tests::canonical_return_paths_wipe_input_and_refuse_low_order_key")
             native_source = (helper_root / "src/macos_tests.rs").read_text()
             self.assertEqual(native_source.count("#[test]"), 2)
-            self.assertIn("framed_build_parent_and_entropy_denial();", native_source)
+            self.assertIn("framed_build_parent_and_entropy_denial(phase);", native_source)
             self.assertIn("Case::Good(0), Case::Good(3), Case::Good(protocol::MAX_PLAINTEXT)", native_source)
-            self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl, Case::DeviceDenied, Case::EntropyDenied", native_source)
-            self.assertIn("assert_eq!(closed_originals, 8);", native_source)
+            self.assertIn("Case::Trailing, Case::LowOrder, Case::DeviceControl]", native_source)
+            self.assertIn("TestPhase::Denied => &[Case::DeviceDenied, Case::EntropyDenied]", native_source)
+            self.assertIn("assert_eq!(closed_originals, match phase { TestPhase::Ordinary => 6, TestPhase::Denied => 2 });", native_source)
+            self.assertNotIn('Command::new("/usr/bin/sandbox-exec")', native_source)
+            self.assertIn('if phase == TestPhase::Ordinary { returned_canonical_checks(); }', native_source)
+            self.assertIn('Ok("ordinary6") => TestPhase::Ordinary', native_source)
+            self.assertIn('Ok("denied2") => TestPhase::Denied', native_source)
+            self.assertIn('_ => panic!("closed test-only owner phase")', native_source)
+            # Canonical name lookup also initializes/stirs the RNG: the denied
+            # parent must reach its children, not abort in this observation.
+            backend_observer = native_source.split('fn framed_build_parent_and_entropy_denial(phase: TestPhase) {', 1)[1].split('    let current =', 1)[0]
+            self.assertEqual(backend_observer, '\n    use std::os::unix::process::ExitStatusExt;\n    if phase == TestPhase::Ordinary {\n        // This API initializes/stirs the RNG. Only ordinary may call it;\n        // denied must reach its actual device probe before any entropy use.\n        let name = unsafe { randombytes_implementation_name() };\n        assert!(!name.is_null());\n        let mut backend = [0u8; 10];\n        for (offset, slot) in backend.iter_mut().enumerate() {\n            // Canonical API returns a static NUL-terminated C string. Stop at its\n            // actual NUL; never read beyond a shorter unexpected backend name.\n            *slot = unsafe { name.add(offset).read() } as u8;\n            if *slot == 0 { break; }\n        }\n        assert_eq!(&backend, b"sysrandom\\0");\n    }\n')
+            self.assertEqual(native_source.count('unsafe { randombytes_implementation_name() }'), 1)
+            # Fixed diagnostic SOURCE only; no child/native/panic is executed.
+            captured_at = native_source.index('let captured = capture_case(case, &current, &helper).expect("actual child IO/close/wait");')
+            report_at = native_source.index('report_captured(case, &captured);')
+            refusal_at = native_source.index('assert!(captured.error.is_empty(), "no child diagnostic accepted");')
+            self.assertLess(captured_at, report_at); self.assertLess(report_at, refusal_at)
+            self.assertEqual(native_source.count('report_captured(case, &captured);'), 1)
+            reporter = native_source.split('fn report_captured(case: Case, captured: &Capture) {', 1)[1].split('fn pipe_original<', 1)[0]
+            self.assertEqual(reporter.count('eprintln!('), 1)
+            self.assertIn('MRK_SEAL_CHILD_DIAGNOSTIC_V1 case={} code={} signal={} stdoutBytes={} stderrBytes={} tokenMask={:03x} parentPipesAndWait=returned', reporter)
+            self.assertIn('captured.status.code().unwrap_or(-1)', reporter)
+            self.assertIn('captured.status.signal().unwrap_or(0)', reporter)
+            self.assertIn('captured.output.len(), captured.error.len(), diagnostic_tokens(&captured.error)', reporter)
+            for forbidden in ('from_utf8', 'from_utf8_lossy', 'Debug', '{:?}', 'std::env', 'as_os_str'):
+                self.assertNotIn(forbidden, reporter)
+            classifier = native_source.split('fn diagnostic_tokens(error: &[u8]) -> u16 {', 1)[1].split('fn diagnostic_data_checks()', 1)[0]
+            self.assertIn('if error.len() > 1024 { return 0; }', classifier)
+            for token in ('sandbox-exec:', 'sandbox_apply', 'sandbox_init', 'Operation not permitted', 'Permission denied',
+                          'dyld:', 'dyld[', 'Library not loaded:', 'Symbol not found:', 'panicked at', 'fatal runtime error:', 'memory allocation of'):
+                self.assertIn('b"' + token + '"', classifier)
+            self.assertIn('diagnostic_data_checks();', native_source)
+            # Worst fixed case/i32/length formatting is below the promised bound.
+            longest = ('MRK_SEAL_CHILD_DIAGNOSTIC_V1 case=device-control code=-2147483648 signal=-2147483648 '
+                       'stdoutBytes=49212 stderrBytes=1024 tokenMask=3ff parentPipesAndWait=returned\n')
+            self.assertLessEqual(len(longest.encode('ascii')), 256)
+
             self.assertIn("assert_eq!(captured.status.signal(), Some(6));", native_source)
             self.assertIn("matches!(error.raw_os_error(), Some(1 | 13))", native_source)
             self.assertIn('command.env_clear().env("LANG", "C").env("LC_ALL", "C");', native_source)
@@ -8512,6 +8604,115 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertIn('"framedBuildParentRoundTrip": True', source_text)
             self.assertIn('"installedDesktopParentQualified": False', source_text)
             self.assertIn('"abortReturnedWipeClaim": False', source_text)
+            # Exercise the real fixed caller + run/remaining/parser bodies.
+            # The sole process port returns inert CompletedProcess DATA: this
+            # proves routing/refusal, NOT a sandbox, entropy or native receipt.
+            exact_output = ("running 1 test\ntest " + seal.NATIVE_TEST + " ... ok\n"
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.01s\n").encode("ascii")
+            self.assertEqual(seal.NATIVE_PHASES, (("helper-native-test", "ordinary6", 6),
+                ("helper-entropy-test", "denied2", 2)))
+            self.assertEqual(seal.NATIVE_DENIED_POLICY,
+                '(version 1)(allow default)(deny network*)(deny file-read-data (literal "/dev/urandom") (literal "/dev/random"))')
+            for scenario in ("success", "first-nonzero", "second-nonzero", "first-stderr", "second-stderr",
+                             "second-bad-count", "expired-first", "capture-empty", "capture-overflow", "unknown-original"):
+                with self.subTest(native_pair=scenario):
+                    clock, calls, events = [100.0], [], []
+                    base_environment = {"LANG": "C", "LC_ALL": "C", "ZERO_AR_DATE": "1"}
+                    original_environment = dict(base_environment)
+                    verdict = SimpleNamespace(complete=True, fatal=False, contained=True)
+                    failure = OSError("inert original uncertainty")
+                    def returned(argv, **kwargs):
+                        calls.append((list(argv), kwargs))
+                        index = len(calls)
+                        if scenario == "unknown-original":
+                            verdict.complete = False
+                            raise failure
+                        clock[0] += 3 if index == 1 else 2
+                        if scenario == "expired-first" and index == 1: clock[0] = 110.0
+                        output, error, code = exact_output, b"", 0
+                        if scenario == "first-nonzero" and index == 1 or scenario == "second-nonzero" and index == 2: code = 1
+                        if scenario == "first-stderr" and index == 1 or scenario == "second-stderr" and index == 2: error = b"inert refusal"
+                        if scenario == "second-bad-count" and index == 2: output = output.replace(b"4 filtered", b"3 filtered")
+                        if scenario == "capture-empty" and index == 1: output += b"\n" * (seal.QUERY_LIMIT - len(output))
+                        if scenario == "capture-overflow" and index == 2: output = b"x" * (kwargs["output_limit"] + 1)
+                        return subprocess.CompletedProcess(argv, code, output, error)
+                    receiver = SimpleNamespace(deadline=200.0, native_deadline=None, native_capture_remaining=0,
+                        provider_mode=False, role_limits=seal.ROLE_LIMITS, entered=21, returned=21,
+                        native={}, commands=[], environment=base_environment, private=Path("/inert/private"),
+                        sandbox="/usr/bin/sandbox-exec", inflight=False, phase="inert",
+                        check=lambda: None, recheck_tools=lambda: events.append("tools-post"),
+                        census=lambda: {"inert": True}, evidence_bytes=lambda name, data: BUILD.digest(data),
+                        owner=SimpleNamespace(run_owned=returned),
+                        guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda: verdict)))
+                    receiver.run = lambda *args, **kwargs: seal.SealBuild.run(receiver, *args, **kwargs)
+                    with patch.object(seal.time, "monotonic", side_effect=lambda: clock[0]):
+                        if scenario == "success":
+                            seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        elif scenario == "unknown-original":
+                            with self.assertRaises(OSError) as caught:
+                                seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                            self.assertIs(caught.exception, failure)
+                        else:
+                            with self.assertRaises(BUILD.BuildRefused):
+                                seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        # The pair cannot be restarted even after a known failure.
+                        count = len(calls)
+                        with self.assertRaisesRegex(BUILD.BuildRefused, "^native-pair-admission$"):
+                            seal.SealBuild.native_tests(receiver, Path("/inert/test"))
+                        self.assertEqual(len(calls), count)
+                    self.assertIs(receiver.environment, base_environment)
+                    self.assertEqual(base_environment, original_environment)
+                    self.assertEqual(receiver.native_deadline, 110.0)
+                    for index, (argv, kwargs) in enumerate(calls):
+                        self.assertEqual(argv, ["/usr/bin/sandbox-exec", "-p",
+                            BUILD.NETWORK_POLICY if index == 0 else seal.NATIVE_DENIED_POLICY,
+                            "/inert/test", seal.NATIVE_TEST, "--exact", "--test-threads=1"])
+                        self.assertEqual(kwargs["environ"], {**base_environment, seal.NATIVE_PHASE_ENV: "ordinary6" if index == 0 else "denied2"})
+                        self.assertIsNot(kwargs["environ"], base_environment)
+                        self.assertIs(kwargs["cancellation"], receiver.guard)
+                        self.assertEqual(kwargs["timeout"], 10 if index == 0 else 7)
+                        self.assertEqual(kwargs["output_limit"], seal.QUERY_LIMIT - index * len(exact_output))
+                        self.assertTrue(kwargs["capture"]); self.assertFalse(kwargs["text"])
+                        self.assertEqual(receiver.commands[index]["environmentSha256"], BUILD.digest(BUILD.canonical(kwargs["environ"])))
+                    if scenario == "success":
+                        self.assertEqual((receiver.entered, receiver.returned), (23, 23))
+                        self.assertEqual(receiver.native_capture_remaining, seal.QUERY_LIMIT - 2 * len(exact_output))
+                        combined = receiver.native["helperNativeTest"]
+                        self.assertEqual((combined["passed"], combined["selectedInvocations"], combined["nestedOriginalsClosed"]), (2, 2, 8))
+                        self.assertEqual(combined["phases"], [{"phase": "ordinary6", "passed": 1, "nestedOriginalsClosed": 6},
+                            {"phase": "denied2", "passed": 1, "nestedOriginalsClosed": 2}])
+                        self.assertFalse(combined["abortReturnedWipeClaim"])
+                        self.assertFalse(combined["installedDesktopParentQualified"])
+                        self.assertFalse(receiver.inflight)
+                    else:
+                        self.assertNotIn("helperNativeTest", receiver.native)
+                        if scenario in {"expired-first", "capture-empty", "unknown-original", "first-nonzero", "first-stderr"}:
+                            self.assertEqual(len(calls), 1)
+                        if scenario == "unknown-original":
+                            self.assertTrue(receiver.inflight)
+                            self.assertEqual((receiver.entered, receiver.returned), (22, 21))
+            # Other recipe/provider modes retain the original sandbox/env/limit.
+            for provider in (False, True):
+                role = "provider-version" if provider else "compiler-version"
+                calls, events = [], []
+                environment = {"LANG": "C"}
+                def other_returned(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    return subprocess.CompletedProcess(argv, 0, seal.PROVIDER_VERSION if provider else b"inert\n", b"")
+                receiver = SimpleNamespace(deadline=120.0, role_limits=((role, 30, seal.QUERY_LIMIT),),
+                    entered=0, returned=0, provider_mode=provider, environment=environment,
+                    sandbox="/usr/bin/sandbox-exec", private=Path("/inert/private"), commands=[],
+                    check=lambda: None, recheck_tools=lambda: None,
+                    provider_post=lambda: events.append("provider-post"), census=lambda: {},
+                    evidence_bytes=lambda name, data: BUILD.digest(data),
+                    owner=SimpleNamespace(run_owned=other_returned), guard=object())
+                with patch.object(seal.time, "monotonic", return_value=100.0):
+                    seal.SealBuild.run(receiver, role, ["/inert/program"])
+                self.assertEqual(calls[0][0], ["/usr/bin/sandbox-exec", "-p", BUILD.NETWORK_POLICY, "/inert/program"])
+                self.assertIs(calls[0][1]["environ"], environment)
+                self.assertEqual((calls[0][1]["timeout"], calls[0][1]["output_limit"]), (20, seal.QUERY_LIMIT))
+                self.assertEqual(events, ["provider-post", "provider-post"] if provider else [])
+
             # Production helper and binary wire source remain exactly unchanged.
             for fixed, fixed_digest in {
                 "src/main.rs": "14392210ce19e06e91da0a93ad6ac5a6ac142bc658cf0d25a838f9cec3261310",
@@ -8595,6 +8796,212 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     self.assertEqual(target.read_bytes(), b"actual generated metadata; not linker authority")
                     self.assertEqual(BUILD.DATA.known, mode != "unknown-data")
                     self.assertEqual(BUILD.DATA._pending, 0)
+            # Same fixed owner route, not a second native/process test. The
+            # expected rc1 is accepted only for one exact provider observation.
+            self.assertIs(seal.probe_mode([], seal.REFERENCE), False)
+            self.assertIs(seal.probe_mode(["--history-provider-probe"], seal.PROVIDER_REFERENCE), True)
+            for args, reference in (([], seal.PROVIDER_REFERENCE), (["--history-provider-probe"], seal.REFERENCE),
+                                    (["--history-provider-probe", "extra"], seal.PROVIDER_REFERENCE), ([], "refs/heads/main")):
+                with self.assertRaises(ValueError):
+                    seal.probe_mode(args, reference)
+            self.assertEqual(len(seal.ROLE_LIMITS), 23)
+            self.assertEqual(seal.PROVIDER_ROLES, (("network-denial", 15, 65536),
+                ("provider-version", 15, 65536), ("provider-invalid-controls", 15, 65536)))
+            self.assertEqual((seal.WORK_SECONDS, seal.CLEANUP_SECONDS, seal.WORK_ENTRIES, seal.WORK_BYTES),
+                             (900, 60, 8192, 512 * 1024 * 1024))
+            # Actual both-architecture output and the unchanged upstream
+            # changelogURL rule: the modified version's second hyphen chooses
+            # /latest, not a fabricated upstream release tag. Keep every byte.
+            observed_version = (b"gh version 2.88.1-mrk-history.1 (2026-10-09)\n"
+                                b"https://github.com/cli/cli/releases/latest\n")
+            self.assertEqual(len(observed_version), 88)
+            self.assertEqual(seal.PROVIDER_VERSION, observed_version)
+            self.assertTrue(seal.provider_output("provider-version", 0, observed_version, b""))
+            for changed_version_output in (
+                    observed_version.replace(b"releases/latest", b"releases/tag/v2.88.1-mrk-history.1"),
+                    observed_version.replace(b"2.88.1-mrk-history.1", b"2.88.1"),
+                    observed_version.replace(b"2026-10-09", b"2026-10-10"),
+                    observed_version + b"extra\n"):
+                self.assertFalse(seal.provider_output("provider-version", 0, changed_version_output, b""))
+            self.assertFalse(seal.provider_output("provider-version", 0, observed_version, b"unexpected\n"))
+            self.assertTrue(seal.provider_output("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL))
+            for role, code, stdout, stderr in (("provider-version", 1, seal.PROVIDER_VERSION, b""),
+                    ("provider-invalid-controls", 0, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", True, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", -9, b"", seal.PROVIDER_REFUSAL),
+                    ("provider-invalid-controls", 1, b"", b"authentication required\n"),
+                    ("provider-invalid-controls", 1, b"", seal.PROVIDER_REFUSAL + b"extra"),
+                    ("provider-invalid-controls", 1, b"unexpected", seal.PROVIDER_REFUSAL),
+                    ("helper-native-test", 1, b"", seal.PROVIDER_REFUSAL)):
+                self.assertFalse(seal.provider_output(role, code, stdout, stderr))
+            # Actual streaming/copy/POST over tiny test-owned inert bytes. A
+            # replaced same-content name is not the retained source original.
+            with scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                original = root / "input"
+                original.write_bytes(b"inert provider bytes; never launched")
+                pin = (original.stat().st_size, hashlib.sha256(original.read_bytes()).hexdigest())
+                receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                invoke = lambda **kw: seal.SealBuild.provider_stream(receiver, original, pin, **kw)
+                identity, prefix = invoke()
+                self.assertEqual(prefix, original.read_bytes())
+                copy_path = root / "copied"
+                invoke(original=identity, destination=copy_path)
+                self.assertEqual(copy_path.read_bytes(), prefix)
+                self.assertEqual(copy_path.stat().st_mode & 0o777, 0o555)
+                seal.SealBuild.provider_stream(receiver, copy_path, pin, original=receiver.provider_copy_identity)
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"):
+                    seal.SealBuild.provider_stream(receiver, original, (pin[0], "0" * 64))
+                saved = root / "saved"
+                original.rename(saved)
+                original.write_bytes(saved.read_bytes())
+                with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"):
+                    invoke(original=identity)
+                saved.unlink()
+                self.assertTrue(BUILD.DATA.known)
+                self.assertEqual(BUILD.DATA._pending, 0)
+            for fault in ("named-post", "close-unknown"):
+                with self.subTest(provider_stream=fault), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    path = root / "input"
+                    path.write_bytes(b"post-bound inert bytes")
+                    pin = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                    receiver = SimpleNamespace(check=lambda: None, provider_parents={str(root): BUILD.custody(root.lstat())})
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    real_read, real_close = os.read, os.close
+                    if fault == "named-post":
+                        def changed(fd, size):
+                            value = real_read(fd, size)
+                            if value == b"":
+                                path.rename(root / "retained")
+                                path.write_bytes(b"post-bound inert bytes")
+                            return value
+                        with patch.object(seal.os, "read", changed), self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-post"):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertTrue(BUILD.DATA.known)
+                    else:
+                        def closed_unknown(fd):
+                            real_close(fd)  # Real consuming close; no descriptor leak or retry.
+                            raise OSError("inert close-observation failure")
+                        with patch.object(seal.os, "close", closed_unknown), self.assertRaises(OSError):
+                            seal.SealBuild.provider_stream(receiver, path, pin)
+                        self.assertFalse(BUILD.DATA.known)
+                        self.assertEqual(BUILD.DATA._pending, 1)
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Exactly two descriptive sidecars use the actual existing stream
+            # originals; neither byte equality nor a replacement name is custody.
+            for scenario in ("ordinary", "wrong-hash", "replaced", "symlink", "missing", "read-fault", "close-fault"):
+                with self.subTest(provider_notices=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    directory = root / "provider-inputs"
+                    directory.mkdir()
+                    notice_pins, notice_originals = {}, {}
+                    parents = {str(root): BUILD.custody(root.lstat()), str(directory): BUILD.custody(directory.lstat())}
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = directory / target
+                        target_dir.mkdir()
+                        path = target_dir / "NOTICES.txt"
+                        path.write_bytes(b"Complete inert notice bytes; not executable\n")
+                        notice_pins[target] = (path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+                        notice_originals[target] = BUILD.identity(path.stat())
+                        parents[str(target_dir)] = BUILD.custody(target_dir.lstat())
+                    receiver = SimpleNamespace(check=lambda: None, provider_parents=parents,
+                                               provider_notice_originals=notice_originals)
+                    receiver.provider_parents_post = lambda: seal.SealBuild.provider_parents_post(receiver)
+                    receiver.provider_stream = lambda path, pin, **kw: seal.SealBuild.provider_stream(receiver, path, pin, **kw)
+                    invoke = lambda: seal.SealBuild.provider_notices_post(receiver)
+                    target = next(iter(seal.PROVIDER_PINS))
+                    path = directory / target / "NOTICES.txt"
+                    original_identity = notice_originals[target]
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(seal, "PROVIDER_NOTICE_PINS", notice_pins):
+                        if scenario == "ordinary":
+                            invoke()
+                            self.assertEqual(notice_originals[target], original_identity)
+                        elif scenario == "wrong-hash":
+                            notice_pins[target] = (notice_pins[target][0], "0" * 64)
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-pin"): invoke()
+                        elif scenario in {"replaced", "symlink"}:
+                            kept = path.with_name("retained")
+                            path.rename(kept)
+                            if scenario == "replaced": path.write_bytes(kept.read_bytes())
+                            else: path.symlink_to("retained")
+                            with self.assertRaisesRegex(BUILD.BuildRefused, "provider-input-original"): invoke()
+                        elif scenario == "missing":
+                            path.unlink()
+                            with self.assertRaises(FileNotFoundError): invoke()
+                        elif scenario == "read-fault":
+                            with patch.object(seal.os, "read", side_effect=OSError("inert read refusal")), self.assertRaises(OSError): invoke()
+                        else:
+                            actual_close = os.close
+                            def notice_close_unknown(fd):
+                                actual_close(fd)
+                                raise OSError("inert consuming close uncertainty")
+                            with patch.object(seal.os, "close", notice_close_unknown), self.assertRaises(OSError): invoke()
+                    self.assertEqual(BUILD.DATA.known, scenario != "close-fault")
+                    self.assertEqual(BUILD.DATA._pending, 1 if scenario == "close-fault" else 0)
+                    self.assertEqual(notice_originals[target], original_identity)
+                    if scenario == "close-fault":
+                        self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                            ledger={"complete": True, "fatal": False, "contained": True}, handlers="RESTORED",
+                            scratch_retired=True, data_finality=BUILD.DATA.known))
+            # Real production input roster refuses before the intentionally
+            # unavailable stream port; no dummy binary is admitted or launched.
+            for scenario in ("missing-notice", "unexpected-leaf"):
+                with self.subTest(provider_notice_roster=scenario), scratch() as root, patch.object(BUILD, "DATA", BUILD.DataFinality()):
+                    inputs = root / "provider-inputs"
+                    inputs.mkdir()
+                    for fixture_name in ("source-manifest.json", "crossbuild.json"): (inputs / fixture_name).write_bytes(b"inert")
+                    for target in seal.PROVIDER_PINS:
+                        target_dir = inputs / target
+                        target_dir.mkdir()
+                        (target_dir / "gh").write_bytes(b"inert-not-launched")
+                        (target_dir / "NOTICES.txt").write_bytes(b"inert")
+                    target = next(iter(seal.PROVIDER_PINS))
+                    if scenario == "missing-notice": (inputs / target / "NOTICES.txt").unlink()
+                    else: (inputs / target / "unexpected").write_bytes(b"refuse")
+                    receiver = SimpleNamespace(check=lambda: None, target=target)
+                    with patch.object(seal, "CHECKOUT", root), patch.object(seal, "PROVIDER_INPUT_ROOT", "provider-inputs"), patch.object(receiver, "provider_stream", create=True, side_effect=AssertionError("unexpected stream")) as stream:
+                        with self.assertRaises(BUILD.BuildRefused): seal.SealBuild.provider_input(receiver)
+                        stream.assert_not_called()
+                    self.assertTrue(BUILD.DATA.known)
+                    self.assertEqual(BUILD.DATA._pending, 0)
+            # Production run loop with an inert returned-value port, never a
+            # subprocess. Wrong role refuses before that port, wrong return
+            # shape cannot increment a successful command observation.
+            for scenario in ("exact", "wrong-role", "wrong-exit", "wrong-output", "wrong-original"):
+                trace = []
+                receiver = SimpleNamespace(provider_mode=True, role_limits=seal.PROVIDER_ROLES, entered=2, returned=2,
+                    sandbox="/fixed/sandbox", private=Path("/fixed/private"), environment={}, commands=[],
+                    check=lambda: None, provider_post=lambda: trace.append("post"), recheck_tools=lambda: None,
+                    evidence_bytes=lambda n, b: hashlib.sha256(b).hexdigest(), census=lambda: {"entries": 0, "bytes": 0},
+                    deadline=time.monotonic() + 60, guard=SimpleNamespace(lifetime_ledger=SimpleNamespace(verdict=lambda:
+                        SimpleNamespace(complete=True, fatal=False, contained=True))))
+                def returned(argv, **kwargs):
+                    trace.append("run")
+                    return subprocess.CompletedProcess(argv if scenario != "wrong-original" else [],
+                        0 if scenario == "wrong-exit" else 1, b"", b"wrong" if scenario == "wrong-output" else seal.PROVIDER_REFUSAL)
+                receiver.owner = SimpleNamespace(run_owned=returned)
+                if scenario == "exact":
+                    result = seal.SealBuild.run(receiver, "provider-invalid-controls", ["/fixed/gh", "api"])
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual((receiver.entered, receiver.returned), (3, 3))
+                    self.assertEqual(trace, ["post", "run", "post"])
+                else:
+                    with self.assertRaises(BUILD.BuildRefused):
+                        seal.SealBuild.run(receiver, "provider-version" if scenario == "wrong-role" else "provider-invalid-controls", ["/fixed/gh", "api"])
+                    if scenario == "wrong-role":
+                        self.assertEqual(trace, [])
+                # No parser return is an actual entry/publication grant.
+                self.assertFalse(BUILD.public_eligible(failure=None, entered=3, returned=3,
+                    ledger={"complete": False, "fatal": False, "contained": True}, handlers="RESTORED",
+                    scratch_retired=True, data_finality=True))
+            workflow = (ROOT / ".github/workflows/desktop-macos-github-seal.yml").read_text()
+            self.assertIn("      - verify/desktop-macos-github-seal\n      - verify/desktop-macos-history-provider-probe\n", workflow)
+            self.assertEqual(workflow.count("--history-provider-probe\n"), 1)
+            self.assertIn("test \"$GITHUB_REF\" = refs/heads/verify/desktop-macos-github-seal", workflow)
+            self.assertIn("timeout-minutes: 25", workflow)
+            self.assertIn("if-no-files-found: ignore", workflow)
+            self.assertNotIn("workflow_dispatch", workflow)
             # All nine fixed official metadata aliases are ordinary generated
             # work, including eight convenience archives on both Darwin CPUs.
             self.assertEqual(set(seal.LIBTOOL_ARCHIVES), {
@@ -8871,7 +9278,7 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                     for value in (True, False, "private-value", None, -(2 ** 31) - 1, 2 ** 31):
                         receiver.commands = [{"returned": True, "returncode": value}]
                         self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
-                    for commands in ([{"returned": 1, "returncode": 0}], [{}] * 23, (), None):
+                    for commands in ([{"returned": 1, "returncode": 0}], [{"returned": True, "returncode": 0}] * 24, (), None):
                         receiver.commands = commands
                         self.assertIn("lastRc=unavailable ", seal.failure_diagnostic(HostileError()))
                     receiver.inflight, receiver.scratch_retired, receiver.source_post = 1, 0, "private-value"
@@ -8881,6 +9288,13 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                         self.assertIn("reason=" + reason + " ", line)
                         self.assertLessEqual(len(line.encode("ascii")), 512)
                     self.assertIn("reason=unclassified ", seal.failure_diagnostic(BUILD.BuildRefused("/private/unknown")))
+                    receiver.phase, receiver.entered, receiver.returned = "helper-entropy-test", 23, 23
+                    receiver.commands = [{"returned": True, "returncode": 0}] * 23
+                    line = seal.failure_diagnostic(HostileError())
+                    self.assertIn("phase=helper-entropy-test calls=23/23", line)
+                    self.assertIn("lastRc=0 ", line)
+                    self.assertLessEqual(len(line.encode("ascii")), 512)
+                    receiver.entered = 22
                     receiver.phase, receiver.returned = "private-value", 23
                     self.assertIn("phase=unknown calls=unavailable data=unknown", seal.failure_diagnostic(HostileError()))
                     receiver.entered, receiver.returned = True, False

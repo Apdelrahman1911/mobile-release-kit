@@ -541,7 +541,7 @@ def write_tree(output, files, *, root_mode=0o555, app_signing=False, current_own
             for path, (body, mode) in sorted(files.items()):
                 # Signed resident image/helpers are copied unchanged/read-only.
                 # The raw desktop image is executable code for inside-out signing.
-                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER)
+                allowed_modes = (((0o555,) if path in (VAULT_HELPER, ANDROID_HELPER, RESIDENT_IMAGE, REMOVER, GITHUB_SEAL)
                                   else (0o755,) if path == DESKTOP_IMAGE else (0o644, 0o755))
                                  if app_signing else (0o444, 0o555))
                 need(mode in allowed_modes, "output-mode")
@@ -2336,7 +2336,110 @@ def android_service_input(app, expected, expected_image=None, *, target=ARM_TARG
          and app[ANDROID_SERVICE_PLIST][1] in (0o444, 0o644), "android-service-plist")
 
 
+GITHUB_SEAL = PAYLOAD_CONTENTS + "Helpers/mrk-github-seal"
+GITHUB_SEAL_NOTICE = PAYLOAD_CONTENTS + "Resources/mrk-github-seal/LICENSE.libsodium"
+GITHUB_SEAL_LIMIT = 16 * 1024 * 1024
+
+
+@contextlib.contextmanager
+def github_tool_leaf(path, limit, *, executable=False):
+    """Retain this exact leaf and complete parent chain through the caller."""
+    with _parent_originals(path) as (parents, parts):
+        outer, leaf = parents[-1], parts[-1]
+        parent_identities = tuple(current_directory_identity(os.fstat(fd)) for fd in parents)
+        def parents_post():
+            for index, held in enumerate(parents):
+                named = (os.stat("/", follow_symlinks=False) if index == 0 else
+                         os.stat(parts[index - 1], dir_fd=parents[index - 1], follow_symlinks=False))
+                need(current_directory_identity(os.fstat(held)) == current_directory_identity(named)
+                     == parent_identities[index], "github-tool-parent-changed")
+        parents_post()
+        before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
+        need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit
+             and stat.S_IMODE(before.st_mode) & 0o7022 == 0 and getattr(before, "st_flags", 0) == 0, "github-tool-original")
+        if executable:
+            need(stat.S_IMODE(before.st_mode) == 0o555 and before.st_uid == os.getuid()
+                 and before.st_gid == os.getgid(), "github-tool-executable")
+        fd = os.open(leaf, READ_FLAGS, dir_fd=outer)
+        try:
+            def capture():
+                parents_post()
+                need(signature(os.fstat(fd)) == signature(before)
+                     == signature(os.stat(leaf, dir_fd=outer, follow_symlinks=False)), "github-tool-original-changed")
+                need(getattr(os.fstat(fd), "st_flags", 0) == 0, "github-tool-flags")
+                no_xattrs(fd)
+                body = os.pread(fd, before.st_size + 1, 0)
+                need(len(body) == before.st_size and not os.pread(fd, 1, before.st_size)
+                     and signature(os.fstat(fd)) == signature(before), "github-tool-original-changed")
+                parents_post()
+                return body
+            body = capture()
+            yield body
+            need(capture() == body, "github-tool-original-changed")
+        finally:
+            close_once(fd)
+
+
+@contextlib.contextmanager
+def github_seal_files(args, *, installed=False):
+    target = command_target(args)
+    expected, count = getattr(args, "expected_github_seal", None), getattr(args, "expected_github_seal_bytes", None)
+    selected = getattr(args, "github_seal", None)
+    # Fixed prospective SOURCE/control budget plus at most three 16MiB binary
+    # copies. This is not an RSS guarantee; the ordinary app total cap remains.
+    with contextlib.ExitStack() as originals:
+        owner_path = DESKTOP / "tools/macos_android_helper_package.py"
+        owner_body = originals.enter_context(github_tool_leaf(owner_path, 2 * 1024 * 1024))
+        nomination = originals.enter_context(github_tool_leaf(DESKTOP / "macos-installed-inputs/github-tool-signing.json", 16384))
+        spec = importlib.util.spec_from_file_location("mrk_tool_nomination_data", owner_path)
+        need(spec is not None, "github-tool-source-loader")
+        module = importlib.util.module_from_spec(spec)
+        # Execute the captured SOURCE, never a subsequently resolved pathname;
+        # import is DATA-only and main/Operation are never invoked here.
+        exec(compile(owner_body, str(owner_path), "exec"), module.__dict__)
+        try:
+            row = module.tool_nomination_data(nomination)["tools"]["github-seal"][target]
+        except module.Refused as error:
+            raise Refused("github-tool-source-nomination") from error
+        if row["signed"]["state"] == "unconfigured":
+            need(expected is None and count is None and selected is None, "github-seal-unconfigured")
+            yield {}
+            return
+        signed = row["signed"]
+        need(sha(expected) and expected == signed["signedSha256"] and type(count) is int
+             and 0 < count <= GITHUB_SEAL_LIMIT and count == signed["signedBytes"], "github-seal-source-binding")
+        producer = originals.enter_context(github_tool_leaf(PRODUCER_PROFILE, 1024))
+        service = originals.enter_context(github_tool_leaf(SERVICE_PROFILE, 1024))
+        entitlements = originals.enter_context(github_tool_leaf(DESKTOP / "packaging/macos-empty-entitlements.plist", 1024))
+        packaging_signing_data(producer, service)
+        need(all(signed[key] == digest(value) for key, value in (("producerProfileSha256", producer),
+             ("serviceProfileSha256", service), ("entitlementsSha256", entitlements))), "github-seal-source-profiles")
+        if installed:
+            need(selected is None, "github-seal-derived-installed-path")
+            path = Path(args.app) / GITHUB_SEAL
+        else:
+            need(isinstance(selected, Path) and selected.is_absolute() and selected.name == "mrk-github-seal",
+                 "github-seal-selected-capsule")
+            path = selected
+            receipt = originals.enter_context(github_tool_leaf(path.parent / "tool-signed-receipt.json", 16384))
+            try:
+                module.tool_signed_receipt(receipt, row, "github-seal", target, producer, service, entitlements)
+            except module.Refused as error:
+                raise Refused("github-seal-signed-receipt") from error
+        body = originals.enter_context(github_tool_leaf(path, GITHUB_SEAL_LIMIT, executable=True))
+        need(len(body) == count and digest(body) == expected, "github-seal-original-anchor")
+        macho(body, system_only=True, target=target)
+        notice = originals.enter_context(github_tool_leaf(DESKTOP / "helpers/macos-github-seal/LICENSE.libsodium", 65536))
+        need(b"ISC" in notice and b"Permission to use" in notice, "github-seal-source-notice")
+        yield {GITHUB_SEAL: (body, 0o555), GITHUB_SEAL_NOTICE: (notice, 0o644)}
+
+
 def app_command(args):
+    with github_seal_files(args) as seal:
+        return app_with_github_seal(args, seal)
+
+
+def app_with_github_seal(args, seal):
     target = command_target(args)
     role = package_role(getattr(args, "package_role", None))
     # Both explicit roles must pass their own selected-target artifact parser.
@@ -2396,6 +2499,7 @@ def app_command(args):
     android_service = android_service_files(args, target=target)
     need(bool(android_service), "package-role-resident-required")
     files.update(android_service)
+    files.update(seal)
     # Each image/helper is separately signed/verified before payload then outer
     # bundle signing. No deep repair or image/executable fallback is permitted.
     write_tree(args.output, files, root_mode=0o755, app_signing=True)
@@ -2462,6 +2566,11 @@ def ticket_input_names(app, expectations):
 
 
 def input_command(args, *, ticket_expectations=None):
+    with github_seal_files(args, installed=True) as seal:
+        return input_with_github_seal(args, seal, ticket_expectations=ticket_expectations)
+
+
+def input_with_github_seal(args, seal, *, ticket_expectations=None):
     target = command_target(args)
     role = package_role(getattr(args, "package_role", None))
     need(target == ARM_TARGET or args.current_runtime is True, "unqualified-intel-route")
@@ -2482,6 +2591,9 @@ def input_command(args, *, ticket_expectations=None):
                       "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
     if role == "ordinary-image":
         expected_names.add(DESKTOP_IMAGE)
+    expected_names.update(seal)
+    need(all(app.get(path) == (body, mode) or app.get(path) == (body, 0o444)
+             and mode == 0o644 for path, (body, mode) in seal.items()), "github-seal-installed-correspondence")
     expected_names.update(ticket_input_names(app, ticket_expectations))
     need(set(app) == expected_names and app["Contents/Info.plist"][0] == source_entry_info(selection=selection)
          and app[PAYLOAD_INFO][0] == source_app_info(selection=selection), "signed-app-roster")
@@ -2509,7 +2621,7 @@ def input_command(args, *, ticket_expectations=None):
         for name, (body, mode) in source.items():
             need(prefix != "app/" or name.startswith("Contents/"), "app-contents-scope")
             code = ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "runtime/python/bin/python3")
+                    "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")
             expected_mode = 0o555 if prefix + name in code else 0o444
             # Normalize only the fresh copy, never the signed original.
             need(mode & 0o7022 == 0 and bool(mode & 0o111) == (expected_mode == 0o555), "input-executable-scope")
@@ -3330,11 +3442,12 @@ def observation_inventory_bytes(body, expected_inventory, expected_manifest, *, 
              and sha(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= MAX_BYTES
              and type(row["executable"]) is bool
              and row["executable"] == (row["path"] in ("app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/" + ANDROID_HELPER,
-                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "runtime/python/bin/python3")), "observation-inventory-row")
+                                                     "app/" + DESKTOP_IMAGE, "app/" + RESIDENT_IMAGE, "app/" + REMOVER, "app/" + GITHUB_SEAL, "runtime/" + HISTORY_PROVIDER_PATH, "runtime/python/bin/python3")), "observation-inventory-row")
         rows[row["path"]] = row
     need(("app/" + ANDROID_HELPER in rows) == ("app/" + ANDROID_SERVICE_PLIST in rows)
          == ("app/" + RESIDENT_IMAGE in rows)
          and ("app/" + DESKTOP_IMAGE not in rows or "app/" + RESIDENT_IMAGE in rows), "android-service-input-pair")
+    need(("app/" + GITHUB_SEAL in rows) == ("app/" + GITHUB_SEAL_NOTICE in rows), "github-seal-notice-pair")
     need(list(rows) == sorted(rows) and sum(row["size"] for row in rows.values()) <= MAX_BYTES
          and {"app/" + ENTRY_BINARY, "app/" + APP_BINARY, "app/" + VAULT_HELPER, "app/Contents/Info.plist", "app/" + PAYLOAD_INFO,
               "runtime/python/bin/python3", "runtime/manifest.json"} <= set(rows)
@@ -4948,6 +5061,9 @@ def main(argv=None):
     app.add_argument("--expected-resident-image", required=True)
     app.add_argument("--entry-binary", required=True, type=Path)
     app.add_argument("--expected-entry", required=True)
+    app.add_argument("--github-seal", type=Path)
+    app.add_argument("--expected-github-seal")
+    app.add_argument("--expected-github-seal-bytes", type=int)
     app.add_argument("--vault-helper", required=True, type=Path)
     app.add_argument("--expected-vault-helper", required=True)
     app.add_argument("--android-helper", required=True, type=Path,
@@ -4980,6 +5096,8 @@ def main(argv=None):
     inputs.add_argument("--expected-resident-image", required=True)
     inputs.add_argument("--expected-entry", required=True)
     inputs.add_argument("--expected-app-binary", required=True)
+    inputs.add_argument("--expected-github-seal")
+    inputs.add_argument("--expected-github-seal-bytes", type=int)
     inputs.add_argument("--expected-vault-helper", required=True)
     inputs.add_argument("--expected-android-helper", required=True,
                         help="Final signed resident facade digest; the complete helper/image/plist group is required")

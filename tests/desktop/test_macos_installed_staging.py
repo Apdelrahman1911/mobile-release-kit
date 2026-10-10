@@ -370,7 +370,37 @@ def without_install_product_workflow(source):
     return value.decode()
 
 
+TOOL_SIGNING_WORKFLOW_INVERSE = ((224, 49, 'df1dc25bada9ecadb21ae42acc54f1affa4b204a875cd8db47388675d91b8682', ''), (8011, 5947, '05574396aa916dcaeebfe7fd5cbd2576a6d3e5b4ccde1b0317fda11b3a10e88e', ''))
+
+def without_tool_signing_workflow(source):
+    value = source.encode()
+    for start, length, expected, prior in reversed(TOOL_SIGNING_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError('tool signing exact region changed')
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != 'f02a9f7ce848ac7c30c6926cd4c8d0cf03f04dd0662ffd32603921d53f5d8c68':
+        raise AssertionError('tool signing inverse changed original')
+    return value.decode()
+
+
+TOOL_ENROLLMENT_WORKFLOW_INVERSE = ((41577, 4155, 'e1ad3768ba7ed53f8217824d1348ca502b9bcf88b0562ce82ca66de2efd9cdfe', ''), (45965, 244, 'dec34c68710ed49677a78116d21f6c9a1eb3e13bc0c2bb83b26b78babeb76523', ''), (46419, 78, '251bd1dc99a992dba08e5aba35b0d7b67765f79b4da5679606da413e18ee08dd', '            --target "$MRK_MACOS_TARGET" \\\n'), (90916, 363, '4bec18b0387d401a0cb993bf2d1396cce3fe8ca432abcd966e1eef12317d3eab', ''), (91329, 163, '98ec04098231bc33c3a4fa0614ef46cbdd6057e9f58af89fa9e3bf332dd4258d', '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'), (95390, 368, '31da7f0d6c48b8dc93d41545e63747b4a170a208737daac4630c58b1e7cb105b', ''))
+
+
+def without_tool_enrollment_workflow(source):
+    if "      - name: Select only SOURCE-enrolled current signed GitHub tools" not in source:
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(TOOL_ENROLLMENT_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("tool enrollment workflow region changed")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "c68a194c08d209e19f6f7028a590a6d39619c6b2f276a24a2dc334ad49dfba00":
+        raise AssertionError("tool enrollment workflow inverse changed original")
+    return value.decode()
+
+
 def without_shipping_compile_workflow(source):
+    source = without_tool_enrollment_workflow(source)
     source = without_install_product_workflow(source)
     marker = "  shipping-image-compile:\n"
     if marker not in source:
@@ -559,6 +589,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 (source / "desktop/macos-installed-inputs" / name).read_bytes())
         for name in ("macos_android_helper_package.py", "stage_macos_installed.py"):
             put(checkout / "desktop/tools" / name, (source / "desktop/tools" / name).read_bytes())
+        # The real stager reads this SOURCE even when both tools are unconfigured.
+        put(checkout / module.TOOL_NOMINATION, (source / module.TOOL_NOMINATION).read_bytes())
+        # Current runtime_tree also reads the real unconfigured provider profile.
+        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, (source / TOOL.HISTORY_PROVIDER_PROFILE).read_bytes())
         notary_profile = {"schemaVersion": 1, "mode": "app-store-connect-team-key", "teamId": "TEST000001",
                           "keyId": "DATA000001", "issuerId": "11111111-2222-3333-4444-555555555555"}
         put(checkout / module.NOTARY_PROFILE, TOOL.canonical(notary_profile))
@@ -1596,7 +1630,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                      "desktop/native/macos-installed-entry/gate.h", "desktop/native/macos-installed-entry/fixed_paths.h",
                      "desktop/native/macos-installed-entry/image_abi.h", "desktop/native/macos-installed-entry/desktop_facade.c",
                      "desktop/native/macos-installed-entry/resident_facade.c", release_path,
-                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs"):
+                     "desktop/native/macos-installed-native/src/native.m", "desktop/src-tauri/src/macos_install_fixed_paths.rs", module.TOOL_NOMINATION, "desktop/packaging/macos-empty-entitlements.plist"):
             target = checkout / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes((source / name).read_bytes()); target.chmod(0o644)
@@ -2927,6 +2961,117 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
     def test_alias_original_return_close_and_signature_failures_never_produce_success(self):
         module = ANDROID_HELPER
 
+        # New two-purpose DATA contract. No signing owner/helper is executed.
+        nomination = {"schemaVersion": 1, "tools": {purpose: {target: {
+            "build": {"state": "unconfigured"}, "signed": {"state": "unconfigured"}}
+            for target in (module.ARM_TARGET, module.INTEL_TARGET)} for purpose in module.TOOL_FIXED}}
+        encode = lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        self.assertEqual(module.tool_nomination_data(encode(nomination)), nomination)
+        for changed in (dict(nomination, schemaVersion=True), dict(nomination, unknown=1),
+                        {"schemaVersion": 1, "tools": {}}, {"schemaVersion": 1, "tools": []}):
+            with self.assertRaises(module.Refused): module.tool_nomination_data(encode(changed))
+        for target in (module.ARM_TARGET, module.INTEL_TARGET):
+            for purpose, (name, identifier, limit) in module.TOOL_FIXED.items():
+                value = copy.deepcopy(nomination)
+                build = {"state": "configured", "sourceCommit": "1" * 40, "sourceManifestSha256": "2" * 64,
+                    "binarySha256": "3" * 64, "binaryBytes": limit, "buildReceiptSha256": "4" * 64,
+                    "runId": "1", "runAttempt": "1", "artifactId": "2", "notices": None}
+                if purpose == "history-provider":
+                    build["notices"] = {"manifestSha256": "5" * 64, "contentSha256": "6" * 64, "files": 333, "modules": 162}
+                value["tools"][purpose][target]["build"] = build
+                self.assertEqual(module.tool_nomination_data(encode(value)), value)
+                for key, wrong in (("binaryBytes", limit + 1), ("binaryBytes", True), ("sourceManifestSha256", "0" * 64),
+                                   ("runId", "01"), ("artifactId", "0"), ("notices", {"files": 333})):
+                    changed = copy.deepcopy(value); changed["tools"][purpose][target]["build"][key] = wrong
+                    with self.assertRaises(module.Refused): module.tool_nomination_data(encode(changed))
+                sign, verify = module.tool_sign_arguments(Path("/owned") / name, Path("/source/empty.plist"),
+                                                          purpose, ("ABCDEFGHIJ", "a" * 40))
+                self.assertEqual(sign[:4], ["/usr/bin/codesign", "--force", "--sign", "a" * 40])
+                self.assertIn(identifier, sign); self.assertIn("--timestamp", sign)
+                self.assertEqual(verify[:4], ["/usr/bin/codesign", "--verify", "--strict", "-R"])
+                self.assertNotIn("--deep", sign + verify)
+                self.assertLessEqual(module.tool_quote(purpose)[0], 1024 * 1024 * 1024)
+                self.assertGreater(module.tool_quote(purpose)[1], 3 * limit)
+        # Actual offline build references are distinct from future publication
+        # identifiers. This DATA grammar alone cannot authenticate a report.
+        origin = {"kind": "offline-owned-crossbuild",
+            **{key: {"bytes": limit, "sha256": "a" * 64} for key, limit in
+               (("result", 256 * 1024), ("closedSummary", 16384), ("crossbuild", 65536), ("buildInfo", 65536))},
+            "sourceInventory": {"bytes": 1024 * 1024, "sha256": "b" * 64, "fileCount": 2048, "fileBytes": 32 * 1024 * 1024},
+            "dependencyInventorySha256": "c" * 64, "toolchainInventorySha256": "d" * 64,
+            "childOriginals": 5, "namespaceOriginals": 1,
+            **{key: True for key in ("allJoinedZeroAndPipesClosed", "sourcePost", "dependencyPost", "toolchainPost", "embeddedNoticesComplete")},
+            **{key: False for key in ("noticeContentRuntimeExecuted", "nativeExecuted", "developerIdSigned", "notarized")}}
+        self.assertIsNone(module.tool_build_origin(origin))
+        for key, wrong in (("childOriginals", True), ("namespaceOriginals", 2), ("embeddedNoticesComplete", False),
+                           ("nativeExecuted", True), ("sourcePost", 1), ("kind", "github-compiler-run")):
+            changed = copy.deepcopy(origin); changed[key] = wrong
+            with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        for key in ("result", "closedSummary", "crossbuild", "buildInfo", "sourceInventory"):
+            changed = copy.deepcopy(origin); changed[key]["bytes"] += 1
+            with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        changed = copy.deepcopy(origin); changed["sourceInventory"]["fileCount"] = 2049
+        with self.assertRaises(module.Refused): module.tool_build_origin(changed)
+        # Real local original admission, with inert native callbacks never
+        # entered: unconfigured profiles cannot borrow a credential context.
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary))
+            operation = module.Operation(owner, checkout, work, "sign-github-seal", environment, TOOL)
+            with mock.patch.object(module.Operation, "credential_scope", side_effect=AssertionError("unconfigured credential borrow")):
+                with self.assertRaises(module.Refused): operation.execute()
+            self.assertFalse(observations or operation.calls or operation.credential_calls or operation.credential_contexts)
+            self.assertFalse(operation.receipt["passed"] or operation.tool_complete)
+            self.assertTrue(operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+            self.assertFalse((work / "tool-signed-receipt.json").exists())
+
+        # Source hash alone is not a substitute for the closed finality grammar.
+        purpose, target = "github-seal", module.ARM_TARGET
+        build = copy.deepcopy(value["tools"][purpose][module.INTEL_TARGET]["build"])
+        producer, service, entitlements = b"producer", b"service", b"empty"
+        signed = {"state": "configured", "buildSha256": module.digest(module.tool_canonical(build)),
+            "signingSourceCommit": "7" * 40, "signedSha256": "8" * 64, "signedBytes": 123,
+            "receiptSha256": "9" * 64, "runId": "3", "runAttempt": "1", "artifactId": "4",
+            "producerProfileSha256": module.digest(producer), "serviceProfileSha256": module.digest(service),
+            "entitlementsSha256": module.digest(entitlements)}
+        row = {"build": build, "signed": signed}
+        final = {"schemaVersion": 1, "phase": "sign-github-seal", "target": target,
+            "source": "7" * 40, "workflowSource": "7" * 40,
+            "workflow": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml@" + module.TOOL_REF,
+            "runId": "3", "runAttempt": "1", "outerFinalityRequired": True, "productReady": False,
+            "tool": {"purpose": purpose, "buildSha256": signed["buildSha256"], "sourceManifestSha256": build["sourceManifestSha256"],
+                "rawSha256": build["binarySha256"], "rawBytes": build["binaryBytes"], "signedSha256": "8" * 64,
+                "signedBytes": 123, "notices": None, "identifier": module.TOOL_FIXED[purpose][1],
+                "producerProfileSha256": module.digest(producer), "serviceProfileSha256": module.digest(service),
+                "entitlementsSha256": module.digest(entitlements)},
+            "passed": True, "originalClosesKnown": True, "targetRetired": True, "toolFinal": True,
+            "cleanupErrors": [], "directStagerIOPending": None,
+            "credentialOriginals": [{"returned": True, "settled": True, "status": 0}],
+            "credentialContexts": [{"purpose": "sign-github-seal", "retired": True, "closed": True,
+                                    "searchRestored": True, "defaultUnchanged": True}],
+            "originalCalls": [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0}
+                              for role in ("sign-github-seal", "sign-github-seal-verify")]}
+        raw = encode(final); signed["receiptSha256"] = module.digest(raw)
+        self.assertEqual(module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements), final)
+        for key, wrong in (("originalClosesKnown", False), ("targetRetired", False), ("toolFinal", False),
+                           ("directStagerIOPending", "copy"), ("credentialOriginals", []), ("originalCalls", [])):
+            changed = copy.deepcopy(final); changed[key] = wrong
+            raw = encode(changed); signed["receiptSha256"] = module.digest(raw)
+            with self.assertRaises(module.Refused): module.tool_signed_receipt(raw, row, purpose, target, producer, service, entitlements)
+        self.assertEqual(module.MAX_HELPER, 32 * 1024 * 1024)
+        self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload",
+            "sign-root-app", "sign-root-installer", "sign-remover"))
+        with self.assertRaises(module.Refused): module.tool_quote("arbitrary-tool")
+        # The original epoch is not restarted by a callback or cleanup switch.
+        clock = SimpleNamespace(phase="sign-github-seal", tool_started=100, tool_observed=100)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 299_000_000_000):
+            self.assertEqual(module.Operation.tool_clock(clock)[1], 100 + 300_000_000_000)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 300_000_000_000):
+            with self.assertRaisesRegex(module.Refused, "tool-original-deadline"): module.Operation.tool_clock(clock)
+            self.assertEqual(module.Operation.tool_clock(clock, work=False)[1], 100 + 360_000_000_000)
+        with mock.patch.object(module.time, "monotonic_ns", return_value=100 + 360_000_000_000):
+            with self.assertRaisesRegex(module.Refused, "tool-original-deadline"): module.Operation.tool_clock(clock, work=False)
+
+
         with tempfile.TemporaryDirectory() as temporary:
             checkout, work, environment, owner, observations = self.fixture(Path(temporary))
             operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL)
@@ -3622,9 +3767,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 operation = state.operation
                 with self.notary_fixture_call(state), self.assertRaises(module.Refused):
                     operation.execute()
+                # Expose only finite failure labels before an observation mismatch;
+                # never print paths, credentials, command captures or the receipt.
+                notary_failure = operation.receipt.get("failure", {})
+                self.assertEqual(notary_failure.get("reason"), "original-nonzero-" + selected_role,
+                    {**{key: value[:96] if type(value) is str else None
+                        for key in ("stage", "type") for value in (notary_failure.get(key),)},
+                     "errno": notary_failure.get("errno") if type(notary_failure.get("errno")) is int
+                         and 0 < notary_failure["errno"] < 65536 else None})
                 self.assertEqual(len(state.observations), module.NOTARY_ROLES.index(selected_role) + 1)
                 self.assertFalse(operation.receipt["passed"])
-                self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-" + selected_role)
                 self.assertFalse((operation.work / "input").exists())
                 self.assertEqual(operation.receipt["targetRetired"], not selected_role.startswith("staple-"))
                 self.assertFalse((operation.work / operation.target_name / "notary-key").exists())
@@ -3875,6 +4027,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         removal=remove, environment={"MRK_MACOS_PACKAGE_ROLE": package_role},
                         calls=[{"role": role} for role in history], notary_key=object() if label == "key-held" else None,
                         notary_known=lambda: label != "unknown")
+                    # Use the real final-package predicate and original-role projection.
+                    state.removal_final_active = module.Operation.removal_final_active.__get__(state)
+                    state.removal_final_calls = module.Operation.removal_final_calls.__get__(state)
                     boundary = RuntimeError("INERT before private-key DATA")
                     with mock.patch.object(module, "notary_key_data", side_effect=boundary) as key_data:
                         if label == "valid":
@@ -4759,6 +4914,21 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
     def test_both_workflows_use_one_digest_and_owned_nested_checks_around_app_signing(self):
         root = Path(__file__).absolute().parents[2]
+        current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        restored = without_tool_enrollment_workflow(current)
+        self.assertNotEqual(current, restored)
+        self.assertNotIn("--github-seal", restored)
+        self.assertIn('--history-provider "$MRK_MACOS_WORK/history-provider-capsule/gh"', current)
+        self.assertIn('--expected-github-seal-bytes "$MRK_MACOS_GITHUB_SEAL_BYTES"', current)
+        signing = (root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text()
+        self.assertIn("verify/desktop-macos-github-tool-signing", signing)
+        tool_job = signing.split("  signed-github-tool:\n", 1)[1]
+        self.assertIn("environment: macos-developer-id", tool_job)
+        self.assertIn("digest-mismatch: error", tool_job)
+        self.assertIn("steps.sign.outcome == 'success'", tool_job)
+        self.assertNotIn("--deep", tool_job)
+        self.assertNotIn("signed-github-tool", without_tool_signing_workflow(signing))
+        self.assertEqual(tool_job.count("purpose:"), 4)
         actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         names = ("Prepare the fixed two-file removal package without executing it",
                  "Sign and notarize the completed removal package without executing it",
@@ -5050,7 +5220,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertIn("    environment: ${{ contains(fromJSON('" + fixed + "'), matrix.scope) && 'macos-developer-id' || 'macos-engineering' }}\n", workflow)
 
 
-        signing = (root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text()
+        signing = without_tool_signing_workflow((root / ".github/workflows/desktop-macos-python-runtime-signing.yml").read_text())
         self.assertEqual(signing.count("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"), 1)
         self.assertEqual(signing.count("github-token:"), 1)
         self.assertIn("persist-credentials: false", signing)
@@ -5106,6 +5276,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "expected_entry": 'self.environment.get("MRK_MACOS_SIGNED_ENTRY_SHA256")',
             "expected_app_binary": 'self.environment.get("MRK_MACOS_SIGNED_PAYLOAD_SHA256")',
             "expected_vault_helper": 'self.environment.get("MRK_MACOS_VAULT_HELPER_SHA256")',
+            "expected_github_seal": 'self.environment.get("MRK_MACOS_GITHUB_SEAL_SHA256")',
+            "expected_github_seal_bytes": 'int(self.environment["MRK_MACOS_GITHUB_SEAL_BYTES"]) if "MRK_MACOS_GITHUB_SEAL_BYTES" in self.environment else None',
             "expected_remover": 'self.environment.get("MRK_MACOS_REMOVER_SHA256")',
             "expected_android_helper": 'self.environment.get("MRK_MACOS_ANDROID_HELPER_SHA256")',
             "expected_resident_image": 'self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256")',
@@ -10461,6 +10633,12 @@ class MacNormalPreviewData(unittest.TestCase):
                                      TOOL.observer_cargo_artifact(messages, artifact, target, artifact_body, target=build_target))
                     self.assertNotIn("desktopImageCargoArtifact", result)
                 self.assertEqual(TOOL.tree(output), expected)
+                seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
+                sealed_args = SimpleNamespace(**dict(vars(args), output=work / "with-seal.app"))
+                with mock.patch.object(TOOL, "github_seal_files", return_value=contextlib.nullcontext(seal)), \
+                     mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                    TOOL.app_command(sealed_args)
+                self.assertEqual(TOOL.tree(sealed_args.output), dict(expected, **seal))
                 self.assertEqual(result["packageRole"], role)
                 self.assertEqual(result["appBinarySha256BeforeSigning"], TOOL.digest(body))
                 self.assertEqual(result["vaultHelperSha256"], TOOL.digest(helper_body))
@@ -10483,7 +10661,45 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertFalse(wrong.output.exists())
 
     def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
-        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER)
+        # Actual private file/original boundary, not a native signature fixture.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(strict=True)
+            path = root / "mrk-github-seal"; path.write_bytes(b"inert-helper"); path.chmod(0o555)
+            with TOOL.github_tool_leaf(path, 16, executable=True) as body:
+                self.assertEqual(body, b"inert-helper")
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-original-changed"):
+                with TOOL.github_tool_leaf(path, 16, executable=True):
+                    replacement = root / "replacement"; replacement.write_bytes(b"inert-helper"); replacement.chmod(0o555)
+                    os.replace(replacement, path)  # Same bytes, genuinely different original.
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-original"):
+                with TOOL.github_tool_leaf(path, 1): pass
+            path.chmod(0o755)
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-executable"):
+                with TOOL.github_tool_leaf(path, 16, executable=True): pass
+            path.chmod(0o555)
+            real_close = TOOL.close_once
+            attempts = []
+            def close_lost(fd):
+                attempts.append(fd); real_close(fd)
+                if len(attempts) == 1:
+                    raise TOOL.Refused("original-close-unknown")
+            # Inject only the leaf close; parent context uses its existing path.
+            with mock.patch.object(TOOL, "close_once", side_effect=close_lost):
+                with self.assertRaisesRegex(TOOL.Refused, "original-close-unknown"):
+                    with TOOL.github_tool_leaf(path, 16, executable=True): pass
+            self.assertGreaterEqual(len(attempts), 1)
+            self.assertEqual(len(set(attempts)), len(attempts))
+            original_parent = root / "parent"; original_parent.mkdir()
+            held_file = original_parent / "mrk-github-seal"
+            held_file.write_bytes(b"inert-helper"); held_file.chmod(0o555)
+            with self.assertRaisesRegex(TOOL.Refused, "github-tool-parent-changed"):
+                with TOOL.github_tool_leaf(held_file, 16, executable=True):
+                    original_parent.rename(root / "detached")
+                    original_parent.mkdir()
+                    replacement = original_parent / held_file.name
+                    replacement.write_bytes(b"inert-helper"); replacement.chmod(0o555)
+
+        cases = tuple((path, mode) for path in (TOOL.VAULT_HELPER, TOOL.ANDROID_HELPER, TOOL.RESIDENT_IMAGE, TOOL.REMOVER, TOOL.GITHUB_SEAL)
                       for mode in (0o755, 0o644, 0o444)) + (
                       (TOOL.DESKTOP_IMAGE, 0o555), (TOOL.DESKTOP_IMAGE, 0o644),
                       (TOOL.DESKTOP_IMAGE, 0o444), ("Contents/Helpers/other", 0o555))

@@ -39,3 +39,7 @@ pub const PAYLOAD_INFO_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleas
 pub const VAULT_HELPER_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-vault-keychain";
 pub const ANDROID_HELPER_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-android-register";
 pub const ANDROID_SERVICE_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Library/LaunchDaemons/dev.mobile-release-kit.desktop.android-register.plist";
+
+// Exact optional SOURCE-enrolled executable rows, not arbitrary tool authority.
+pub const HISTORY_PROVIDER_INVENTORY_PATH: &str = "runtime/tools/gh";
+pub const GITHUB_SEAL_INVENTORY_PATH: &str = "app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-github-seal";

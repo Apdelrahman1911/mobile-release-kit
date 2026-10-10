@@ -197,6 +197,23 @@ fn main() {
     anchor("MRK_MACOS_INSTALL_INVENTORY_SHA256");
     if target_os == "macos" && matches!(target.as_str(), "aarch64-apple-darwin" | "x86_64-apple-darwin")
         && env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() == Ok("64") {
+        // Fixed signed helper supplied only by the source-nominated packaging
+        // caller. Absence keeps secret preparation unavailable; half-pairs fail.
+        println!("cargo:rerun-if-env-changed=MRK_MACOS_GITHUB_SEAL_SHA256");
+        println!("cargo:rerun-if-env-changed=MRK_MACOS_GITHUB_SEAL_BYTES");
+        match (env::var_os("MRK_MACOS_GITHUB_SEAL_SHA256"), env::var_os("MRK_MACOS_GITHUB_SEAL_BYTES")) {
+            (None, None) => (),
+            (Some(hash), Some(bytes)) => {
+                let hash = hash.to_str().expect("invalid fixed seal digest encoding");
+                let bytes = bytes.to_str().expect("invalid fixed seal size encoding");
+                assert!(digest(hash) && hash != "0".repeat(64), "invalid fixed seal digest");
+                assert!(bytes.parse::<u64>().is_ok_and(|n| n > 0 && n <= 16 * 1024 * 1024 && n.to_string() == bytes),
+                        "invalid fixed seal size");
+                println!("cargo:rustc-env=MRK_MACOS_GITHUB_SEAL_SHA256={hash}");
+                println!("cargo:rustc-env=MRK_MACOS_GITHUB_SEAL_BYTES={bytes}");
+            }
+            _ => panic!("fixed seal binding requires both digest and size"),
+        }
         anchor("MRK_MACOS_VAULT_HELPER_SHA256");
         println!("cargo:rerun-if-env-changed=MRK_MACOS_VAULT_HELPER_BYTES");
         if let Ok(value) = env::var("MRK_MACOS_VAULT_HELPER_BYTES") {
