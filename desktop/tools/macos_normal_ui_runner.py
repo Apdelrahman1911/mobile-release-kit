@@ -402,8 +402,8 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
     need(((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300))
          and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
     return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
-        "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
-        "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
+        "-destination", "platform=macOS" if target == INTEL_TARGET else "platform=macOS,arch=" + machine,
+        "-destination-timeout", "15", "-resultBundlePath", str(result), *["-only-testing:" + method for method in methods],
         "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
         "-default-test-execution-time-allowance", str(allowance),
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
@@ -814,8 +814,9 @@ def normal_toolchain(values):
 def normal_build_arguments(derived, *, target=ARM_TARGET):
     machine, _ = normal_target_data(target)
     return ["/usr/bin/xcodebuild", "build-for-testing", "-project", PROJECT, "-scheme", "MRKNormalAppUI",
-        "-configuration", "Debug", "-destination", "platform=macOS,arch=" + machine, "-destination-timeout", "15",
-        "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
+        "-configuration", "Debug", "-destination",
+        "platform=macOS" if target == INTEL_TARGET else "platform=macOS,arch=" + machine,
+        "-destination-timeout", "15", "-derivedDataPath", str(derived), "-jobs", "2", "-disableAutomaticPackageResolution",
         "COMPILER_INDEX_STORE_ENABLE=NO"] + (["ARCHS=x86_64"] if target == INTEL_TARGET else [])
 
 
@@ -2409,6 +2410,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         markers["buildFailed"] = rb"(?m)^\*\* BUILD FAILED \*\*\r?$"
         table = value["destinationTable"]
         table["state"] = "absent"  # No exact header observed, not an eligible-destination count.
+        # Lexical observations only, never an Apple error grammar or cause claim.
+        destination_error_terms = (
+            ("architecture", ("architecture", "architectures")), ("platform", ("platform", "platforms")),
+            ("macos", ("macos",)), ("xcode", ("xcode",)), ("sdk", ("sdk", "sdks")),
+            ("deployment", ("deployment",)), ("version", ("version", "versions")),
+            ("support", ("support", "supports", "supported")), ("install", ("install", "installed", "installation")))
         destination_header = (rb'[ \t]{0,32}(Available|Ineligible) destinations for the '
                               rb'"MRKNormalAppUI" scheme:[ \t]{0,32}')
         destination_row = rb"[ \t]{0,32}\{([\x20-\x7e\x80-\xff]{1,4094})\}[ \t]{0,32}"
@@ -2754,6 +2761,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                             table["rows"].append({"stream": stream, "section": destination_section,
                                 "platform": "macos", "architecture": parts[b"arch"].decode("ascii")
                                 if b"arch" in parts else None, "errorPresent": b"error" in parts})
+                            if b"error" in parts:
+                                # ASCII spelling only with Unicode word boundaries; no Unicode case folding.
+                                words = {word.lower() for word in re.findall(r"(?<!\w)[A-Za-z]+(?!\w)",
+                                    parts[b"error"].decode("utf-8", "strict"))}
+                                table["rows"][-1]["errorTerms"] = [term for term, spellings in destination_error_terms
+                                    if any(spelling in words for spelling in spellings)]
                 elif record.strip(b" \t"):
                     destination_section = None
                 if complete and len(record) <= 4096:
@@ -2918,6 +2931,10 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        for row in reversed(table["rows"]):
+            if "errorTerms" in row and len(encoded(value)) + 1 > 4094:
+                del row["errorTerms"]
+                value["findingsTruncated"] = True
         if "unknownRows" in table:
             while table["unknownRows"] and len(encoded(value)) + 1 > 4094:
                 table["unknownRows"].pop()

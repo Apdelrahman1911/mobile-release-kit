@@ -1012,6 +1012,11 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                         "observation": "containingSameStaticText", "matches": 5, "exceedsFour": True,
                         "nonAtomic": True} for _ in range(4)]
                     if role == "build":
+                        terms_raw = (b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+                            b'{ platform:macOS, arch:x86_64h, name:PRIVATE, error:architectures platforms macOS Xcode SDKs deployment versions supports installed }\n')
+                        terms_value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, terms_raw, b""))
+                        diagnostic["destinationTable"] = terms_value["destinationTable"]
+                        self.assertEqual(len(diagnostic["destinationTable"]["rows"][0]["errorTerms"]), 9)
                         diagnostic["buildFailureReasons"] = [{"stream": stream, "code": code}
                             for stream in ("stdout", "stderr") for code in ("destination-not-found", "no-eligible-destination")]
                         diagnostic["compilerDiagnostics"] = [{"stream": "stderr", "source": "NormalAppUITests.swift",
@@ -1480,7 +1485,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         value = normal["normal_failure_diagnostics"]("build", None, original)
         observed = DATA.project_ui_diagnostic(value, "build", status)
         self.assertEqual(observed["destinationTable"]["rows"], [{"stream": "stderr", "section": "ineligible",
-            "platform": "macos", "architecture": "x86_64", "errorPresent": True}])
+            "platform": "macos", "architecture": "x86_64", "errorPresent": True, "errorTerms": []}])
         self.assertEqual(observed["destinationTable"], value["destinationTable"])
         self.assertEqual(observed["stderrSha256"], hashlib.sha256(raw).hexdigest())
         self.assertEqual(observed["originalReturncode"], 70)
@@ -1546,6 +1551,49 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         for code in (0, True, 1):
             with self.assertRaises(DATA.Refused):
                 DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": code})
+
+    def test_destination_error_terms_public_schema_is_closed_and_optional(self):
+        normal = normal_diagnostic_data(); status = {"receiptState": "observed", "returncode": 70}
+        terms = ["architecture", "platform", "macos", "xcode", "sdk", "deployment", "version", "support", "install"]
+        raw = (b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+               b'{ platform:macOS, arch:x86_64h, name:PRIVATE, error:architectures platforms macOS Xcode SDKs deployment versions supported installation 26.6.1 }\n')
+        value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, b"", raw))
+        projected = DATA.project_ui_diagnostic(value, "build", status)
+        self.assertEqual(projected["destinationTable"]["rows"][0]["errorTerms"], terms)
+        self.assertEqual(projected["stderrSha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(projected["originalReturncode"], 70)
+        self.assertIs(projected["nativeSuccessInferred"], False)
+        self.assertEqual(projected["status"], "unclassified")
+        self.assertNotIn("PRIVATE", json.dumps(projected)); self.assertNotIn("26.6.1", json.dumps(projected))
+        for replacement in ([], ["architecture"], ["support", "install"]):
+            candidate = copy.deepcopy(value); candidate["destinationTable"]["rows"][0]["errorTerms"] = replacement
+            self.assertEqual(DATA.project_ui_diagnostic(candidate, "build", status)["destinationTable"]["rows"][0]["errorTerms"], replacement)
+        legacy = copy.deepcopy(value); del legacy["destinationTable"]["rows"][0]["errorTerms"]
+        self.assertNotIn("errorTerms", DATA.project_ui_diagnostic(legacy, "build", status)["destinationTable"]["rows"][0])
+        for replacement in (None, True, "architecture", {}, [True], [1], [None], ["PRIVATE"],
+                            ["Architecture"], ["architectures"], ["version", "architecture"],
+                            ["architecture", "architecture"], terms + ["support"]):
+            candidate = copy.deepcopy(value); candidate["destinationTable"]["rows"][0]["errorTerms"] = replacement
+            with self.subTest(replacement=replacement), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(candidate, "build", status)
+        for key, item in (("errorPresent", False), ("errorPresent", 1), ("rawError", "PRIVATE")):
+            candidate = copy.deepcopy(value); candidate["destinationTable"]["rows"][0][key] = item
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(candidate, "build", status)
+        for missing in ("errorPresent", "stream", "section", "platform", "architecture"):
+            candidate = copy.deepcopy(value); del candidate["destinationTable"]["rows"][0][missing]
+            with self.subTest(missing=missing), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(candidate, "build", status)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": 0})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); write(root, "normal-ui/build.status", b"70\n")
+            original = write(root, "normal-ui/build.failure-diagnostics.json", value); before = original.read_bytes()
+            result = project(root)
+            self.assertEqual(result["normalUiBuildDiagnostics"]["build"]["destinationTable"]["rows"][0]["errorTerms"], terms)
+            self.assertEqual(original.read_bytes(), before)
+            self.assertNotIn("PRIVATE", (root / DATA.OUTPUT).read_text())
+            self.assertIs(result["productReady"], False)
 
 
 if __name__ == "__main__":

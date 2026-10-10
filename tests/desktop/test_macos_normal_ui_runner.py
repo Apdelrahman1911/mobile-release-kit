@@ -3072,7 +3072,8 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual(MODULE.normal_target_data(target_value), (machine, marker))
             selected_build = MODULE.normal_request(["--target", target_value, "--normal-build"], temporary)
             expected_build = list(arm_build)
-            expected_build[expected_build.index("-destination") + 1] = "platform=macOS,arch=" + machine
+            expected_build[expected_build.index("-destination") + 1] = ("platform=macOS" if machine == "x86_64"
+                else "platform=macOS,arch=" + machine)
             if machine == "x86_64": expected_build.append("ARCHS=x86_64")
             self.assertEqual(MODULE.normal_build_arguments(build["derived"], target=target_value), expected_build)
             self.assertEqual(selected_build, dict(build, target=target_value))
@@ -3088,7 +3089,8 @@ class NormalPhaseDataTests(unittest.TestCase):
                                  (target_value, 30, 90))
                 command = MODULE.xcode_test_arguments("/fixed.xctestrun", normal / name,
                     selected_test["methods"], allowance, target=target_value)
-                self.assertEqual(command[command.index("-destination") + 1], arguments[8])
+                self.assertEqual(command[command.index("-destination") + 1],
+                                 "platform=macOS" if machine == "x86_64" else arguments[8])
                 self.assertFalse(any(value.startswith("ARCHS=") for value in command))
                 other = "x86_64-apple-darwin" if machine == "arm64" else "aarch64-apple-darwin"
                 with self.assertRaises(MODULE.Refused):

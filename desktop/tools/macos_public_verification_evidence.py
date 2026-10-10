@@ -414,10 +414,18 @@ def project_ui_failure(value, phase):
                     need(row["unsupportedKeyPresent"] or row["platform"] == "unrecognized"
                          or row["architecture"] == "unrecognized")
             for row in rows:
-                need(type(row) is dict and set(row) == {"stream", "section", "platform", "architecture", "errorPresent"}
+                fields = {"stream", "section", "platform", "architecture", "errorPresent"}
+                need(type(row) is dict and fields <= set(row) <= fields | {"errorTerms"}
                      and row["stream"] in ("stdout", "stderr") and row["section"] in ("available", "ineligible")
                      and row["platform"] == "macos" and row["architecture"] in (None, "arm64", "arm64e", "x86_64", "x86_64h", "i386"))
                 boolean(row["errorPresent"])
+                if "errorTerms" in row:
+                    # Closed lexical presence, not a platform/architecture failure classification.
+                    vocabulary = ("architecture", "platform", "macos", "xcode", "sdk", "deployment", "version", "support", "install")
+                    terms = row["errorTerms"]
+                    need(row["errorPresent"] and type(terms) is list and len(terms) <= len(vocabulary)
+                         and all(type(term) is str and term in vocabulary for term in terms)
+                         and terms == [term for term in vocabulary if term in terms])
     return dict(value)
 
 

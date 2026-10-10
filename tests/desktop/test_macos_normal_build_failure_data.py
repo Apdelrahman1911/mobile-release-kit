@@ -67,9 +67,11 @@ def admission_reducers():
 def build_settings_reducers(*, main=False):
     """Actual DATA, phase/clock and caller with inert ports; no owner import."""
     names = {"Refused", "need", "pairs", "encoded", "sha", "original_command", "PhaseClock", "NormalPhase",
-        "normal_target_data", "normal_build_arguments", "normal_build_settings_arguments", "normal_build_settings_data",
+        "normal_target_data", "normal_build_arguments", "xcode_test_arguments", "normal_build_settings_arguments", "normal_build_settings_data",
         "publish_normal_build_settings", "ARM_TARGET", "INTEL_TARGET", "TARGET", "PROJECT",
-        "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS"}
+        "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS",
+        "CLASS", "PACKAGED_METHOD", "ENGINEERING_METHOD", "OUTPUT_DATA_METHOD", "ANDROID_METHOD", "ANDROID_RESULT",
+        "IOS_UNSIGNED_METHOD", "IOS_UNSIGNED_RESULT", "NORMAL_SELECTIONS"}
     if main:
         names.update(("main", "NativeQueryFailure", "ENGINEERING_MODES"))
     nodes, found = [], set()
@@ -165,7 +167,8 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         self.assertEqual(observed["destinationTable"], {"state": "observed", "unknownRowObserved": False,
             "malformedRowObserved": False, "rowsTruncated": False, "rows": [
                 {"stream": "stdout", "section": "available", "platform": "macos", "architecture": arch,
-                 "errorPresent": error} for arch, error in (("x86_64", False), ("arm64", False), (None, True))] + [
+                 "errorPresent": error, **({"errorTerms": []} if error else {})}
+                for arch, error in (("x86_64", False), ("arm64", False), (None, True))] + [
                 {"stream": "stderr", "section": "ineligible", "platform": "macos", "architecture": None,
                  "errorPresent": False}]})
         self.assertEqual(observed["status"], "unclassified")  # Table rows are not a cause or success predicate.
@@ -454,7 +457,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         self.assertEqual(writes[0][2], 4096); self.assertEqual(json.loads(writes[0][1]), observed)
         self.assertNotIn(b"PRIVATE_SENTINEL", writes[0][1]); self.assertLessEqual(len(writes[0][1]), 4096)
         build = data["normal_build_arguments"](request["derived"], target=data["INTEL_TARGET"])
-        self.assertIn("build-for-testing", build); self.assertIn("platform=macOS,arch=x86_64", build)
+        self.assertIn("build-for-testing", build); self.assertIn("platform=macOS", build)
         self.assertIn("-destination-timeout", build); self.assertNotIn("-showBuildSettings", build)
         self.assertNotIn("-destination", expected)
 
@@ -610,7 +613,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
                     value = self.observe(raw if stream == "stdout" else b"", raw if stream == "stderr" else b"")
                     table = value["destinationTable"]
                     self.assertEqual(table["rows"], [{"stream": stream, "section": section,
-                        "platform": "macos", "architecture": "x86_64", "errorPresent": True}])
+                        "platform": "macos", "architecture": "x86_64", "errorPresent": True, "errorTerms": []}])
                     self.assertFalse(table["malformedRowObserved"]); self.assertFalse(table["unknownRowObserved"])
                     self.assertNotIn("rejections", table)
                     self.assertNotIn("OPAQUE_PRIVATE", json.dumps(value))
@@ -640,7 +643,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
                        + "name:PRIVATE_名, error:PRIVATE_“reason” }\n").encode()
                 value = self.observe(b"", header + raw)
                 self.assertEqual(value["destinationTable"]["rows"], [{"stream": "stderr", "section": section,
-                    "platform": "macos", "architecture": arch, "errorPresent": True}])
+                    "platform": "macos", "architecture": arch, "errorPresent": True, "errorTerms": []}])
                 self.assertFalse(value["destinationTable"]["unknownRowObserved"])
                 self.assertNotIn("unknownRows", value["destinationTable"])
                 self.assertNotIn("PRIVATE_", json.dumps(value))
@@ -680,9 +683,111 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         combined = self.observe(dense + header + good * 8 + unknown * 8)
         for key in ("errorCodes", "compilerDiagnostics", "buildFailureReasons", "queryObservations", "markers", "status"):
             self.assertEqual(combined[key], baseline[key], key)
-        self.assertEqual(combined["destinationTable"]["rows"], baseline["destinationTable"]["rows"])
+        self.assertEqual([{key: value for key, value in row.items() if key != "errorTerms"}
+                          for row in combined["destinationTable"]["rows"]],
+                         [{key: value for key, value in row.items() if key != "errorTerms"}
+                          for row in baseline["destinationTable"]["rows"]])
         self.assertTrue(combined["findingsTruncated"])
         self.assertTrue("unknownRows" not in combined["destinationTable"] or combined["destinationTable"]["unknownRowsTruncated"])
+
+    def test_intel_local_destination_preserves_both_native_argument_contracts(self):
+        data = build_settings_reducers(); derived = Path("/inert/normal-ui/DerivedData")
+        for target, destination in ((data["ARM_TARGET"], "platform=macOS,arch=arm64"),
+                                    (data["INTEL_TARGET"], "platform=macOS")):
+            expected = ["/usr/bin/xcodebuild", "build-for-testing", "-project", data["PROJECT"],
+                "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-destination", destination,
+                "-destination-timeout", "15", "-derivedDataPath", str(derived), "-jobs", "2",
+                "-disableAutomaticPackageResolution", "COMPILER_INDEX_STORE_ENABLE=NO"]
+            if target == data["INTEL_TARGET"]: expected.append("ARCHS=x86_64")
+            self.assertEqual(data["normal_build_arguments"](derived, target=target), expected)
+            for result_name, (methods, allowance, _) in data["NORMAL_SELECTIONS"].items():
+                selected = tuple(data["CLASS"] + method for method in methods)
+                result = derived.parent / result_name
+                expected = ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", "/inert/fixed.xctestrun",
+                    "-destination", destination, "-destination-timeout", "15", "-resultBundlePath", str(result),
+                    *["-only-testing:" + method for method in selected], "-parallel-testing-enabled", "NO",
+                    "-test-timeouts-enabled", "YES", "-default-test-execution-time-allowance", str(allowance),
+                    "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
+                actual = data["xcode_test_arguments"]("/inert/fixed.xctestrun", result, selected, allowance, target=target)
+                self.assertEqual(actual, expected)
+                self.assertFalse(any(argument.startswith("ARCHS=") for argument in actual))
+        selected = (data["CLASS"] + "testLaunchCancelAndQuit",)
+        for target in (None, True, "x86_64h", "x86_64", "x86_64-apple-darwin "):
+            with self.subTest(target=target), self.assertRaises(data["Refused"]):
+                data["normal_build_arguments"](derived, target=target)
+            with self.subTest(target=target), self.assertRaises(data["Refused"]):
+                data["xcode_test_arguments"]("/inert/fixed.xctestrun", "/inert/test.xcresult", selected, 60, target=target)
+        for methods, flags, allowance, result in (
+            ((data["PACKAGED_METHOD"],), {}, 60, "/inert/test.xcresult"),
+            ((data["ENGINEERING_METHOD"],), {"engineering": True}, 60, "/inert/test.xcresult"),
+            ((data["OUTPUT_DATA_METHOD"],), {"output_data": True}, 60, "/inert/test.xcresult"),
+            ((data["CLASS"] + data["ANDROID_METHOD"],), {"android_positive": True}, 900, "/inert/" + data["ANDROID_RESULT"])):
+            with self.subTest(flags=flags), self.assertRaises(data["Refused"]):
+                data["xcode_test_arguments"]("/inert/fixed.xctestrun", result, methods, allowance,
+                    target=data["INTEL_TARGET"], **flags)
+
+    def test_destination_error_terms_are_finite_lexical_observations(self):
+        vocabulary = ["architecture", "platform", "macos", "xcode", "sdk", "deployment", "version", "support", "install"]
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        prefix = b"{ platform:macOS, arch:x86_64h, name:PRIVATE_NAME, error:"
+        variants = (("architecture", "architectures"), ("platform", "platforms"), ("macos",), ("xcode",),
+            ("sdk", "sdks"), ("deployment",), ("version", "versions"), ("support", "supports", "supported"),
+            ("install", "installed", "installation"))
+        for term, spellings in zip(vocabulary, variants):
+            for spelling in spellings:
+                for word in (spelling, spelling.upper(), "“" + spelling.title() + "”"):
+                    raw = header + prefix + (word + " PRIVATE_VALUE }\n").encode()
+                    value = self.observe(b"", raw)
+                    row = value["destinationTable"]["rows"][0]
+                    self.assertEqual(row["errorTerms"], [term])
+                    self.assertTrue(row["errorPresent"])
+                    self.assertEqual(value["stderrSha256"], hashlib.sha256(raw).hexdigest())
+                    self.assertNotIn("PRIVATE_", json.dumps(value))
+                    self.assertEqual(value["status"], "unclassified")  # Lexical terms are not cause classifiers.
+        raw = header + prefix + b"ARCHITECTURES platforms macOS Xcode SDKs deployment versions supports installed architecture 26.6.1 PRIVATE_VALUE }\n"
+        value = self.observe(raw)
+        self.assertEqual(value["destinationTable"]["rows"][0]["errorTerms"], vocabulary)
+        self.assertNotIn("26.6.1", json.dumps(value)); self.assertNotIn("PRIVATE_", json.dumps(value))
+        # Unicode-aware boundaries and ASCII-only spelling reject lookalike folds.
+        for word in ("prearchitecture", "architecture_suffix", "platforms2", "SDKNAME", "unsupported",
+                     "suppeřt", "verſion", "ınstall", "sdK", "名architecture", "architecture名", "PRIVATE_VALUE"):
+            value = self.observe(header + prefix + (word + " }\n").encode())
+            self.assertEqual(value["destinationTable"]["rows"][0]["errorTerms"], [])
+        no_error = header + b"{ platform:macOS, arch:x86_64h, name:architecture }\n"
+        self.assertNotIn("errorTerms", self.observe(no_error)["destinationTable"]["rows"][0])
+        unknown = header + b"{ platform:macOS, arch:PRIVATE, name:PRIVATE, error:architecture }\n"
+        self.assertNotIn("errorTerms", self.observe(unknown)["destinationTable"]["unknownRows"][0])
+        for invalid in (raw.rstrip(b"\n"), header + prefix + b"bad\x00architecture }\n",
+                        header + prefix + b"architecture" * 400 + b" }\n"):
+            value = self.observe(invalid)
+            self.assertEqual(value["destinationTable"]["rows"], [])
+        original = subprocess.CompletedProcess([], 70, raw, b"")
+        self.assertNotIn("destinationTable", self.data["normal_failure_diagnostics"]("query", None, original))
+
+    def test_destination_error_terms_retire_before_all_old_findings(self):
+        dense = b"xcodebuild: error: Unable to find a destination matching the provided destination specifier:\n"
+        for index in range(8):
+            dense += ("Error Domain=IDETestOperationsObserverErrorDomain Code=" + str(-2147483648 + index) + "\n").encode()
+        for index in range(4):
+            dense += ("NormalAppUITests.swift:" + str(65535 - index) + ":4096: error: ambiguous missing argument actor-isolated\n").encode()
+            dense += b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=containingSameStaticText;matches=5;exceedsFour=1;nonAtomic=1\n"
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        row = b"{ platform:macOS, arch:x86_64h, name:PRIVATE, error:PRIVATE }\n"
+        full = row.replace(b"error:PRIVATE", b"error:architectures platforms macOS Xcode SDKs deployment versions supports installed")
+        baseline = self.observe(dense + header + row * 8)
+        observed = self.observe(dense + header + full * 8)
+        for key in ("errorCodes", "compilerDiagnostics", "buildFailureReasons", "queryObservations", "markers", "status"):
+            self.assertEqual(observed[key], baseline[key], key)
+        before = [{key: value for key, value in row.items() if key != "errorTerms"}
+                  for row in baseline["destinationTable"]["rows"]]
+        after = [{key: value for key, value in row.items() if key != "errorTerms"}
+                 for row in observed["destinationTable"]["rows"]]
+        self.assertEqual(after, before)
+        self.assertTrue(observed["findingsTruncated"])
+        self.assertTrue(any("errorTerms" not in row for row in observed["destinationTable"]["rows"]))
+        self.assertFalse(observed["destinationTable"]["rowsTruncated"])
+        self.assertEqual(len(after), 8)
+        self.assertNotIn("PRIVATE", json.dumps(observed))
 
 
 if __name__ == "__main__":
