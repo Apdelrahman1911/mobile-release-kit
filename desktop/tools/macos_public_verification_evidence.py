@@ -153,10 +153,17 @@ UI_ADMISSION_SOURCES = frozenset(("macos_normal_ui_runner.py", "macos_aqua_quali
 UI_OWNER_REASONS = frozenset(("incomplete-output", "output-bound", "protocol-or-ownership",
     "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected", "stopped-before-exec",
     "parent-ended", "observer-ended", "fence-collision", "unknown"))
-UI_ADMISSION_ROLES = frozenset(("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+UI_ADMISSION_ROLES = frozenset(("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary", "normal-build-settings",
     "saved-version-source-roster", "saved-version-core-interrupt", "verify-generated-runner", "generated-runner-entitlements",
     "one-admitted-ui-test", "normal-ui-test-tree", "normal-toolchain-xcode", "normal-toolchain-sdkPath",
     "normal-toolchain-sdkVersion", "normal-toolchain-sdkBuild"))
+BUILD_SETTINGS = ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "NATIVE_ARCH_ACTUAL",
+    "NATIVE_ARCH_64_BIT", "SUPPORTED_PLATFORMS", "ONLY_ACTIVE_ARCH", "MACOSX_DEPLOYMENT_TARGET", "SDK_VERSION")
+BUILD_ARCHITECTURES = ("arm64", "arm64e", "x86_64", "x86_64h", "i386")
+BUILD_PLATFORMS = ("macosx", "iphoneos", "iphonesimulator", "appletvos", "appletvsimulator",
+    "watchos", "watchsimulator", "xros", "xrsimulator", "driverkit")
+DESTINATION_REJECTIONS = ("non-ascii-or-control", "row-envelope", "field-count", "field-format",
+    "duplicate-key", "missing-required-field")
 INPUT_LIMIT = 3 * 1024 * 1024
 OUTPUT_LIMIT = 128 * 1024
 JSON_NODE_LIMIT = 250000
@@ -364,8 +371,9 @@ def project_ui_failure(value, phase):
             need(len({(row["stream"], row["code"]) for row in rows}) == len(rows))
         if "destinationTable" in value:
             table = value["destinationTable"]
-            need(type(table) is dict and set(table) == {"state", "unknownRowObserved",
-                 "malformedRowObserved", "rowsTruncated", "rows"}
+            need(type(table) is dict and set(table) in ({"state", "unknownRowObserved",
+                 "malformedRowObserved", "rowsTruncated", "rows"}, {"state", "unknownRowObserved",
+                 "malformedRowObserved", "rowsTruncated", "rows", "rejections", "rejectionDetailsTruncated"})
                  and table["state"] in ("unavailable", "absent", "observed"))
             for name in ("unknownRowObserved", "malformedRowObserved", "rowsTruncated"):
                 boolean(table[name])
@@ -374,6 +382,19 @@ def project_ui_failure(value, phase):
                  and (not table["rowsTruncated"] or value["findingsTruncated"])
                  and (table["state"] == "observed" or not (rows or table["unknownRowObserved"]
                       or table["malformedRowObserved"] or table["rowsTruncated"])))
+            if "rejections" in table:
+                rejections = table["rejections"]
+                need(table["state"] == "observed" and table["malformedRowObserved"]
+                     and type(rejections) is list and len(rejections) <= 8)
+                boolean(table["rejectionDetailsTruncated"])
+                keys = []
+                for rejection in rejections:
+                    need(type(rejection) is dict and set(rejection) == {"stream", "section", "reason"}
+                         and rejection["stream"] in ("stdout", "stderr")
+                         and rejection["section"] in ("available", "ineligible")
+                         and type(rejection["reason"]) is str and rejection["reason"] in DESTINATION_REJECTIONS)
+                    keys.append((rejection["stream"], rejection["section"], rejection["reason"]))
+                need(len(set(keys)) == len(keys) and (bool(keys) or table["rejectionDetailsTruncated"]))
             for row in rows:
                 need(type(row) is dict and set(row) == {"stream", "section", "platform", "architecture", "errorPresent"}
                      and row["stream"] in ("stdout", "stderr") and row["section"] in ("available", "ineligible")
@@ -435,6 +456,63 @@ def project_ui_diagnostic(value, role, caller_status):
     if role != "admission":
         need(row["originalReturncode"] == status)
     return {**row, "receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False}
+
+
+def project_build_settings(value, context, status, build):
+    """A later query is not the failed build or independent source/phase proof."""
+    fields = {"schemaVersion", "scope", "target", "sourceCommit", "originalBuildReturncode",
+        "originalBuildStdoutSha256", "originalBuildStderrSha256", "hostVersion", "queryRole", "queryState",
+        "queryReturncode", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256", "settingsState", "settings",
+        "sourceBinding", "phaseFinality", "nativeSuccessInferred", "productReady"}
+    need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
+         and value["schemaVersion"] == 1 and value["scope"] == "normal-macos-build-settings-diagnostic-only"
+         and value["target"] == context["target"] == "x86_64-apple-darwin"
+         and value["sourceCommit"] == context["source"]
+         and value["queryRole"] == "normal-build-settings"
+         and value["sourceBinding"] == "prior-build-source-pre-post-only" and value["phaseFinality"] == "not-asserted"
+         and value["nativeSuccessInferred"] is False and value["productReady"] is False
+         and type(status) is dict and status.get("receiptState") == "observed"
+         and type(build) is dict and build.get("receiptState") == "observed" and build.get("phase") == "build")
+    code = integer(value["originalBuildReturncode"], 255, 1)
+    need(code == integer(status.get("returncode"), 255, 1) == integer(build.get("originalReturncode"), 255, 1))
+    for stream in ("Stdout", "Stderr"):
+        need(hex_value(value["originalBuild" + stream + "Sha256"]) == hex_value(build.get(stream.lower() + "Sha256")))
+    host = value["hostVersion"]
+    need(host is None or type(host) is str and len(host) <= 16 and re.fullmatch(r"26(?:\.[0-9]{1,3}){1,3}", host))
+    need(value["queryState"] in ("not-returned", "returned")
+         and value["settingsState"] in ("unavailable", "nonzero", "malformed", "observed"))
+    capture = ("queryReturncode", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256")
+    if value["queryState"] == "not-returned":
+        need(all(value[key] is None for key in capture) and value["settingsState"] == "unavailable" and value["settings"] is None)
+    else:
+        query_code = integer(value["queryReturncode"], 255)
+        size = integer(value["stdoutBytes"], 262144)
+        integer(value["stderrBytes"], 262144 - size)
+        hex_value(value["stdoutSha256"]); hex_value(value["stderrSha256"])
+        need(value["settingsState"] in (("malformed", "observed") if query_code == 0 else ("nonzero",)))
+        if value["settingsState"] != "observed":
+            need(value["settings"] is None)
+    if value["settingsState"] == "observed":
+        need(value["stdoutBytes"] > 0)  # The genuine parser never admits empty input.
+        settings = value["settings"]
+        need(type(settings) is dict and set(settings) == set(BUILD_SETTINGS))
+        for name in BUILD_SETTINGS:
+            row = settings[name]
+            need(type(row) is dict and set(row) == {"state", "value"} and row["state"] in ("absent", "unsupported", "observed"))
+            item = row["value"]
+            if row["state"] != "observed":
+                need(item is None)
+            elif name in ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "SUPPORTED_PLATFORMS"):
+                choices = BUILD_PLATFORMS if name == "SUPPORTED_PLATFORMS" else BUILD_ARCHITECTURES
+                need(type(item) is list and len(item) <= (8 if name == "SUPPORTED_PLATFORMS" else 5)
+                     and all(type(word) is str and word in choices for word in item) and len(set(item)) == len(item))
+            elif name in ("NATIVE_ARCH_ACTUAL", "NATIVE_ARCH_64_BIT"):
+                need(type(item) is str and item in ("x86_64", "x86_64h", "arm64", "arm64e"))
+            elif name == "ONLY_ACTIVE_ARCH":
+                boolean(item)
+            else:
+                need(type(item) is str and re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,2}", item))
+    return {**value, "receiptState": "observed", "binding": "same-work-root-parent-context-and-failed-build-captures"}
 
 
 def project_data_contract_failure(value, context, statuses, inventory_paths):
@@ -881,12 +959,15 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         ui_diagnostics = {role: observe(path, 4096, lambda body, role=role:
             project_ui_diagnostic(decode(body, budget), role, statuses["normal-ui/build.status"]))
             for role, path in UI_DIAGNOSTICS} if profile == "installed" else {}
+        settings_diagnostic = observe("normal-ui/build.settings-diagnostics.json", 4096,
+            lambda body: project_build_settings(decode(body, budget), context, statuses["normal-ui/build.status"],
+                ui_diagnostics["build"])) if profile == "installed" else None
         data_failure = observe("data-contracts/failure-diagnostics.json", 16384,
             lambda body: project_data_contract_failure(decode(body, budget), context, statuses, inventory_paths)) if profile == "installed" else None
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
-                 "dataContractFailure": data_failure}
+                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic}
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         need(len(body) <= OUTPUT_LIMIT and directory_identity(os.fstat(root)) == root_id
              == directory_identity(os.stat(work, follow_symlinks=False)))

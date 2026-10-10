@@ -2,6 +2,7 @@
 import ast
 import hashlib
 import json
+from types import SimpleNamespace
 from pathlib import Path
 import re
 import subprocess
@@ -61,6 +62,33 @@ def admission_reducers():
         class ProcessInterrupted(KeyboardInterrupt):
             pass
     return namespace, Owner
+
+
+def build_settings_reducers(*, main=False):
+    """Actual DATA, phase/clock and caller with inert ports; no owner import."""
+    names = {"Refused", "need", "pairs", "encoded", "sha", "original_command", "PhaseClock", "NormalPhase",
+        "normal_target_data", "normal_build_arguments", "normal_build_settings_arguments", "normal_build_settings_data",
+        "publish_normal_build_settings", "ARM_TARGET", "INTEL_TARGET", "TARGET", "PROJECT",
+        "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS"}
+    if main:
+        names.update(("main", "NativeQueryFailure", "ENGINEERING_MODES"))
+    nodes, found = [], set()
+    for node in ast.parse(RUNNER.read_bytes()).body:
+        name = node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else (
+            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) else None)
+        if name in names:
+            nodes.append(node); found.add(name)
+    assert found == names and len(nodes) == len(names)
+    namespace = dict(hashlib=hashlib, json=json, re=re, Path=Path,
+        subprocess=SimpleNamespace(CompletedProcess=subprocess.CompletedProcess))
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(RUNNER), "exec"), namespace)
+    return namespace
+
+
+def settings_body(settings=None, **extra):
+    return json.dumps([{"target": "MRKNormalAppUITests", "buildSettings": {} if settings is None else settings,
+                        **extra}]).encode()
 
 
 class NormalBuildFailureDataTests(unittest.TestCase):
@@ -346,6 +374,229 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         expected = [len(body), hashlib.sha256(body).hexdigest()]
         self.assertEqual(ast.literal_eval(assignments["PINS"])["desktop/tools/macos_normal_ui_runner.py"], expected)
         self.assertEqual(ast.literal_eval(assignments["UI_NORMAL_PIN"]), expected)
+
+
+    def test_build_settings_selected_values_are_closed_and_private(self):
+        data = build_settings_reducers(); parse = data["normal_build_settings_data"]
+        raw = {"ARCHS": "arm64 arm64e x86_64 x86_64h i386", "VALID_ARCHS": "x86_64", "EXCLUDED_ARCHS": "",
+            "NATIVE_ARCH_ACTUAL": "x86_64h", "NATIVE_ARCH_64_BIT": "x86_64", "SUPPORTED_PLATFORMS": "macosx",
+            "ONLY_ACTIVE_ARCH": "NO", "MACOSX_DEPLOYMENT_TARGET": "26.0", "SDK_VERSION": "26.1.2",
+            "PRIVATE_SENTINEL": "/private/setting/value"}
+        result = parse(settings_body(raw, private="PRIVATE_SENTINEL"))
+        self.assertEqual(tuple(result), data["NORMAL_BUILD_SETTINGS"])
+        self.assertEqual(result["ARCHS"], {"state": "observed", "value": raw["ARCHS"].split()})
+        self.assertEqual(result["EXCLUDED_ARCHS"], {"state": "observed", "value": []})
+        self.assertEqual(result["ONLY_ACTIVE_ARCH"], {"state": "observed", "value": False})
+        for name in ("NATIVE_ARCH_ACTUAL", "NATIVE_ARCH_64_BIT", "MACOSX_DEPLOYMENT_TARGET", "SDK_VERSION"):
+            self.assertEqual(result[name], {"state": "observed", "value": raw[name]})
+        self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        self.assertTrue(all(row == {"state": "absent", "value": None} for row in parse(settings_body()).values()))
+        for name, values in (("ARCHS", ("x86_64 PRIVATE_SENTINEL", "x86_64 x86_64", "x86_64\tarm64", True)),
+                ("SUPPORTED_PLATFORMS", ("macosx PRIVATE_SENTINEL", "macosx macosx")),
+                ("NATIVE_ARCH_ACTUAL", ("", "i386", "PRIVATE_SENTINEL", 64)),
+                ("ONLY_ACTIVE_ARCH", ("", "yes", True, "PRIVATE_SENTINEL")),
+                ("SDK_VERSION", ("26.1.2.3", "1000", "26/PRIVATE_SENTINEL", None))):
+            for value in values:
+                with self.subTest(setting=name, value=value):
+                    self.assertEqual(parse(settings_body({name: value}))[name], {"state": "unsupported", "value": None})
+        self.assertEqual(parse(settings_body({"ONLY_ACTIVE_ARCH": "YES"}))["ONLY_ACTIVE_ARCH"]["value"], True)
+
+    def test_build_settings_json_bounds_and_target_selection(self):
+        data = build_settings_reducers(); parse = data["normal_build_settings_data"]
+        valid = settings_body({"ARCHS": "x86_64"})
+        self.assertEqual(parse(valid + b" " * (262144 - len(valid)))["ARCHS"]["value"], ["x86_64"])
+        for body in (b"", valid + b" " * (262145 - len(valid)), b"\xff", valid[:-1],
+                b'[{"target":"MRKNormalAppUITests","target":"MRKNormalAppUITests","buildSettings":{}}]',
+                settings_body(extra=1.5), settings_body(extra=float("nan")), settings_body(extra=2147483648),
+                settings_body(extra=-2147483649), settings_body(extra="x" * 16385),
+                settings_body(extra=[0] * 2049), settings_body(extra={str(n): 0 for n in range(2049)}),
+                settings_body(extra=[[0] * 2048 for _ in range(6)]),
+                b"[" * 9 + b"0" + b"]" * 9, b"[]", b"{}",
+                json.dumps([{"target": "other", "buildSettings": {}}]).encode(),
+                json.dumps([{"target": "MRKNormalAppUITests", "buildSettings": {}}] * 2).encode(),
+                json.dumps([{"target": "other", "buildSettings": {}}] * 9).encode(),
+                settings_body().decode()):
+            with self.subTest(kind=type(body).__name__, size=len(body)), self.assertRaises((data["Refused"], ValueError)):
+                parse(body)
+        rows = [{"target": "other", "buildSettings": {"ARCHS": "arm64"}},
+                {"target": "MRKNormalAppUITests", "buildSettings": {"ARCHS": "x86_64"}}]
+        self.assertEqual(parse(json.dumps(rows).encode())["ARCHS"]["value"], ["x86_64"])
+        # Braces/escapes within a private JSON string do not change lexical depth.
+        self.assertEqual(parse(settings_body(private='[{}]"\\'))["ARCHS"]["state"], "absent")
+
+    def test_build_settings_same_phase_arguments_and_original_capture(self):
+        data = build_settings_reducers(); now = [0]; calls = []; writes = []
+        environment = {"PRIVATE_SENTINEL": "not exported"}; root = Path("/inert/repo")
+        request = {"phase": "build", "target": data["INTEL_TARGET"], "derived": Path("/inert/normal-ui/DerivedData")}
+        body = settings_body({"ARCHS": "x86_64"})
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs)); now[0] += 1_000_000_000
+            return subprocess.CompletedProcess(argv, 0, body, b"PRIVATE_SENTINEL")
+        owner = SimpleNamespace(run_owned=run)
+        clock = data["PhaseClock"](450, now=lambda: now[0])
+        phase = data["NormalPhase"](owner, environment, root, clock)
+        data["exclusive_output"] = lambda *args: writes.append(args)
+        original = subprocess.CompletedProcess([], 70, b"failed-build-out", b"failed-build-err")
+        observed = data["publish_normal_build_settings"](phase, request, "1" * 40, original, "26.0.1")
+        expected = ["/usr/bin/xcodebuild", "-showBuildSettings", "-json", "-project", data["PROJECT"],
+            "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-derivedDataPath", str(request["derived"]),
+            "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO"]
+        self.assertEqual(calls[0][0], expected); self.assertEqual(len(calls), 1)
+        self.assertIs(calls[0][1]["environ"], environment); self.assertIs(calls[0][1]["cwd"], root)
+        self.assertEqual(calls[0][1], dict(environ=environment, cwd=root, timeout=15, capture=True, text=False, output_limit=262144))
+        self.assertIs(phase.owner, owner); self.assertIs(phase.clock, clock); self.assertEqual(clock.deadline, 450_000_000_000)
+        self.assertFalse(clock.finalized); self.assertFalse(clock.failed)
+        self.assertEqual(phase.records[0]["role"], "normal-build-settings")
+        self.assertEqual(observed["stdoutSha256"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(observed["originalBuildStderrSha256"], hashlib.sha256(original.stderr).hexdigest())
+        self.assertEqual(observed["settingsState"], "observed"); self.assertEqual(observed["hostVersion"], "26.0.1")
+        self.assertEqual(writes[0][0], request["derived"].parent / "build.settings-diagnostics.json")
+        self.assertEqual(writes[0][2], 4096); self.assertEqual(json.loads(writes[0][1]), observed)
+        self.assertNotIn(b"PRIVATE_SENTINEL", writes[0][1]); self.assertLessEqual(len(writes[0][1]), 4096)
+        build = data["normal_build_arguments"](request["derived"], target=data["INTEL_TARGET"])
+        self.assertIn("build-for-testing", build); self.assertIn("platform=macOS,arch=x86_64", build)
+        self.assertIn("-destination-timeout", build); self.assertNotIn("-showBuildSettings", build)
+        self.assertNotIn("-destination", expected)
+
+    def test_build_settings_unknown_nonzero_malformed_and_publication_failures(self):
+        for outcome in ("nonzero", "malformed", "owner-error", "bad-original", "expired", "write-error"):
+            with self.subTest(outcome=outcome):
+                data = build_settings_reducers(); now = [0]; calls = []; writes = []
+                clock = data["PhaseClock"](450, now=lambda: now[0])
+                def run(argv, **kwargs):
+                    calls.append(argv)
+                    if outcome == "owner-error": raise RuntimeError("PRIVATE_SENTINEL")
+                    if outcome == "bad-original": return None
+                    return subprocess.CompletedProcess(argv, 9 if outcome == "nonzero" else 0,
+                        b"" if outcome == "malformed" else settings_body(), b"")
+                phase = data["NormalPhase"](SimpleNamespace(run_owned=run), {}, Path("/inert"), clock)
+                def write(*args):
+                    writes.append(args)
+                    if outcome == "write-error": raise OSError("PRIVATE_SENTINEL")
+                data["exclusive_output"] = write
+                if outcome == "expired": now[0] = clock.deadline
+                request = dict(phase="build", target=data["INTEL_TARGET"], derived=Path("/inert/normal-ui/DerivedData"))
+                original = subprocess.CompletedProcess([], 70, b"a", b"b")
+                if outcome in ("owner-error", "bad-original", "expired"):
+                    with self.assertRaises((RuntimeError, data["Refused"])):
+                        data["publish_normal_build_settings"](phase, request, "1" * 40, original, "PRIVATE_SENTINEL")
+                    value = json.loads(writes[0][1]); self.assertTrue(clock.failed)
+                    self.assertEqual(value["queryState"], "not-returned")
+                    self.assertTrue(all(value[k] is None for k in ("queryReturncode", "stdoutBytes", "stderrBytes", "stdoutSha256", "stderrSha256")))
+                else:
+                    value = data["publish_normal_build_settings"](phase, request, "1" * 40, original, "PRIVATE_SENTINEL")
+                    self.assertEqual(value["settingsState"], {"nonzero": "nonzero", "malformed": "malformed", "write-error": "observed"}[outcome])
+                self.assertIsNone(value["hostVersion"]); self.assertEqual(original.returncode, 70)
+                self.assertEqual(len(calls), 0 if outcome == "expired" else 1)
+                self.assertIs(value["nativeSuccessInferred"], False); self.assertEqual(value["phaseFinality"], "not-asserted")
+
+    def _settings_main(self, scenario, *, target="x86_64-apple-darwin", code=70, phase_name="build", engineering=False):
+        data = build_settings_reducers(main=True); events = []; captures = []; phases = []; clock_value = [0]
+        request = dict(phase=phase_name, phaseSeconds=450, target=target, derived=Path("/inert/normal-ui/DerivedData"))
+        original = subprocess.CompletedProcess(["build"], code, b"original-out", b"original-err")
+        class Stream:
+            def __init__(self, name): self.name = name; self.buffer = self
+            def write(self, body):
+                events.append(self.name + "-write")
+                if scenario == "stream-error": raise OSError("PRIVATE_SENTINEL")
+            def flush(self): events.append(self.name + "-flush")
+        data["sys"] = SimpleNamespace(argv=["runner", "--engineering-main-build" if engineering else "--normal-build"],
+            stdout=Stream("stdout"), stderr=Stream("stderr"))
+        data["os"] = SimpleNamespace(environ={}); data["time"] = SimpleNamespace(monotonic_ns=lambda: clock_value[0])
+        data["normal_request"] = data["engineering_request"] = lambda *_: request
+        def context(req, **kwargs):
+            events.append("context"); self.assertIs(req, request)
+            self.assertEqual(set(kwargs), {"diagnostics"} if target == data["INTEL_TARGET"] and phase_name == "build" and not engineering else set())
+            if kwargs: kwargs["diagnostics"]["hostVersion"] = "26.0"
+            return Path("/inert/repo"), "1" * 40, {"inert": "environment"}, 123
+        data["normal_context"] = data["engineering_context"] = context
+        def run(argv, **kwargs):
+            events.append("settings-query")
+            self.assertEqual(events[-6:-1], ["build-diagnostic", "stdout-write", "stderr-write", "stdout-flush", "stderr-flush"])
+            self.assertEqual(kwargs["timeout"], 15); self.assertEqual(kwargs["output_limit"], 262144)
+            if scenario == "query-error": raise RuntimeError("PRIVATE_SENTINEL")
+            return subprocess.CompletedProcess(argv, 9 if scenario == "query-nonzero" else 0,
+                b"" if scenario == "parse-error" else settings_body(), b"")
+        owner = SimpleNamespace(run_owned=run); data["load_normal_owner"] = lambda root: owner
+        def execute(phase, req, source, file_limit):
+            phases.append(phase); events.append("execute")
+            if scenario == "toolchain-error": raise data["NativeQueryFailure"](original)
+            if scenario == "execute-error": raise RuntimeError("PRIVATE_SENTINEL")
+            if scenario == "expired": clock_value[0] = phase.clock.deadline
+            return original
+        data["execute_normal_phase"] = data["execute_engineering_phase"] = execute
+        def diagnostic(*args, **kwargs):
+            events.append("build-diagnostic")
+            if scenario == "diagnostic-error": raise OSError("PRIVATE_SENTINEL")
+        data["publish_failure_diagnostics"] = data["publish_engineering_failure"] = diagnostic
+        data["engineering_native_failure"] = lambda *args, **kwargs: {}
+        data["normal_admission_failure"] = lambda *args, **kwargs: {"stage": args[0]}
+        def publish(path, body, limit):
+            captures.append(json.loads(body)); events.append("settings-publication")
+            if scenario == "write-error": raise OSError("PRIVATE_SENTINEL")
+            if scenario == "finish-error": clock_value[0] = phases[0].clock.deadline
+        data["exclusive_output"] = publish
+        result = data["main"]()
+        return result, events, captures, phases, original
+
+    def test_build_settings_main_preserves_build70_and_publication_order(self):
+        for scenario in ("ok", "query-nonzero", "query-error", "parse-error", "write-error", "finish-error",
+                         "expired", "diagnostic-error", "stream-error"):
+            with self.subTest(scenario=scenario):
+                result, events, captures, phases, original = self._settings_main(scenario)
+                self.assertEqual(result, 70); self.assertEqual(original.returncode, 70)
+                self.assertEqual(events.count("execute"), 1)
+                queried = scenario not in ("expired", "diagnostic-error", "stream-error")
+                self.assertEqual(events.count("settings-query"), int(queried))
+                if scenario not in ("diagnostic-error", "stream-error"):
+                    self.assertEqual(len(captures), 1)
+                    self.assertEqual(captures[0]["originalBuildStdoutSha256"], hashlib.sha256(original.stdout).hexdigest())
+                    self.assertEqual(captures[0]["originalBuildStderrSha256"], hashlib.sha256(original.stderr).hexdigest())
+                if scenario in ("query-error", "finish-error", "expired", "diagnostic-error", "stream-error"):
+                    self.assertTrue(phases[0].clock.failed)
+
+    def test_build_settings_main_never_queries_other_routes(self):
+        for scenario, kwargs, expected in (("ok", {"target": "aarch64-apple-darwin"}, 70),
+                ("ok", {"code": 0}, 0), ("ok", {"phase_name": "test"}, 70),
+                ("ok", {"engineering": True}, 70), ("toolchain-error", {}, 70), ("execute-error", {}, 1)):
+            with self.subTest(scenario=scenario, kwargs=kwargs):
+                result, events, captures, _, _ = self._settings_main(scenario, **kwargs)
+                self.assertEqual(result, expected); self.assertNotIn("settings-query", events); self.assertEqual(captures, [])
+
+    def test_build_settings_context_reuses_single_admitted_host_observation(self):
+        tree = ast.parse(RUNNER.read_bytes())
+        context = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "normal_context")
+        calls = [node for node in ast.walk(context) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "platform" and node.func.attr == "mac_ver"]
+        self.assertEqual(len(calls), 1)
+        assignments = [node for node in ast.walk(context) if isinstance(node, ast.NamedExpr)
+                       and isinstance(node.target, ast.Name) and node.target.id == "host_version"]
+        self.assertEqual(len(assignments), 1)
+        self.assertIn(calls[0], list(ast.walk(assignments[0])))
+        self.assertEqual(context.args.kwonlyargs[0].arg, "diagnostics")
+        self.assertEqual(ast.literal_eval(context.args.kw_defaults[0]), None)
+        source = ast.get_source_segment(RUNNER.read_text(), context)
+        self.assertIn('if diagnostics is not None:\n        diagnostics["hostVersion"] = host_version', source)
+        self.assertLess(source.index('"normal-clean-environment"'), source.index('diagnostics["hostVersion"] = host_version'))
+
+    def test_destination_rejection_details_cover_each_branch_and_cap(self):
+        header = b'Available destinations for the "MRKNormalAppUI" scheme:\n'
+        rows = (("non-ascii-or-control", b'{ platform:macOS, name:private\x01name }\n'),
+            ("row-envelope", b'{ platform:macOS, name:private\n'),
+            ("field-count", b'{ platform:macOS, name:a, id:b, arch:arm64, error:c, extra:d }\n'),
+            ("field-format", b'{ platform:macOS, name:a, broken }\n'),
+            ("duplicate-key", b'{ platform:macOS, name:a, name:b }\n'),
+            ("missing-required-field", b'{ platform:macOS }\n'))
+        for reason, raw in rows:
+            value = self.observe(header + raw + raw)["destinationTable"]
+            self.assertEqual(value["rejections"], [{"stream": "stdout", "section": "available", "reason": reason}])
+            self.assertFalse(value["rejectionDetailsTruncated"])
+        value = self.observe(header + b"".join(row for _, row in rows), header + b"".join(row for _, row in rows))
+        self.assertEqual(len(value["destinationTable"]["rejections"]), 8)
+        self.assertTrue(value["destinationTable"]["rejectionDetailsTruncated"])
+        self.assertEqual(value["destinationTable"]["rows"], [])
+        self.assertNotIn(b"private", self.data["encoded"](value))
 
 
 if __name__ == "__main__":

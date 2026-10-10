@@ -67,7 +67,10 @@ def normal_diagnostic_data(*, removal=False):
         "normal_failure_diagnostics", "normal_admission_failure", "classify_normal_admission_failure", "ADMISSION_OWNER_REASONS",
         "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
         "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
-        "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES"}
+        "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES",
+        "TARGET", "PROJECT", "INTEL_TARGET", "PhaseClock", "NormalPhase", "original_command",
+        "normal_build_settings_arguments", "normal_build_settings_data", "publish_normal_build_settings",
+        "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS"}
     if removal:
         names.update(("TARGET", "CLASS", "REMOVAL_METHODS", "removal_selection", "removal_ui_result"))
     nodes, found = [], set()
@@ -90,6 +93,37 @@ def build_diagnostic(normal, phase="build", *, fallback=False):
         b"NormalAppUITests.swift:123:7: error: cannot find '" + SENTINEL.encode() + b"' in scope\n"
         b"** BUILD FAILED **\nxcodebuild: error: " + SENTINEL.encode() + b"\n"))
     return normal["failure_base" if fallback else "normal_failure_diagnostics"](phase, None, original)
+
+
+def build_settings_fixture(normal, outcome="observed"):
+    """Genuine DATA producer/phase with one inert original; never a native query."""
+    context = {**CONTEXT, "target": "x86_64-apple-darwin"}
+    original = CompletedProcess([], 70, b"failed-build-out", b"failed-build-err")
+    build = normal["normal_failure_diagnostics"]("build", None, original)
+    raw = {"ARCHS": " ".join(normal["NORMAL_BUILD_ARCHITECTURES"]),
+        "VALID_ARCHS": " ".join(normal["NORMAL_BUILD_ARCHITECTURES"]),
+        "EXCLUDED_ARCHS": " ".join(normal["NORMAL_BUILD_ARCHITECTURES"]),
+        "NATIVE_ARCH_ACTUAL": "x86_64h", "NATIVE_ARCH_64_BIT": "x86_64h",
+        "SUPPORTED_PLATFORMS": " ".join(sorted(normal["NORMAL_BUILD_PLATFORMS"], key=len, reverse=True)[:8]),
+        "ONLY_ACTIVE_ARCH": "YES", "MACOSX_DEPLOYMENT_TARGET": "999.999.999", "SDK_VERSION": "999.999.999",
+        "PRIVATE_KEY": SENTINEL}
+    body = json.dumps([{"target": normal["TARGET"], "buildSettings": raw, "private": SENTINEL}]).encode()
+    writes = []
+    def run(argv, **kwargs):
+        if outcome == "unavailable": raise RuntimeError("inert-original-did-not-return")
+        return CompletedProcess(argv, 9 if outcome == "nonzero" else 0,
+            b"" if outcome == "malformed" else body, SENTINEL.encode())
+    clock = normal["PhaseClock"](450, now=lambda: 0)
+    phase = normal["NormalPhase"](SimpleNamespace(run_owned=run), {}, Path("/inert"), clock)
+    normal["exclusive_output"] = lambda path, body, limit: writes.append((path, body, limit))
+    try:
+        normal["publish_normal_build_settings"](phase,
+            dict(phase="build", target=context["target"], derived=Path("/inert/normal-ui/DerivedData")),
+            context["source"], original, "26.999.999.999")
+    except RuntimeError:
+        if outcome != "unavailable": raise
+    assert len(writes) == 1 and writes[0][2] == 4096 and len(writes[0][1]) <= 4096
+    return json.loads(writes[0][1]), build, {"receiptState": "observed", "returncode": 70}, context
 
 
 def admission_diagnostic(normal):
@@ -792,6 +826,17 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(result["phases"]["package-removal-fixture"]["originalCalls"]["recordedCount"], 9)
             self.assertEqual(result["phases"]["package-removal-fixture"]["removalFixture"]["case"], "ordinary")
             self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+            # Intel-only settings are independently validated under their own
+            # parent/build tuple. This combined ARM+Intel object is ONLY an
+            # inert conservative byte budget, never one semantically valid run.
+            settings, intel_build, intel_status, intel_context = build_settings_fixture(normal)
+            intel_build = DATA.project_ui_diagnostic(intel_build, "build", intel_status)
+            projected = DATA.project_build_settings(settings, intel_context, intel_status, intel_build)
+            self.assertEqual(projected["receiptState"], "observed")
+            self.assertEqual(len(projected["settings"]), 9)
+            combined_budget_only = {**result, "buildSettingsDiagnostic": projected}
+            encoded = (json.dumps(combined_budget_only, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+            self.assertLessEqual(len(encoded), DATA.OUTPUT_LIMIT)
 
     def test_fixed_roster_preserves_originals_and_independent_failure_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1097,6 +1142,119 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertIsNone(result["dataContractFailure"])
             self.assertEqual(path.read_bytes(), SENTINEL.encode())
 
+
+
+    def test_build_settings_genuine_tuple_and_enum_parity(self):
+        normal = normal_diagnostic_data()
+        for public, producer in (("BUILD_SETTINGS", "NORMAL_BUILD_SETTINGS"),
+                ("BUILD_ARCHITECTURES", "NORMAL_BUILD_ARCHITECTURES"),
+                ("BUILD_PLATFORMS", "NORMAL_BUILD_PLATFORMS"), ("DESTINATION_REJECTIONS", "DESTINATION_REJECTIONS")):
+            self.assertEqual(getattr(DATA, public), normal[producer])
+        self.assertEqual(DATA.UI_ADMISSION_ROLES, frozenset(normal["ADMISSION_COMMAND_ROLES"]))
+        self.assertIn("normal-build-settings", DATA.UI_ADMISSION_ROLES)
+        for state in ("observed", "nonzero", "malformed", "unavailable"):
+            value, build, status, context = build_settings_fixture(normal, state)
+            build = DATA.project_ui_diagnostic(build, "build", status)
+            row = DATA.project_build_settings(value, context, status, build)
+            self.assertEqual(row["receiptState"], "observed")
+            self.assertEqual(row["settingsState"], state)
+            self.assertEqual(row["originalBuildReturncode"], 70)
+            self.assertEqual(row["sourceBinding"], "prior-build-source-pre-post-only")
+            self.assertEqual(row["binding"], "same-work-root-parent-context-and-failed-build-captures")
+            self.assertEqual(row["phaseFinality"], "not-asserted")
+            self.assertIs(row["nativeSuccessInferred"], False); self.assertIs(row["productReady"], False)
+            self.assertNotIn(SENTINEL, json.dumps(row))
+            if state == "observed": self.assertEqual(len(row["settings"]), 9)
+            else: self.assertIsNone(row["settings"])
+
+    def test_build_settings_public_closed_schema_and_correlations(self):
+        value, build, status, context = build_settings_fixture(normal_diagnostic_data())
+        build = DATA.project_ui_diagnostic(build, "build", status)
+        mutations = (("schemaVersion", True), ("target", "aarch64-apple-darwin"), ("sourceCommit", "2" * 40),
+            ("originalBuildReturncode", 0), ("originalBuildReturncode", True),
+            ("originalBuildStdoutSha256", "2" * 64), ("originalBuildStderrSha256", "3" * 64),
+            ("hostVersion", SENTINEL), ("hostVersion", "25.0"), ("hostVersion", True),
+            ("queryRole", SENTINEL), ("queryState", "not-returned"), ("queryReturncode", True),
+            ("queryReturncode", 1), ("stdoutBytes", 0), ("stdoutBytes", True), ("stdoutBytes", 262145),
+            ("stderrBytes", 262144), ("stdoutSha256", SENTINEL), ("stderrSha256", None),
+            ("settingsState", "unavailable"), ("settings", None), ("sourceBinding", SENTINEL),
+            ("phaseFinality", "settled"), ("nativeSuccessInferred", True), ("productReady", 0), ("extra", SENTINEL))
+        for key, bad in mutations:
+            broken = copy.deepcopy(value); broken[key] = bad
+            with self.subTest(key=key, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_build_settings(broken, context, status, build)
+        for key in value:
+            broken = dict(value); broken.pop(key)
+            with self.subTest(missing=key), self.assertRaises(DATA.Refused):
+                DATA.project_build_settings(broken, context, status, build)
+        for field, bad in (("ARCHS", {"state": "observed", "value": ["x86_64", "PRIVATE"]}),
+                ("VALID_ARCHS", {"state": "observed", "value": ["x86_64", "x86_64"]}),
+                ("ONLY_ACTIVE_ARCH", {"state": "observed", "value": 1}),
+                ("SDK_VERSION", {"state": "observed", "value": "26.0.0.0"}),
+                ("NATIVE_ARCH_ACTUAL", {"state": "observed", "value": "i386"}),
+                ("ARCHS", {"state": "absent", "value": []}),
+                ("ARCHS", {"state": "unsupported", "value": False}),
+                ("ARCHS", {"state": "observed", "value": [], "private": SENTINEL})):
+            broken = copy.deepcopy(value); broken["settings"][field] = bad
+            with self.subTest(field=field, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_build_settings(broken, context, status, build)
+        for other_context, other_status, other_build in (({**context, "target": "aarch64-apple-darwin"}, status, build),
+                (context, {"receiptState": "absent"}, build), (context, {**status, "returncode": 0}, build),
+                (context, status, {"receiptState": "refused"}), (context, status, {**build, "phase": "query"}),
+                (context, status, {**build, "stdoutSha256": "4" * 64}),
+                (context, status, {**build, "stderrSha256": "4" * 64})):
+            with self.assertRaises(DATA.Refused):
+                DATA.project_build_settings(value, other_context, other_status, other_build)
+
+    def test_build_settings_fixed_file_states_and_aqua_absence(self):
+        value, build, _, context = build_settings_fixture(normal_diagnostic_data())
+        def run(root, profile="installed"):
+            return DATA.project(str(root), profile=profile, source=context["source"], workflow_source=context["workflowSource"],
+                run_id=context["runId"], run_attempt=context["runAttempt"], target=context["target"])
+        for mode in ("valid", "absent", "oversized", "duplicate", "bad-status", "bad-build", "raw-unlisted"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); before = {}
+                path = write(root, "normal-ui/build.failure-diagnostics.json", build); before[path] = path.read_bytes()
+                path = write(root, "normal-ui/build.status", b"0\n" if mode == "bad-status" else b"70\n"); before[path] = path.read_bytes()
+                if mode != "absent":
+                    raw = json.dumps(value).encode()
+                    if mode == "oversized": raw += b" " * (4097 - len(raw))
+                    if mode == "duplicate": raw = raw[:-1] + b',"schemaVersion":1}'
+                    path = write(root, "normal-ui/build.settings-diagnostics.json", raw); before[path] = raw
+                if mode == "bad-build":
+                    broken = {**build, "stderrSha256": "a" * 64}; path = write(root, "normal-ui/build.failure-diagnostics.json", broken); before[path] = path.read_bytes()
+                if mode == "raw-unlisted":
+                    path = write(root, "normal-ui/private-build-settings.stdout", SENTINEL.encode()); before[path] = path.read_bytes()
+                result = run(root)
+                expected = "absent" if mode == "absent" else "observed" if mode in ("valid", "raw-unlisted") else "refused"
+                self.assertEqual(result["buildSettingsDiagnostic"]["receiptState"], expected)
+                if expected == "observed": self.assertEqual(result["buildSettingsDiagnostic"]["originalBuildReturncode"], 70)
+                for path, body in before.items(): self.assertEqual(path.read_bytes(), body)
+                self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); raw = write(root, "normal-ui/build.settings-diagnostics.json", SENTINEL.encode())
+            self.assertIsNone(run(root, "aqua")["buildSettingsDiagnostic"])
+            self.assertEqual(raw.read_bytes(), SENTINEL.encode())
+
+    def test_destination_rejection_details_public_schema(self):
+        normal = normal_diagnostic_data(); status = {"receiptState": "observed", "returncode": 70}
+        raw = b'Available destinations for the "MRKNormalAppUI" scheme:\n{ platform:macOS }\n'
+        value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, raw, b""))
+        observed = DATA.project_ui_diagnostic(value, "build", status)
+        expected = [{"stream": "stdout", "section": "available", "reason": "missing-required-field"}]
+        self.assertEqual(observed["destinationTable"]["rejections"], expected)
+        self.assertIs(observed["destinationTable"]["rejectionDetailsTruncated"], False)
+        legacy = copy.deepcopy(value)
+        del legacy["destinationTable"]["rejections"], legacy["destinationTable"]["rejectionDetailsTruncated"]
+        self.assertNotIn("rejections", DATA.project_ui_diagnostic(legacy, "build", status)["destinationTable"])
+        for field, bad in (("rejections", None), ("rejections", []), ("rejections", expected * 2),
+                ("rejections", [{**expected[0], "reason": SENTINEL}]),
+                ("rejections", [{**expected[0], "stream": True}]),
+                ("rejections", [{**expected[0], "section": "other"}]),
+                ("rejections", [{**expected[0], "private": SENTINEL}]), ("rejectionDetailsTruncated", 1)):
+            broken = copy.deepcopy(value); broken["destinationTable"][field] = bad
+            with self.subTest(field=field, bad=bad), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(broken, "build", status)
 
 
 if __name__ == "__main__":

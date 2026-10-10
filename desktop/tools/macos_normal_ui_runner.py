@@ -819,6 +819,133 @@ def normal_build_arguments(derived, *, target=ARM_TARGET):
         "COMPILER_INDEX_STORE_ENABLE=NO"] + (["ARCHS=x86_64"] if target == INTEL_TARGET else [])
 
 
+NORMAL_BUILD_SETTINGS = ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "NATIVE_ARCH_ACTUAL",
+    "NATIVE_ARCH_64_BIT", "SUPPORTED_PLATFORMS", "ONLY_ACTIVE_ARCH", "MACOSX_DEPLOYMENT_TARGET", "SDK_VERSION")
+NORMAL_BUILD_ARCHITECTURES = ("arm64", "arm64e", "x86_64", "x86_64h", "i386")
+NORMAL_BUILD_PLATFORMS = ("macosx", "iphoneos", "iphonesimulator", "appletvos", "appletvsimulator",
+    "watchos", "watchsimulator", "xros", "xrsimulator", "driverkit")
+DESTINATION_REJECTIONS = ("non-ascii-or-control", "row-envelope", "field-count", "field-format",
+    "duplicate-key", "missing-required-field")
+
+
+def normal_build_settings_arguments(derived):
+    # Separate read-only settings query, not a second build or a new destination.
+    return ["/usr/bin/xcodebuild", "-showBuildSettings", "-json", "-project", PROJECT,
+        "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-derivedDataPath", str(derived),
+        "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO"]
+
+
+def normal_build_settings_data(body):
+    """Bounded native JSON to nine fixed settings; all other values stay private."""
+    need(type(body) is bytes and 0 < len(body) <= 262144, "normal-settings-input-bound")
+    depth, quoted, escaped = 0, False, False
+    for byte in body:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            need(depth <= 8, "normal-settings-depth")
+        elif byte in (93, 125):
+            depth -= 1
+            need(depth >= 0, "normal-settings-depth")
+    need(depth == 0 and not quoted, "normal-settings-json")
+    value = json.loads(body.decode("utf-8", "strict"), object_pairs_hook=pairs,
+        parse_constant=lambda _: (_ for _ in ()).throw(Refused("normal-settings-number")),
+        parse_float=lambda _: (_ for _ in ()).throw(Refused("normal-settings-number")))
+    pending, visited = [value], 0  # Byte/depth bounds precede parsing; node checks follow it.
+    while pending:
+        item = pending.pop(); visited += 1
+        need(visited <= 12000, "normal-settings-nodes")
+        if type(item) is dict:
+            need(len(item) <= 2048, "normal-settings-map")
+            pending.extend(item.keys()); pending.extend(item.values())
+        elif type(item) is list:
+            need(len(item) <= 2048, "normal-settings-list")
+            pending.extend(item)
+        elif type(item) is str:
+            need(len(item) <= 16384, "normal-settings-string")
+        else:
+            need(item is None or type(item) is bool or type(item) is int
+                 and -2147483648 <= item <= 2147483647, "normal-settings-scalar")
+    need(type(value) is list and 1 <= len(value) <= 8, "normal-settings-target-list")
+    selected = []
+    for row in value:
+        need(type(row) is dict and type(row.get("target")) is str and 0 < len(row["target"]) <= 256
+             and type(row.get("buildSettings")) is dict, "normal-settings-target-row")
+        if row["target"] == TARGET:
+            selected.append(row["buildSettings"])
+    need(len(selected) == 1, "normal-settings-one-target")
+    settings, result = selected[0], {}
+    for name in NORMAL_BUILD_SETTINGS:
+        if name not in settings:
+            result[name] = {"state": "absent", "value": None}
+            continue
+        raw, observed, good = settings[name], None, False
+        if type(raw) is str and len(raw) <= 1024:
+            if name in ("ARCHS", "VALID_ARCHS", "EXCLUDED_ARCHS", "SUPPORTED_PLATFORMS"):
+                tokens = [word for word in raw.split(" ") if word]
+                choices = NORMAL_BUILD_PLATFORMS if name == "SUPPORTED_PLATFORMS" else NORMAL_BUILD_ARCHITECTURES
+                cap = 8 if name == "SUPPORTED_PLATFORMS" else 5
+                good = len(tokens) <= cap and len(set(tokens)) == len(tokens) and all(word in choices for word in tokens)
+                observed = tokens
+            elif name in ("NATIVE_ARCH_ACTUAL", "NATIVE_ARCH_64_BIT"):
+                good = raw in ("x86_64", "x86_64h", "arm64", "arm64e")
+                observed = raw
+            elif name == "ONLY_ACTIVE_ARCH":
+                good, observed = raw in ("YES", "NO"), raw == "YES"
+            else:
+                good = re.fullmatch(r"[0-9]{1,3}(?:\.[0-9]{1,3}){0,2}", raw) is not None
+                observed = raw
+        result[name] = {"state": "observed" if good else "unsupported", "value": observed if good else None}
+    return result
+
+
+def publish_normal_build_settings(phase, request, source, original, host_version):
+    """One same-owner follow-up; caller retains the already returned failed build."""
+    need(type(phase) is NormalPhase and type(phase.clock) is PhaseClock
+         and request["phase"] == "build" and request["target"] == INTEL_TARGET
+         and type(original) is subprocess.CompletedProcess and type(original.returncode) is int
+         and 1 <= original.returncode <= 255 and type(original.stdout) is bytes and type(original.stderr) is bytes
+         and len(original.stdout) + len(original.stderr) <= 1024 * 1024
+         and type(source) is str and re.fullmatch(r"[0-9a-f]{40}", source), "normal-settings-failed-build")
+    value = {"schemaVersion": 1, "scope": "normal-macos-build-settings-diagnostic-only", "target": INTEL_TARGET,
+        "sourceCommit": source, "originalBuildReturncode": original.returncode,
+        "originalBuildStdoutSha256": sha(original.stdout), "originalBuildStderrSha256": sha(original.stderr),
+        "hostVersion": host_version if type(host_version) is str and len(host_version) <= 16
+            and re.fullmatch(r"26(?:\.[0-9]{1,3}){1,3}", host_version) else None,
+        "queryRole": "normal-build-settings", "queryState": "not-returned", "queryReturncode": None,
+        "stdoutBytes": None, "stderrBytes": None, "stdoutSha256": None, "stderrSha256": None,
+        "settingsState": "unavailable", "settings": None, "sourceBinding": "prior-build-source-pre-post-only",
+        "phaseFinality": "not-asserted", "nativeSuccessInferred": False, "productReady": False}
+    try:
+        query = phase.call("normal-build-settings", normal_build_settings_arguments(request["derived"]), 15, 262144)
+        value.update(queryState="returned", queryReturncode=query.returncode,
+            stdoutBytes=len(query.stdout), stderrBytes=len(query.stderr),
+            stdoutSha256=sha(query.stdout), stderrSha256=sha(query.stderr), settingsState="nonzero")
+        if query.returncode == 0:
+            value["settingsState"] = "malformed"
+            try:
+                value["settings"] = normal_build_settings_data(query.stdout)
+                value["settingsState"] = "observed"
+            except Exception:
+                pass  # Parse failure is not a usable settings observation.
+    finally:
+        try:
+            body = encoded(value) + b"\n"
+            need(len(body) <= 4096, "normal-settings-output-bound")
+            exclusive_output(request["derived"].parent / "build.settings-diagnostics.json", body, 4096)
+        except BaseException:
+            pass  # Optional publication cannot replace the primary build failure.
+    return value
+
+
 def normal_source_state(phase, source):
     arguments = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
@@ -2572,14 +2699,26 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                         row_match = re.fullmatch(destination_row, record)
                         fields = row_match.group(1).split(b",", 5) if row_match is not None else []
                         parts, malformed = {}, not 1 <= len(fields) <= 5
+                        rejection = ("non-ascii-or-control" if any(byte < 32 or byte > 126
+                            for byte in record.strip(b" \t")) else "row-envelope") if row_match is None else "field-count"
                         for field in fields if not malformed else ():
                             item = re.fullmatch(destination_field, field)
                             if item is None or item.group(1) in parts:
                                 malformed = True
+                                rejection = "field-format" if item is None else "duplicate-key"
                                 break
                             parts[item.group(1)] = item.group(2)
                         if malformed or not {b"platform", b"name"} <= parts.keys():
                             table["malformedRowObserved"] = True
+                            rejection = rejection if malformed else "missing-required-field"
+                            if "rejections" not in table:
+                                table.update(rejections=[], rejectionDetailsTruncated=False)
+                            finding = {"stream": stream, "section": destination_section, "reason": rejection}
+                            if finding not in table["rejections"]:
+                                if len(table["rejections"]) < 8:
+                                    table["rejections"].append(finding)
+                                else:
+                                    table["rejectionDetailsTruncated"] = True
                         elif (not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"}
                               or parts[b"platform"] != b"macOS"
                               or parts.get(b"arch") not in (None, b"arm64", b"x86_64")):
@@ -2755,6 +2894,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        if "rejections" in table:
+            while table["rejections"] and len(encoded(value)) + 1 > 4094:
+                table["rejections"].pop()
+                table["rejectionDetailsTruncated"] = value["findingsTruncated"] = True
+            if len(encoded(value)) + 1 > 4094:
+                del table["rejections"], table["rejectionDetailsTruncated"]
+                value["findingsTruncated"] = True
         while table["rows"] and len(encoded(value)) + 1 > 4094:
             table["rows"].pop()
             table["rowsTruncated"] = value["findingsTruncated"] = True
@@ -2867,7 +3013,7 @@ ADMISSION_OWNER_REASONS = {
     "owned command original observer ended": "observer-ended",
     "owned command fence name already exists": "fence-collision",
 }
-ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+ADMISSION_COMMAND_ROLES = ("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary", "normal-build-settings",
     "saved-version-source-roster", "saved-version-core-interrupt",
     "verify-generated-runner", "generated-runner-entitlements", "one-admitted-ui-test", "normal-ui-test-tree",
     *("normal-toolchain-" + key for key, _, _ in TOOLCHAIN_QUERIES))
@@ -2992,7 +3138,8 @@ def classify_normal_admission_failure(body):
         return unavailable
 
 
-def normal_context(request):
+def normal_context(request, *, diagnostics=None):
+    need(diagnostics is None or type(diagnostics) is dict and not diagnostics, "normal-context-diagnostic-collector")
     machine, hosted_job = normal_target_data(request["target"])
     source = os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE", "")
     need(re.fullmatch(r"[0-9a-f]{40}", source)
@@ -3000,7 +3147,7 @@ def normal_context(request):
          and os.environ.get("TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB") == hosted_job,
          "normal-same-build-only")
     import resource  # Native CLI only; inert helper import stays portable.
-    need(sys.platform == "darwin" and platform.machine() == machine and platform.mac_ver()[0].startswith("26.")
+    need(sys.platform == "darwin" and platform.machine() == machine and (host_version := platform.mac_ver()[0]).startswith("26.")
          and os.environ.get("DEVELOPER_DIR") == DEVELOPER, "normal-host-developer-file-budget")
     file_limit = normal_file_limit(request["phase"], resource.getrlimit(resource.RLIMIT_FSIZE))
     import pwd
@@ -3036,6 +3183,8 @@ def normal_context(request):
         # Derived from this admitted fixed work, never a caller-supplied private path.
         environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
                             ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+    if diagnostics is not None:
+        diagnostics["hostVersion"] = host_version
     return root, source, environment, file_limit
 
 
@@ -3623,6 +3772,8 @@ def publish_engineering_failure(request, failure):
 
 
 def main():
+    retained_intel_build = None
+    context_diagnostics = {}
     owner = None
     phase = None
     request = None
@@ -3636,7 +3787,9 @@ def main():
                    else normal_request(sys.argv[1:], os.environ.get("TMPDIR", "")))
         clock = PhaseClock(request["phaseSeconds"], started=started)
         stage = "context"
-        root, source, environment, file_limit = engineering_context(request) if engineering else normal_context(request)
+        root, source, environment, file_limit = (engineering_context(request) if engineering else
+            normal_context(request, diagnostics=context_diagnostics)
+            if request["phase"] == "build" and request["target"] == INTEL_TARGET else normal_context(request))
         stage = "loader"
         owner = load_normal_owner(root)
         stage = "phase"
@@ -3665,6 +3818,8 @@ def main():
             clock.finish()
             return failure.original.returncode
         if original.returncode != 0:
+            if not engineering and request["phase"] == "build" and request["target"] == INTEL_TARGET:
+                retained_intel_build = original  # Before any optional diagnostic/publication can fail.
             stage = "diagnostic"
             if request.get("androidPositive") is True:
                 publish_android_signed_failure(request, stage, original.returncode)
@@ -3677,12 +3832,23 @@ def main():
         sys.stderr.buffer.write(original.stderr)
         sys.stdout.buffer.flush()
         sys.stderr.buffer.flush()
+        if retained_intel_build is not None:
+            stage = "diagnostic"
+            publish_normal_build_settings(phase, request, source, retained_intel_build,
+                                          context_diagnostics.get("hostVersion"))
         stage = "finalize"
         clock.finish()
         return original.returncode
     except BaseException as error:
         if phase is not None:
             phase.clock.failed = True
+        if retained_intel_build is not None:
+            try:
+                failure = normal_admission_failure(stage, error, owner, records)
+                sys.stderr.write(encoded(failure).decode("ascii") + "\n")
+            except BaseException:
+                pass
+            return retained_intel_build.returncode  # Query/final-clock errors cannot replace original70.
         if request is not None and request.get("iosUnsigned") is True:
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
             try:
