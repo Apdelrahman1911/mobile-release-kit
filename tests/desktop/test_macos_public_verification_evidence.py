@@ -1144,7 +1144,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         table = value["destinationTable"]
         row = table["rows"][0]
         for key, bad in (("stream", SENTINEL), ("stream", True), ("section", SENTINEL), ("section", 1),
-                         ("platform", "iOS"), ("platform", None), ("architecture", "i386"), ("architecture", False),
+                         ("platform", "iOS"), ("platform", None), ("architecture", "future-arch"), ("architecture", False),
                          ("errorPresent", 1), ("errorPresent", None), ("name", SENTINEL)):
             broken = copy.deepcopy(value); broken["destinationTable"]["rows"] = [{**row, key: bad}]
             with self.subTest(key=key, bad=bad), self.assertRaises(DATA.Refused):
@@ -1496,6 +1496,56 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertEqual(observed["destinationTable"]["rows"], [])
         self.assertIs(observed["nativeSuccessInferred"], False)
         self.assertNotIn("PRIVATE_", json.dumps(observed))
+
+
+    def test_destination_unknown_rows_public_schema_is_closed_and_optional(self):
+        normal = normal_diagnostic_data(); status = {"receiptState": "observed", "returncode": 70}
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        raw = header + b"{ platform:PRIVATE, arch:PRIVATE, extra:PRIVATE, error:PRIVATE, name:PRIVATE }\n"
+        value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, b"", raw))
+        projected = DATA.project_ui_diagnostic(value, "build", status)
+        expected = {"stream": "stderr", "section": "ineligible", "platform": "unrecognized",
+            "architecture": "unrecognized", "unsupportedKeyPresent": True, "errorPresent": True}
+        self.assertEqual(projected["destinationTable"]["unknownRows"], [expected])
+        self.assertEqual(projected["stderrSha256"], hashlib.sha256(raw).hexdigest())
+        self.assertIs(projected["nativeSuccessInferred"], False)
+        self.assertNotIn("PRIVATE", json.dumps(projected))
+        legacy = copy.deepcopy(value)
+        del legacy["destinationTable"]["unknownRows"], legacy["destinationTable"]["unknownRowsTruncated"]
+        self.assertNotIn("unknownRows", DATA.project_ui_diagnostic(legacy, "build", status)["destinationTable"])
+        for arch in ("arm64e", "x86_64h", "i386"):
+            body = header + ("{ platform:macOS, arch:" + arch + ", name:PRIVATE }\n").encode()
+            observed = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, body, b""))
+            row = DATA.project_ui_diagnostic(observed, "build", status)
+            self.assertEqual(row["destinationTable"]["rows"][0]["architecture"], arch)
+            self.assertFalse(row["destinationTable"]["unknownRowObserved"])
+        for key, item in (("stream", True), ("section", "other"), ("platform", "PRIVATE"),
+                ("architecture", "PRIVATE"), ("architecture", False), ("unsupportedKeyPresent", 1),
+                ("errorPresent", None), ("extra", "PRIVATE")):
+            bad = copy.deepcopy(value); bad["destinationTable"]["unknownRows"][0][key] = item
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(bad, "build", status)
+        for fault in ("missing-rows", "missing-truncation", "not-list", "ninth", "empty", "bad-truncation",
+                      "unknown-false", "not-observed", "no-unknown-predicate", "truncation-without-findings"):
+            bad = copy.deepcopy(value); table = bad["destinationTable"]
+            if fault == "missing-rows": del table["unknownRows"]
+            elif fault == "missing-truncation": del table["unknownRowsTruncated"]
+            elif fault == "not-list": table["unknownRows"] = None
+            elif fault == "ninth": table["unknownRows"] *= 9
+            elif fault == "empty": table["unknownRows"] = []
+            elif fault == "bad-truncation": table["unknownRowsTruncated"] = 1
+            elif fault == "unknown-false": table["unknownRowObserved"] = False
+            elif fault == "not-observed": table["state"] = "absent"
+            elif fault == "no-unknown-predicate": table["unknownRows"][0].update(platform="macos", architecture=None, unsupportedKeyPresent=False)
+            elif fault == "truncation-without-findings": table["unknownRowsTruncated"] = True
+            with self.subTest(fault=fault), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(bad, "build", status)
+        truncated = copy.deepcopy(value); truncated["destinationTable"].update(unknownRows=[], unknownRowsTruncated=True)
+        truncated["findingsTruncated"] = True
+        self.assertEqual(DATA.project_ui_diagnostic(truncated, "build", status)["destinationTable"]["unknownRows"], [])
+        for code in (0, True, 1):
+            with self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": code})
 
 
 if __name__ == "__main__":

@@ -2732,8 +2732,21 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                                     table["rejectionDetailsTruncated"] = True
                         elif (not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"}
                               or parts[b"platform"] != b"macOS"
-                              or parts.get(b"arch") not in (None, b"arm64", b"x86_64")):
+                              or parts.get(b"arch") not in (None, b"arm64", b"arm64e", b"x86_64", b"x86_64h", b"i386")):
                             table["unknownRowObserved"] = True
+                            if "unknownRows" not in table:
+                                table.update(unknownRows=[], unknownRowsTruncated=False)
+                            if len(table["unknownRows"]) < 8:
+                                architecture = parts.get(b"arch")
+                                table["unknownRows"].append({"stream": stream, "section": destination_section,
+                                    "platform": "macos" if parts[b"platform"] == b"macOS" else "unrecognized",
+                                    "architecture": None if architecture is None else architecture.decode("ascii")
+                                        if architecture in (b"arm64", b"arm64e", b"x86_64", b"x86_64h", b"i386")
+                                        else "unrecognized",
+                                    "unsupportedKeyPresent": not parts.keys() <= {b"platform", b"arch", b"id", b"name", b"error"},
+                                    "errorPresent": b"error" in parts})
+                            else:
+                                table["unknownRowsTruncated"] = value["findingsTruncated"] = True
                         elif len(table["rows"]) == 8:
                             table["rowsTruncated"] = value["findingsTruncated"] = True
                         else:
@@ -2905,6 +2918,13 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        if "unknownRows" in table:
+            while table["unknownRows"] and len(encoded(value)) + 1 > 4094:
+                table["unknownRows"].pop()
+                table["unknownRowsTruncated"] = value["findingsTruncated"] = True
+            if len(encoded(value)) + 1 > 4094:
+                del table["unknownRows"], table["unknownRowsTruncated"]
+                value["findingsTruncated"] = True
         if "rejections" in table:
             while table["rejections"] and len(encoded(value)) + 1 > 4094:
                 table["rejections"].pop()

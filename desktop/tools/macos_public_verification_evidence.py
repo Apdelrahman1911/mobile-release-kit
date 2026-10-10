@@ -371,9 +371,11 @@ def project_ui_failure(value, phase):
             need(len({(row["stream"], row["code"]) for row in rows}) == len(rows))
         if "destinationTable" in value:
             table = value["destinationTable"]
-            need(type(table) is dict and set(table) in ({"state", "unknownRowObserved",
-                 "malformedRowObserved", "rowsTruncated", "rows"}, {"state", "unknownRowObserved",
-                 "malformedRowObserved", "rowsTruncated", "rows", "rejections", "rejectionDetailsTruncated"})
+            fields = {"state", "unknownRowObserved", "malformedRowObserved", "rowsTruncated", "rows"}
+            need(type(table) is dict and fields <= set(table) <= fields | {
+                 "rejections", "rejectionDetailsTruncated", "unknownRows", "unknownRowsTruncated"}
+                 and ("rejections" in table) == ("rejectionDetailsTruncated" in table)
+                 and ("unknownRows" in table) == ("unknownRowsTruncated" in table)
                  and table["state"] in ("unavailable", "absent", "observed"))
             for name in ("unknownRowObserved", "malformedRowObserved", "rowsTruncated"):
                 boolean(table[name])
@@ -395,10 +397,26 @@ def project_ui_failure(value, phase):
                          and type(rejection["reason"]) is str and rejection["reason"] in DESTINATION_REJECTIONS)
                     keys.append((rejection["stream"], rejection["section"], rejection["reason"]))
                 need(len(set(keys)) == len(keys) and (bool(keys) or table["rejectionDetailsTruncated"]))
+            if "unknownRows" in table:
+                unknown = table["unknownRows"]
+                need(table["state"] == "observed" and table["unknownRowObserved"]
+                     and type(unknown) is list and len(unknown) <= 8)
+                boolean(table["unknownRowsTruncated"])
+                need((bool(unknown) or table["unknownRowsTruncated"])
+                     and (not table["unknownRowsTruncated"] or value["findingsTruncated"]))
+                for row in unknown:
+                    need(type(row) is dict and set(row) == {"stream", "section", "platform", "architecture",
+                         "unsupportedKeyPresent", "errorPresent"}
+                         and row["stream"] in ("stdout", "stderr") and row["section"] in ("available", "ineligible")
+                         and row["platform"] in ("macos", "unrecognized")
+                         and row["architecture"] in (None, "arm64", "arm64e", "x86_64", "x86_64h", "i386", "unrecognized"))
+                    boolean(row["unsupportedKeyPresent"]); boolean(row["errorPresent"])
+                    need(row["unsupportedKeyPresent"] or row["platform"] == "unrecognized"
+                         or row["architecture"] == "unrecognized")
             for row in rows:
                 need(type(row) is dict and set(row) == {"stream", "section", "platform", "architecture", "errorPresent"}
                      and row["stream"] in ("stdout", "stderr") and row["section"] in ("available", "ineligible")
-                     and row["platform"] == "macos" and row["architecture"] in (None, "arm64", "x86_64"))
+                     and row["platform"] == "macos" and row["architecture"] in (None, "arm64", "arm64e", "x86_64", "x86_64h", "i386"))
                 boolean(row["errorPresent"])
     return dict(value)
 

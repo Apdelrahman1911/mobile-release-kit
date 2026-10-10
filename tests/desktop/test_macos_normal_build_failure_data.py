@@ -203,7 +203,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
             b'{ platform:macOS, name:Any\xffMac }\n', b'{ platform:macOS, name:{Any Mac} }\n',
             b'{ platform:macOS, name:' + b'x' * 1025 + b' }\n', b' ' * 33 + good,
             b'{ platform:macOS, name:Any Mac, id:x, arch:arm64, error:x, extra:x }\n')
-        unknown = (b'{ platform:iOS, name:Any Mac }\n', b'{ platform:macOS, arch:i386, name:Any Mac }\n',
+        unknown = (b'{ platform:iOS, name:Any Mac }\n', b'{ platform:macOS, arch:future-arch, name:Any Mac }\n',
                    b'{ platform:macOS, name:Any Mac, OS:26.0 }\n',
                    b'{ platform:macOS, name:Any Mac, variant:unknown }\n')
         for flag, cases in (("malformedRowObserved", malformed), ("unknownRowObserved", unknown)):
@@ -630,6 +630,59 @@ class NormalBuildFailureDataTests(unittest.TestCase):
             value = self.observe(header + raw)
             self.assertTrue(value["destinationTable"]["rowsTruncated"])
             self.assertTrue(value["findingsTruncated"]); self.assertEqual(value["destinationTable"]["rows"], [])
+
+
+    def test_destination_known_architectures_and_all_unknown_predicates_are_passive(self):
+        for section in ("available", "ineligible"):
+            header = (section.title() + ' destinations for the "MRKNormalAppUI" scheme:\n').encode()
+            for arch in (None, "arm64", "arm64e", "x86_64", "x86_64h", "i386"):
+                raw = ("{ platform:macOS, " + ("arch:" + arch + ", " if arch is not None else "")
+                       + "name:PRIVATE_名, error:PRIVATE_“reason” }\n").encode()
+                value = self.observe(b"", header + raw)
+                self.assertEqual(value["destinationTable"]["rows"], [{"stream": "stderr", "section": section,
+                    "platform": "macos", "architecture": arch, "errorPresent": True}])
+                self.assertFalse(value["destinationTable"]["unknownRowObserved"])
+                self.assertNotIn("unknownRows", value["destinationTable"])
+                self.assertNotIn("PRIVATE_", json.dumps(value))
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        cases = ((b"platform:macOS, arch:x86_64, extra:PRIVATE", "macos", "x86_64", True, False),
+            (b"platform:PRIVATE, arch:arm64e", "unrecognized", "arm64e", False, False),
+            (b"platform:macOS, arch:PRIVATE", "macos", "unrecognized", False, False),
+            (b"platform:PRIVATE, arch:PRIVATE, extra:PRIVATE, error:PRIVATE", "unrecognized", "unrecognized", True, True),
+            (b"platform:macOS, extra:PRIVATE", "macos", None, True, False))
+        for fields, platform, architecture, extra, error in cases:
+            raw = b"{ " + fields + b", name:PRIVATE }\n"
+            value = self.observe(header + raw)
+            self.assertEqual(value["destinationTable"]["rows"], [])
+            self.assertEqual(value["destinationTable"]["unknownRows"], [{"stream": "stdout", "section": "ineligible",
+                "platform": platform, "architecture": architecture, "unsupportedKeyPresent": extra, "errorPresent": error}])
+            self.assertTrue(value["destinationTable"]["unknownRowObserved"])
+            self.assertFalse(value["destinationTable"]["unknownRowsTruncated"])
+            self.assertNotIn("PRIVATE", json.dumps(value))
+        unknown = b"{ platform:macOS, arch:PRIVATE, name:PRIVATE }\n"
+        for count in (8, 9):
+            value = self.observe(header + unknown * count)
+            self.assertEqual(len(value["destinationTable"]["unknownRows"]), 8)
+            self.assertEqual(value["destinationTable"]["unknownRowsTruncated"], count == 9)
+            self.assertEqual(value["findingsTruncated"], count == 9)
+        for raw in (unknown.rstrip(b"\n"), b"{ platform:PRIVATE, name:" + b"x" * 4096 + b" }\n"):
+            value = self.observe(header + raw)
+            self.assertNotIn("unknownRows", value["destinationTable"])
+            self.assertTrue(value["destinationTable"]["rowsTruncated"])
+        dense = b"xcodebuild: error: Unable to find a destination matching the provided destination specifier:\n"
+        for index in range(8):
+            dense += ("Error Domain=IDETestOperationsObserverErrorDomain Code=" + str(-2147483648 + index) + "\n").encode()
+        for index in range(4):
+            dense += ("NormalAppUITests.swift:" + str(65535 - index) + ":4096: error: ambiguous missing argument actor-isolated\n").encode()
+            dense += b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=containingSameStaticText;matches=5;exceedsFour=1;nonAtomic=1\n"
+        good = b"{ platform:macOS, arch:x86_64, name:PRIVATE, error:PRIVATE }\n"
+        baseline = self.observe(dense + header + good * 8)
+        combined = self.observe(dense + header + good * 8 + unknown * 8)
+        for key in ("errorCodes", "compilerDiagnostics", "buildFailureReasons", "queryObservations", "markers", "status"):
+            self.assertEqual(combined[key], baseline[key], key)
+        self.assertEqual(combined["destinationTable"]["rows"], baseline["destinationTable"]["rows"])
+        self.assertTrue(combined["findingsTruncated"])
+        self.assertTrue("unknownRows" not in combined["destinationTable"] or combined["destinationTable"]["unknownRowsTruncated"])
 
 
 if __name__ == "__main__":
