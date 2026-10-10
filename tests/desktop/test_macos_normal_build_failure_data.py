@@ -440,7 +440,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         observed = data["publish_normal_build_settings"](phase, request, "1" * 40, original, "26.0.1")
         expected = ["/usr/bin/xcodebuild", "-showBuildSettings", "-json", "-project", data["PROJECT"],
             "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-derivedDataPath", str(request["derived"]),
-            "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO"]
+            "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO", "build-for-testing"]
         self.assertEqual(calls[0][0], expected); self.assertEqual(len(calls), 1)
         self.assertIs(calls[0][1]["environ"], environment); self.assertIs(calls[0][1]["cwd"], root)
         self.assertEqual(calls[0][1], dict(environ=environment, cwd=root, timeout=15, capture=True, text=False, output_limit=262144))
@@ -597,6 +597,39 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         self.assertTrue(value["destinationTable"]["rejectionDetailsTruncated"])
         self.assertEqual(value["destinationTable"]["rows"], [])
         self.assertNotIn(b"private", self.data["encoded"](value))
+
+
+    def test_destination_opaque_printable_utf8_preserves_only_finite_fields(self):
+        opaque = "OPAQUE_PRIVATE_名_“diagnostic”"
+        row = ("{ platform:macOS, arch:x86_64, id:" + opaque + ", name:" + opaque + ", error:" + opaque + " }\n").encode()
+        for section in ("available", "ineligible"):
+            header = (section.title() + ' destinations for the "MRKNormalAppUI" scheme:\n').encode()
+            for stream in ("stdout", "stderr"):
+                with self.subTest(section=section, stream=stream):
+                    raw = header + row
+                    value = self.observe(raw if stream == "stdout" else b"", raw if stream == "stderr" else b"")
+                    table = value["destinationTable"]
+                    self.assertEqual(table["rows"], [{"stream": stream, "section": section,
+                        "platform": "macos", "architecture": "x86_64", "errorPresent": True}])
+                    self.assertFalse(table["malformedRowObserved"]); self.assertFalse(table["unknownRowObserved"])
+                    self.assertNotIn("rejections", table)
+                    self.assertNotIn("OPAQUE_PRIVATE", json.dumps(value))
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        invalid = (b"\xff", b"bad\x00value", b"bad\x7fvalue", "bad\u0085value".encode(),
+            "bad\u202evalue".encode(), "bad\u200bvalue".encode(), "bad\u2028value".encode(),
+            "bad\u00a0value".encode(), b"comma,value", b"brace{value}", "名".encode() * 342)
+        for value in invalid:
+            table = self.observe(header + b"{ platform:macOS, name:" + value + b" }\n")["destinationTable"]
+            self.assertTrue(table["malformedRowObserved"]); self.assertEqual(table["rows"], [])
+        for row in ("{ platform:macOS, 名:value, name:a }\n", "{ platform:macOS名, name:a }\n",
+                    "{ platform:macOS, arch:x86_64名, name:a }\n", "{ platform:macOS, name:名, name:名 }\n"):
+            table = self.observe(header + row.encode())["destinationTable"]
+            self.assertTrue(table["malformedRowObserved"]); self.assertEqual(table["rows"], [])
+        good = ("{ platform:macOS, name:" + opaque + " }\n").encode()
+        for raw in (good.rstrip(b"\n"), b"{ platform:macOS, name:" + "名".encode() * 1400 + b" }\n"):
+            value = self.observe(header + raw)
+            self.assertTrue(value["destinationTable"]["rowsTruncated"])
+            self.assertTrue(value["findingsTruncated"]); self.assertEqual(value["destinationTable"]["rows"], [])
 
 
 if __name__ == "__main__":

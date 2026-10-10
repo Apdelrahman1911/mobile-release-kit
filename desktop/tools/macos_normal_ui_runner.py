@@ -832,7 +832,7 @@ def normal_build_settings_arguments(derived):
     # Separate read-only settings query, not a second build or a new destination.
     return ["/usr/bin/xcodebuild", "-showBuildSettings", "-json", "-project", PROJECT,
         "-scheme", "MRKNormalAppUI", "-configuration", "Debug", "-derivedDataPath", str(derived),
-        "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO"]
+        "-jobs", "2", "-disableAutomaticPackageResolution", "ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO", "build-for-testing"]
 
 
 def normal_build_settings_data(body):
@@ -2411,10 +2411,10 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
         table["state"] = "absent"  # No exact header observed, not an eligible-destination count.
         destination_header = (rb'[ \t]{0,32}(Available|Ineligible) destinations for the '
                               rb'"MRKNormalAppUI" scheme:[ \t]{0,32}')
-        destination_row = rb"[ \t]{0,32}\{([\x20-\x7e]{1,4094})\}[ \t]{0,32}"
-        atom = rb"[\x21-\x2b\x2d-\x7a\x7c\x7e]"  # Neither comma nor braces.
+        destination_row = rb"[ \t]{0,32}\{([\x20-\x7e\x80-\xff]{1,4094})\}[ \t]{0,32}"
+        atom = rb"[\x21-\x2b\x2d-\x7a\x7c\x7e\x80-\xff]"  # Neither comma nor braces.
         destination_field = (rb" {0,8}([A-Za-z]{1,8}) {0,8}: {0,8}(" + atom
-            + rb"(?:[\x20-\x2b\x2d-\x7a\x7c\x7e]{0,1022}" + atom + rb")?) {0,8}")
+            + rb"(?:[\x20-\x2b\x2d-\x7a\x7c\x7e\x80-\xff]{0,1022}" + atom + rb")?) {0,8}")
     if methods:
         markers.update(selectedCaseStarted=rb"(?m)^Test Case '" + case + rb"' started\.\r?$",
             selectedCaseFailed=rb"(?m)^Test Case '" + case + rb"' failed(?: \([0-9]{1,6}(?:\.[0-9]{1,9})? seconds\))?\.\r?$")
@@ -2706,6 +2706,17 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                             if item is None or item.group(1) in parts:
                                 malformed = True
                                 rejection = "field-format" if item is None else "duplicate-key"
+                                break
+                            # Only discarded opaque values may contain printable UTF-8.
+                            # Structural keys/platform/architecture remain ASCII, not normalized.
+                            try:
+                                printable = (item.group(2).decode("utf-8").isprintable()
+                                    if item.group(1) in (b"name", b"id", b"error") else item.group(2).isascii())
+                            except UnicodeDecodeError:
+                                printable = False
+                            if not printable:
+                                malformed = True
+                                rejection = "non-ascii-or-control"
                                 break
                             parts[item.group(1)] = item.group(2)
                         if malformed or not {b"platform", b"name"} <= parts.keys():

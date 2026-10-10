@@ -55,7 +55,7 @@ def project(root, *, removal_case="disabled"):
                         run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"], removal_case=removal_case)
 
 
-def normal_diagnostic_data(*, removal=False):
+def normal_diagnostic_data(*, removal=False, positive=False):
     """Compile only genuine DATA writers/constants, never import the native runner.
 
     CompletedProcess is only an inert record constructor; no subprocess runner
@@ -71,6 +71,8 @@ def normal_diagnostic_data(*, removal=False):
         "TARGET", "PROJECT", "INTEL_TARGET", "PhaseClock", "NormalPhase", "original_command",
         "normal_build_settings_arguments", "normal_build_settings_data", "publish_normal_build_settings",
         "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS"}
+    if positive:
+        names.update(("android_signed_facts", "ios_unsigned_facts", "ANDROID_FACTS_SCOPE", "ARM_TARGET"))
     if removal:
         names.update(("TARGET", "CLASS", "REMOVAL_METHODS", "removal_selection", "removal_ui_result"))
     nodes, found = [], set()
@@ -254,7 +256,220 @@ def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flag
         guard, context, names, source_paths, "/public/checkout"))
 
 
+def positive_ui_data(context=None, *, ios=False):
+    """Synthetic receipt DATA shaped by genuine pure fact validators; no native proof."""
+    context = CONTEXT if context is None else context
+    normal = normal_diagnostic_data(positive=True)
+    facts = normal["ios_unsigned_facts"](dict(schemaVersion=1, scope="one-ordinary-local-unsigned-ios-archive",
+        sourceCommit=context["source"], savedVersion="1.2.3", savedBuild=7, inputFiles=9, inputBytes=7264,
+        topLevelDirectories=4, archiveDescendantsObserved=False, nativeResultDisplayed=True, outputPostMatched=True,
+        originalsClosed=True, normalQuitObserved=True, successBeforeCutoff=True, signed=False, ipaExported=False,
+        releaseQualified=False, parentReturncodeRequired=0, operationId="4" * 32, ownerGeneration="5" * 32,
+        originalEntries=100, originalBytes=10000), source=context["source"])
+    android_facts = normal["android_signed_facts"](dict(schemaVersion=1,
+        scope=normal["ANDROID_FACTS_SCOPE"], sourceCommit=context["source"], target=DATA.TARGETS[0],
+        runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
+        nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
+        outputPostMatched=True, normalQuitObserved=True, releaseQualified=False, operationId="4" * 32,
+        ownerGeneration="5" * 32, publicCertificateSha256="6" * 64, artifactSha256="7" * 64,
+        outputCensusSha256="8" * 64, artifactBytes=200, outputEntries=100, outputNameBytes=1000,
+        outputLogicalBytes=10000, moduleLogicalBytes=2000), source=context["source"], run=context["runId"], attempt=context["runAttempt"])
+    inventory = {"receiptState": "observed", "tree": "9" * 40}
+    android = dict(schemaVersion=1, scope="ordinary-installed-one-android-signed-build-ui", target=DATA.TARGETS[0],
+        applicationSourceCommit=context["source"], harnessSourceCommit=context["source"], sourceTree=inventory["tree"],
+        workflow=".github/workflows/desktop-macos-installed.yml", runId=context["runId"], runAttempt=context["runAttempt"],
+        testIdentifier="MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild",
+        resultOriginalReturncodeRequired=0, privateInputsPublished=False, vendorAcknowledgementAutomated=False,
+        newProtectedCopyRegistered=False, cleanExitStatus=None, allWorkerFinality="not-established-by-XCTest-UI-state",
+        fullUIQualified=False, distributionQualified=False, productReady=False, packageSha256="2" * 64, packageBytes=1024,
+        runtimeManifestSha256="3" * 64, installerInventorySha256="4" * 64,
+        originalCommandStatuses=dict(packageInstall=0, installer=0, supplier=0, build=0, test=0, summary=0),
+        testCounts=dict(DATA.POSITIVE_UI_COUNTS), observation=android_facts)
+    common = dict(target=context["target"], sourceCommit=context["source"], sourceRosterSha256="a" * 64,
+        sourcePrePostMatched=True, originalCommandReturned=True, receiptPolicy="exclusive0600-readback-consuming-close",
+        resultBundle="ios-unsigned-archive-test.xcresult", fileLimitBytes=[1024**3] * 2)
+    def commands(rows):
+        return [dict(role=role, returncode=0, roleCapSeconds=cap, timeoutSeconds=cap, outputLimitBytes=limit,
+            argvSha256="1" * 64, stdoutSha256="2" * 64, stderrSha256="3" * 64, stdoutBytes=1, stderrBytes=0)
+            for role, cap, limit in rows]
+    def clock(seconds):
+        return dict(startNs="1", deadlineNs=str(1 + seconds * 10**9), beforePublicationNs="2", postCloseDeadlineRequired=True)
+    source_row = ("normal-ui-source-roster", 15, 1048576)
+    original = ["file", ["1", "2", str(0o100600), "501", "20", "1", "100", "3", "4"], "b" * 64]
+    test = dict(common, schemaVersion=1, scope="actual-generated-xctrunner-admission-only",
+        strictCodesignOriginalZero=True, reSignedOrRepaired=False, originalProductsPrePostMatched=True,
+        originalClosesCompleted=True, originalTestReturncode=0, normalPhase="test", iosUnsignedObservation=copy.deepcopy(facts),
+        runnerPath=SENTINEL, xctestrunPath=SENTINEL, runnerExecutable=copy.deepcopy(original),
+        testExecutable=copy.deepcopy(original), xctestrun=copy.deepcopy(original), productEntryCount=5,
+        productRosterSha256="c" * 64, entitlementsSha256="d" * 64, appSandboxEntitlement="absent",
+        phaseClock=clock(1245), commands=commands((source_row, ("verify-generated-runner", 30, 1048576),
+        ("generated-runner-entitlements", 30, 1048576), ("one-admitted-ui-test", 1020, 1048576), source_row)))
+    summary = dict(common, schemaVersion=1, scope="normal-ui-original-command-admission-only", phase="summary",
+        originalCommandRole="normal-ui-summary", originalReturncode=0, iosUnsignedTestCounts=dict(DATA.POSITIVE_UI_COUNTS),
+        phaseClock=clock(90), commands=commands((source_row, ("normal-ui-summary", 30, 262144), source_row)))
+    statuses = {name: {"receiptState": "observed", "returncode": 0} for name in
+                ("package-install.status", "normal-ui/build.status", *DATA.POSITIVE_UI_STATUSES["ios" if ios else "android"])}
+    phases = {"package-install": {"receiptState": "observed", "recordedPassed": True,
+                                 "originalClosesKnown": True, "targetRetired": True}}
+    return android, facts, test, summary, statuses, phases, inventory
+
+
 class PublicVerificationEvidenceData(unittest.TestCase):
+    def test_android_positive_closed_result_matches_genuine_facts_and_statuses(self):
+        value, _, _, _, statuses, phases, inventory = positive_ui_data()
+        result = DATA.project_android_positive(value, CONTEXT, statuses, phases, inventory)
+        self.assertEqual(result["recordedResult"], value)
+        self.assertIs(result["nativeSuccessInferred"], False)
+        self.assertEqual(result["binding"], "source-run-target-fields-and-current-statuses")
+        changes = (("applicationSourceCommit", "2" * 40), ("harnessSourceCommit", "2" * 40),
+                   ("runAttempt", "3"), ("target", "x86_64-apple-darwin"), ("sourceTree", "2" * 40),
+                   ("vendorAcknowledgementAutomated", True), ("newProtectedCopyRegistered", True),
+                   ("privateInputsPublished", True), ("cleanExitStatus", 0), ("productReady", True),
+                   ("testIdentifier", SENTINEL), ("packageBytes", True), ("unexpected", SENTINEL))
+        for key, item in changes:
+            with self.subTest(field=key):
+                bad = copy.deepcopy(value); bad[key] = item
+                with self.assertRaises(DATA.Refused):
+                    DATA.project_android_positive(bad, CONTEXT, statuses, phases, inventory)
+        for key in DATA.POSITIVE_UI_COUNTS:
+            bad = copy.deepcopy(value); bad["testCounts"][key] = True
+            with self.assertRaises(DATA.Refused):
+                DATA.project_android_positive(bad, CONTEXT, statuses, phases, inventory)
+        for key, item in (("sourceRegistrationObserved", True), ("nativeSigningVerified", False),
+                          ("privateOriginalsClosed", False), ("memorySessionDiscarded", False),
+                          ("releaseQualified", True), ("artifactBytes", (64 << 20) + 1)):
+            bad = copy.deepcopy(value); bad["observation"][key] = item
+            with self.assertRaises(DATA.Refused):
+                DATA.project_android_positive(bad, CONTEXT, statuses, phases, inventory)
+        for status in (1, -1, True):
+            bad = copy.deepcopy(statuses); bad[DATA.POSITIVE_UI_STATUSES["android"][-1]]["returncode"] = status
+            with self.assertRaises(DATA.Refused):
+                DATA.project_android_positive(value, CONTEXT, bad, phases, inventory)
+        bad = copy.deepcopy(statuses); bad[DATA.POSITIVE_UI_STATUSES["ios"][0]] = {"receiptState": "observed", "returncode": 0}
+        with self.assertRaises(DATA.Refused):
+            DATA.project_android_positive(value, CONTEXT, bad, phases, inventory)
+
+    def test_ios_positive_paired_admissions_preserve_parent_context_and_limits(self):
+        for target in DATA.TARGETS:
+            context = dict(CONTEXT, target=target)
+            _, facts, test, summary, statuses, phases, inventory = positive_ui_data(context, ios=True)
+            result = DATA.project_ios_positive(facts, test, summary, context, statuses, phases, inventory)
+            self.assertEqual(result["observation"], facts)
+            self.assertEqual(result["testCounts"], DATA.POSITIVE_UI_COUNTS)
+            self.assertEqual(result["binding"], "same-work-root-parent-context-only")
+            self.assertNotIn("runId", result)
+            self.assertIs(result["nativeSuccessInferred"], False)
+            self.assertIsNone(result["cleanExitStatus"])
+            self.assertNotIn(SENTINEL, json.dumps(result))
+            self.assertEqual([row["role"] for row in result["commands"]["test"]],
+                             [row["role"] for row in test["commands"]])
+            for which, key, item in (("test", "target", "wrong"), ("test", "sourceCommit", "2" * 40),
+                    ("test", "originalTestReturncode", True), ("test", "originalClosesCompleted", False),
+                    ("test", "strictCodesignOriginalZero", False), ("test", "reSignedOrRepaired", True),
+                    ("test", "originalProductsPrePostMatched", False), ("test", "appSandboxEntitlement", "true"),
+                    ("test", "runId", "123"), ("summary", "sourceRosterSha256", "2" * 64),
+                    ("summary", "originalReturncode", 1), ("summary", "phase", "test")):
+                bad_test, bad_summary = copy.deepcopy(test), copy.deepcopy(summary)
+                (bad_test if which == "test" else bad_summary)[key] = item
+                with self.subTest(target=target, which=which, field=key), self.assertRaises(DATA.Refused):
+                    DATA.project_ios_positive(facts, bad_test, bad_summary, context, statuses, phases, inventory)
+            for fault in ("role", "count", "status", "timeout", "output", "clock", "observation", "counts"):
+                bad_test, bad_summary = copy.deepcopy(test), copy.deepcopy(summary)
+                if fault == "role": bad_test["commands"][0]["role"] = "one-admitted-ui-test"
+                if fault == "count": bad_test["commands"].append(copy.deepcopy(test["commands"][0]))
+                if fault == "status": bad_test["commands"][3]["returncode"] = 1
+                if fault == "timeout": bad_test["commands"][3]["timeoutSeconds"] = 1021
+                if fault == "output": bad_test["commands"][3]["stdoutBytes"] = 1048577
+                if fault == "clock": bad_test["phaseClock"]["deadlineNs"] = str(int(test["phaseClock"]["deadlineNs"]) + 1)
+                if fault == "observation": bad_test["iosUnsignedObservation"]["operationId"] = "3" * 32
+                if fault == "counts": bad_summary["iosUnsignedTestCounts"]["passedTests"] = 2
+                with self.subTest(target=target, fault=fault), self.assertRaises(DATA.Refused):
+                    DATA.project_ios_positive(facts, bad_test, bad_summary, context, statuses, phases, inventory)
+            for key in ("signed", "ipaExported", "releaseQualified", "archiveDescendantsObserved"):
+                bad = copy.deepcopy(facts); bad[key] = True
+                with self.assertRaises(DATA.Refused):
+                    DATA.project_ios_positive(bad, test, summary, context, statuses, phases, inventory)
+
+    def test_positive_ui_fixed_files_keep_private_originals_and_partial_refusals(self):
+        for ios in (False, True):
+            with self.subTest(ios=ios), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                android, facts, test, summary, statuses, _, inventory = positive_ui_data(ios=ios)
+                write(root, "source-inventory.json", {"source": CONTEXT["source"], "tree": inventory["tree"],
+                    "files": [{"path": "public.rs", "gitMode": "100644", "blob": "2" * 40, "size": 1, "sha256": "3" * 64}]})
+                write(root, "android-helper-package-install.json", receipt("package-install"))
+                for name, row in statuses.items():
+                    write(root, name, (str(row["returncode"]) + "\n").encode())
+                source_values = {"android": android} if not ios else {"iosFacts": facts, "iosTest": test, "iosSummary": summary}
+                originals = []
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS:
+                    if key in source_values:
+                        item = write(root, path, source_values[key]); originals.append((item, item.read_bytes()))
+                private = write(root, "normal-ui/android-input-fixture.json", SENTINEL.encode())
+                write(root, "normal-ui/ios-unsigned-archive-summary.json", SENTINEL.encode())
+                result = project(root)
+                selected = "iosUnsignedArchive" if ios else "androidSignedBuild"
+                other = "androidSignedBuild" if ios else "iosUnsignedArchive"
+                self.assertEqual(result["positiveUiObservations"][selected]["receiptState"], "observed")
+                self.assertEqual(result["positiveUiObservations"][other], {"receiptState": "absent"})
+                self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+                self.assertEqual(private.read_bytes(), SENTINEL.encode())
+                for item, body in originals: self.assertEqual(item.read_bytes(), body)
+                self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+        for fault in ("missing-summary", "status-failure", "wrong-source", "closed-false", "malformed-facts", "linked-facts"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                _, facts, test, summary, statuses, phases, inventory = positive_ui_data(ios=True)
+                if fault == "status-failure": statuses[DATA.POSITIVE_UI_STATUSES["ios"][0]]["returncode"] = 70
+                if fault == "wrong-source": summary["sourceCommit"] = "2" * 40
+                if fault == "closed-false": phases["package-install"]["originalClosesKnown"] = False
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS[1:]:
+                    if fault == "missing-summary" and key == "iosSummary": continue
+                    item = write(root, path, {"iosFacts": facts, "iosTest": test, "iosSummary": summary}[key])
+                    if key == "iosFacts" and fault == "malformed-facts": item.write_bytes(b'{"source":NaN}')
+                    if key == "iosFacts" and fault == "linked-facts": os.link(item, root / "second-link")
+                fd = DATA.open_root(str(root))
+                try:
+                    b = dict(budget(), files=0, bytes=0, outputBytes=16384)
+                    result = DATA.positive_ui_observations(fd, CONTEXT, statuses, phases, inventory, b)
+                finally: os.close(fd)
+                self.assertEqual(result["iosUnsignedArchive"], {"receiptState": "refused"})
+                self.assertEqual(result["androidSignedBuild"], {"receiptState": "absent"})
+        with tempfile.TemporaryDirectory() as directory:
+            result = DATA.project(directory, profile="aqua", source=CONTEXT["source"], workflow_source=CONTEXT["source"],
+                run_id="123", run_attempt="2", target=CONTEXT["target"])
+            self.assertNotIn("positiveUiObservations", result)
+
+    def test_positive_ui_specific_decoder_and_complete_fixed_roster_bounds(self):
+        def padded(size):
+            prefix, suffix = b'{"opaque":"', b'"}'
+            return prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+        DATA.decode(padded(16384), budget())
+        for size in (16385, 32768):
+            with self.assertRaises(DATA.Refused): DATA.decode(padded(size), budget())
+            self.assertEqual(len(DATA.decode(padded(size), budget(), ui_admission=True)["opaque"]), size - 13)
+        with self.assertRaises(DATA.Refused): DATA.decode(padded(32769), budget(), ui_admission=True)
+        for option in (1, None, "true"):
+            with self.assertRaises(DATA.Refused): DATA.decode(b"{}", budget(), ui_admission=option)
+        with self.assertRaises(DATA.Refused): DATA.decode(b"{}", budget(), inventory=True, ui_admission=True)
+        for body in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":1.5}', b'{"a":Infinity}'):
+            with self.assertRaises(DATA.Refused): DATA.decode(body, budget(), ui_admission=True)
+        self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 4)
+        self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768])
+        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 2 + len(DATA.POSITIVE_UI_INPUTS)
+        self.assertEqual(attempts, 98)
+        self.assertLessEqual(attempts, 128)
+        self.assertEqual((DATA.INPUT_LIMIT, DATA.OUTPUT_LIMIT), (3 * 1024 * 1024, 128 * 1024))
+        # Each legal positive maximum remains finite without displacing old report facts.
+        value, facts, test, summary, statuses, phases, inventory = positive_ui_data()
+        value["observation"].update(artifactBytes=64 << 20, outputEntries=100000, outputNameBytes=2 << 20,
+            moduleLogicalBytes=1 << 30, outputLogicalBytes=2 << 30)
+        android = DATA.project_android_positive(value, CONTEXT, statuses, phases, inventory)
+        _, facts, test, summary, statuses, phases, inventory = positive_ui_data(ios=True)
+        facts.update(originalEntries=100000, originalBytes=8 << 30); test["iosUnsignedObservation"] = copy.deepcopy(facts)
+        ios = DATA.project_ios_positive(facts, test, summary, CONTEXT, statuses, phases, inventory)
+        self.assertLessEqual(len(json.dumps(android)) + len(json.dumps(ios)), 16384)
+
     def test_genuine_removal_data_preserves_case_facts_and_expected_nonzero(self):
         stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
         self.assertEqual(DATA.REMOVAL_RELEASE, json.loads((ROOT / "desktop/macos-installed-inputs/build-release.json").read_text())["release"])
@@ -1255,6 +1470,32 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             broken = copy.deepcopy(value); broken["destinationTable"][field] = bad
             with self.subTest(field=field, bad=bad), self.assertRaises(DATA.Refused):
                 DATA.project_ui_diagnostic(broken, "build", status)
+
+
+    def test_destination_opaque_utf8_public_projection_never_exports_private_values(self):
+        normal = normal_diagnostic_data(); status = {"receiptState": "observed", "returncode": 70}
+        header = b'Ineligible destinations for the "MRKNormalAppUI" scheme:\n'
+        raw = header + ("{ platform:macOS, arch:x86_64, name:PRIVATE_名, error:PRIVATE_“reason” }\n").encode()
+        original = CompletedProcess([], 70, b"", raw)
+        value = normal["normal_failure_diagnostics"]("build", None, original)
+        observed = DATA.project_ui_diagnostic(value, "build", status)
+        self.assertEqual(observed["destinationTable"]["rows"], [{"stream": "stderr", "section": "ineligible",
+            "platform": "macos", "architecture": "x86_64", "errorPresent": True}])
+        self.assertEqual(observed["destinationTable"], value["destinationTable"])
+        self.assertEqual(observed["stderrSha256"], hashlib.sha256(raw).hexdigest())
+        self.assertEqual(observed["originalReturncode"], 70)
+        self.assertIs(observed["nativeSuccessInferred"], False)
+        self.assertNotIn("PRIVATE_", json.dumps(observed))
+        for code in (0, True, 1):
+            with self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": code})
+        invalid = header + b"{ platform:macOS, name:PRIVATE_\xff }\n"
+        value = normal["normal_failure_diagnostics"]("build", None, CompletedProcess([], 70, b"", invalid))
+        observed = DATA.project_ui_diagnostic(value, "build", status)
+        self.assertTrue(observed["destinationTable"]["malformedRowObserved"])
+        self.assertEqual(observed["destinationTable"]["rows"], [])
+        self.assertIs(observed["nativeSuccessInferred"], False)
+        self.assertNotIn("PRIVATE_", json.dumps(observed))
 
 
 if __name__ == "__main__":
