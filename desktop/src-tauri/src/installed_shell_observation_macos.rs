@@ -721,7 +721,11 @@ impl PanelSample {
                 mrk_macos_installed_native::PanelKind::PublicImages => "public-images",
                 mrk_macos_installed_native::PanelKind::AndroidJdk => "android-jdk",
                 mrk_macos_installed_native::PanelKind::AndroidSdk => "android-sdk",
-                mrk_macos_installed_native::PanelKind::AndroidGradle => "android-gradle" },
+                mrk_macos_installed_native::PanelKind::AndroidGradle => "android-gradle",
+                mrk_macos_installed_native::PanelKind::ArtifactAab => "artifact-aab",
+                mrk_macos_installed_native::PanelKind::ArtifactIpa => "artifact-ipa",
+                mrk_macos_installed_native::PanelKind::ArtifactArchive => "artifact-archive",
+                mrk_macos_installed_native::PanelKind::ArtifactDsyms => "artifact-dsyms" },
             parent_present: native.parent_present, panel_present: native.panel_present,
             parent_references_panel: native.parent_references_panel,
             panel_references_parent: native.panel_references_parent, panel_visible: native.panel_visible,
@@ -1375,7 +1379,11 @@ impl Observation {
                     project_fields::accepts(i) && project_fields::kind(i) == Some(kind)),
             mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder
                 | mrk_macos_installed_native::PanelKind::PublicImages | mrk_macos_installed_native::PanelKind::AndroidJdk
-                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle => false,
+                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle
+                | mrk_macos_installed_native::PanelKind::ArtifactAab
+                | mrk_macos_installed_native::PanelKind::ArtifactIpa
+                | mrk_macos_installed_native::PanelKind::ArtifactArchive
+                | mrk_macos_installed_native::PanelKind::ArtifactDsyms => false,
         }
     }
     pub(super) fn open_identity_target(&self, id: u32, kind: mrk_macos_installed_native::PanelKind) -> Option<&Path> {
@@ -1388,7 +1396,11 @@ impl Observation {
                 | mrk_macos_installed_native::PanelKind::MetadataRoot => self.field_paths.get(usize::from(self.case.field_index(id)?)).map(PathBuf::as_path),
             mrk_macos_installed_native::PanelKind::Quit | mrk_macos_installed_native::PanelKind::EvidenceFolder
                 | mrk_macos_installed_native::PanelKind::PublicImages | mrk_macos_installed_native::PanelKind::AndroidJdk
-                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle => None,
+                | mrk_macos_installed_native::PanelKind::AndroidSdk | mrk_macos_installed_native::PanelKind::AndroidGradle
+                | mrk_macos_installed_native::PanelKind::ArtifactAab
+                | mrk_macos_installed_native::PanelKind::ArtifactIpa
+                | mrk_macos_installed_native::PanelKind::ArtifactArchive
+                | mrk_macos_installed_native::PanelKind::ArtifactDsyms => None,
         }
     }
     pub(super) fn completion_returned(&self, id: u32, returned: mrk_macos_installed_native::CompletionReturn) {

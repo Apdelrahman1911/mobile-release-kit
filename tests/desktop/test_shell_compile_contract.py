@@ -3219,6 +3219,60 @@ class ShellCompileContractTests(unittest.TestCase):
         for good_path in ("src/lib.rs", app + "/src/lib.rs", source + "/" + app + "/src/lib.rs"):
             row = helper.source_slots_diagnostic_records(cargo_bytes([message(spans=[primary(good_path)]), terminal]), b"", source)[0]
             self.assertEqual(row["spans"], [{"path": app + "/src/lib.rs", "line": 19, "column": 7}])
+        # The observed integration crate uses literal tests/../src imports.
+        # Bind this single known alias only for the explicit observer route;
+        # raw diagnostics, arbitrary parent traversal and foreign crates stay out.
+        aliases = ("tests/../src/lib.rs", app + "/tests/../src/lib.rs",
+                   source + "/" + app + "/tests/../src/lib.rs")
+        for alias in aliases:
+            raw = cargo_bytes([message(spans=[primary(alias)]), terminal])
+            self.assertEqual(helper.source_slots_diagnostic_records(raw, b"", source)[0]["unboundSpans"], 1)
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual(row["spans"], [{"path": app + "/src/lib.rs", "line": 19, "column": 7}])
+            self.assertEqual(row["unboundSpans"], 0)
+        for prefix in ("tests/", app + "/tests/", source + "/" + app + "/tests/"):
+            raw = cargo_bytes([message(spans=[primary(prefix + "installed_shell_observation.rs")]), terminal])
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual(row["spans"][0]["path"], app + "/tests/installed_shell_observation.rs")
+        for bad_path in ("tests/../../src/lib.rs", "tests/../src/../lib.rs", "tests/../src/./lib.rs",
+                         "tests/../src//lib.rs", "tests/../src/a\0.rs", "tests/../src/lib.txt",
+                         "tests/../src/" + "x" * 479 + ".rs", "tests/../../native/macos-installed-native/src/lib.rs"):
+            raw = cargo_bytes([message(spans=[primary(bad_path)]), terminal])
+            row = helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]
+            self.assertEqual((row["spans"], row["unboundSpans"]), ([], 1))
+        exact_limit = "tests/../src/" + "x" * 478 + ".rs"
+        self.assertEqual(len(app + "/" + exact_limit), 512)
+        row = helper.source_slots_diagnostic_records(
+            cargo_bytes([message(spans=[primary(exact_limit)]), terminal]), b"", source, observer=True)[0]
+        self.assertEqual(row["unboundSpans"], 0)
+        self.assertEqual(row["spans"][0]["path"], app + "/src/" + "x" * 478 + ".rs")
+        for package in (native, "foreign"):
+            raw = cargo_bytes([message(spans=[primary(aliases[0])], package=package), terminal])
+            self.assertEqual(helper.source_slots_diagnostic_records(raw, b"", source, observer=True)[0]["unboundSpans"], 1)
+        for invalid in (1, None, "true"):
+            with self.assertRaises(helper.CheckFailure):
+                helper.source_slots_diagnostic_records(simple_raw, b"", source, observer=invalid)
+        observer_bound = dict(bound, executionScope=helper.MAC_COMPILE_SCOPE,
+                              workflowPath=helper.MAC_COMPILE_WORKFLOW, macCompile={"mode": helper.MAC_OBSERVER_MODE})
+        observer_raw = cargo_bytes([message(spans=[primary(aliases[0])]), terminal])
+        for present in (True, False):
+            calls.clear(); source_checks.clear()
+            with patch.object(helper, "source_unchanged", side_effect=lambda *a, **kw: source_checks.append("post")), \
+                    patch.object(helper, "run", side_effect=metadata_original if present else lambda *a, **kw: ""), \
+                    patch.dict(helper.os.environ, {"PATH": "/fixed/bin"}, clear=True):
+                result = helper.source_slots_compiler_diagnostic(observer_bound, observer_raw, b"", 101,
+                                                                  timeout_for=lambda cap: cap)
+            self.assertEqual(result["returnCode"], 101)
+            self.assertEqual(result["state"], "complete")
+            self.assertEqual(result["sources"], [{"path": app + "/src/lib.rs", "gitBlob": blob}] if present else [])
+            self.assertEqual(result["errors"][0]["unboundSpans"], 0 if present else 1)
+            if present:
+                self.assertEqual(calls[0][0][-1], app + "/src/lib.rs")
+                self.assertEqual(result["errors"][0]["spans"], [{"source": 0, "line": 19, "column": 7}])
+            else:
+                self.assertEqual(result["errors"][0]["spans"], [])
+            self.assertNotIn(private, json.dumps(result))
+            self.assertNotIn(source, json.dumps(result))
         malformed = [b"", simple_raw[:-1], simple_raw + b"\n", simple_raw + cargo_bytes([terminal]), b"\xff\n",
                      simple_raw.replace(b'"level":"error"', b'"level":"error","level":"error"'),
                      simple_raw.replace(b'"line_start":19', b'"line_start":NaN'),

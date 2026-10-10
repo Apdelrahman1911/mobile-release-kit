@@ -9066,8 +9066,9 @@ def source_slots_diagnostic_unavailable(code: int | None, reason: str) -> dict:
             "errors": [], "sources": []}
 
 
-def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> list[dict]:
+def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str, *, observer: bool = False) -> list[dict]:
     """Only bounded Cargo error DATA; no raw message or foreign path escapes."""
+    require(type(observer) is bool, "Observer diagnostic selector must be boolean")
     require(type(raw) is bytes and 0 < len(raw) <= 2 * 1024 * 1024
             and type(stderr) is bytes and len(stderr) <= 1024 * 1024,
             "SourceSlots diagnostic captures exceed their fixed stdout/stderr bounds")
@@ -9094,8 +9095,18 @@ def source_slots_diagnostic_records(raw: bytes, stderr: bytes, source: str) -> l
             relative = name
         elif name == "build.rs" or name.startswith("src/"):
             relative = package[2] + "/" + name
+        elif observer and package[2] == "desktop/src-tauri" and name.startswith("tests/"):
+            relative = package[2] + "/" + name
         else:
             return None
+        # Rust preserves the literal #[path = "../src/..."] spelling from
+        # this integration crate. Admit only that one SOURCE-owned alias;
+        # never normalize arbitrary traversal or filesystem paths.
+        alias = "desktop/src-tauri/tests/../src/"
+        if observer and package[2] == "desktop/src-tauri" and relative.startswith(alias):
+            if len(relative) > 512:
+                return None
+            relative = "desktop/src-tauri/src/" + relative[len(alias):]
         parts = relative.split("/")
         if (len(relative) > 512 or not relative.endswith(".rs")
                 or any(part in {"", ".", ".."} or re.fullmatch(r"[A-Za-z0-9._+-]+", part) is None for part in parts)
@@ -9251,7 +9262,11 @@ def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, c
             require(type(code) is int and 0 < code <= 255, "Short diagnostics require a returned nonzero original")
             errors = source_slots_short_diagnostic_records(raw, stderr, context["source"])
         else:
-            errors = source_slots_diagnostic_records(raw, stderr, context["source"])
+            if (context.get("executionScope") == MAC_COMPILE_SCOPE
+                    and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_MODE):
+                errors = source_slots_diagnostic_records(raw, stderr, context["source"], observer=True)
+            else:
+                errors = source_slots_diagnostic_records(raw, stderr, context["source"])
     except Exception:
         return source_slots_diagnostic_unavailable(code, "cargo-short-unavailable" if short else "cargo-json-unavailable")
     if not errors:

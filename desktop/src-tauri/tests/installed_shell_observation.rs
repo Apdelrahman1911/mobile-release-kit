@@ -19,6 +19,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/macos_install_maintenance.rs"] mod macos_install_maintenance;
 #[path = "../src/macos_install_transaction.rs"] mod macos_install_transaction;
 #[path = "../src/macos_remove_protocol.rs"] mod macos_remove_protocol;
+#[path = "../src/macos_remove_producer.rs"] mod macos_remove_producer;
 #[path = "../src/macos_install_producer.rs"] mod macos_install_producer;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
