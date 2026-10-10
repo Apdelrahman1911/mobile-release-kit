@@ -236,7 +236,7 @@ def tool_quote(purpose):
 def tool_sign_arguments(path, entitlements, purpose, identity):
     need(purpose in TOOL_FIXED and isinstance(path, Path) and isinstance(entitlements, Path), "tool-sign-purpose")
     identifier = TOOL_FIXED[purpose][1]
-    requirement = signing_requirement(identity, identifier)
+    requirement = "=" + signing_requirement(identity, identifier)
     return (["/usr/bin/codesign", "--force", "--sign", identity[1], "--identifier", identifier,
              "--options", "runtime", "--entitlements", str(entitlements), "--timestamp", str(path)],
             ["/usr/bin/codesign", "--verify", "--strict", "-R", requirement, str(path)])
@@ -896,7 +896,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -2262,7 +2262,7 @@ class Operation:
         for purpose, original, body, path, receipt, receipt_body in values:
             need(self.signing is not None, "tool-staged-configured-signing")
             result = self.call(self.phase + "-" + purpose, ["/usr/bin/codesign", "--verify", "--strict", "-R",
-                signing_requirement(self.signing, TOOL_FIXED[purpose][1]), str(path)],
+                "=" + signing_requirement(self.signing, TOOL_FIXED[purpose][1]), str(path)],
                 self.native_environment(), cwd=self.work, timeout=30, limit=65536)
             need(not result.stdout and not result.stderr and self.read(original) == body
                  and self.read(receipt) == receipt_body, "tool-staged-native-post")
@@ -2306,7 +2306,7 @@ class Operation:
             str(self.checkout / "desktop/packaging/macos-empty-entitlements.plist")]
         if self.phase == "sign-remover":
             arguments += ["--identifier", "dev.mobile-release-kit.desktop.remove"]
-        verify_arguments = (["-R", signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove")]
+        verify_arguments = (["-R", "=" + signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove")]
                             if self.phase == "sign-remover" else [])
         with self.credential_scope(self.phase):
             self.stage = self.phase
@@ -3318,7 +3318,7 @@ class Operation:
                  and not result.stderr, "final-image-tool-original")
             self.notary_tool_post(tool)
         path = self.work / self.target_name / "final-image" / self.image_filename
-        requirement = signing_requirement(self.signing, self.image_identifier)
+        requirement = "=" + signing_requirement(self.signing, self.image_identifier)
         self.final_image_call("final-image-signature-before", ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, str(path)])
         submitted_sha = self.final_image_sha
         tool = str(self.notary_tools["notarytool"]["path"])
@@ -4050,7 +4050,7 @@ class Operation:
             need(old["closed"] and not self.errors, "python-input-slot-close-unknown")
             self.python_files["signing-slot/python3"] = (output, signed)
             self.python_mutation_pending = False
-            requirement = [] if self.phase == "python-engineering" else ["--test-requirement", signing_requirement(self.signing, PYTHON_IDENTIFIER)]
+            requirement = [] if self.phase == "python-engineering" else ["--test-requirement", "=" + signing_requirement(self.signing, PYTHON_IDENTIFIER)]
             verified = self.python_call("python-verify", ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures", *requirement, str(path)])
             need(not verified.stdout and not verified.stderr and self.read(output) == signed, "python-strict-signature-original")
         derived = dict(original)
@@ -4339,7 +4339,7 @@ class Operation:
     def strict_verify(self, original, body, role, path):
         self.stage = role
         requirement = [] if self.signing is None else ["--all-architectures", "--test-requirement",
-            signing_requirement(self.signing, IDENTIFIER + ".image" if path.name == RESIDENT_IMAGE else IDENTIFIER)]
+            "=" + signing_requirement(self.signing, IDENTIFIER + ".image" if path.name == RESIDENT_IMAGE else IDENTIFIER)]
         result = self.call(role, ["/usr/bin/codesign", "--verify", "--strict", *requirement, str(path)],
                            self.native_environment(), cwd=self.work, timeout=30, limit=65536)
         need(not result.stdout and not result.stderr and self.read(original) == body, "strict-original-verification")
@@ -4579,7 +4579,7 @@ class Operation:
             need(unsigned["closed"] and not self.errors, "observer-program-prior-close")
             self.signing_mutation_pending = False
             verified = self.removal_prepare_call("program-verify", ["/usr/bin/codesign", "--verify", "--strict", "-R",
-                signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove"), str(path)])
+                "=" + signing_requirement(self.signing, "dev.mobile-release-kit.desktop.remove"), str(path)])
             need(not verified.stdout and not verified.stderr, "observer-program-purpose-verification")
             before = signed["identity"]
             self.signing_mutation_pending = True
@@ -5770,7 +5770,7 @@ class Operation:
             need(self.read(image) == body, "package-image-mode-bytes")
             self.package_outputs.append((image, digest(body)))
             self.package_call(label + "-verify-signature", ["/usr/bin/codesign", "--verify", "--strict",
-                "--test-requirement", signing_requirement(self.signing, identifier), str(path)])
+                "--test-requirement", "=" + signing_requirement(self.signing, identifier), str(path)])
         self.package_call(label + "-verify-image", ["/usr/bin/hdiutil", "verify", str(path)], timeout=120)
         self.package_post()
         return {"file": path.name, "sha256": digest(body), "bytes": len(body)}, path
@@ -6263,7 +6263,8 @@ class Operation:
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                and self.environment.get("GITHUB_REF") != APP_SIGNATURE_REF)
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in PYTHON_PHASES:
@@ -6441,6 +6442,8 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    if ref == APP_SIGNATURE_REF:
+        need(phase in APP_SIGNATURE_PHASES, "app-signature-fixed-native-phase")
     if ref == REMOVAL_REF:
         removal_context_data(environment, target)
         need(phase not in PYTHON_PHASES and phase not in FINAL_IMAGE_PHASES, "removal-only-existing-purpose-route")
@@ -6457,7 +6460,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
              "closed-python-purpose-ref")
     workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -6480,6 +6483,202 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     prefix = "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
     need(work.parent == WORK_PARENT and re.fullmatch(re.escape(prefix) + r"\.[A-Za-z0-9]{8}", work.name), "owned-work-route")
     return work
+
+
+# Fixed DATA checkpoint after the eight existing native phase owners. This is
+# not a native operation or a certificate/notary/Installer policy override.
+APP_SIGNATURE_REF = "refs/heads/verify/desktop-macos-app-signature"
+APP_SIGNATURE_PHASES = ("prepare", "sign-vault-helper", "sign-remover", "verify-before",
+                        "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "verify-after")
+APP_SIGNATURE_DATA = ("select-github-tools-signed", "project-history-provider", "project-github-seal")
+APP_SIGNATURE_SUMMARY = "summarize-app-signature"
+APP_SIGNATURE_STEPS = ("work", "source", "app_runtime", "github_tools", "app_tools", "app_selection",
+                       "android_helper", "app_vault", "app_build", "app_compiler", "app_assemble")
+
+
+def app_signature_receipt(value, phase, target, environment, selected):
+    """Same-run closed receipt DATA; the original caller exit is checked separately."""
+    need(type(value) is dict and phase in APP_SIGNATURE_PHASES
+         and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+         and value.get("phase") == phase and value.get("target") == target
+         and value.get("source") == value.get("workflowSource") == environment["GITHUB_SHA"]
+         and value.get("workflow") == environment["GITHUB_WORKFLOW_REF"]
+         and value.get("runId") == environment["GITHUB_RUN_ID"]
+         and value.get("runAttempt") == environment["GITHUB_RUN_ATTEMPT"]
+         and value.get("packageRole") == "ordinary-image"
+         and value.get("toolchain") == rust_toolchain(target)
+         and all(value.get(key) is True for key in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired"))
+         and "failure" not in value and value.get("cleanupErrors") == []
+         and value.get("directStagerIOPending", False) is None,
+         "app-signature-phase-finality")
+    roles = (PREPARE_ROLES if phase == "prepare" else
+             (phase, phase + "-verify") if phase in SIGNING_PHASES else
+             (phase, phase + "-resident-image") + tuple(phase + "-" + p for p in TOOL_FIXED if selected[p] is not None))
+    calls = value.get("originalCalls")
+    need(type(calls) is list and len(calls) == len(roles)
+         and all(type(row) is dict and row.get("role") == role and row.get("returned") is True
+                 and row.get("capturesSettled") is True and type(row.get("returncode")) is int
+                 and row["returncode"] == 0 for row, role in zip(calls, roles)), "app-signature-original-roster")
+    purposes = (("resident-image", "helper") if phase == "prepare" else
+                (phase,) if phase in SIGNING_PHASES else ())
+    contexts, auxiliary = value.get("credentialContexts"), value.get("credentialOriginals")
+    credential_roles = (CREDENTIAL_ROLES[:17] + ("search-final", "default-after")) * len(purposes)
+    need(type(contexts) is list and len(contexts) == len(purposes)
+         and all(type(row) is dict and row.get("purpose") == purpose
+                 and all(row.get(key) is True for key in ("closed", "retired", "searchRestored", "defaultUnchanged"))
+                 for row, purpose in zip(contexts, purposes))
+         and type(auxiliary) is list and len(auxiliary) == len(credential_roles)
+         and all(type(row) is dict and row.get("role") == role
+                 and all(row.get(key) is True for key in ("entered", "returned", "settled"))
+                 and type(row.get("status")) is int and row["status"] == 0
+                 for row, role in zip(auxiliary, credential_roles)), "app-signature-credential-finality")
+    need(value.get("imageSourceCommit") == environment["GITHUB_SHA"]
+         and tool_hex(value.get("imageReleaseSourceSha256")), "app-signature-release-source")
+    if phase in SIGNING_PHASES:
+        need(value.get("fixedSigningRole") == phase and tool_hex(value.get("signedBytesSha256")),
+             "app-signature-signed-bytes")
+    return {"phase": phase, "nativeCalls": len(calls), "credentialCalls": len(auxiliary),
+            "credentialContexts": len(contexts), "originalsClosed": True}
+
+
+def app_signature_outcomes(value):
+    need(type(value) is dict and set(value) == set(APP_SIGNATURE_STEPS)
+         and all(type(item) is str and item == "success" for item in value.values()),
+         "app-signature-original-step-outcomes")
+    return value
+
+
+def app_signature_inventory(files):
+    # tree() really retains <=512MiB of file bodies. No streaming/RSS claim.
+    # This projection contains no second copy of those bodies.
+    need(type(files) is dict and 0 < len(files) <= 2048, "app-signature-inventory-count")
+    rows = []
+    for name, (body, mode) in sorted(files.items()):
+        need(type(name) is str and len(name.encode("utf-8")) <= 4096 and type(body) is bytes
+             and type(mode) is int, "app-signature-inventory-row")
+        rows.append({"path": name, "mode": mode, "bytes": len(body), "sha256": digest(body)})
+    result = tool_canonical({"schemaVersion": 1, "files": rows}) + b"\n"
+    need(len(result) <= 1024 * 1024, "app-signature-inventory-bytes")
+    return rows, result
+
+
+def app_signature_summary(target, environment, stager, work):
+    """Readonly post-sign observations, not custody spanning independent codesign calls."""
+    need(environment.get("GITHUB_REF") == APP_SIGNATURE_REF, "app-signature-summary-ref")
+    outcomes = app_signature_outcomes(tool_json(environment.get("MRK_APP_SIGNATURE_STEP_OUTCOMES", "").encode("ascii")))
+    source_inputs = {}
+    def read_source(name, maximum):
+        body = stager.read(CHECKOUT / name, maximum)
+        source_inputs[name] = (body, maximum)
+        return body
+    producer = read_source(PRODUCER_PROFILE, 1024)
+    service = read_source(PROFILE, 1024)
+    identity = stager.packaging_signing_data(producer, service)
+    binding = stager.maintenance_json(stager.read(work / "source-binding.json", 65536), 65536)
+    work_info = work.lstat()
+    need(stat.S_ISDIR(work_info.st_mode) and stat.S_IMODE(work_info.st_mode) == 0o700
+         and work_info.st_uid == os.getuid() and os.getuid() != 0
+         and binding.get("workDirectory") == [work_info.st_dev, work_info.st_ino, work_info.st_uid]
+         and binding.get("scope") == "whole-app-signature-only"
+         and binding.get("frontendAbsentAtAdmission") is True
+         and binding.get("source") == binding.get("workflowSource") == environment["GITHUB_SHA"]
+         and binding.get("runId") == environment["GITHUB_RUN_ID"]
+         and binding.get("runAttempt") == environment["GITHUB_RUN_ATTEMPT"]
+         and binding.get("target") == target and tool_hex(binding.get("tree"), 40), "app-signature-work-binding")
+    selected, selected_source = tool_selected(stager, target)
+    receipt_bytes, receipts, phases = {}, {}, []
+    for phase in APP_SIGNATURE_PHASES:
+        body = stager.read(work / ("android-helper-" + phase + ".json"), 16384)
+        value = tool_json(body)
+        fact = app_signature_receipt(value, phase, target, environment, selected)
+        fact["receiptSha256"] = digest(body)
+        receipt_bytes[phase], receipts[phase] = body, value
+        phases.append(fact)
+    _, _, release_path = build_profile(target)
+    release = read_source(release_path, 4096)
+    need(all(row["imageReleaseSourceSha256"] == digest(release)
+             and row["imageReleaseId"] == receipts["prepare"]["imageReleaseId"] for row in receipts.values()),
+         "app-signature-same-release")
+    for name in ("normal-build.status", "remover-build.status"):
+        need(stager.read(work / name, 16) == b"0\n", "app-signature-original-compiler-status")
+    app = stager.tree(work / "app/Mobile Release Kit.app")
+    prefix = "Contents/Helpers/MobileReleaseKitPayload.app/Contents/"
+    anchors = {
+        "Contents/MacOS/mrk-macos-entry": ("sign-root-app", "MRK_MACOS_SIGNED_ENTRY_SHA256"),
+        prefix + "MacOS/mobile-release-kit-desktop": ("sign-desktop-payload", "MRK_MACOS_SIGNED_PAYLOAD_SHA256"),
+        prefix + "Frameworks/libmrk_desktop_image.dylib": ("sign-desktop-image", "MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256"),
+        prefix + "Helpers/mrk-vault-keychain": ("sign-vault-helper", "MRK_MACOS_VAULT_HELPER_SHA256"),
+        prefix + "Helpers/mrk-macos-remove": ("sign-remover", "MRK_MACOS_REMOVER_SHA256"),
+    }
+    for path, (phase, variable) in anchors.items():
+        need(path in app and tool_hex(environment.get(variable))
+             and digest(app[path][0]) == environment[variable] == receipts[phase]["signedBytesSha256"],
+             "app-signature-observed-signed-executable")
+    for path, key in ((stager.ANDROID_HELPER, "helperSha256"), (stager.RESIDENT_IMAGE, "residentImageSha256")):
+        need(path in app and all(receipts[phase][key] == digest(app[path][0])
+             for phase in ("prepare", "verify-before", "verify-after")), "app-signature-prepared-original")
+    if selected["github-seal"] is not None:
+        need(stager.GITHUB_SEAL in app and digest(app[stager.GITHUB_SEAL][0]) == selected["github-seal"]["signed"]["signedSha256"],
+             "app-signature-selected-seal")
+    app_rows, app_inventory = app_signature_inventory(app)
+    del app  # Release this full body map BEFORE the separate runtime tree.
+    manifest = environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+    need(tool_hex(manifest) and binding.get("runtimeManifestSha256") == manifest
+         and binding.get("runtimeSourceInputsSha256") == environment.get("MRK_BUNDLED_RUNTIME_SOURCE_SHA256"),
+         "app-signature-runtime-binding")
+    runtime = stager.runtime_tree(work / "runtime", manifest, current=True, target=target)
+    runtime_rows, runtime_inventory = app_signature_inventory(runtime)
+    del runtime
+    need(tool_selected(stager, target) == (selected, selected_source), "app-signature-tool-source-post")
+    # Recheck every actual tracked source leaf against the pre-compilation inventory;
+    # generated node_modules/dist are deliberately not treated as source leaves.
+    inventory_body = stager.read(work / "source-inventory.json", 2 * 1024 * 1024)
+    need(tool_hex(environment.get("MRK_APP_SIGNATURE_SOURCE_INVENTORY_SHA256"))
+         and digest(inventory_body) == environment["MRK_APP_SIGNATURE_SOURCE_INVENTORY_SHA256"],
+         "app-signature-source-inventory-original")
+    inventory = stager.maintenance_json(inventory_body, 2 * 1024 * 1024)
+    need(set(inventory) == {"source", "tree", "files"} and inventory["source"] == environment["GITHUB_SHA"]
+         and inventory["tree"] == binding["tree"] and type(inventory["files"]) is list
+         and 0 < len(inventory["files"]) < 4096, "app-signature-source-inventory")
+    names = set()
+    for row in inventory["files"]:
+        need(type(row) is dict and set(row) == {"path", "gitMode", "blob", "size", "sha256"}
+             and type(row["path"]) is str and stager.safe_path(row["path"]) and row["path"] not in names
+             and row["gitMode"] in ("100644", "100755") and tool_hex(row["blob"], 40)
+             and tool_hex(row["sha256"]) and type(row["size"]) is int and 0 <= row["size"] <= 32 * 1024 * 1024,
+             "app-signature-source-row")
+        names.add(row["path"])
+        with stager.parent(CHECKOUT / row["path"]) as (parent, leaf):
+            body, info = stager.read_at(parent, leaf, 32 * 1024 * 1024)
+        need(len(body) == row["size"] and digest(body) == row["sha256"]
+             and hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest() == row["blob"]
+             and bool(info.st_mode & 0o111) == (row["gitMode"] == "100755"), "app-signature-source-post")
+    for name, (body, maximum) in source_inputs.items():
+        need(stager.read(CHECKOUT / name, maximum) == body, "app-signature-profile-release-post")
+    for phase, body in receipt_bytes.items():
+        need(stager.read(work / ("android-helper-" + phase + ".json"), 16384) == body, "app-signature-receipt-post")
+    need(stager.read(work / "source-inventory.json", 2 * 1024 * 1024) == inventory_body
+         and [work.lstat().st_dev, work.lstat().st_ino, work.lstat().st_uid] == binding["workDirectory"],
+         "app-signature-input-post")
+    value = {"schemaVersion": 1, "scope": "whole-app-signature-only", "source": environment["GITHUB_SHA"],
+        "workflow": environment["GITHUB_WORKFLOW_REF"], "workflowSource": environment["GITHUB_WORKFLOW_SHA"],
+        "tree": binding["tree"], "target": target, "runId": environment["GITHUB_RUN_ID"], "runAttempt": environment["GITHUB_RUN_ATTEMPT"],
+        "teamIdentifier": identity.team, "leafCertificateSha1": identity.leaf_sha1,
+        "producerProfileSha256": digest(producer), "serviceProfileSha256": digest(service),
+        "runtimeManifestSha256": manifest, "runtimeSourceInputsSha256": binding["runtimeSourceInputsSha256"],
+        "sourceInventorySha256": digest(inventory_body), "sourceFilesPostChecked": len(names),
+        "appInventorySha256": digest(app_inventory), "appFiles": len(app_rows),
+        "runtimeInventorySha256": digest(runtime_inventory), "runtimeFiles": len(runtime_rows),
+        "phaseOriginals": phases, "originalStepOutcomes": outcomes,
+        "appCodeSignVerified": True, "observation": "post-sign-bytes-and-completed-strict-verification-not-atomic-custody",
+        "notarized": False, "packageCreated": False, "installed": False, "appLaunched": False,
+        "distributionReady": False, "cleanupStillRequired": True}
+    summary = tool_canonical(value) + b"\n"
+    need(len(summary) <= 65536, "app-signature-summary-bound")
+    stager.write_tree(work / "app-signature-evidence", {"summary.json": (summary, 0o444),
+        "app-inventory.json": (app_inventory, 0o444), "runtime-inventory.json": (runtime_inventory, 0o444)},
+        current_owned=True, root_mode=0o700)
+    return 0
 
 
 def tool_source_snapshot(stager, checkout=CHECKOUT):
@@ -6536,9 +6735,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
+    if ref == APP_SIGNATURE_REF:
+        need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
@@ -6644,11 +6845,18 @@ def main():
         phase, target = entrypoint(sys.argv)
         if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
             return tool_data_main(phase, target)
+        if phase == APP_SIGNATURE_SUMMARY:
+            need(os.environ.get("GITHUB_REF") == APP_SIGNATURE_REF, "app-signature-summary-ref")
+            work = admit(os.environ, target=target, phase="verify-after")
+            stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_app_signature_stager")
+            need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+            return app_signature_summary(target, os.environ, stager, work)
         work = admit(os.environ, target=target, phase=phase)
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                                     and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
         if phase in FINAL_PACKAGE_PHASES or phase == "prepare-removal-observers":
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")

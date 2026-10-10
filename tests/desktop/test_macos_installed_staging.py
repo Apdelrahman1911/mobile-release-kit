@@ -306,9 +306,25 @@ RELEASE_EVIDENCE_WORKFLOW_INVERSE = ((8803,
   '900e8a281f11cd3bddc346a58e380328531165c5ed02394c620a2bbff46dd0b8',
   '                  "workflow-refusal": "workflow-refusal"}[scope]'))
 
+APP_SIGNATURE_WORKFLOW_INVERSE = ((273, 43, '7fce308b4a7080ff7750eac96f2d9b4cffbb3783b4122ba8cba542498acb5bfd', ''), (711, 65, '41559436d557d14e00f7d258f8c4e12dbe18d63c9fa21299122ea4ef10cecc72', ''), (1535, 196, '19f9ce6b7d1ec6a940317d1ab55b2a8098cd4c1dc4888103cf0534954547c57f', 'timeout-minutes: 350'), (8496, 346, '007ec8dc2b6263d463042cde185b2b11532cd97452239be023a87962e7dec487', ') ]] || exit 1'), (22387, 392, '140f1114a37be725631dc52ff0d6e6d7bc70c25a2643c3ede69bcadaa9f7435d', ''), (28064, 404, 'f02b9ddfefd341e9b719b357cfefbd9e153c83ca836d04b6e334969e895d37ce', ''), (6090, 106, 'e2d105aeb112cfd2bd59cf0647c033334694eb6acce215f761c44f7138231cc7', ''), (12337, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (12803, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (16823, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (17177, 106, '7ee78366225f739c169111fbefed37f411bcbbd3cc2690ce927f99a229829b0a', ''), (25310, 106, 'd50f52c13a8a19f68b2c33b50d5b25e6dd20d369fe17756888f8b9bbdc25d5b2', ''), (46887, 22, '7c17228c1639da37cc0cb9c729e8fa369e145457f66dbca110e45efa0b5b819a', ''), (47906, 24, '4bd7d18a6ab921647f28b9f705afce990e7be141983b0261a1bd78a2027b46cd', ''), (49834, 569, '0cb195b9032334ab1fde6250bd5a506aa55210401354052606487836d0941e5d', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (56371, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (59904, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (73979, 26, '597f8c7b070b180f75b720d5e0ed56c9d8516121f2362472835a8d2ca9f62a3f', ''), (77317, 22, '1ff00fb090aa18879ebc52e6139b586ab4df0a1f8ae2bf554349f760fd5d4971', ''), (81724, 22, '26477eb4b9b1e9f4e33d895f3a8078a3c0dd77bf259f688adef6a71076ccc3d6', ''), (86995, 25, '77ab554b279f18d90fa1e1c00e32cc72ccd74339ab1691df1db5c4813a45c27f', ''), (91240, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (91584, 25, '5cc48d8e6d98662ab3c2aab2df255eae1e5ec11f1feda55fd65b35debb50f20d', ''), (99092, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (101598, 113, 'f5a33c75c6ce8fc9ab4318b9ff1c9c73431c21443fda21b6e7c5c4dd7aec9064', "== 'refs/heads/verify/desktop-macos-installed'"), (109317, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (113961, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (116948, 85, '2644bb6d6cdfe3a94764f272420ae678b46e191a59addb024a0e7bb20d1991f0', "removal-lifecycle'"), (117883, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (122676, 74, 'f866c0025f1d76e1354383cae0e5b786337ee91bc1feb88d224c96904116adbc', ''), (125088, 74, 'bad463f354b2a866e9cf26c7a6d2e05a0a489eec8c9f6e744e83f2a8efb2b615', ''), (127216, 308, 'ab9cdf74283bafd177c5d7f4f3f00fecc8d0e2e1afd617e17e6dec40263465c8', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (130098, 314, 'ed4d8df25865bb2efa1affa1aae5e6735d5fdcc45207f0f28dd32b27e8979442', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'"), (132865, 315, 'c7db2067611ed9836dea7e55cd0efdbcdca216304f6aef8d00395619e34bf015', "== 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'"), (157373, 366, 'eea4d991941793cc3ff538b64e95b890df2522d3461df258b3bccc68b244918f', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (160117, 415, 'b91605221b6e03330e1de20fec73ff21c41bf31c8851e403dc87eaec309db3d6', "== 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'"), (162951, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (164606, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (168336, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (170714, 180, '8c4abdb5c61de686aec61b6587e7bcf2c5111317be45104dfcd69d973594f235', "== 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'"), (172776, 213, '43ed53d5845b014b6ed81e99151694b3ecd71ce09e89d25f19f2aa373b92db13', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (175646, 215, 'f90633631773d375f84c5b8e75e7e2f4a4a0125844ec4e11a37514f56b489aeb', "== 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'"), (177434, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (179130, 111, '3724c9e86afa31131d048471eac2cbf9e34d37ffd9ceaad11df2f9454396a35c', "== 'refs/heads/verify/desktop-macos-preview'"), (180189, 149, 'c9f8c1b898ebe47511fc19a92d4779c383cf0fd9bdd3add2fe114ea267529845', "== 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'"), (181255, 202, '80a104c2c0efbbebaecb3357f952d702096bd2ec9274733a50e9889e055086bc', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'"), (185986, 156, '04803e48fbef0bb42a74922ce1f3f1d52ed0d93229d52140c613b22c3aa02bbd', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'"), (200721, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (205582, 164, 'ec40c206029f6e512ed2542530214ccd1c2b27ae228b6eb636c4a5edb22d50aa', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'"), (221342, 158, '22a1be5e5346d3f9463dbcbec338a30f1612bae9eb3aab8ed6f9347c44767cee', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'"), (229607, 168, 'e84aa7b7c1c39bcca3049d9454603cbdb2f1329bec45cc9c04d7a74bdbb41aab', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'"), (248219, 170, 'd1cf60824d1d2edbaada6b17cc0cb4b260eaa273653bd503a4b1ea9b8827f85f', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'"), (256538, 168, '04d55d596e2237f5bb1673b6f5eca44367d66a3a05b8595d55d127d7f5a2b3f2', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'"), (275763, 227, 'af714bbb5dd50503c6e50c46cad8b225faa61d5b41d5009163553cfe33a05429', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'"), (284537, 169, '8a205d64a41a2fb50e9668e96d3f1dc3cf06cfd29505d360f916c4781c664ce7', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'"), (306585, 354, '98d0f1fff12aee1fdc4d912ff203420fb5ecbaaba63381407e1992308e8fe322', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (310167, 363, 'b77a50fe6b42263b79e7c5c58bbcc09478e6af96e7f7acc5158cc2d0e6942dfb', "== 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'"), (328621, 108, '5c417bb5e050744e16fefbeb795e9f68f08a699c1f2e2e4245c922c3e43f96f8', "always() && steps.work.outputs.root != ''"), (348311, 802, '4a646c829e8f95a14c43b2abf5d5ad076e9284d64a7a10f1f330002887c0482c', "always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'"), (99000, 6360, '1fd61cebe258aef7e40106cf2093ea57d052bf385053c294bbd41d23ef25faac', ''))
+
+def without_app_signature_workflow(source):
+    if "verify/desktop-macos-app-signature" not in source:
+        return source
+    value = source.encode()
+    for start, length, expected, prior in reversed(APP_SIGNATURE_WORKFLOW_INVERSE):
+        if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
+            raise AssertionError("app signature workflow region changed")
+        value = value[:start] + prior.encode() + value[start + length:]
+    if hashlib.sha256(value).hexdigest() != "fdbe8fcc6595ce90cb5cab397b4050cf53c164132198252d6b6ada4be4b83081":
+        raise AssertionError("app signature workflow inverse changed predecessor")
+    return value.decode()
+
+
 # This exact current two-site pin delta is independent of the historical
 # workflow additions below. Preserve their complete predecessor hash checks.
 def without_current_runtime_source_pin(source):
+    source = without_app_signature_workflow(source)
     current = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
     previous = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
     if current not in source:
@@ -1393,7 +1409,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif role in ("final-image-signature-before", "final-image-signature-after"):
                 self.assertIsNone(operation.notary_key)
                 self.assertEqual(argv, ["/usr/bin/codesign", "--verify", "--strict", "--test-requirement",
-                    module.signing_requirement(operation.signing, "dev.mobile-release-kit.desktop.distribution"), str(path)])
+                    "=" + module.signing_requirement(operation.signing, "dev.mobile-release-kit.desktop.distribution"), str(path)])
                 self.assertEqual(path.read_bytes(), image if role.endswith("-before") else final_image)
             elif role in ("final-image-submit", "final-image-log"):
                 self.assertIsNotNone(operation.notary_key)
@@ -1584,6 +1600,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 os.replace(replacement, path)
                 return CompletedProcess(argv, 1 if failure == "sign" else 0, b"", b"inert signing failure" if failure == "sign" else b"")
             if role == "python-verify":
+                expected = ["/usr/bin/codesign", "--verify", "--strict", "--all-architectures"]
+                if phase == "python-shipping":
+                    expected += ["--test-requirement", "=" + module.signing_requirement(
+                        ("TEST000001", credentials.leaf), module.PYTHON_IDENTIFIER)]
+                self.assertEqual(argv, expected + [str(Path(argv[-1]))])
                 self.assertEqual(Path(argv[-1]).read_bytes(), signed)
                 return CompletedProcess(argv, 1 if failure == "verify" else 0, b"", b"")
             context = json.loads(Path(argv[-1]).read_bytes())
@@ -2369,7 +2390,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         else:
                             expected_verify = ["/usr/bin/codesign", "--verify", "--strict"]
                             if phase == "sign-remover":
-                                expected_verify += ["-R", module.signing_requirement(("TEST000001", credentials.leaf),
+                                expected_verify += ["-R", "=" + module.signing_requirement(("TEST000001", credentials.leaf),
                                                                                    "dev.mobile-release-kit.desktop.remove")]
                             self.assertEqual(argv, expected_verify + [str(selected)])
                             self.assertEqual(binary.read_bytes(), signed)
@@ -2433,6 +2454,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         self.assertIsNotNone(operation.credential_active)
                         self.assertEqual(stat.S_IMODE(image.stat().st_mode), 0o444)
                         self.assertIn("--test-requirement", argv)
+                        identifier = ("dev.mobile-release-kit.desktop.observation"
+                                      if image.name.endswith("-Observation.dmg") else operation.image_identifier)
+                        self.assertEqual(argv, ["/usr/bin/codesign", "--verify", "--strict",
+                            "--test-requirement", "=" + module.signing_requirement(operation.signing, identifier), str(image)])
                     else:
                         self.assertEqual(argv[:2], ["/usr/bin/hdiutil", "verify"])
                         self.assertIsNone(operation.credential_active)
@@ -3013,6 +3038,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(sign[:4], ["/usr/bin/codesign", "--force", "--sign", "a" * 40])
                 self.assertIn(identifier, sign); self.assertIn("--timestamp", sign)
                 self.assertEqual(verify[:4], ["/usr/bin/codesign", "--verify", "--strict", "-R"])
+                self.assertEqual(sign, ["/usr/bin/codesign", "--force", "--sign", "a" * 40,
+                    "--identifier", identifier, "--options", "runtime", "--entitlements",
+                    "/source/empty.plist", "--timestamp", str(Path("/owned") / name)])
+                raw = module.signing_requirement(("ABCDEFGHIJ", "a" * 40), identifier)
+                self.assertEqual(raw, 'identifier "' + identifier + '" and anchor apple generic'
+                    ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
+                    ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
+                    ' and certificate leaf[subject.OU] = "ABCDEFGHIJ"'
+                    ' and certificate leaf = H"' + "a" * 40 + '"')
+                self.assertEqual(verify, ["/usr/bin/codesign", "--verify", "--strict", "-R",
+                                         "=" + raw, str(Path("/owned") / name)])
                 self.assertNotIn("--deep", sign + verify)
                 self.assertLessEqual(module.tool_quote(purpose)[0], 1024 * 1024 * 1024)
                 self.assertGreater(module.tool_quote(purpose)[1], 3 * limit)
@@ -4295,6 +4331,60 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.assertRaises(module.Refused):
                     operation.final_image_call("final-image-detach", ["never", "execute"])
 
+        # Fixed summary consumes real owner schema, including genuine zero/boolean
+        # distinctions. These are DATA mutations, not native signature evidence.
+        module = ANDROID_HELPER
+        environment = {"GITHUB_SHA":"a"*40,"GITHUB_WORKFLOW_REF":"workflow@"+module.APP_SIGNATURE_REF,
+                       "GITHUB_RUN_ID":"123","GITHUB_RUN_ATTEMPT":"1"}
+        selected = {purpose: None for purpose in module.TOOL_FIXED}
+        for phase in module.APP_SIGNATURE_PHASES:
+            roles = (module.PREPARE_ROLES if phase == "prepare" else
+                     (phase,phase+"-verify") if phase in module.SIGNING_PHASES else (phase,phase+"-resident-image"))
+            purposes = (("resident-image","helper") if phase == "prepare" else
+                        (phase,) if phase in module.SIGNING_PHASES else ())
+            credentials = (module.CREDENTIAL_ROLES[:17]+("search-final","default-after"))*len(purposes)
+            value = {"schemaVersion":1,"phase":phase,"target":module.ARM_TARGET,"source":"a"*40,"workflowSource":"a"*40,
+                "workflow":environment["GITHUB_WORKFLOW_REF"],"runId":"123","runAttempt":"1","packageRole":"ordinary-image",
+                "toolchain":module.rust_toolchain(module.ARM_TARGET),"passed":True,"targetRetired":True,
+                "originalClosesKnown":True,"outerFinalityRequired":True,"cleanupErrors":[],"directStagerIOPending":None,
+                "imageSourceCommit":"a"*40,"imageReleaseSourceSha256":"b"*64,
+                "originalCalls":[{"role":role,"returned":True,"capturesSettled":True,"returncode":0} for role in roles],
+                "credentialContexts":[{"purpose":p,"closed":True,"retired":True,"searchRestored":True,"defaultUnchanged":True} for p in purposes],
+                "credentialOriginals":[{"role":role,"entered":True,"returned":True,"settled":True,"status":0} for role in credentials]}
+            if phase in module.SIGNING_PHASES:value.update(fixedSigningRole=phase,signedBytesSha256="c"*64)
+            self.assertEqual(module.app_signature_receipt(value,phase,module.ARM_TARGET,environment,selected)["nativeCalls"],len(roles))
+            mutations = [("passed",1),("schemaVersion",True),("originalClosesKnown",False),("targetRetired",False),
+                         ("runId","124"),("source","d"*40),("directStagerIOPending","read"),("cleanupErrors",[{}]),
+                         ("originalCalls",value["originalCalls"][:-1])]
+            for key, replacement in mutations:
+                changed = dict(value,**{key:replacement})
+                with self.subTest(appPhase=phase,field=key),self.assertRaises(module.Refused):
+                    module.app_signature_receipt(changed,phase,module.ARM_TARGET,environment,selected)
+            for key,replacement in (("returncode",False),("capturesSettled",1),("returned",False)):
+                changed = json.loads(json.dumps(value)); changed["originalCalls"][0][key]=replacement
+                with self.assertRaises(module.Refused):module.app_signature_receipt(changed,phase,module.ARM_TARGET,environment,selected)
+            if purposes:
+                for key,replacement in (("status",False),("settled",1)):
+                    changed=json.loads(json.dumps(value));changed["credentialOriginals"][0][key]=replacement
+                    with self.assertRaises(module.Refused):module.app_signature_receipt(changed,phase,module.ARM_TARGET,environment,selected)
+                changed=json.loads(json.dumps(value));changed["credentialContexts"][0]["searchRestored"]=False
+                with self.assertRaises(module.Refused):module.app_signature_receipt(changed,phase,module.ARM_TARGET,environment,selected)
+            if phase in ("verify-before","verify-after"):
+                with self.assertRaises(module.Refused):
+                    module.app_signature_receipt(value,phase,module.ARM_TARGET,environment,{p:{} for p in module.TOOL_FIXED})
+        outcomes={key:"success" for key in module.APP_SIGNATURE_STEPS}
+        self.assertEqual(module.app_signature_outcomes(outcomes),outcomes)
+        for replacement in ("skipped","failure","cancelled",True,0):
+            with self.assertRaises(module.Refused):module.app_signature_outcomes(dict(outcomes,app_assemble=replacement))
+        with self.assertRaises(module.Refused):module.app_signature_outcomes(dict(outcomes,unexpected="success"))
+        rows,encoded=module.app_signature_inventory({"a":(b"genuine public DATA",0o555)})
+        self.assertEqual(rows[0]["sha256"],hashlib.sha256(b"genuine public DATA").hexdigest())
+        self.assertEqual(json.loads(encoded)["files"],rows)
+        with self.assertRaises(module.Refused):module.app_signature_inventory({str(i):(b"",0o444) for i in range(2049)})
+        # Actual encoded cap, not only an entry-count truncation check.
+        with self.assertRaisesRegex(module.Refused,"^app-signature-inventory-bytes$"):
+            module.app_signature_inventory({str(i)+"x"*4000:(b"",0o444) for i in range(300)})
+
 
 
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
@@ -4407,6 +4497,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(len(verified), 2)
                     for argv in verified:
                         requirement = argv[argv.index("--test-requirement") + 1]
+                        identifier = (module.IDENTIFIER + ".image" if Path(argv[-1]).name == module.RESIDENT_IMAGE
+                                      else module.IDENTIFIER)
+                        self.assertEqual(requirement, "=" + module.signing_requirement(("TEST000001", credentials.leaf), identifier))
                         self.assertIn('certificate leaf = H"' + credentials.leaf + '"', requirement)
                         self.assertIn('certificate leaf[subject.OU] = "TEST000001"', requirement)
                         self.assertIn('certificate leaf[field.1.2.840.113635.100.6.1.13]', requirement)
@@ -4818,6 +4911,55 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertFalse(operation.receipt["passed"] or (state.work / "distribution-final").exists())
                 self.assertFalse(operation.receipt["notaryAuthentication"]["created"])
                 self.assertEqual((state.work / "distribution/MobileReleaseKit.dmg").read_bytes(), state.original_image)
+
+        # New ref selects eight existing native owners, never a notary/Installer fallback.
+        module = ANDROID_HELPER
+        expected = ("prepare", "sign-vault-helper", "sign-remover", "verify-before", "sign-desktop-image",
+                    "sign-desktop-payload", "sign-root-app", "verify-after")
+        self.assertEqual(module.APP_SIGNATURE_PHASES, expected)
+        self.assertEqual(module.APP_SIGNATURE_DATA, ("select-github-tools-signed", "project-history-provider", "project-github-seal"))
+        ref, sha = module.APP_SIGNATURE_REF, "a" * 40
+        environment = {"GITHUB_ACTIONS":"true", "RUNNER_ENVIRONMENT":"github-hosted", "RUNNER_OS":"macOS",
+            "GITHUB_EVENT_NAME":"push", "GITHUB_REPOSITORY":"Apdelrahman1911/mobile-release-kit",
+            "GITHUB_WORKSPACE":str(module.CHECKOUT), "GITHUB_SHA":sha, "GITHUB_WORKFLOW_SHA":sha,
+            "GITHUB_WORKFLOW_REF":"Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@"+ref,
+            "GITHUB_REF":ref, "MRK_EXPECTED_SHA":sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT":sha,
+            "GITHUB_RUN_ID":"123", "GITHUB_RUN_ATTEMPT":"1", "MRK_MACOS_PACKAGE_ROLE":"ordinary-image",
+            "MRK_MACOS_WORK":str(module.WORK_PARENT / "mrk-macos-installed.AbC12345"),
+            "DEVELOPER_DIR":"/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET":"26.0"}
+        for target, machine, arch in ((module.ARM_TARGET,"arm64","ARM64"), (module.INTEL_TARGET,"x86_64","X64")):
+            selected = dict(environment,RUNNER_ARCH=arch,RUSTUP_TOOLCHAIN=module.rust_toolchain(target))
+            with (mock.patch.object(module.sys,"platform","darwin"), mock.patch.object(module.sys,"maxsize",2**63-1),
+                  mock.patch.object(module,"__file__",str(module.CHECKOUT / "desktop/tools/macos_android_helper_package.py")),
+                  mock.patch.multiple(module.os, uname=mock.Mock(return_value=SimpleNamespace(machine=machine)),
+                    getuid=mock.Mock(return_value=501),geteuid=mock.Mock(return_value=501),
+                    getgid=mock.Mock(return_value=20),getegid=mock.Mock(return_value=20))):
+                for phase in expected:
+                    self.assertEqual(module.admit(selected,target=target,phase=phase),Path(selected["MRK_MACOS_WORK"]))
+                for phase in set(module.PHASES + module.PYTHON_PHASES + module.SIGNING_PHASES + module.TOOL_SIGNING_PHASES
+                                 + module.NOTARY_PHASES + module.FINAL_PACKAGE_PHASES + module.FINAL_IMAGE_PHASES
+                                 + module.REMOVAL_OWNER_PHASES) - set(expected):
+                    with self.subTest(appRefPhase=phase), self.assertRaisesRegex(module.Refused,"^app-signature-fixed-native-phase$"):
+                        module.admit(selected,target=target,phase=phase)
+                for phase in module.APP_SIGNATURE_DATA:
+                    module.tool_data_context(selected,phase,target)
+                for phase in module.TOOL_SELECTION_PHASES[:2] + module.TOOL_SIGNING_PHASES:
+                    with self.assertRaisesRegex(module.Refused,"^app-signature-fixed-data-phase$"):
+                        module.tool_data_context(selected,phase,target)
+                with self.assertRaisesRegex(module.Refused,"^hosted-source-bindings$"):
+                    module.admit(dict(selected,GITHUB_WORKFLOW_SHA="b"*40),target=target,phase="prepare")
+        # The genuine parser must refuse unconfigured input for this route at BOTH
+        # main admission and the actual retained Operation profile read.
+        helper_source = Path(module.__file__).read_text()
+        helper_ast = ast.parse(helper_source)
+        main_node = next(n for n in helper_ast.body if isinstance(n,ast.FunctionDef) and n.name == "main")
+        operation_node = next(n for n in helper_ast.body if isinstance(n,ast.ClassDef) and n.name == "Operation")
+        execute_node = next(n for n in operation_node.body if isinstance(n,ast.FunctionDef) and n.name == "execute")
+        for callable_node in (main_node,execute_node):
+            self.assertIn('get("GITHUB_REF") != APP_SIGNATURE_REF',ast.get_source_segment(helper_source,callable_node))
+        with self.assertRaises(TOOL.Refused):
+            TOOL.packaging_signing_data(b"schema=1\nstate=unconfigured\n",module.UNCONFIGURED_PROFILE,
+                                       allow_unconfigured=environment["GITHUB_REF"] != module.APP_SIGNATURE_REF)
 
 
 
@@ -5365,6 +5507,36 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertIn('after[:6] == before[:6]', methods["final_image_mutated"])
         self.assertIn('abs(after[6] - before[6]) <= 1024 * 1024', methods["final_image_mutated"])
         self.assertNotIn('final_package_stapled', final)
+
+        # Raw current source is checked before the exact predecessor projection.
+        app_current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        app_job = app_current.split("  engineering-install:\n",1)[1].split("  shipping-image-compile:\n",1)[0]
+        app_blocks = re.split(r"(?=^      - name: )",app_job,flags=re.M)[1:]
+        app_named = {block.splitlines()[0][14:]:block for block in app_blocks}
+        retained = ('Admit only this exact disposable-hosted source route', 'Check out exact reviewed source without retained credentials', 'Select DATA stager Python, not the packaged interpreter', 'Select the fixed configured signed runtime before any payload download', 'Select fixed frontend compiler', 'Reserve fresh work and record exact source and actual tool bindings', 'Bind the complete reviewed first-party checkout before compilation', 'Admit the fixed image Rust tools without installing a distribution', 'Admit only a fresh independently pinned Python transport destination', 'Download the independently accepted fresh Python transport', 'Project the pinned fresh Python transport without executing it', 'Download only the configured signed Python capsule', 'Project the configured capsule as DATA without executing it', 'Select only SOURCE-enrolled current signed GitHub tools', 'Download exactly the nominated signed history provider', 'Download exactly the nominated signed seal helper', 'Project current signed tools without executing either program', 'Prepare the current payload from the independently accepted fresh Python supplier', 'Acquire and verify the two fixed Android support archives as DATA', 'Require the fixed SOURCE producer identity and release before ordinary signing', 'Build and sign the fixed resident image and C facades', 'Build and sign the separate fixed vault helper before binding the app', 'Build the ordinary selected-target desktop image and embedded frontend', 'Record the effective pinned compiler from the successful build context', 'Assemble the ordinary image app and sign code inside-out (never --deep)')
+        excluded = ('Build only the external normal-app XCTest runner, not an instrumented app', 'Fail fast on native Scripts ownership and package format (never Installer)', 'Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive', 'Compile and run only fixed native DATA contracts and exact host-Python regressions', 'Bind this completed signed app and current-source runtime into fresh Installer DATA', 'Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)', 'Build the separate fixed eight-case Installer package from the same completed input', 'Standard Installer runs the one fixed fixture, never root libtest or a scenario selector', 'Nonroot fixture readback leaves protected0700 staging closed and unchanged', 'Build the fixed one-shot root Installer and scripts-only package', 'Build fixed Installer presentation then sign and notarize the completed outer package before final P', 'Standard Installer only is privileged; never execute the app or Python as root', 'Prepare fresh private Android UI suppliers and disposable key inputs', 'Exercise one ordinary signed Android build with current private inputs', 'Bind the single Android journey to current installed originals only', 'Exercise one ordinary unsigned iOS archive and normal Quit', 'Observe the single unsigned iOS XCTest summary under the same source', 'Notarize, staple and verify only the final user image', 'Prepare the fixed two-file removal package without executing it', 'Sign and notarize the completed removal package without executing it', 'Emit the genuine removal descriptor and readonly carrier without Installer', 'Prepare three source-bound readonly observation carriers without removal', 'One genuine fixed removal journey through the existing original owners', 'Notarize staple and verify the separate readonly removal carrier', 'Stage only the audited normal early-preview deliverables', 'Upload only the normal user preview package and guide', 'Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally', 'Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim', 'Exercise normal project edits, images and four draft-only Browse fields', 'Verify both selected project journeys against their original XCTest result', 'Exercise synthetic encrypted credentials through the ordinary Mac UI', 'Bind the single persistence journey to original XCTest and app-helper evidence', 'Observe one original build-tool diagnostics report through the ordinary Mac UI', 'Bind the single diagnostics journey to original XCTest and the same ordinary package', 'Observe saved offline checks and empty build-input inspection through the ordinary Mac UI', 'Bind both saved-check journeys to original XCTest and the same ordinary package', 'Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI', 'Bind only the selected singleton to original XCTest and the same ordinary preview package', 'Preserve bounded originals; upload success is never GUI/native acceptance', "Remove only this completed preview build's disposable compiler outputs")
+        added = ('Summarize only completed whole-app signatures and observed bytes', 'Retire only settled app-signature compiler outputs independently of upload', 'Retain finite app-signature facts only, never an installable delivery')
+        self.assertEqual(set(app_named),set(retained+excluded+added))
+        self.assertEqual(len(app_named),len(app_blocks))
+        for name in excluded:
+            self.assertIn("if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'",app_named[name])
+        for name in retained:
+            self.assertNotIn("github.ref != 'refs/heads/verify/desktop-macos-app-signature'",app_named[name])
+            self.assertNotIn("MRK_MACOS_NOTARY_API_KEY_BASE64",app_named[name])
+            self.assertNotIn("MRK_MACOS_INSTALLER_P12_",app_named[name])
+        self.assertIn("&& 110 || 350",app_job)
+        self.assertIn("MRK_APP_SIGNATURE_SOURCE_INVENTORY_SHA256",app_named[added[0]])
+        self.assertIn("app_assemble",app_named[added[0]])
+        self.assertIn("summarize-app-signature --target",app_named[added[0]])
+        self.assertIn("steps.app_signature_summary.outcome == 'success'",app_named[added[1]])
+        self.assertNotIn("steps.app_signature_evidence.outcome",app_named[added[1]])
+        self.assertNotIn(".dmg",app_named[added[2]])
+        for name in added:
+            self.assertNotIn("secrets.",app_named[name])
+        self.assertEqual(hashlib.sha256(without_app_signature_workflow(app_current).encode()).hexdigest(),
+                         "fdbe8fcc6595ce90cb5cab397b4050cf53c164132198252d6b6ada4be4b83081")
+        broken=app_current.replace("summarize-app-signature --target","summarize-app-signature --other",1)
+        with self.assertRaises(AssertionError):without_app_signature_workflow(broken)
 
 
 

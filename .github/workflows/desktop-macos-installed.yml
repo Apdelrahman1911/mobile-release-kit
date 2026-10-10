@@ -7,6 +7,7 @@ on:
       - verify/desktop-macos-preview
       - verify/desktop-macos-image-compile
       - verify/desktop-macos-removal-lifecycle
+      - verify/desktop-macos-app-signature
 
 permissions:
   contents: read
@@ -18,7 +19,7 @@ concurrency:
 
 jobs:
   engineering-install:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature')
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
@@ -29,7 +30,8 @@ jobs:
     # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
     # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
     # then one removal owner990 (fixed segment sum963); no budget restart.
-    timeout-minutes: 350
+    # App-signature:82 timed preparation +13 bounded setup +7 summary/cleanup/upload;8 overhead.
+    timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +72,7 @@ jobs:
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
     steps:
       - name: Admit only this exact disposable-hosted source route
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 1 || 350 }}
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
@@ -108,7 +111,10 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
-          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ) ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ) ]] || exit 1
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          fi
           if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
             [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
             case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
@@ -138,6 +144,7 @@ jobs:
           [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
           [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: Check out exact reviewed source without retained credentials
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 3 || 350 }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         env:
           GIT_CONFIG_COUNT: '1'
@@ -147,6 +154,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Select DATA stager Python, not the packaged interpreter
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -211,11 +219,13 @@ jobs:
               os.close(fd)
           PY_SIGNING_SELECTION
       - name: Select fixed frontend compiler
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
           package-manager-cache: false
       - name: Reserve fresh work and record exact source and actual tool bindings
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 2 || 350 }}
         id: work
         shell: bash
         env:
@@ -287,6 +297,10 @@ jobs:
                    "aclPrimitiveCases": 6,
                    "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
                    "actualAquaSaveGate": "pending"}
+          if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-app-signature":
+              value.update(scope="whole-app-signature-only", fixedFixtureCases=0, aclPrimitiveCases=0,
+                  selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                  fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
           if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-preview":
               value.update({"scope": "normal-macos-early-preview", "fixedFixtureCases": 8, "aclPrimitiveCases": 0,
                             "selectedRegressionGroups": [], "instrumented": False, "applicationLaunched": False,
@@ -315,6 +329,7 @@ jobs:
           finally: os.close(fd)
           PY
       - name: Bind the complete reviewed first-party checkout before compilation
+        timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 3 || 350 }}
         id: source
         shell: bash
         run: &mrk_installed_source_inventory |
@@ -362,6 +377,12 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           PY_SOURCE
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+            inventory_sha=$(/usr/bin/shasum -a 256 "$MRK_MACOS_WORK/source-inventory.json")
+            inventory_sha=${inventory_sha%% *}
+            [[ "$inventory_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
+            printf 'app-signature-source-inventory-sha256=%s\n' "$inventory_sha" >> "$GITHUB_OUTPUT"
+          fi
       - name: Admit the fixed image Rust tools without installing a distribution
         timeout-minutes: 4
         shell: bash
@@ -640,6 +661,7 @@ jobs:
           digest-mismatch: error
           skip-decompress: 'false'
       - name: Project current signed tools without executing either program
+        id: app_tools
         timeout-minutes: 3
         shell: bash
         env:
@@ -659,6 +681,7 @@ jobs:
             false) ;; *) exit 1 ;;
           esac
       - name: Prepare the current payload from the independently accepted fresh Python supplier
+        id: app_runtime
         timeout-minutes: 3
         shell: bash
         run: |
@@ -689,7 +712,7 @@ jobs:
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))
         timeout-minutes: 9
         shell: bash
         env:
@@ -787,6 +810,7 @@ jobs:
             exit "$build_status"
           fi
       - name: Fail fast on native Scripts ownership and package format (never Installer)
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 2
         shell: bash
         run: |
@@ -837,7 +861,7 @@ jobs:
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
       - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed')
         timeout-minutes: 2
         shell: bash
         run: |
@@ -1029,6 +1053,7 @@ jobs:
             --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
             > "$work/android-support-result.json"
       - name: Require the fixed SOURCE producer identity and release before ordinary signing
+        id: app_selection
         timeout-minutes: 1
         shell: bash
         run: |
@@ -1083,6 +1108,7 @@ jobs:
             "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare --target "$MRK_MACOS_TARGET" >> "$GITHUB_OUTPUT"
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Build and sign the separate fixed vault helper before binding the app
+        id: app_vault
         timeout-minutes: 8
         shell: bash
         env:
@@ -1142,6 +1168,7 @@ jobs:
           PY_HELPER
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Build the ordinary selected-target desktop image and embedded frontend
+        id: app_build
         timeout-minutes: 24
         shell: bash
         env:
@@ -1207,6 +1234,7 @@ jobs:
             [[ "$observer_status_saved" == 0 ]] || exit "$observer_status_saved"
           fi
       - name: Record the effective pinned compiler from the successful build context
+        id: app_compiler
         timeout-minutes: 1
         shell: bash
         run: |
@@ -1264,12 +1292,13 @@ jobs:
           PY_EFFECTIVE_RUST
       - name: Compile and run only fixed native DATA contracts and exact host-Python regressions
         id: data_contracts
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')
         timeout-minutes: 28
         shell: bash
         run: |
           builtin source ./desktop/tools/macos_installed_data_contracts.sh
       - name: Assemble the ordinary image app and sign code inside-out (never --deep)
+        id: app_assemble
         timeout-minutes: 3
         shell: bash
         env:
@@ -1366,7 +1395,92 @@ jobs:
           [[ "$entry_sha" =~ ^[0-9a-f]{64}$ ]] || exit 1
           printf 'MRK_MACOS_SIGNED_ENTRY_SHA256=%s\nMRK_MACOS_SIGNED_PAYLOAD_SHA256=%s\nMRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256=%s\n' "$entry_sha" "$payload_sha" "$desktop_image_sha" >> "$GITHUB_ENV"
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Summarize only completed whole-app signatures and observed bytes
+        id: app_signature_summary
+        if: github.ref == 'refs/heads/verify/desktop-macos-app-signature'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_APP_SIGNATURE_STEP_OUTCOMES: >-
+            {"work":"${{ steps.work.outcome }}","source":"${{ steps.source.outcome }}","app_runtime":"${{ steps.app_runtime.outcome }}","github_tools":"${{ steps.github_tools.outcome }}","app_tools":"${{ steps.app_tools.outcome }}","app_selection":"${{ steps.app_selection.outcome }}","android_helper":"${{ steps.android_helper.outcome }}","app_vault":"${{ steps.app_vault.outcome }}","app_build":"${{ steps.app_build.outcome }}","app_compiler":"${{ steps.app_compiler.outcome }}","app_assemble":"${{ steps.app_assemble.outcome }}"}
+          MRK_APP_SIGNATURE_SOURCE_INVENTORY_SHA256: ${{ steps.source.outputs.app-signature-source-inventory-sha256 }}
+        run: |
+          set -euo pipefail
+          # DATA-only checkpoint; no process/signing/native owner is created.
+          # These receipts become evidence only with their real completed caller steps.
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py summarize-app-signature --target "$MRK_MACOS_TARGET"
+      - name: Retire only settled app-signature compiler outputs independently of upload
+        id: app_signature_cleanup
+        if: always() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && steps.app_signature_summary.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_APP_CLEAN'
+          import json, os, re, shutil, stat
+          from pathlib import Path
+          root = Path(os.environ["MRK_MACOS_WORK"])
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          if (root.parent != Path("/Users/runner/work/_temp") or not re.fullmatch(r"mrk-macos-installed\.[A-Za-z0-9]{8}", root.name)
+                  or workspace != Path("/Users/runner/work/mobile-release-kit/mobile-release-kit") or not shutil.rmtree.avoids_symlink_attacks):
+              raise ValueError("app-signature-cleanup-route")
+          def read(name, limit):
+              fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  info = os.fstat(fd)
+                  if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or not 0 < info.st_size <= limit:
+                      raise ValueError("app-signature-cleanup-input")
+                  body = os.read(fd, limit + 1)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if len(body) != info.st_size or sig(os.fstat(fd)) != sig(info) or sig(os.lstat(root / name)) != sig(info):
+                      raise ValueError("app-signature-cleanup-input-post")
+                  return json.loads(body)
+              finally: os.close(fd)
+          binding = read("source-binding.json", 65536)
+          proof = read("app-signature-evidence/summary.json", 65536)
+          current = os.lstat(root)
+          if (not stat.S_ISDIR(current.st_mode) or current.st_uid != os.getuid() or os.getuid() == 0
+                  or stat.S_IMODE(current.st_mode) != 0o700
+                  or [current.st_dev,current.st_ino,current.st_uid] != binding["workDirectory"]
+                  or binding["source"] != os.environ["GITHUB_SHA"] or binding["frontendAbsentAtAdmission"] is not True
+                  or binding["scope"] != proof["scope"] or proof["scope"] != "whole-app-signature-only"
+                  or proof["source"] != os.environ["GITHUB_SHA"] or proof["runId"] != os.environ["GITHUB_RUN_ID"]
+                  or proof["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"] or proof["target"] != os.environ["MRK_MACOS_TARGET"]
+                  or proof["appCodeSignVerified"] is not True):
+              raise ValueError("app-signature-cleanup-original")
+          # Same completed work owner, no shared caches/installation/app/runtime removal.
+          outputs = (root / "cargo-target", root / "vault-helper-target", root / "remover-target", root / "npm-cache",
+                     workspace / "desktop/node_modules", workspace / "desktop/dist")
+          for path in outputs:
+              selected = os.lstat(path)
+              if not stat.S_ISDIR(selected.st_mode) or selected.st_uid != os.getuid() or selected.st_dev != current.st_dev:
+                  raise ValueError("app-signature-cleanup-output")
+              shutil.rmtree(path)
+              if os.path.lexists(path): raise ValueError("app-signature-cleanup-retained")
+          body = (json.dumps({"schemaVersion":1,"scope":"whole-app-signature-only","source":os.environ["GITHUB_SHA"],
+              "runId":os.environ["GITHUB_RUN_ID"],"runAttempt":os.environ["GITHUB_RUN_ATTEMPT"],"target":os.environ["MRK_MACOS_TARGET"],
+              "compilerOutputsRetired":True,"sharedCachesTouched":False,"appRuntimeRetained":True},sort_keys=True,separators=(",",":"))+"\n").encode("ascii")
+          fd = os.open(root / "app-signature-evidence/cleanup.json", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          try:
+              if os.write(fd,body) != len(body): raise OSError("app-signature-cleanup-write")
+              os.fsync(fd)
+              if os.pread(fd,len(body)+1,0) != body: raise OSError("app-signature-cleanup-readback")
+          finally: os.close(fd)
+          PY_APP_CLEAN
+      - name: Retain finite app-signature facts only, never an installable delivery
+        id: app_signature_evidence
+        if: always() && github.ref == 'refs/heads/verify/desktop-macos-app-signature' && steps.app_signature_summary.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-signature-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ format('{0}/app-signature-evidence/*.json', steps.work.outputs.root) }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
       - name: Bind this completed signed app and current-source runtime into fresh Installer DATA
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 32
         shell: bash
         env:
@@ -1407,7 +1521,7 @@ jobs:
           # authorized build into its one-shot installer; it grants no runtime,
           # GUI, distribution, update or arbitrary adjacent-file authority.
       - name: Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed')
         timeout-minutes: 12
         shell: bash
         run: |
@@ -1491,7 +1605,7 @@ jobs:
               os.fsync(stream.fileno())
           PY
       - name: Build the separate fixed eight-case Installer package from the same completed input
-        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 8
         shell: bash
         run: |
@@ -1549,7 +1663,7 @@ jobs:
             --scripts "$MRK_MACOS_WORK/scripts-fixture" --package "$MRK_MACOS_WORK/package-fixture-final/MobileReleaseKit-InstallerFixture.pkg" \
             --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"
       - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector
-        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 18
         shell: bash
         run: |
@@ -1588,7 +1702,7 @@ jobs:
           # Setup and each fixed case retain their own original120s endpoint.
           # Any unexpected native failure/Unknown stops subsequent cases. No retry.
       - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged
-        if: github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -1601,6 +1715,7 @@ jobs:
           # Deterministic collisions and reported policy faults are not genuine
           # concurrent races, OS EIO/power-loss, native close failure or Aqua/Save.
       - name: Build the fixed one-shot root Installer and scripts-only package
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 8
         shell: bash
         env:
@@ -1667,6 +1782,7 @@ jobs:
           # first productbuilds the SOURCE ReadMe envelope, then signs the outer package.
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Build fixed Installer presentation then sign and notarize the completed outer package before final P
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         timeout-minutes: 32
         shell: bash
         env:
@@ -1704,6 +1820,7 @@ jobs:
           # actual original0/status and the retained closed receipt, not a flag.
 
       - name: Standard Installer only is privileged; never execute the app or Python as root
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
         id: package_install
         timeout-minutes: 18
         shell: bash
@@ -1739,7 +1856,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Prepare fresh private Android UI suppliers and disposable key inputs
         id: normal_android_inputs
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 22
         shell: bash
         env:
@@ -1779,7 +1896,7 @@ jobs:
 
       - name: Exercise one ordinary signed Android build with current private inputs
         id: normal_android_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 23
         shell: bash
         env:
@@ -1819,7 +1936,7 @@ jobs:
 
       - name: Bind the single Android journey to current installed originals only
         id: normal_android_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -2143,7 +2260,7 @@ jobs:
 
       - name: Exercise one ordinary unsigned iOS archive and normal Quit
         id: normal_ios_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 22
         shell: bash
         env:
@@ -2181,7 +2298,7 @@ jobs:
 
       - name: Observe the single unsigned iOS XCTest summary under the same source
         id: normal_ios_ui_summary
-        if: github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
         timeout-minutes: 2
         shell: bash
         env:
@@ -2218,7 +2335,7 @@ jobs:
           # and facts are evidence, never IPA/signing/distribution qualification.
 
       - name: Notarize, staple and verify only the final user image
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2248,7 +2365,7 @@ jobs:
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
       - name: Prepare the fixed two-file removal package without executing it
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 8
         shell: bash
         run: |
@@ -2301,7 +2418,7 @@ jobs:
           [[ $xar_status == 0 ]] || exit "$xar_status"
           # This completed unsigned XAR is not final P; the next fixed phase signs and notarizes it.
       - name: Sign and notarize the completed removal package without executing it
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2337,7 +2454,7 @@ jobs:
           # plus the retained purpose-specific receipt; no removal is executed.
 
       - name: Emit the genuine removal descriptor and readonly carrier without Installer
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
         id: removal_package
         timeout-minutes: 18
         shell: bash
@@ -2371,7 +2488,7 @@ jobs:
           unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
       - name: Prepare three source-bound readonly observation carriers without removal
         id: removal_observers
-        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_package.outcome == 'success' && steps.normal_ui_build.outcome == 'success')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2410,7 +2527,7 @@ jobs:
           [[ "$preparation_status_saved" == 0 ]] || exit "$preparation_status_saved"
       - name: One genuine fixed removal journey through the existing original owners
         id: removal_fixture
-        if: github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && steps.removal_observers.outcome == 'success' && steps.normal_ui_build.outcome == 'success')
         timeout-minutes: 18
         shell: bash
         env:
@@ -2436,7 +2553,7 @@ jobs:
           # separately joins actual Installer/UI/supervisor/observer outcomes.
           # No protected path/log copy, fake peer, release or power-loss claim.
       - name: Notarize staple and verify the separate readonly removal carrier
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')
         timeout-minutes: 32
         shell: bash
         env:
@@ -2467,7 +2584,7 @@ jobs:
           # actual original0. Preview has no fallback to the old image.
       - name: Stage only the audited normal early-preview deliverables
         id: preview
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')
         timeout-minutes: 3
         shell: bash
         run: |
@@ -2482,7 +2599,7 @@ jobs:
           printf '%s\n' 'Normal preview built/installed/read back; automatic open and normal Quit unexecuted; manual UI acceptance pending.'
       - name: Upload only the normal user preview package and guide
         id: preview_upload
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.preview.outcome == 'success')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mobile-release-kit-macos26-${{ matrix.target }}-preview-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2498,7 +2615,7 @@ jobs:
           compression-level: 0
       - name: Launch the exact ordinary app, Cancel its real Quit sheet, then Quit normally
         id: normal_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_build.outcome == 'success' && steps.preview_upload.outcome == 'success')
         timeout-minutes: 7
         shell: bash
         env:
@@ -2571,7 +2688,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Preserve original XCTest counts and a closed UI-only result, never a clean-exit claim
         id: normal_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -2746,7 +2863,7 @@ jobs:
           PY_UI_RESULT
       - name: Exercise normal project edits, images and four draft-only Browse fields
         id: normal_project_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')
         timeout-minutes: 16
         shell: bash
         env:
@@ -2820,7 +2937,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Verify both selected project journeys against their original XCTest result
         id: normal_project_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_project_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3004,7 +3121,7 @@ jobs:
           PY_UI_RESULT
       - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
         id: normal_persistence_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')
         timeout-minutes: 11
         shell: bash
         env:
@@ -3123,7 +3240,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind the single persistence journey to original XCTest and app-helper evidence
         id: normal_persistence_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3336,7 +3453,7 @@ jobs:
           PY_PERSISTENCE_RESULT
       - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
         id: normal_diagnostics_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')
         timeout-minutes: 11
         shell: bash
         env:
@@ -3454,7 +3571,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind the single diagnostics journey to original XCTest and the same ordinary package
         id: normal_diagnostics_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -3668,7 +3785,7 @@ jobs:
 
       - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
         id: normal_saved_checks_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven')
         timeout-minutes: 17
         shell: bash
         env:
@@ -3790,7 +3907,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind both saved-check journeys to original XCTest and the same ordinary package
         id: normal_saved_checks_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         env:
@@ -4026,7 +4143,7 @@ jobs:
 
       - name: Exercise one selected saved-version recovery, GitHub refusal or saved evidence through the ordinary Mac UI
         id: normal_saved_version_recovery_ui_test
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'))
         timeout-minutes: 11
         shell: bash
         env:
@@ -4077,7 +4194,7 @@ jobs:
           [[ "$test_status" == 0 ]] || exit "$test_status"
       - name: Bind only the selected singleton to original XCTest and the same ordinary preview package
         id: normal_saved_version_recovery_ui_result
-        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_version_recovery_ui_test.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence'))
         timeout-minutes: 3
         shell: bash
         env:
@@ -4287,7 +4404,7 @@ jobs:
           PY_SAVED_VERSION_RECOVERY_RESULT
       - name: Preserve bounded originals; upload success is never GUI/native acceptance
         id: evidence
-        if: always() && steps.work.outputs.root != ''
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.work.outputs.root != '')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: desktop-macos-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -4648,7 +4765,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success'
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')
         timeout-minutes: 3
         shell: bash
         run: |
