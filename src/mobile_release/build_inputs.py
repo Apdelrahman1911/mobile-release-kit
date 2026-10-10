@@ -342,6 +342,10 @@ class _FD:
         self._artifact_operation = artifact.require_operation() if artifact is not None else None
         if self._artifact_operation is not None:
             self._artifact_operation.register_descriptor(self)
+        history = getattr(guard, "_github_history_source", None)
+        self._history_operation = history.require_operation() if history is not None else None
+        if self._history_operation is not None:
+            self._history_operation.register_descriptor(self)
         source = guard._project_recovery_source
         if source is not None:
             # The existing original descriptor remains its only close owner.
@@ -397,6 +401,8 @@ class _FD:
             self.close_state = "CLOSED"  # NEW or a positive direct no-effect receipt only.
             if parent and self._artifact_operation is not None:
                 self._artifact_operation.retired_descriptor(self)
+            if parent and self._history_operation is not None:
+                self._history_operation.retired_descriptor(self)
             return
         try:
             # Default cancellation cannot cut between numeric retirement and the
@@ -424,6 +430,8 @@ class _FD:
             raise
         if parent and self._artifact_operation is not None:
             self._artifact_operation.retired_descriptor(self)
+        if parent and self._history_operation is not None:
+            self._history_operation.retired_descriptor(self)
 
     def after_fork_child(self) -> None:
         if self.pid != os.getpid():

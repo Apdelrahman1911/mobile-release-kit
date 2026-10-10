@@ -5,6 +5,13 @@ use sha2::{Digest, Sha256};
 use crate::{error::BridgeError, github_connection_protocol::{self as connection, bounds, coordinate,
     numeric_id, nullable, utc, GitHubReadControl}, protocol::{strict_json, valid_id}};
 
+#[path = "github_setup_secret_protocol.rs"]
+mod secret;
+pub(crate) use secret::*;
+#[path = "github_setup_variable_protocol.rs"]
+mod variable;
+pub(crate) use variable::*;
+
 pub(crate) const PROTOCOL: &str = "mrk-github-setup/1";
 pub(crate) const EVENT: &str = "github-remote-setup-status";
 pub(crate) const INITIAL_LIMIT: usize = 8192;
@@ -37,14 +44,18 @@ pub(crate) enum Selection {
     },
     #[serde(rename = "environment_protection")]
     Environment(EnvironmentSelection),
+    #[serde(rename = "environment_secret")]
+    Secret(SecretSelection),
+    #[serde(rename = "environment_variable")]
+    Variable(VariableSelection),
 }
 impl Selection {
     pub(crate) fn name(&self) -> &'static str { match self {
         Self::ActionsEnabled { .. } => "actions_enabled", Self::WorkflowTokenPolicy { .. } => "workflow_token_policy",
-        Self::Environment(_) => "environment_protection",
+        Self::Environment(_) => "environment_protection", Self::Secret(_) => "environment_secret", Self::Variable(_) => "environment_variable",
     } }
-    pub(crate) fn valid(&self) -> bool { match self { Self::Environment(v) => v.valid(), _ => true } }
-    fn retained_heap_bytes(&self) -> usize { match self { Self::Environment(v) => v.retained_heap_bytes(), _ => 0 } }
+    pub(crate) fn valid(&self) -> bool { match self { Self::Environment(v) => v.valid(), Self::Secret(v) => v.valid(), Self::Variable(v) => v.valid(), _ => true } }
+    fn retained_heap_bytes(&self) -> usize { match self { Self::Environment(v) => v.retained_heap_bytes(), Self::Secret(v) => v.retained_heap_bytes(), Self::Variable(v) => v.retained_heap_bytes(), _ => 0 } }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged, deny_unknown_fields)]
@@ -70,7 +81,7 @@ pub(crate) struct Target {
 impl Target {
     pub(crate) fn valid(&self) -> bool { hex(&self.project_binding, 64) && coordinate(&self.repository)
         && numeric_id(&self.account_id) && numeric_id(&self.repository_id) && self.selection.valid()
-        && (!matches!(&self.selection, Selection::Environment(_)) || environment_id(&self.account_id) && environment_id(&self.repository_id)) }
+        && (!matches!(&self.selection, Selection::Environment(_) | Selection::Secret(_) | Selection::Variable(_)) || environment_id(&self.account_id) && environment_id(&self.repository_id)) }
     pub(crate) fn retained_heap_bytes(&self) -> Option<usize> {
         self.project_binding.capacity().checked_add(self.repository.capacity())?
             .checked_add(self.account_id.capacity())?.checked_add(self.repository_id.capacity())?
@@ -244,40 +255,51 @@ impl EnvironmentPrepared {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum Prepared { Repository(RepositoryPrepared), Environment(EnvironmentPrepared) }
+pub(crate) enum Prepared { Repository(RepositoryPrepared), Environment(EnvironmentPrepared), Secret(SecretPrepared), Variable(VariablePrepared) }
 impl Prepared {
-    pub(crate) fn target(&self) -> &Target { match self { Self::Repository(v) => &v.target, Self::Environment(v) => &v.target } }
-    pub(crate) fn valid(&self) -> bool { match self { Self::Repository(v) => v.valid(), Self::Environment(v) => v.valid() } }
+    pub(crate) fn target(&self) -> &Target { match self { Self::Repository(v) => &v.target, Self::Environment(v) => &v.target, Self::Secret(v) => &v.target, Self::Variable(v) => &v.target } }
+    pub(crate) fn valid(&self) -> bool { match self { Self::Repository(v) => v.valid(), Self::Environment(v) => v.valid(), Self::Secret(v) => v.valid(), Self::Variable(v) => v.valid() } }
     pub(crate) fn retained_heap_bytes(&self) -> Option<usize> { match self {
-        Self::Repository(v) => v.retained_heap_bytes(), Self::Environment(v) => v.retained_heap_bytes(),
+        Self::Repository(v) => v.retained_heap_bytes(), Self::Environment(v) => v.retained_heap_bytes(), Self::Secret(v) => v.retained_heap_bytes(), Self::Variable(v) => v.retained_heap_bytes(),
     } }
     fn matches_before(&self, observed: &Observation) -> bool { match (self, observed) {
         (Self::Repository(v), Observation::Repository(p)) => v.before == *p,
-        (Self::Environment(v), Observation::Environment(p)) => v.before == *p, _ => false,
+        (Self::Environment(v), Observation::Environment(p)) => v.before == *p,
+        (Self::Secret(v), Observation::Secret(p)) => v.before == *p,
+        (Self::Variable(v), Observation::Variable(p)) => v.before == *p, _ => false,
     } }
     fn matches_after(&self, observed: &Observation) -> bool { match (self, observed) {
         (Self::Repository(v), Observation::Repository(p)) => v.after == *p,
         (Self::Environment(v), Observation::Environment(p)) => p.name == v.before.name && p.id.is_some()
-            && p.policy.as_ref() == Some(&v.after) && (v.before.id.is_none() || p.id == v.before.id), _ => false,
+            && p.policy.as_ref() == Some(&v.after) && (v.before.id.is_none() || p.id == v.before.id),
+        (Self::Secret(v), Observation::Secret(p)) => v.matches_after(p),
+        (Self::Variable(v), Observation::Variable(p)) => v.matches_after(p), _ => false,
     } }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
-pub(crate) enum Observation { Repository(Policy), Environment(EnvironmentFacts) }
+pub(crate) enum Observation { Repository(Policy), Environment(EnvironmentFacts), Secret(SecretFacts), Variable(VariableFacts) }
 impl Observation {
     fn valid_for(&self, target: &Target) -> bool { match (self, &target.selection) {
         (Self::Repository(policy), Selection::ActionsEnabled { .. } | Selection::WorkflowTokenPolicy { .. }) =>
             policy.changed(target.selection.clone()).is_some(),
         (Self::Environment(facts), Selection::Environment(selection)) => facts.valid() && facts.name == selection.stage.name(),
+        (Self::Secret(facts), Selection::Secret(selection)) => facts.valid_for(selection),
+        (Self::Variable(facts), Selection::Variable(selection)) => facts.valid_for(selection),
         _ => false,
     } }
     fn unchanged_for(&self, target: &Target) -> bool { match (self, &target.selection) {
         (Self::Repository(policy), _) => policy.changed(target.selection.clone()) == Some(*policy),
         (Self::Environment(facts), Selection::Environment(selection)) =>
-            facts.policy.as_ref().is_some_and(|v| v.unchanged_for(selection)), _ => false,
+            facts.policy.as_ref().is_some_and(|v| v.unchanged_for(selection)),
+        // Shape only here: Supervisor binds NoChange to its actual retained field
+        // before the reply can become a settled/public outcome. No source value
+        // is inferred from a fingerprint supplied by the child.
+        (Self::Variable(facts), Selection::Variable(selection)) =>
+            selection.mode == VariableMode::Replace && facts.valid_for(selection) && facts.value.is_some(), _ => false,
     } }
     fn retained_heap_bytes(&self) -> Option<usize> { match self { Self::Repository(_) => Some(0),
-        Self::Environment(v) => v.retained_heap_bytes() } }
+        Self::Environment(v) => v.retained_heap_bytes(), Self::Secret(v) => v.retained_heap_bytes(), Self::Variable(v) => v.retained_heap_bytes() } }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -305,7 +327,7 @@ fn frame(raw: &[u8], limit: usize, nodes: usize, depth: usize) -> Result<Value, 
     if !bounds(&value, limit, nodes, depth) { return Err(BridgeError::protocol()); } Ok(value)
 }
 pub(crate) fn encode_initial(id: &str, request: &Request) -> Result<Vec<u8>, BridgeError> {
-    if !valid_id(id) || !request.valid() { return Err(BridgeError::invalid()); }
+    if !valid_id(id) || !request.valid() || matches!(&request.target.selection, Selection::Secret(_) | Selection::Variable(_)) { return Err(BridgeError::invalid()); }
     let value = serde_json::json!({"protocol": PROTOCOL, "id": id, "action": request});
     if !bounds(&value, INITIAL_LIMIT - 1, 256, 8) { return Err(BridgeError::invalid()); }
     let mut raw = serde_json::to_vec(&value).map_err(|_| BridgeError::invalid())?; raw.push(b'\n');
@@ -348,14 +370,15 @@ pub(crate) fn encode_go(id: &str, digest: &str, token: &str) -> Result<Vec<u8>, 
 pub(crate) enum Reason { None, NoChange, PolicyUnsupported, PolicyChanged, OrganizationRestricted, RepositoryArchived,
     Unauthorized, Forbidden, NotFoundOrInaccessible, TargetChanged, RateLimited, NetworkUnavailable, TlsFailed,
     ResponseInvalid, ResponseLimit, Expired, Cancelled, Unqualified, NotConnected, Busy, InvalidInput,
-    CleanupUnknown, RuntimeUnavailable, ConsentExpired }
+    CleanupUnknown, RuntimeUnavailable, ConsentExpired, MaterialUnavailable, MaterialChanged, MaterialTooLarge,
+    RequirementUnsupported, ConfigurationChanged, SecretExists, SecretMissing, SecretKeyChanged, SealingFailed, ResourcesUnavailable, VariableExists, VariableMissing, VariableChanged }
 impl Reason {
     fn private(self) -> bool { !matches!(self, Self::Unqualified | Self::NotConnected | Self::Busy | Self::InvalidInput
         | Self::CleanupUnknown | Self::RuntimeUnavailable | Self::ConsentExpired) }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Effect { NotStarted, Unknown, ReadbackConfirmed }
+pub(crate) enum Effect { NotStarted, Unknown, ReadbackConfirmed, AcceptedNotValueVerified }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Outcome {
@@ -372,9 +395,18 @@ impl Outcome {
             .checked_add(self.control.credential_expires_at.as_ref().map_or(0, String::capacity))
     }
     fn valid(&self, request: &Request) -> bool {
-        if self.schema_version != 1 || self.action != request.kind || !self.reason.private() || !self.control.valid()
+        if self.schema_version != 1 || self.action != request.kind
+            || !(self.reason.private() || self.reason == Reason::RuntimeUnavailable && matches!(&request.target.selection,Selection::Secret(_) | Selection::Variable(_)))
+            || !self.control.valid()
             || self.write_acknowledged && !self.write_claimed
             || self.observed.as_ref().is_some_and(|value| !value.valid_for(&request.target)) { return false; }
+        if !matches!(&request.target.selection,Selection::Secret(_) | Selection::Variable(_)) && matches!(self.reason,
+            Reason::MaterialUnavailable|Reason::MaterialChanged|Reason::MaterialTooLarge|Reason::RequirementUnsupported
+            |Reason::ConfigurationChanged|Reason::ResourcesUnavailable){return false}
+        if !matches!(&request.target.selection,Selection::Secret(_)) && matches!(self.reason,
+            Reason::SecretExists|Reason::SecretMissing|Reason::SecretKeyChanged|Reason::SealingFailed){return false}
+        if !matches!(&request.target.selection,Selection::Variable(_)) && matches!(self.reason,
+            Reason::VariableExists|Reason::VariableMissing|Reason::VariableChanged){return false}
         if self.control.reason != connection::Reason::None
             && serde_json::to_value(self.control.reason).ok() != serde_json::to_value(self.reason).ok() { return false; }
         match self.action {
@@ -385,7 +417,9 @@ impl Outcome {
                     && self.observed.as_ref().is_some_and(|v| p.matches_before(v)))
                 && (self.reason != Reason::NoChange || self.observed.as_ref().is_some_and(|v| v.unchanged_for(&request.target))),
             Kind::Apply => self.prepared.is_none() && self.reason != Reason::NoChange &&
-                if self.effect == Effect::ReadbackConfirmed {
+                if self.effect == if matches!(&request.target.selection, Selection::Secret(_)) {
+                    Effect::AcceptedNotValueVerified
+                } else { Effect::ReadbackConfirmed } {
                     self.reason == Reason::None && self.write_acknowledged
                         && request.prepared.as_ref().is_some_and(|p| self.observed.as_ref().is_some_and(|v| p.matches_after(v)))
                 } else { self.reason != Reason::None && self.observed.is_none()
@@ -435,11 +469,24 @@ pub(crate) fn decode_reply(id: &str, raw: &[u8], request: &Request) -> Result<Re
     if matches!(&request.target.selection, Selection::Environment(_)) && !environment_reply_shape(&frame) {
         return Err(BridgeError::protocol());
     }
+    if matches!(&request.target.selection, Selection::Secret(_)) && !secret_reply_shape(&frame) {
+        return Err(BridgeError::protocol());
+    }
+    if matches!(&request.target.selection, Selection::Variable(_)) && !variable_reply_shape(&frame) {
+        return Err(BridgeError::protocol());
+    }
     let reply: Reply = serde_json::from_value(frame)
         .map_err(|_| BridgeError::protocol())?;
     if reply.protocol != PROTOCOL || reply.id != id || !request.valid() || !reply.result.valid(request) {
         return Err(BridgeError::protocol());
-    } Ok(reply)
+    }
+    // A read child cannot manufacture a public secret Prepare. Only the
+    // containing native two-original owner constructs that settled result.
+    if request.kind == Kind::Prepare && matches!(&request.target.selection, Selection::Secret(_))
+        && (reply.result.reason == Reason::None || reply.result.prepared.is_some()) {
+        return Err(BridgeError::protocol());
+    }
+    Ok(reply)
 }
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -491,7 +538,9 @@ pub(crate) fn decode_command(name: &str, value: &Value) -> Result<Command, Bridg
     }
     let command = match name {
         "github_remote_setup_status" if value.as_object().is_some_and(|v| v.is_empty()) => Command::Status,
-        "github_remote_setup_prepare" => { let v: PrepareArgs = read(value)?;
+        "github_remote_setup_prepare" => {
+            if !value.get("selection").is_some_and(|v| secret_selection_shape(v) && variable_selection_shape(v)) { return Err(BridgeError::invalid()); }
+            let v: PrepareArgs = read(value)?;
             if !valid_id(&v.session_id) || !revision(v.expected_revision) || !revision(v.expected_connection_revision) || !v.selection.valid() { return Err(BridgeError::invalid()); }
             Command::Prepare(v) },
         "github_remote_setup_apply" => { let v: ApplyArgs = read(value)?;
@@ -514,6 +563,21 @@ pub(crate) fn environment_retention_fits(parts: &[Option<usize>]) -> bool {
 }
 pub(crate) fn future_status_fits(request: &Request, session: &str) -> bool {
     if !request.valid() || !valid_id(session) { return false; }
+    if matches!(&request.target.selection, Selection::Secret(_)) {
+        return secret_future_status_fits(request, session);
+    }
+    if matches!(&request.target.selection, Selection::Variable(_)) {
+        // Serialized size ceiling only, never a synthetic consent. Prepared and
+        // Facts enforce their own actual byte/node caps on every returned reply.
+        let outer=serde_json::json!({"schemaVersion":1,"revision":LAST_REVISION,"sessionId":session,
+            "available":false,"reason":"not-found-or-inaccessible","operation":{"id":"x".repeat(64),"kind":"prepare",
+            "phase":"cleanup-unknown","reason":"not-found-or-inaccessible","effect":"readback-confirmed",
+            "writeClaimed":false,"writeAcknowledged":false},"consent":{"id":"a".repeat(32),
+            "expiresAt":"9999-12-31T23:59:59Z","prepared":null},"observed":null});
+        return serde_json::to_vec(&outer).ok().and_then(|v|v.len().checked_add(VARIABLE_PREPARED_LIMIT))
+            .and_then(|v|v.checked_add(VARIABLE_FACTS_LIMIT)).and_then(|v|v.checked_add(512))
+            .is_some_and(|v|v<=RESPONSE_LIMIT);
+    }
     if matches!(&request.target.selection, Selection::Environment(_)) {
         // Size only: the ceiling is deliberately not parsed into authoritative
         // Prepared/Facts. Six longest IDs, both reviewer types, longest fixed
@@ -551,6 +615,8 @@ pub(crate) fn future_status_fits(request: &Request, session: &str) -> bool {
 // credential material, installed runtime, or original effect is constructed.
 #[cfg(test)]
 pub(crate) fn data_checks() {
+    secret::data_checks();
+    variable::variable_contract_checks();
     use serde_json::json;
     let target = Target { project_binding: "a".repeat(64), repository: "owner/repository".into(),
         account_id: "1".into(), repository_id: "2".into(), selection: Selection::ActionsEnabled { enabled: true } };

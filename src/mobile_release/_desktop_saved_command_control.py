@@ -29,6 +29,7 @@ class SavedCommandDomain(Enum):
     ProjectRecovery = "project-recovery"
     IOSArchive = "ios-archive"
     ArtifactInspection = "artifact-inspection"
+    GitHubHistory = "github-history"
 
 
 def _protocol(domain: SavedCommandDomain):
@@ -48,6 +49,9 @@ def _protocol(domain: SavedCommandDomain):
     if domain is SavedCommandDomain.ArtifactInspection:
         from . import _desktop_artifact_inspection_protocol
         return _desktop_artifact_inspection_protocol
+    if domain is SavedCommandDomain.GitHubHistory:
+        from . import _desktop_github_history_protocol
+        return _desktop_github_history_protocol
     raise ValueError("Invalid saved-command domain")
 
 
@@ -68,6 +72,9 @@ def source_domain(source: object) -> SavedCommandDomain:
     from ._desktop_artifact_inspection_control import ArtifactInspectionInput
     if type(source) is ArtifactInspectionInput and source.domain is SavedCommandDomain.ArtifactInspection:
         return SavedCommandDomain.ArtifactInspection
+    from ._desktop_github_history_control import HistoryInput
+    if type(source) is HistoryInput and source.domain is SavedCommandDomain.GitHubHistory:
+        return SavedCommandDomain.GitHubHistory
     raise ValueError("Invalid original saved-command input")
 
 
@@ -215,7 +222,8 @@ class _SavedCommandInput:
                            SavedCommandDomain.AndroidBuild: "Original Android build input changed",
                            SavedCommandDomain.ProjectRecovery: "Original project recovery input changed",
                            SavedCommandDomain.IOSArchive: "Original saved build input changed",
-                           SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed"}[self.domain]
+                           SavedCommandDomain.ArtifactInspection: "Original artifact inspection input changed",
+                           SavedCommandDomain.GitHubHistory: "Original History input changed"}[self.domain]
                 raise _protocol(self.domain).ProtocolError(message)
             if material_phase and (not self.material_receiving or self.buffer):
                 # The original bounded private reader drains this buffer before

@@ -6,6 +6,10 @@ consent are separate, required integrations; existing engine routes stay closed.
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .github_setup_variable_runtime import VariableRuntimeAction
+
 import hashlib
 import json
 from dataclasses import dataclass
@@ -793,10 +797,529 @@ def execute_environment(action: EnvironmentAction, reader: Reader, *, observed_a
         result["reason"] = "response-invalid"
     return result
 
+# One fixed environment-secret Prepare read, separate from effectful Apply.
+# Eligibility comes from the held saved configuration adapter, not this map.
+SECRET_REQUIREMENTS = {
+    "MOBILE_RELEASE_ANDROID_KEYSTORE_BASE64": ("android", "base64"),
+    "MOBILE_RELEASE_ANDROID_KEYSTORE_PASSWORD": ("android", "utf8"),
+    "MOBILE_RELEASE_ANDROID_KEY_PASSWORD": ("android", "utf8"),
+    "MOBILE_RELEASE_ANDROID_GOOGLE_SERVICES_JSON_BASE64": ("android", "base64"),
+    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_BASE64": ("ios", "base64"),
+    "MOBILE_RELEASE_APPLE_DISTRIBUTION_P12_PASSWORD": ("ios", "utf8"),
+    "MOBILE_RELEASE_APPLE_PROVISIONING_PROFILE_BASE64": ("ios", "base64"),
+    "MOBILE_RELEASE_IOS_GOOGLE_SERVICE_INFO_PLIST_BASE64": ("ios", "base64"),
+    "MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64": ("ios", "base64"),
+    "MOBILE_RELEASE_PROJECT_READ_TOKEN": ("project", "utf8"),
+}
+SECRET_REASONS = (REASONS - {"no-change"}) | frozenset({"material-unavailable", "material-changed",
+    "material-too-large", "requirement-unsupported", "configuration-changed", "secret-exists", "secret-missing",
+    "secret-key-changed", "sealing-failed", "resources-unavailable", "runtime-unavailable"})
+SECRET_READ_BYTES = 8192
+SECRET_APPLY_GO_BYTES = 73728
+SECRET_WRITE_BYTES = 69632
+SECRET_APPLY_BUFFERS = 815345
+SECRET_CONFIRMATION = "Send this exact required secret to GitHub? GitHub cannot show or compare the existing value. This create-or-update request can overwrite a concurrent change or recreate a deleted secret; there is no atomic compare-and-set. A returned acceptance does not verify the secret value or prove a build or release works. Cancel does not undo a sent request."
 
-def _parse_action(value: object) -> Action | EnvironmentAction:
+
+def _secret_selection(value: object) -> dict:
+    row = _object(value, {"kind", "mode", "stage", "requirement", "source"})
+    _require(row["kind"] == "environment_secret" and row["mode"] in {"create", "replace"}
+             and type(row["stage"]) is str and row["stage"] in ENVIRONMENT_NAMES
+             and type(row["requirement"]) is str and row["requirement"] in SECRET_REQUIREMENTS)
+    ref = _object(row["source"], {"recordId", "recordRevision", "contextRevision"})
+    _require(type(ref["recordId"]) is str and len(ref["recordId"]) == 32
+             and all(c in "0123456789abcdef" for c in ref["recordId"])
+             and all(type(ref[k]) is int and 0 <= ref[k] <= 2**32-1 for k in ("recordRevision", "contextRevision")))
+    return {"kind": row["kind"], "mode": row["mode"], "stage": row["stage"],
+            "requirement": row["requirement"], "source": dict(ref)}
+
+
+def _secret_target(value: object) -> dict:
+    row = _object(value, {"projectBinding", "repository", "accountId", "repositoryId", "selection"})
+    return {"projectBinding": _match(row["projectBinding"], _DIGEST), "repository": _coordinate(row["repository"]),
+            "accountId": _environment_id(row["accountId"]), "repositoryId": _environment_id(row["repositoryId"]),
+            "selection": _secret_selection(row["selection"])}
+
+
+def _secret_digest(value: object) -> dict:
+    row = _object(value, {"bytes", "sha256"})
+    _require(type(row["bytes"]) is int and 1 <= row["bytes"] <= 524288)
+    return {"bytes": row["bytes"], "sha256": _match(row["sha256"], _DIGEST)}
+
+
+def _secret_configuration(value: object) -> dict:
+    row = _object(value, {"savedConfig", "canonicalConfig"})
+    return {k: _secret_digest(row[k]) for k in ("savedConfig", "canonicalConfig")}
+
+
+def _secret_material(value: object, selection: dict) -> dict:
+    row = _object(value, {"encoding", "plaintextBytes"})
+    _require(row["encoding"] == SECRET_REQUIREMENTS[selection["requirement"]][1]
+             and type(row["plaintextBytes"]) is int and 1 <= row["plaintextBytes"] <= 49152
+             and (row["encoding"] != "base64" or row["plaintextBytes"] % 4 == 0))
+    return dict(row)
+
+
+def _secret_source(value: object, selection: dict) -> dict:
+    row = _object(value, {"root", "rootIdentity", "draft", "platform", "purpose", "material"})
+    identity = _object(row["rootIdentity"], {"device", "inode", "mode", "uid", "gid"})
+    _require(type(row["root"]) is str and row["root"].startswith("/") and 1 <= len(row["root"].encode("utf-8", "strict")) <= 4096
+             and not any(ord(c) < 32 or ord(c) == 127 for c in row["root"])
+             and row["platform"] == SECRET_REQUIREMENTS[selection["requirement"]][0]
+             and row["purpose"] in {"full", "signing", "store"})
+    for key in ("device", "inode"):
+        item = identity[key]
+        _require(type(item) is str and item.isascii() and item.isdecimal() and len(item) <= 20
+                 and str(int(item)) == item and int(item) <= 2**64-1)
+    _require(all(type(identity[k]) is int and 0 <= identity[k] <= 2**32-1 for k in ("mode", "uid", "gid"))
+             and identity["mode"] & 0o170000 == 0o040000)
+    return {"root": row["root"], "rootIdentity": dict(identity), "draft": _secret_digest(row["draft"]),
+            "platform": row["platform"], "purpose": row["purpose"], "material": _secret_material(row["material"], selection)}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SecretAction:
+    kind: str
+    target: dict
+    source: dict
+    prepared: dict | None = None
+
+    @classmethod
+    def parse(cls, value: object) -> SecretAction:
+        row = _object(value, {"kind", "target", "prepared", "source"})
+        _require(row["kind"] in {"prepare", "apply"})
+        target = _secret_target(row["target"])
+        source = _secret_source(row["source"], target["selection"])
+        if row["kind"] == "prepare":
+            _require(row["prepared"] is None)
+            prepared = None
+        else:
+            prepared = _secret_prepared(row["prepared"])
+            _require(prepared["target"] == target and prepared["configuration"]["canonicalConfig"] == source["draft"]
+                     and {k: prepared["after"][k] for k in ("encoding", "plaintextBytes")} == source["material"])
+        return cls(row["kind"], target, source, prepared)
+
+    def value(self) -> dict:
+        return {"kind": self.kind, "target": self.target, "prepared": self.prepared, "source": self.source}
+
+
+class SecretSchedule:
+    """Six fixed GETs, consumed before exchange including failures; no retries."""
+    def __init__(self, action: SecretAction) -> None:
+        self.action = SecretAction.parse(action.value())
+        _require(self.action.kind == "prepare")
+        self.next = 0
+
+    def claim(self, step: str, reference: str | None = None) -> HttpRequest:
+        steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "repository-after")
+        _require(reference is None and self.next < len(steps) and step == steps[self.next])
+        self.next += 1
+        if step == "account":
+            return HttpRequest("GET", "/user", None)
+        prefix = "/repos/" + self.action.target["repository"]
+        if step in {"repository-before", "repository-after"}:
+            return HttpRequest("GET", prefix, None)
+        selected = self.action.target["selection"]
+        prefix += "/environments/" + ENVIRONMENT_NAMES[selected["stage"]]
+        if step != "environment-before":
+            prefix += "/secrets/" + ("public-key" if step == "key-before" else selected["requirement"])
+        return HttpRequest("GET", prefix, None)
+
+
+def _secret_key(value: object) -> dict:
+    import base64
+    import binascii
+    row = _object(value, {"id", "value"})
+    _require(type(row["id"]) is str and 1 <= len(row["id"]) <= 128
+             and all(0x21 <= ord(c) <= 0x7e for c in row["id"])
+             and type(row["value"]) is str and len(row["value"]) == 44 and row["value"].isascii())
+    try:
+        raw = base64.b64decode(row["value"], validate=True)
+    except (ValueError, binascii.Error) as error:
+        raise ValueError("Invalid fixed public key") from error
+    _require(len(raw) == 32 and base64.b64encode(raw).decode("ascii") == row["value"])
+    return dict(row)
+
+
+def _secret_facts(value: object, selected: dict) -> dict:
+    row = _object(value, {"environmentName", "environmentId", "name", "metadata"})
+    _require(row["environmentName"] == ENVIRONMENT_NAMES[selected["stage"]] and row["name"] == selected["requirement"])
+    result = {"environmentName": row["environmentName"], "environmentId": _environment_id(row["environmentId"]),
+              "name": row["name"], "metadata": None}
+    if row["metadata"] is not None:
+        metadata = _object(row["metadata"], {"createdAt", "updatedAt"})
+        result["metadata"] = {"createdAt": _utc(metadata["createdAt"]), "updatedAt": _utc(metadata["updatedAt"])}
+    _require(len(_canonical(result)) <= 2048)
+    return result
+
+
+def _secret_identity(value: object, target: dict) -> None:
+    # The existing normalized repository parser binds account/repository IDs;
+    # the secret variant does not borrow repository-policy write authority.
+    _require(type(value) is dict and type(value.get("id")) is int)
+    repo = _repository(value)
+    _same(repo["id"] == target["repositoryId"] and repo["fullName"].lower() == target["repository"].lower(), "target-changed")
+    _same(not repo["archived"], "repository-archived")
+
+
+def execute_secret_read(action: SecretAction, reader: Reader, configuration: dict, *, observed_at: str) -> dict:
+    from .github_setup_secret_inputs import SecretConfigurationError
+    action = SecretAction.parse(action.value())
+    _utc(observed_at)
+    _require(action.kind == "prepare")
+    selected = action.target["selection"]
+    config = _secret_configuration(configuration)
+    _require(config["canonicalConfig"] == action.source["draft"])
+    result = {"schemaVersion": 1, "action": "prepare", "reason": "none", "effect": "not-started",
+              "writeClaimed": False, "writeAcknowledged": False, "prepared": None, "observed": None, "control": _control()}
+
+    def take(step: str) -> dict | None:
+        reply = reader.read(step)
+        _require(type(reply) is ReadResult)
+        result["control"] = dict(_check_control(reply.control))
+        _check_values(reply.observation, nodes=20_000, depth=24)
+        row = _object(reply.observation, {"status", "body", "failure"})
+        if result["control"]["reason"] != "none":
+            raise Refused(result["control"]["reason"])
+        if step == "secret-before" and type(row["status"]) is int and row["status"] == 404:
+            _require(row["body"] is None and row["failure"] == "none")
+            return None  # Only this exact role after a real environment GET.
+        body, reason = _read(row)
+        if body is None:
+            raise Refused(reason)
+        return body
+
+    try:
+        account = take("account")
+        _require(type(account) is dict and type(account.get("id")) is int)
+        _same(_account(account)["id"] == action.target["accountId"], "target-changed")
+        account = None
+        _secret_identity(take("repository-before"), action.target)
+        environment = take("environment-before")
+        _require(type(environment) is dict)
+        _same(environment.get("name") == ENVIRONMENT_NAMES[selected["stage"]], "target-changed")
+        environment_id = _environment_id(environment.get("id"), upstream=True)
+        environment = None  # No unneeded protection body retained or forwarded.
+        body = take("secret-before")
+        metadata = None
+        if body is not None:
+            row = _object(body, {"name", "created_at", "updated_at"})
+            _same(row["name"] == selected["requirement"], "target-changed")
+            metadata = {"createdAt": _utc(row["created_at"]), "updatedAt": _utc(row["updated_at"])}
+        body = None
+        if (metadata is None) != (selected["mode"] == "create"):
+            result["reason"] = "secret-exists" if metadata is not None else "secret-missing"
+            return result
+        facts = _secret_facts({"environmentName": ENVIRONMENT_NAMES[selected["stage"]], "environmentId": environment_id,
+                              "name": selected["requirement"], "metadata": metadata}, selected)
+        body = _object(take("key-before"), {"key_id", "key"})
+        key = _secret_key({"id": body["key_id"], "value": body["key"]})
+        body = None
+        _secret_identity(take("repository-after"), action.target)
+        return {"schemaVersion": 1, "target": action.target, "before": facts, "configuration": config,
+                "material": action.source["material"], "key": key, "observedAt": observed_at, "control": result["control"]}
+    except SecretConfigurationError:
+        # This is the genuine source context's failure, not malformed HTTP DATA.
+        # The containing engine must retain control and its cleanup-unknown veto.
+        raise
+    except (Refused, ReadFailure) as error:
+        result["reason"] = error.reason
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+        result["reason"] = "response-invalid"
+    return result
+
+
+def _secret_prepared(value: object) -> dict:
+    row = _object(value, {"target", "before", "after", "configuration", "observedAt", "confirmation"})
+    target = _secret_target(row["target"])
+    before = _secret_facts(row["before"], target["selection"])
+    _require((before["metadata"] is None) == (target["selection"]["mode"] == "create"))
+    after = _object(row["after"], {"name", "encoding", "plaintextBytes"})
+    _require(after["name"] == target["selection"]["requirement"] and row["confirmation"] == SECRET_CONFIRMATION)
+    material = _secret_material({k: after[k] for k in ("encoding", "plaintextBytes")}, target["selection"])
+    result = {"target": target, "before": before, "after": {"name": after["name"], **material},
+              "configuration": _secret_configuration(row["configuration"]), "observedAt": _utc(row["observedAt"]),
+              "confirmation": SECRET_CONFIRMATION}
+    _require(len(_canonical(result)) <= 8192)
+    return result
+
+
+def secret_write_policy(value: object) -> dict:
+    import base64
+    import binascii
+    row = _object(value, {"encrypted_value", "key_id"})
+    text = row["encrypted_value"]
+    _require(type(text) is str and 68 <= len(text) <= 65600 and text.isascii()
+             and type(row["key_id"]) is str and 1 <= len(row["key_id"]) <= 128
+             and all(0x21 <= ord(c) <= 0x7e for c in row["key_id"]))
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except (ValueError, binascii.Error):
+        raise ValueError("Invalid fixed sealed data") from None
+    _require(49 <= len(raw) <= 49200 and base64.b64encode(raw).decode("ascii") == text)
+    return dict(row)
+
+
+def parse_secret_apply_go(raw: bytes, request: Initial) -> tuple[str, dict]:
+    _require(type(request.action) is SecretAction and request.action.kind == "apply")
+    row = _object(_frame(raw, SECRET_APPLY_GO_BYTES, nodes=32, depth=5), {"protocol", "id", "go"})
+    _require(row["protocol"] == PROTOCOL and row["id"] == request.id)
+    go = _object(row["go"], {"requestSha256", "token", "sealed"})
+    _require(go["requestSha256"] == request.digest)
+    token = go["token"]
+    _require(type(token) is str and 1 <= len(token) <= 4096 and all(0x21 <= ord(c) <= 0x7e for c in token))
+    sealed = _object(go["sealed"], {"key", "encryptedValue"})
+    key = _secret_key(sealed["key"])
+    body = secret_write_policy({"encrypted_value": sealed["encryptedValue"], "key_id": key["id"]})
+    import base64
+    _require(len(base64.b64decode(body["encrypted_value"], validate=True)) == request.action.source["material"]["plaintextBytes"] + 48)
+    return token, {"key": key, "encryptedValue": body["encrypted_value"]}
+
+
+class SecretApplySchedule:
+    """Exactly nine bound exchanges; no retry or renewed clock on failure."""
+    def __init__(self, action: SecretAction, sealed: dict) -> None:
+        self.action = SecretAction.parse(action.value())
+        _require(self.action.kind == "apply")
+        row = _object(sealed, {"key", "encryptedValue"})
+        self.key = _secret_key(row["key"])
+        value = secret_write_policy({"encrypted_value": row["encryptedValue"], "key_id": self.key["id"]})
+        import base64
+        _require(len(base64.b64decode(value["encrypted_value"], validate=True)) == action.source["material"]["plaintextBytes"] + 48)
+        self.body = _canonical(value)
+        _require(len(self.body) <= SECRET_WRITE_BYTES)
+        self.next = 0
+
+    def claim(self, step: str, reference: str | None = None) -> HttpRequest:
+        steps = ("account", "repository-before", "environment-before", "secret-before", "key-before", "write",
+                 "secret-after", "environment-after", "repository-after")
+        _require(reference is None and self.next < len(steps) and step == steps[self.next])
+        self.next += 1
+        if step == "account": return HttpRequest("GET", "/user", None)
+        prefix = "/repos/" + self.action.target["repository"]
+        if step in {"repository-before", "repository-after"}: return HttpRequest("GET", prefix, None)
+        selected = self.action.target["selection"]
+        prefix += "/environments/" + ENVIRONMENT_NAMES[selected["stage"]]
+        if step not in {"environment-before", "environment-after"}:
+            prefix += "/secrets/" + ("public-key" if step == "key-before" else selected["requirement"])
+        return HttpRequest("PUT" if step == "write" else "GET", prefix, self.body if step == "write" else None)
+
+
+class SecretRefused(Refused):
+    def __init__(self, reason: str) -> None:
+        _require(type(reason) is str and reason in SECRET_REASONS - {"none"})
+        self.reason = reason
+        ValueError.__init__(self, "Fixed secret action refused")
+
+
+class SecretApplyProgress:
+    # Private progress survives a later configuration context POST exception.
+    # Only a real validated returned write can set acknowledged; claimed is
+    # conservative and precedes the first possible exchange/its source check.
+    def __init__(self) -> None:
+        self.claimed = False
+        self.acknowledged = False
+
+
+def execute_secret_apply(action: SecretAction, reader: Reader, configuration: dict, *, key: dict,
+                         progress: SecretApplyProgress) -> dict:
+    from .github_setup_secret_inputs import SecretConfigurationError
+    action = SecretAction.parse(action.value())
+    _require(action.kind == "apply" and type(progress) is SecretApplyProgress)
+    prepared, selected = action.prepared, action.target["selection"]
+    key = _secret_key(key)
+    result = {"schemaVersion": 1, "action": "apply", "reason": "none", "effect": "not-started",
+              "writeClaimed": False, "writeAcknowledged": False, "prepared": None, "observed": None, "control": _control()}
+
+    def same(condition, reason):
+        if not condition: raise SecretRefused(reason)
+
+    def take(step: str):
+        reply = reader.read(step)
+        _require(type(reply) is ReadResult)
+        result["control"] = dict(_check_control(reply.control))
+        _check_values(reply.observation, nodes=20_000, depth=24)
+        row = _object(reply.observation, {"status", "body", "failure"})
+        if result["control"]["reason"] != "none": raise SecretRefused(result["control"]["reason"])
+        if step == "write":
+            _require(type(row["status"]) is int and row["status"] in {201, 204} and row["failure"] == "none"
+                     and (row["body"] is None or row["status"] == 201 and type(row["body"]) is dict and not row["body"]))
+            progress.acknowledged = True
+            return None
+        if step == "secret-before" and type(row["status"]) is int and row["status"] == 404:
+            _require(row["body"] is None and row["failure"] == "none")
+            return None
+        body, reason = _read(row)
+        if body is None: raise SecretRefused(reason)
+        return body
+
+    def environment(step):
+        row = take(step)
+        _require(type(row) is dict)
+        same(row.get("name") == ENVIRONMENT_NAMES[selected["stage"]]
+              and _environment_id(row.get("id"), upstream=True) == prepared["before"]["environmentId"], "target-changed")
+
+    def metadata(step):
+        row = take(step)
+        if row is None: return None
+        row = _object(row, {"name", "created_at", "updated_at"})
+        same(row["name"] == selected["requirement"], "target-changed")
+        return {"createdAt": _utc(row["created_at"]), "updatedAt": _utc(row["updated_at"])}
+
+    try:
+        same(_secret_configuration(configuration) == prepared["configuration"], "configuration-changed")
+        row = take("account")
+        _require(type(row) is dict and type(row.get("id")) is int)
+        same(_account(row)["id"] == action.target["accountId"], "target-changed")
+        row = None
+        _secret_identity(take("repository-before"), action.target)
+        environment("environment-before")
+        before = metadata("secret-before")
+        if (before is None) != (selected["mode"] == "create"):
+            raise SecretRefused("secret-exists" if before is not None else "secret-missing")
+        same(before == prepared["before"]["metadata"], "target-changed")
+        current_key = _object(take("key-before"), {"key_id", "key"})
+        same(_secret_key({"id": current_key["key_id"], "value": current_key["key"]}) == key, "secret-key-changed")
+        current_key = None
+        progress.claimed = True
+        take("write")
+        after = metadata("secret-after")
+        same(after is not None, "secret-missing")
+        environment("environment-after")
+        _secret_identity(take("repository-after"), action.target)
+        result["observed"] = _secret_facts({**prepared["before"], "metadata": after}, selected)
+    except SecretConfigurationError:
+        raise
+    except (Refused, ReadFailure) as error:
+        result["reason"] = error.reason
+    except (ValueError, TypeError, KeyError, UnicodeError, OverflowError):
+        result["reason"] = "response-invalid"
+    result["writeClaimed"], result["writeAcknowledged"] = progress.claimed, progress.acknowledged
+    result["effect"] = ("accepted-not-value-verified" if result["reason"] == "none" else
+                        "unknown" if progress.claimed else "not-started")
+    return result
+
+
+def _encode_secret_apply_result(request: Initial, value: object) -> bytes:
+    action = SecretAction.parse(request.action.value())
+    _require(action.kind == "apply")
+    row = _object(value, {"schemaVersion", "action", "reason", "effect", "writeClaimed", "writeAcknowledged", "prepared", "observed", "control"})
+    _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and row["action"] == "apply"
+             and row["reason"] in SECRET_REASONS and type(row["writeClaimed"]) is bool and type(row["writeAcknowledged"]) is bool
+             and (not row["writeAcknowledged"] or row["writeClaimed"]) and row["prepared"] is None)
+    control = _check_control(row["control"])
+    _require(control["reason"] in {"none", row["reason"]})
+    if row["reason"] == "none":
+        observed = _secret_facts(row["observed"], action.target["selection"])
+        _require(row["writeClaimed"] and row["writeAcknowledged"] and row["effect"] == "accepted-not-value-verified"
+                 and observed["metadata"] is not None and observed["environmentId"] == action.prepared["before"]["environmentId"])
+    else:
+        _require(row["observed"] is None and row["effect"] == ("unknown" if row["writeClaimed"] else "not-started"))
+    envelope = {"protocol": PROTOCOL, "id": request.id, "result": row}
+    _check_values(envelope, nodes=256, depth=8)
+    raw = _canonical(envelope) + b"\n"
+    _require(len(raw) <= SECRET_READ_BYTES)
+    return raw
+
+
+def _encode_secret_read_result(request: Initial, value: object) -> bytes:
+    action = SecretAction.parse(request.action.value())
+    if action.kind == "apply": return _encode_secret_apply_result(request, value)
+    _require(type(value) is dict)
+    if "target" in value:
+        row = _object(value, {"schemaVersion", "target", "before", "configuration", "material", "key", "observedAt", "control"})
+        _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and _secret_target(row["target"]) == action.target)
+        before = _secret_facts(row["before"], action.target["selection"])
+        _require((before["metadata"] is None) == (action.target["selection"]["mode"] == "create"))
+        config = _secret_configuration(row["configuration"])
+        _require(config["canonicalConfig"] == action.source["draft"]
+                 and _secret_material(row["material"], action.target["selection"]) == action.source["material"])
+        _secret_key(row["key"]); _utc(row["observedAt"])
+        _require(_check_control(row["control"])["reason"] == "none")
+        envelope = {"protocol": PROTOCOL, "id": request.id, "secretRead": row}
+    else:
+        row = _object(value, {"schemaVersion", "action", "reason", "effect", "writeClaimed", "writeAcknowledged", "prepared", "observed", "control"})
+        _require(type(row["schemaVersion"]) is int and row["schemaVersion"] == 1 and row["action"] == "prepare"
+                 and type(row["reason"]) is str and row["reason"] in SECRET_REASONS - {"none"}
+                 and row["effect"] == "not-started" and row["writeClaimed"] is False and row["writeAcknowledged"] is False
+                 and row["prepared"] is None and row["observed"] is None)
+        control = _check_control(row["control"])
+        _require(control["reason"] == "none" or control["reason"] == row["reason"])
+        envelope = {"protocol": PROTOCOL, "id": request.id, "result": row}
+    _check_values(envelope, nodes=256, depth=8)
+    raw = _canonical(envelope) + b"\n"
+    _require(len(raw) <= SECRET_READ_BYTES)
+    return raw
+
+
+def secret_configuration_failure(reason: str, control: dict, prior: dict | None = None, *,
+                                 progress: SecretApplyProgress | None = None) -> dict:
+    _require(type(reason) is str and reason in SECRET_REASONS - {"none"})
+    control = dict(_check_control(control))
+    earlier = prior.get("reason") if type(prior) is dict else None
+    if type(earlier) is str and earlier in SECRET_REASONS - {"none"}:
+        reason = earlier
+    elif control["reason"] != "none":
+        reason = control["reason"]
+    _require(control["reason"] in {"none", reason})
+    _require(progress is None or type(progress) is SecretApplyProgress)
+    claimed = progress.claimed if progress is not None else False
+    return {"schemaVersion": 1, "action": "apply" if progress is not None else "prepare", "reason": reason,
+            "effect": "unknown" if claimed else "not-started", "writeClaimed": claimed,
+            "writeAcknowledged": progress.acknowledged if progress is not None else False,
+            "prepared": None, "observed": None, "control": control}
+
+
+def _make_secret_reader(action: SecretAction, token: str, *, started: float, runtime_dir: str, budget, configuration,
+                        sealed: dict | None = None, progress: SecretApplyProgress | None = None) -> Reader:
+    from ._github_connection_transport import _Budget, _ExchangeProfile, _ResponseRole, _make_live_exchange
+    _require(type(action) is SecretAction and type(budget) is _Budget and budget.profile is _ExchangeProfile.SETUP
+             and budget.started == started)
+    applying = action.kind == "apply"
+    _require((type(progress) is SecretApplyProgress) == applying and (sealed is not None) == applying)
+    schedule = SecretApplySchedule(action, sealed) if applying else SecretSchedule(action)
+    exchange = _make_live_exchange(token, started=started, runtime_dir=runtime_dir, api_version=API_VERSION,
+                                  _profile=_ExchangeProfile.SETUP, _setup_budget=budget)
+
+    class FixedSecretReader:
+        def __init__(self) -> None:
+            self.control = _control()
+
+        def read(self, step: str, reference: str | None = None) -> ReadResult:
+            if not applying: configuration.checkpoint()
+            request = schedule.claim(step, reference)
+            if step == "write": progress.claimed = True
+            if applying: configuration.checkpoint()
+            role = {"environment-before": _ResponseRole.SETUP_ENVIRONMENT_READ,
+                    "environment-after": _ResponseRole.SETUP_ENVIRONMENT_READ,
+                    "secret-before": _ResponseRole.SETUP_SECRET_METADATA_READ,
+                    "secret-after": _ResponseRole.SETUP_SECRET_METADATA_AFTER,
+                    "write": _ResponseRole.SETUP_SECRET_WRITE,
+                    "key-before": _ResponseRole.SETUP_SECRET_KEY_READ}.get(step, _ResponseRole.STANDARD)
+            reply = exchange(request.method, request.path, request.body, _role=role)
+            # This actual response predates POST. Preserve validated fatal and
+            # cooldown/expiry control even if that same source POST now fails.
+            _require(type(reply) is ReadResult)
+            self.control = dict(_check_control(reply.control))
+            if applying and step == "write":
+                row = _object(reply.observation, {"status", "body", "failure"})
+                if (self.control["reason"] == "none" and type(row["status"]) is int and row["status"] in {201, 204}
+                        and row["failure"] == "none" and (row["body"] is None or row["status"] == 201 and type(row["body"]) is dict and not row["body"])):
+                    progress.acknowledged = True
+            configuration.checkpoint()
+            return reply
+
+    return FixedSecretReader()
+
+
+def _parse_action(value: object) -> Action | EnvironmentAction | SecretAction | VariableRuntimeAction:
     _require(type(value) is dict and type(value.get("target")) is dict
              and type(value["target"].get("selection")) is dict)
+    if value["target"]["selection"].get("kind") == "environment_variable":
+        from .github_setup_variable_runtime import VariableRuntimeAction
+        return VariableRuntimeAction.parse(value)
+    if value["target"]["selection"].get("kind") == "environment_secret":
+        return SecretAction.parse(value)
     if value["target"]["selection"].get("kind") == "environment_protection":
         return EnvironmentAction.parse(value)
     return Action.parse(value)  # Still closed to exactly KINDS, not a fallback grant.
@@ -838,7 +1361,7 @@ def _make_live_reader(action: Action | EnvironmentAction, token: str, *, started
 @dataclass(frozen=True, slots=True, repr=False)
 class Initial:
     id: str
-    action: Action | EnvironmentAction
+    action: Action | EnvironmentAction | SecretAction | VariableRuntimeAction
     digest: str
 
 
@@ -862,6 +1385,8 @@ def ready_frame(request: Initial) -> bytes:
 
 
 def parse_go(raw: bytes, request: Initial) -> str:
+    _require(type(request.action) in {Action, EnvironmentAction, SecretAction}
+             and not (type(request.action) is SecretAction and request.action.kind == "apply"))
     # Actual native context/consent checks precede this private token handoff.
     row = _object(_frame(raw, MAX_GO_BYTES, nodes=32, depth=4), {"protocol", "id", "go"})
     _require(row["protocol"] == PROTOCOL and row["id"] == request.id)
@@ -915,7 +1440,16 @@ def _encode_environment_result(request: Initial, value: object) -> bytes:
     return raw
 
 
-def encode_result(request: Initial, value: object) -> bytes:
+def encode_result(request: Initial, value: object, *, variable_value: str | None = None,
+                  variable_configuration: dict | None = None) -> bytes:
+    if type(request.action) not in {Action, EnvironmentAction, SecretAction}:
+        from .github_setup_variable_runtime import VariableRuntimeAction, encode_runtime_result
+        _require(type(request.action) is VariableRuntimeAction and type(variable_value) is str)
+        return encode_runtime_result(request, value, desired_value=variable_value,
+                                     configuration=variable_configuration)
+    _require(variable_value is None and variable_configuration is None)
+    if type(request.action) is SecretAction:
+        return _encode_secret_read_result(request, value)
     if type(request.action) is EnvironmentAction:
         return _encode_environment_result(request, value)
     row = _object(value, {"schemaVersion", "action", "reason", "effect", "writeClaimed",

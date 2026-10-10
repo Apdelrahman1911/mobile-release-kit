@@ -3,6 +3,9 @@
 //! Protected one-shot installation and original writer finality are separate
 //! prerequisites. Hashes or retained descriptors never make writable data safe.
 #![forbid(unsafe_code)]
+#[path = "github_seal_macos.rs"]
+mod github_seal;
+pub(crate) use github_seal::{GitHubSealSlots, publisher_bound as github_seal_publisher_bound};
 use std::{cell::{Cell, RefCell}, collections::{BTreeMap, BTreeSet}, os::{fd::{AsFd, OwnedFd}, unix::ffi::OsStrExt}, path::{Path, PathBuf}, time::Instant};
 use nix::{fcntl::{self, AtFlags, OFlag}, mount::MntFlags, sys::{stat::{self, FileStat, Mode, SFlag}, statfs}, unistd};
 use serde::{Deserialize, Serialize};
@@ -11,6 +14,13 @@ use tokio::sync::watch;
 use mrk_macos_installed_native as native;
 use native::vault_filesystem::{Expected, Failure as SnapshotFailure, Policy, SnapshotBook};
 use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}, runtime::{self, VerifiedRuntime}};
+
+#[path = "github_history_macos.rs"]
+mod history_runtime;
+pub(crate) use history_runtime::{GitHubHistoryRuntimeSlots,GitHubHistoryInstalledRuntime,
+    ProviderNomination as HistoryProviderNomination,SealedHistoryRequest};
+#[cfg(test)]
+pub(crate) use history_runtime::history_installed_slot_data_checks;
 
 #[path = "android_toolchain_macos.rs"]
 mod android_tools;
@@ -534,6 +544,7 @@ impl Drop for RemovalRequestOriginal {fn drop(&mut self){
 
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+    history_nomination: Option<HistoryProviderNomination>, history_provider: Option<usize>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
     registration_gate: Option<crate::saved_command_owner::AndroidRegistrationWorkGate>,
     #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -574,6 +585,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 }
 impl Book {
     fn new() -> Self { Self { records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+        history_nomination: None, history_provider: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -731,6 +743,7 @@ impl Book {
         };
         let mut bytes = self.records.capacity().checked_mul(std::mem::size_of::<Record>())?.checked_add(frame)?;
         for record in &self.records { bytes = bytes.checked_add(record.name.capacity())?; }
+        if let Some(nomination)=&self.history_nomination{bytes=bytes.checked_add(nomination.retained_bytes()?)?;}
         #[cfg(not(feature = "macos-android-registration-helper"))]
         if let Some(gate)=&self.removal_gate{bytes=bytes.checked_add(gate.retained_bytes()?)?;}
         Some(bytes)
@@ -912,7 +925,8 @@ impl Book {
                 if !directory && !files.contains_key(&path) { return Err(AdmissionFailure::Inventory); }
                 let index = self.open(Some(parent), &name, directory, end, stop)?;
                 let id = self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
-                if id.ino != inode || id.gid != 0 || id.mode & 0o7777 != if directory || path == "python/bin/python3" { 0o555 } else { 0o444 } {
+                let history_executable=history_runtime::provider_inventory_mode(&path,files.get(&path))?;
+                if id.ino != inode || id.gid != 0 || id.mode & 0o7777 != if directory || path == "python/bin/python3" || history_executable { 0o555 } else { 0o444 } {
                     return Err(AdmissionFailure::Ownership);
                 }
                 native::no_xattrs(self.fd(index)?.as_fd()).map_err(native_error)?;
@@ -920,12 +934,14 @@ impl Book {
                 else {
                     let expected = files.get(&path).ok_or(AdmissionFailure::Inventory)?;
                     if self.read(index, expected.size, false, end, stop)?.0 != expected.sha256 { return Err(AdmissionFailure::Inventory); }
+                    history_runtime::provider_observed(self,&path,index,Some(expected))?;
                 }
                 // Original records survive every close. Keep the launch roots
                 // and their ancestors; other inspected payloads need no live fd
                 // because verified root ownership/ACL ancestry forbids mutation.
                 let absolute = selection.cwd.join(&path);
-                let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute));
+                let retain = [&selection.python, &selection.core, &selection.bootstrap].iter().any(|p| p.starts_with(&absolute))
+                    || history_runtime::provider_retained(self,&path);
                 if !retain {
                     self.point(end, stop)?;
                     if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
@@ -1042,6 +1058,7 @@ impl Book {
             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
             || manifest.files.is_empty() || manifest.files.len() > 2048
             || digest(&serde_json::to_vec(&manifest.files).map_err(native_error)?) != manifest.inventory_sha256 { return Err(AdmissionFailure::Inventory); }
+        if self.history_nomination.is_some(){history_runtime::history_manifest_reserve(&manifest.files)?;}
         let mut files = BTreeMap::new(); let mut directories = BTreeSet::new(); let mut folded = BTreeSet::new(); let mut total = 0u64;
         let mut previous = String::new();
         for file in manifest.files {
@@ -1050,10 +1067,16 @@ impl Book {
             total = total.checked_add(file.size).ok_or(AdmissionFailure::Bounds)?;
             if total > 1024*1024*1024 || (file.path == "core.zip" && file.sha256 != manifest.core_sha256) { return Err(AdmissionFailure::Inventory); }
             previous = file.path.clone(); let mut name = file.path.as_str();
-            while let Some((parent, _)) = name.rsplit_once('/') { directories.insert(parent.to_owned()); name = parent; }
+            while let Some((parent, _)) = name.rsplit_once('/') {
+                history_runtime::history_prefix_insert_allowed(self,directories.len(),directories.contains(parent))?;
+                directories.insert(parent.to_owned()); name = parent;
+            }
             files.insert(file.path.clone(), file);
         }
         for required in runtime::REQUIRED_RUNTIME_RESOURCES { if !files.contains_key(required) { return Err(AdmissionFailure::Inventory); } }
+        if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
+            return Err(AdmissionFailure::Inventory);
+        }
         for name in files.keys().chain(directories.iter()) {
             if !folded.insert(name.to_ascii_lowercase()) { return Err(AdmissionFailure::Inventory); }
         }

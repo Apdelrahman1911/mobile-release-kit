@@ -31,10 +31,14 @@ static void __attribute__((unused)) mrk_fixed_abi_declarations(void)
     int (*seal)(unsigned char *, const unsigned char *, unsigned long long, const unsigned char *) = crypto_box_seal;
     void (*wipe)(void *, size_t) = sodium_memzero;
     int (*random_close)(void) = randombytes_close;
+    /* Test-only canonical decrypt/backend observations, never helper APIs. */
+    int (*open_seal)(unsigned char *, const unsigned char *, unsigned long long, const unsigned char *, const unsigned char *) = crypto_box_seal_open;
+    const char *(*random_name)(void) = randombytes_implementation_name;
     int (*get_limit)(int, struct rlimit *) = getrlimit;
     int (*set_limit)(int, const struct rlimit *) = setrlimit;
     int (*descriptor_flags)(int, int, ...) = fcntl;
     int (*consume_close)(int) = close;
     (void)init; (void)seal; (void)wipe; (void)random_close;
+    (void)open_seal; (void)random_name;
     (void)get_limit; (void)set_limit; (void)descriptor_flags; (void)consume_close;
 }

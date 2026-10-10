@@ -1,4 +1,4 @@
-name: Mac normal compilation only
+name: Mac normal compilation and fixed DATA
 
 on:
   push:
@@ -11,15 +11,15 @@ on:
   workflow_dispatch:
     inputs:
       expected_sha:
-        description: Exact reviewed verification commit (no app or native test execution)
+        description: Exact reviewed verification commit (no app launch; history-app4 runs fixed DATA only)
         required: true
         type: string
       target:
-        description: Fixed compiler rows (both full graphs, or remaining Intel plus ARM vault)
+        description: Fixed compiler rows; history-app4 DATA plus app, or app-only shipping compile, both architectures
         required: false
         type: choice
         default: both
-        options: [both, arm, intel, remaining]
+        options: [both, arm, intel, remaining, history-app4, app-only]
 
 permissions:
   contents: read
@@ -30,14 +30,14 @@ concurrency:
 
 jobs:
   compile:
-    name: Compile only / ${{ matrix.target }} / ${{ matrix.mode }}
+    name: Compile or fixed DATA / ${{ matrix.target }} / ${{ matrix.mode }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(inputs.target == 'remaining' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"vault-only"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || inputs.target == 'arm' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"}]' || inputs.target == 'intel' && '[{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]') }}
+        include: ${{ fromJSON(inputs.target == 'app-only' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"app-only"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"app-only"}]' || inputs.target == 'history-app4' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"history-app4"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"history-app4"}]' || inputs.target == 'remaining' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"vault-only"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || inputs.target == 'arm' && '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"}]' || inputs.target == 'intel' && '[{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]' || '[{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"},{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}]') }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || matrix.mode == 'full4' && 50 || 45 }}
+    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 50 || 45 }}
     env:
       MRK_DESKTOP_PLATFORM: ${{ matrix.platform }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -60,6 +60,8 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]
             case "$MRK_COMPILE_SELECTION" in
+              app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;
+              history-app4) [[ "$MRK_MACOS_COMPILE_MODE" == history-app4 && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;
               both) [[ "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
               arm) [[ "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
               intel) [[ "$MRK_MACOS_TARGET" == x86_64-apple-darwin && "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;
@@ -84,12 +86,12 @@ jobs:
         with:
           python-version: '3.14.7'
       - name: Select fixed frontend compiler
-        if: matrix.mode == 'full4'
+        if: matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24.20.0'
           package-manager-cache: false
-      - name: Prepare exact compiler-only source bindings
+      - name: Prepare exact compile or fixed DATA source bindings
         id: prepare
         shell: bash
         env:
@@ -104,8 +106,9 @@ jobs:
           MRK_DESKTOP_CI_ROOT: ${{ steps.prepare.outputs.root }}
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: '"$MRK_PYTHON" -I -S -B desktop/tools/ci_foundation.py acquire'
-      - name: Compile selected graphs without launching outputs
-        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || matrix.mode == 'full4' && 32 || 25 }}
+      - name: Compile selected graphs and run only selected History DATA
+        id: compile
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 32 || 25 }}
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -125,7 +128,7 @@ jobs:
           retention-days: 14
           compression-level: 1
       - name: Immediately remove positively settled compiler outputs
-        if: success()
+        if: always() && steps.prepare.outcome == 'success' && steps.compile.outcome == 'success'
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}

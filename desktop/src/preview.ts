@@ -22,6 +22,7 @@ import { githubConnectionError, parseGitHubConnectionHelp } from './githubConnec
 import { githubRemoteSetupError } from './GitHubRemoteSetupProtocol.ts';
 import { githubPreflightError } from './githubPreflightProtocol.ts';
 import { githubReleaseError } from './githubReleaseProtocol.ts';
+import { githubHistoryError } from './githubHistoryProtocol.ts';
 import { metadataTextError, parseMetadataTextGuide } from './metadataTextProtocol.ts';
 import { environmentError, environmentRequestFits } from './environment.ts';
 import { environmentDiagnosticsError } from './environmentDiagnosticsProtocol.ts';
@@ -88,6 +89,7 @@ const connectionUnavailable = (): Promise<never> => Promise.reject(githubConnect
 const githubRemoteSetupUnavailable = (): Promise<never> => Promise.reject(githubRemoteSetupError({ code: 'github_remote_setup_refused_runtime_unavailable' }));
 const githubPreflightUnavailable = (): Promise<never> => Promise.reject(githubPreflightError({ code: 'github_preflight_refused_unqualified' }));
 const githubReleaseUnavailable = (): Promise<never> => Promise.reject(githubReleaseError({ code: 'github_release_refused_unqualified' }));
+const githubHistoryUnavailable = (): Promise<never> => Promise.reject(githubHistoryError({ code: 'github_history_refused_runtime_unavailable' }));
 const versionEditUnavailable = (): Promise<never> => Promise.reject(versionEditError(null));
 const metadataUnavailable = (): Promise<never> => Promise.reject(metadataTextError(null));
 const recoveryUnavailable = (): Promise<never> => Promise.reject(projectRecoveryError({ code: 'project_recovery_unavailable' }));
@@ -273,6 +275,10 @@ export const previewApi: DesktopApi = {
   githubRemoteSetupDiscard: githubRemoteSetupUnavailable,
   githubRemoteSetupCancel: githubRemoteSetupUnavailable,
   subscribeGitHubRemoteSetup: githubRemoteSetupUnavailable,
+  githubHistoryStatus: githubHistoryUnavailable,
+  startGitHubHistory: githubHistoryUnavailable,
+  cancelGitHubHistory: githubHistoryUnavailable,
+  subscribeGitHubHistory: githubHistoryUnavailable,
   githubPreflightStatus: githubPreflightUnavailable,
   githubReleaseStatus: githubReleaseUnavailable,
   prepareGitHubPreflight: githubPreflightUnavailable,
