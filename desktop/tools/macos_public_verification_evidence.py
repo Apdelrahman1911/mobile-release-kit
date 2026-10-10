@@ -124,6 +124,25 @@ SUMMARY_BOOLS = ("originalInstallerReturnedZero", "originalPackageGroupReturnedZ
     "originalImageFinalizationReturnedZero", "originalFinalImageMountDetached", "finalImageScopedNotarizationObserved",
     "originalPackageFinalizationReturnedZero", "originalPackageRemoveReturnedZero", "removalExecuted",
     "installedAppLaunchedByRemovalRoute", "distributionQualified", "productReady")
+UI_DIAGNOSTICS = (("build", "normal-ui/build.failure-diagnostics.json"),
+    ("toolchain", "normal-ui/toolchain.failure-diagnostics.json"),
+    ("admission", "normal-ui/build.admission-diagnostics.json"))
+UI_ERROR_DOMAINS = frozenset(("NSCocoaErrorDomain", "NSPOSIXErrorDomain", "NSOSStatusErrorDomain", "NSMachErrorDomain",
+    "XCTestErrorDomain", "XCTRunnerErrorDomain", "com.apple.dt.xctest.error", "IDETestOperationsObserverErrorDomain",
+    "IDEFoundationErrorDomain", "RBSRequestErrorDomain", "RBSServiceErrorDomain", "FBSOpenApplicationServiceErrorDomain",
+    "FBSOpenApplicationErrorDomain", "IXUserPresentableErrorDomain"))
+UI_COMPILER_REASONS = frozenset(("type-mismatch", "missing-member", "missing-name", "inaccessible", "missing-argument",
+    "extra-argument", "inference", "ambiguous-overload", "initialization", "throwing", "actor-isolation",
+    "sendability", "syntax", "redeclaration"))
+UI_ADMISSION_STAGES = frozenset(("request", "context", "loader", "phase", "execute", "diagnostic", "publication", "finalize"))
+UI_ADMISSION_EXCEPTIONS = frozenset(("Refused", "AttributeError", "TypeError", "ValueError", "ImportError",
+    "ModuleNotFoundError", "OSError", "FileNotFoundError", "PermissionError", "RuntimeError", "KeyError",
+    "AssertionError", "KeyboardInterrupt", "SystemExit", "ProcessError", "ProcessInterrupted", "other"))
+UI_ADMISSION_SOURCES = frozenset(("macos_normal_ui_runner.py", "macos_aqua_qualification.py", "owned_process.py"))
+UI_ADMISSION_ROLES = frozenset(("normal-ui-source-roster", "normal-ui-build", "normal-ui-summary",
+    "saved-version-source-roster", "saved-version-core-interrupt", "verify-generated-runner", "generated-runner-entitlements",
+    "one-admitted-ui-test", "normal-ui-test-tree", "normal-toolchain-xcode", "normal-toolchain-sdkPath",
+    "normal-toolchain-sdkVersion", "normal-toolchain-sdkBuild"))
 INPUT_LIMIT = 3 * 1024 * 1024
 OUTPUT_LIMIT = 128 * 1024
 JSON_NODE_LIMIT = 250000
@@ -176,6 +195,113 @@ def optional(row, name, validator):
 
 def token(value, choices):
     return value if type(value) is str and value in choices else "unclassified"
+
+
+def project_ui_failure(value, phase):
+    """Validate only the existing ordinary build/query writer's closed schema."""
+    fields = {"schemaVersion", "scope", "phase", "selection", "originalReturncode", "stdoutBytes", "stdoutSha256",
+        "stderrBytes", "stderrSha256", "status", "findingsTruncated", "errorCodes", "sourceFailures",
+        "queryObservations", "requireObservations", "dashboardReadiness", "markers"}
+    build_fields = {"compilerDiagnostics"} if phase == "build" else set()
+    if phase == "build" and "buildFailureReasons" in value:
+        build_fields.add("buildFailureReasons")  # Backward-compatible absence remains unproven, not empty.
+    need(phase in ("build", "query") and set(value) == fields | build_fields
+         and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["scope"] == "normal-macos-ui-failure-diagnostic-only" and value["phase"] == phase
+         and value["selection"] is None and value["status"] in ("unavailable", "classified", "unclassified"))
+    integer(value["originalReturncode"], 255, 1)
+    cap = 4096 if phase == "query" else 1024 * 1024
+    size = integer(value["stdoutBytes"], cap)
+    integer(value["stderrBytes"], cap - size)
+    hex_value(value["stdoutSha256"]); hex_value(value["stderrSha256"])
+    boolean(value["findingsTruncated"])
+    need(value["sourceFailures"] == [] and type(value["sourceFailures"]) is list
+         and value["requireObservations"] == [] and type(value["requireObservations"]) is list
+         and value["dashboardReadiness"] is None)
+    markers = value["markers"]
+    need(type(markers) is dict and set(markers) == {"selectedCaseStarted", "selectedCaseFailed",
+         "testExecuteFailed", "testingFailed", "xcodebuildError"} | ({"buildFailed"} if phase == "build" else set())
+         and all(type(item) is bool for item in markers.values()))
+    errors, queries = value["errorCodes"], value["queryObservations"]
+    need(type(errors) is list and len(errors) <= 8 and type(queries) is list and len(queries) <= 4)
+    for row in errors:
+        need(type(row) is dict and set(row) == {"stream", "domain", "code"}
+             and row["stream"] in ("stdout", "stderr") and type(row["domain"]) is str and row["domain"] in UI_ERROR_DOMAINS)
+        integer(row["code"], 2147483647, -2147483648)
+    for row in queries:
+        need(type(row) is dict and set(row) == {"stream", "kind", "observation", "matches", "exceedsFour", "nonAtomic"}
+             and row["stream"] in ("stdout", "stderr") and row["kind"] in ("renderer", "dashboard")
+             and row["observation"] in ("initial", "identifier", "title", "label", "value", "placeholderValue", "containingSameStaticText")
+             and row["nonAtomic"] is True and (row["kind"] != "renderer" or row["observation"] == "initial"))
+        count = integer(row["matches"], 5)
+        need(boolean(row["exceedsFour"]) == (count == 5) and (row["observation"] != "initial" or count != 1))
+    if phase == "build":
+        rows = value["compilerDiagnostics"]
+        need(type(rows) is list and len(rows) <= 4)
+        for row in rows:
+            need(type(row) is dict and set(row) == {"stream", "source", "line", "column", "severity", "reasonCodes"}
+                 and row["stream"] in ("stdout", "stderr") and row["source"] == "NormalAppUITests.swift"
+                 and row["severity"] in ("error", "note"))
+            integer(row["line"], 65535, 1); integer(row["column"], 4096, 1)
+            reasons = row["reasonCodes"]
+            need(type(reasons) is list and len(reasons) <= 3
+                 and all(type(reason) is str and reason in UI_COMPILER_REASONS for reason in reasons)
+                 and len(set(reasons)) == len(reasons))
+        if "buildFailureReasons" in value:
+            rows = value["buildFailureReasons"]
+            need(type(rows) is list and len(rows) <= 4)
+            for row in rows:
+                need(type(row) is dict and set(row) == {"stream", "code"}
+                     and row["stream"] in ("stdout", "stderr")
+                     and row["code"] in ("destination-not-found", "no-eligible-destination"))
+            need(len({(row["stream"], row["code"]) for row in rows}) == len(rows))
+    return dict(value)
+
+
+def project_ui_admission(value):
+    """No raw exception record: only the wrapper's finite admission projection."""
+    fields = {"schemaVersion", "scope", "status", "nativeSuccessInferred", "productReady", "unknownStateRetained"}
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["scope"] == "normal-macos-ui-admission-diagnostic-only"
+         and value["nativeSuccessInferred"] is False and value["productReady"] is False
+         and value["unknownStateRetained"] is True)
+    if value["status"] == "unavailable":
+        need(set(value) == fields)
+        return dict(value)
+    need(value["status"] == "observed-exception-only"
+         and set(value) == fields | {"stage", "exceptionClass", "sourceFrames", "ownerFailure", "commands"}
+         and type(value["stage"]) is str and value["stage"] in UI_ADMISSION_STAGES
+         and type(value["exceptionClass"]) is str and value["exceptionClass"] in UI_ADMISSION_EXCEPTIONS)
+    frames, owner, commands = value["sourceFrames"], value["ownerFailure"], value["commands"]
+    need(type(frames) is list and len(frames) <= 4 and type(commands) is list and len(commands) <= 16
+         and type(owner) is dict and set(owner) == {"dispatched", "contained", "cleanupComplete"}
+         and all(item is None or type(item) is bool for item in owner.values()))
+    for frame in frames:
+        need(type(frame) is dict and set(frame) == {"source", "line"}
+             and type(frame["source"]) is str and frame["source"] in UI_ADMISSION_SOURCES)
+        integer(frame["line"], 1000000, 1)
+    for command in commands:
+        need(type(command) is dict and set(command) == {"role", "returncode", "stdoutBytes", "stderrBytes"}
+             and type(command["role"]) is str and command["role"] in UI_ADMISSION_ROLES)
+        integer(command["returncode"], 255)
+        size = integer(command["stdoutBytes"], 1024 * 1024)
+        integer(command["stderrBytes"], 1024 * 1024 - size)
+    return dict(value)
+
+
+def project_ui_diagnostic(value, role, caller_status):
+    need(type(value) is dict and role in ("build", "toolchain", "admission")
+         and type(caller_status) is dict and caller_status.get("receiptState") == "observed")
+    status = integer(caller_status.get("returncode"), 255, 1)
+    # Writers have no embedded source/run tuple. This is only parent-context
+    # attribution from the fixed fresh work root, never independent attestation.
+    try:
+        row = project_ui_admission(value) if role == "admission" else project_ui_failure(value, "build" if role == "build" else "query")
+    except KeyError:
+        raise Refused("public-evidence-refused") from None
+    if role != "admission":
+        need(row["originalReturncode"] == status)
+    return {**row, "receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False}
 
 
 def decode(body, budget, *, inventory=False):
@@ -481,9 +607,12 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         deliveries = {name: observe(path, 16384, lambda body, removal=removal:
             project_summary(decode(body, budget), context, removal)) for name, path, removal in
             (("preview", "preview/PREVIEW.json", False), ("removal", "remove-preview/REMOVAL.json", True))}
+        ui_diagnostics = {role: observe(path, 4096, lambda body, role=role:
+            project_ui_diagnostic(decode(body, budget), role, statuses["normal-ui/build.status"]))
+            for role, path in UI_DIAGNOSTICS} if profile == "installed" else {}
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
-                 "phases": phases, "statuses": statuses, "deliveries": deliveries}
+                 "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics}
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
         need(len(body) <= OUTPUT_LIMIT and directory_identity(os.fstat(root)) == root_id
              == directory_identity(os.stat(work, follow_symlinks=False)))

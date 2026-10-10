@@ -2223,6 +2223,7 @@ def failure_base(phase, selection, original, *, engineering=False):
         value["engineeringFirstFailure"] = None
     if not engineering and phase == "build":
         value["compilerDiagnostics"] = []
+        value["buildFailureReasons"] = []
         value["markers"]["buildFailed"] = False
     if not engineering and phase == "test" and selection == OUTPUT_DATA_RESULT:
         value["outputDataFailure"] = None
@@ -2549,6 +2550,12 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
                 record = record[:-1]
             if compiler_eligible:
                 if complete and len(record) <= 4096:
+                    # Fixed diagnostic categories only: do not publish scheme names,
+                    # destination identifiers, variable message tails, or raw text.
+                    if record == b"xcodebuild: error: Unable to find a destination matching the provided destination specifier:":
+                        retain("buildFailureReasons", {"stream": stream, "code": "destination-not-found"}, 4)
+                    elif re.fullmatch(rb"xcodebuild: error: Found no destinations for the scheme [\x20-\x7e]{1,256} and action [\x20-\x7e]{1,32}\.", record):
+                        retain("buildFailureReasons", {"stream": stream, "code": "no-eligible-destination"}, 4)
                     site = re.fullmatch(compiler_site, record)
                     if site is not None and int(site.group(1)) <= 65535 and int(site.group(2)) <= 4096:
                         message = site.group(4).lower()  # Local only; never returned or logged.
@@ -2704,12 +2711,15 @@ def normal_failure_diagnostics(phase, selection, original, *, engineering=False)
     if compiler_eligible:
         # New optional observations cannot displace old findings or their cap.
         # Reserve two bytes for the final status string below.
+        while value["buildFailureReasons"] and len(encoded(value)) + 1 > 4094:
+            value["buildFailureReasons"].pop()
+            value["findingsTruncated"] = True
         while value["compilerDiagnostics"] and len(encoded(value)) + 1 > 4094:
             value["compilerDiagnostics"].pop()
             value["findingsTruncated"] = True
     value["status"] = ("unavailable" if require_invalid or guide_invalid or artifact_invalid or first_invalid or output_invalid else "classified" if any(value[key]
         for key in ("errorCodes", "sourceFailures", "queryObservations", "requireObservations"))
-        or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") else "unclassified")
+        or value.get("engineeringFirstFailure") is not None or value.get("outputDataFailure") is not None or value.get("compilerDiagnostics") or value.get("buildFailureReasons") else "unclassified")
     need(len(encoded(value)) + 1 <= 4096, "normal-diagnostic-output-bound")
     return value
 

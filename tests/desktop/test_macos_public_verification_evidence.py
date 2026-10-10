@@ -1,11 +1,16 @@
 """Inert DATA/privacy tests; never native tools, secret inputs or Apple requests."""
 import ast
+import copy
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+from subprocess import CompletedProcess
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,7 +53,211 @@ def project(root):
                         run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"])
 
 
+def normal_diagnostic_data():
+    """Compile only genuine DATA writers/constants, never import the native runner.
+
+    CompletedProcess is only an inert record constructor; no subprocess runner
+    or native-owner namespace is exposed. The optional output-DATA resultPost
+    branch is outside these build/query fixtures and is never entered.
+    """
+    path = ROOT / "desktop/tools/macos_normal_ui_runner.py"
+    names = {"Refused", "need", "sha", "pairs", "document", "encoded", "failure_base",
+        "normal_failure_diagnostics", "classify_normal_admission_failure", "NORMAL_SELECTIONS", "OUTPUT_DATA_RESULT",
+        "IOS_UNSIGNED_RESULT", "IOS_UNSIGNED_METHOD", "LOADER", "TOOLCHAIN_QUERIES", "ADMISSION_STAGES",
+        "ADMISSION_EXCEPTION_TYPES", "ADMISSION_EXCEPTION_LABELS", "ADMISSION_SOURCE_FILES", "ADMISSION_COMMAND_ROLES"}
+    nodes, found = [], set()
+    for node in ast.parse(path.read_text()).body:
+        name = node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else (
+            node.targets[0].id if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name) else None)
+        if name in names:
+            nodes.append(node); found.add(name)
+    if found != names:
+        raise AssertionError("finite-normal-diagnostic-DATA-dependencies")
+    namespace = {"hashlib": hashlib, "json": json, "re": re, "Path": Path,
+                 "subprocess": SimpleNamespace(CompletedProcess=CompletedProcess)}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
+    return namespace
+
+
+def build_diagnostic(normal, phase="build", *, fallback=False):
+    original = CompletedProcess([], 70, b"Error Domain=NSPOSIXErrorDomain Code=2\n", (
+        b"NormalAppUITests.swift:123:7: error: cannot find '" + SENTINEL.encode() + b"' in scope\n"
+        b"** BUILD FAILED **\nxcodebuild: error: " + SENTINEL.encode() + b"\n"))
+    return normal["failure_base" if fallback else "normal_failure_diagnostics"](phase, None, original)
+
+
+def admission_diagnostic(normal):
+    raw = {"schemaVersion": 1, "scope": "generated-ui-runner-refused", "productReady": False,
+        "error": "runner-admission-or-owner-error", "stage": "execute", "exceptionClass": "ProcessError",
+        "unknownStateRetained": True, "sourceFrames": [{"source": "owned_process.py", "line": 321}],
+        "ownerFailure": {"dispatched": True, "contained": False, "cleanupComplete": None},
+        "commands": [{"role": "normal-toolchain-sdkPath", "returncode": 70, "timeoutSeconds": 30,
+            "roleCapSeconds": 30, "outputLimitBytes": 4096, "argvSha256": "1" * 64,
+            "stdoutBytes": 0, "stdoutSha256": "2" * 64, "stderrBytes": 256, "stderrSha256": "3" * 64}]}
+    return normal["classify_normal_admission_failure"](json.dumps(raw).encode())
+
+
 class PublicVerificationEvidenceData(unittest.TestCase):
+    def test_genuine_normal_build_writer_preserves_finite_cause_without_compiler_prose(self):
+        value = build_diagnostic(normal_diagnostic_data())
+        row = DATA.project_ui_diagnostic(value, "build", {"receiptState": "observed", "returncode": 70})
+        self.assertEqual(row["originalReturncode"], 70)
+        self.assertEqual(row["status"], "classified")
+        self.assertEqual(row["errorCodes"], [{"stream": "stdout", "domain": "NSPOSIXErrorDomain", "code": 2}])
+        self.assertEqual(row["compilerDiagnostics"], [{"stream": "stderr", "source": "NormalAppUITests.swift",
+            "line": 123, "column": 7, "severity": "error", "reasonCodes": ["missing-name"]}])
+        self.assertIs(row["markers"]["buildFailed"], True)
+        self.assertIs(row["markers"]["xcodebuildError"], True)
+        self.assertEqual(row["stderrSha256"], value["stderrSha256"])
+        self.assertEqual(row["binding"], "same-work-root-parent-context-only")
+        self.assertIs(row["nativeSuccessInferred"], False)
+        self.assertNotIn(SENTINEL, json.dumps(row))
+        self.assertNotIn("source", row)  # The writer did not bind a source commit.
+
+    def test_genuine_query_and_fallback_keep_unavailable_distinct(self):
+        normal = normal_diagnostic_data()
+        status = {"receiptState": "observed", "returncode": 70}
+        for role, phase in (("build", "build"), ("toolchain", "query")):
+            for fallback in (True, False):
+                value = build_diagnostic(normal, phase, fallback=fallback)
+                row = DATA.project_ui_diagnostic(value, role, status)
+                self.assertEqual(row["status"], "unavailable" if fallback else "classified")
+                self.assertEqual("compilerDiagnostics" in row, role == "build")
+                self.assertIs(row["nativeSuccessInferred"], False)
+        value = build_diagnostic(normal, "query"); value["stdoutBytes"] = 4097
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(value, "toolchain", status)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(build_diagnostic(normal), "toolchain", status)
+        original = CompletedProcess([], 70, b"MRK_MACOS_NORMAL_DASHBOARD_QUERY=observation=identifier;matches=5;exceedsFour=1;nonAtomic=1\n", b"")
+        value = normal["normal_failure_diagnostics"]("query", None, original)
+        row = DATA.project_ui_diagnostic(value, "toolchain", status)
+        self.assertEqual(row["queryObservations"], [{"stream": "stdout", "kind": "dashboard", "observation": "identifier",
+            "matches": 5, "exceedsFour": True, "nonAtomic": True}])
+        for key, bad in (("matches", True), ("matches", 6), ("exceedsFour", False), ("nonAtomic", False),
+                         ("kind", SENTINEL), ("observation", SENTINEL), ("stream", SENTINEL)):
+            broken = copy.deepcopy(value); broken["queryObservations"][0][key] = bad
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(broken, "toolchain", status)
+
+    def test_genuine_admission_projection_preserves_only_exception_facts(self):
+        normal = normal_diagnostic_data()
+        self.assertEqual(DATA.UI_ADMISSION_STAGES, frozenset(normal["ADMISSION_STAGES"]))
+        self.assertEqual(DATA.UI_ADMISSION_EXCEPTIONS, frozenset(normal["ADMISSION_EXCEPTION_LABELS"]))
+        self.assertEqual(DATA.UI_ADMISSION_SOURCES, frozenset(Path(name).name for name in normal["ADMISSION_SOURCE_FILES"]))
+        self.assertEqual(DATA.UI_ADMISSION_ROLES, frozenset(normal["ADMISSION_COMMAND_ROLES"]))
+        value = admission_diagnostic(normal)
+        row = DATA.project_ui_diagnostic(value, "admission", {"receiptState": "observed", "returncode": 70})
+        self.assertEqual(row["status"], "observed-exception-only")
+        self.assertEqual((row["stage"], row["exceptionClass"]), ("execute", "ProcessError"))
+        self.assertEqual(row["sourceFrames"], [{"source": "owned_process.py", "line": 321}])
+        self.assertEqual(row["commands"], [{"role": "normal-toolchain-sdkPath", "returncode": 70,
+                                          "stdoutBytes": 0, "stderrBytes": 256}])
+        self.assertIsNone(row["ownerFailure"]["cleanupComplete"])
+        self.assertIs(row["ownerFailure"]["contained"], False)
+        self.assertIs(row["nativeSuccessInferred"], False)
+        unavailable = normal["classify_normal_admission_failure"](SENTINEL.encode())
+        self.assertEqual(DATA.project_ui_diagnostic(unavailable, "admission",
+            {"receiptState": "observed", "returncode": 70})["status"], "unavailable")
+        self.assertNotIn(SENTINEL, json.dumps(row))
+
+    def test_optional_build_destination_reasons_are_closed_and_backward_compatible(self):
+        normal = normal_diagnostic_data()
+        status = {"receiptState": "observed", "returncode": 70}
+        value = build_diagnostic(normal); value.pop("buildFailureReasons", None)
+        self.assertNotIn("buildFailureReasons", DATA.project_ui_diagnostic(value, "build", status))
+        for reasons in ([], [{"stream": stream, "code": code} for stream in ("stdout", "stderr")
+                            for code in ("destination-not-found", "no-eligible-destination")]):
+            value["buildFailureReasons"] = reasons
+            self.assertEqual(DATA.project_ui_diagnostic(value, "build", status)["buildFailureReasons"], reasons)
+        valid = {"stream": "stderr", "code": "destination-not-found"}
+        for reasons in (None, {}, [valid] * 5, [valid] * 2, [{**valid, "message": SENTINEL}],
+                        [{**valid, "code": SENTINEL}], [{**valid, "stream": SENTINEL}],
+                        [{**valid, "stream": True}], [{**valid, "code": 1}], [{}]):
+            value["buildFailureReasons"] = reasons
+            with self.subTest(reasons=reasons), self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(value, "build", status)
+        query = build_diagnostic(normal, "query"); query["buildFailureReasons"] = []
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(query, "toolchain", status)
+
+    def test_ui_diagnostic_typed_and_closed_schema_mutations_are_refused(self):
+        normal = normal_diagnostic_data()
+        status = {"receiptState": "observed", "returncode": 70}
+        cases = {
+            "build": (("schemaVersion", True), ("status", SENTINEL), ("phase", "test"), ("selection", SENTINEL),
+                ("stdoutBytes", True), ("stdoutBytes", 1048577), ("stderrSha256", SENTINEL), ("findingsTruncated", 1),
+                ("errorCodes", [{}] * 9), ("errorCodes", [{"stream": "stdout", "domain": SENTINEL, "code": 2}]),
+                ("errorCodes", [{"stream": "stderr", "domain": "NSPOSIXErrorDomain", "code": True}]),
+                ("queryObservations", [{}] * 5), ("compilerDiagnostics", [{}] * 5), ("markers", {}),
+                ("sourceFailures", [SENTINEL]), ("requireObservations", [SENTINEL]), ("dashboardReadiness", {})),
+            "admission": (("schemaVersion", True), ("stage", SENTINEL), ("exceptionClass", SENTINEL),
+                ("nativeSuccessInferred", True), ("productReady", True), ("unknownStateRetained", False),
+                ("sourceFrames", [{"source": SENTINEL, "line": 1}]), ("sourceFrames", [{}] * 5),
+                ("commands", [{}] * 17), ("ownerFailure", {"dispatched": 1, "contained": False, "cleanupComplete": None})),
+        }
+        for role, mutations in cases.items():
+            base = build_diagnostic(normal) if role == "build" else admission_diagnostic(normal)
+            for key, bad in mutations:
+                value = copy.deepcopy(base); value[key] = bad
+                with self.subTest(role=role, key=key, bad=bad), self.assertRaises(DATA.Refused):
+                    DATA.project_ui_diagnostic(value, role, status)
+            for key in base.keys() - {"buildFailureReasons"}:
+                value = copy.deepcopy(base); del value[key]
+                with self.subTest(role=role, missing=key), self.assertRaises(DATA.Refused):
+                    DATA.project_ui_diagnostic(value, role, status)
+            for key in ("message", "path", "argv", "resultPost"):
+                value = copy.deepcopy(base); value[key] = SENTINEL
+                with self.subTest(role=role, extra=key), self.assertRaises(DATA.Refused):
+                    DATA.project_ui_diagnostic(value, role, status)
+        value = build_diagnostic(normal); value["compilerDiagnostics"][0]["reasonCodes"] = [SENTINEL]
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(value, "build", status)
+        for code in (True, 256, -1):
+            value = admission_diagnostic(normal); value["commands"][0]["returncode"] = code
+            with self.assertRaises(DATA.Refused):
+                DATA.project_ui_diagnostic(value, "admission", status)
+
+    def test_ui_diagnostics_require_independent_failed_scalar_status(self):
+        normal = normal_diagnostic_data()
+        for role, value in (("build", build_diagnostic(normal)), ("admission", admission_diagnostic(normal))):
+            for status in (None, {}, {"receiptState": "absent"}, {"receiptState": "refused"},
+                           *({"receiptState": "observed", "returncode": code} for code in (0, True, "70", "0 0 0", -1, 256))):
+                with self.subTest(role=role, status=status), self.assertRaises(DATA.Refused):
+                    DATA.project_ui_diagnostic(value, role, status)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ui_diagnostic(build_diagnostic(normal), "build", {"receiptState": "observed", "returncode": 1})
+
+    def test_build_only_fixed_projection_needs_no_helper_phases_or_raw_log(self):
+        normal = normal_diagnostic_data()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            files = [write(root, "normal-ui/build.status", b"70\n"),
+                write(root, "normal-ui/build.failure-diagnostics.json", build_diagnostic(normal)),
+                write(root, "normal-ui/build.admission-diagnostics.json", admission_diagnostic(normal)),
+                write(root, "normal-ui/build.log", SENTINEL.encode())]
+            before = [path.read_bytes() for path in files]
+            value = project(root)
+            self.assertTrue(all(row["receiptState"] == "absent" for row in value["phases"].values()))
+            self.assertEqual(value["normalUiBuildDiagnostics"]["build"]["status"], "classified")
+            self.assertEqual(value["normalUiBuildDiagnostics"]["admission"]["status"], "observed-exception-only")
+            self.assertEqual(value["normalUiBuildDiagnostics"]["toolchain"], {"receiptState": "absent"})
+            self.assertEqual({key: value[key] for key in CONTEXT}, CONTEXT)
+            self.assertEqual([path.read_bytes() for path in files], before)
+            self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
+        for status in (b"0\n", b"0 0 0\n", b"71\n"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write(root, "normal-ui/build.status", status)
+                write(root, "normal-ui/build.failure-diagnostics.json", build_diagnostic(normal))
+                self.assertEqual(project(root)["normalUiBuildDiagnostics"]["build"], {"receiptState": "refused"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write(root, "normal-ui/build.status", b"70\n")
+            write(root, "normal-ui/build.failure-diagnostics.json", b" " * 4097)
+            self.assertEqual(project(root)["normalUiBuildDiagnostics"]["build"], {"receiptState": "refused"})
+
     def test_correlated_finality_hashes_and_unknown_fields_are_not_raw_exports(self):
         value = receipt()
         value.update(private=SENTINEL, tools={"output": SENTINEL}, argv=[SENTINEL], environment={SENTINEL: SENTINEL})
@@ -223,12 +432,38 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 write(root, "android-helper-" + phase + ".json", body)
             for name in DATA.STATUS_FILES:
                 write(root, name, b"0\n")
+            # Conservative simultaneous maxima (beyond the genuine mutually
+            # exclusive failure paths) must still fit alongside full preview.
+            normal = normal_diagnostic_data()
+            write(root, "normal-ui/build.status", b"70\n")
+            for role, path in DATA.UI_DIAGNOSTICS:
+                if role == "admission":
+                    diagnostic = admission_diagnostic(normal)
+                    diagnostic["sourceFrames"] *= 4
+                    diagnostic["commands"] *= 16
+                else:
+                    diagnostic = build_diagnostic(normal, "build" if role == "build" else "query")
+                    diagnostic["errorCodes"] = [{"stream": "stderr", "domain": "IDETestOperationsObserverErrorDomain",
+                        "code": -2147483648 + index} for index in range(8)]
+                    diagnostic["queryObservations"] = [{"stream": "stderr", "kind": "dashboard",
+                        "observation": "containingSameStaticText", "matches": 5, "exceedsFour": True,
+                        "nonAtomic": True} for _ in range(4)]
+                    if role == "build":
+                        diagnostic["buildFailureReasons"] = [{"stream": stream, "code": code}
+                            for stream in ("stdout", "stderr") for code in ("destination-not-found", "no-eligible-destination")]
+                        diagnostic["compilerDiagnostics"] = [{"stream": "stderr", "source": "NormalAppUITests.swift",
+                            "line": 65535 - index, "column": 4096, "severity": "error",
+                            "reasonCodes": ["ambiguous-overload", "missing-argument", "actor-isolation"]} for index in range(4)]
+                body = json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode()
+                self.assertLessEqual(len(body), 4096)
+                write(root, path, body)
             result = project(root)
             for phase in roster:
                 self.assertEqual(result["phases"][phase]["receiptState"], "observed", phase)
                 self.assertIs(result["phases"][phase]["recordedPassed"], True, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["unclassifiedCount"], 0, phase)
                 self.assertEqual(result["phases"][phase]["originalCalls"]["recordedCount"], len(roster[phase][0]))
+            self.assertTrue(all(row["receiptState"] == "observed" for row in result["normalUiBuildDiagnostics"].values()))
             self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
 
     def test_fixed_roster_preserves_originals_and_independent_failure_status(self):
