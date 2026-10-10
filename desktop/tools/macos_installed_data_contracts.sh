@@ -262,6 +262,46 @@ def data_failure_rust_panic(raw, source_paths, checkout):
         return None
 
 
+def data_failure_rust_panic_diagnostic(raw, source_paths, checkout):
+    """Opaque lexical observation, not verified source attribution or a cause."""
+    value = {"parseState": "input-invalid", "spellingSha256": None, "line": None, "column": None}
+    if (type(raw) is not bytes or type(source_paths) not in (dict, set, frozenset)
+            or type(checkout) is not str or not checkout.startswith("/") or checkout.endswith("/")):
+        return value
+    if not raw:
+        return {**value, "parseState": "empty"}
+    if len(raw) > 65536:
+        return {**value, "parseState": "bounds"}
+    lines = raw.split(b"\n")
+    nonempty = [line for line in lines if line]
+    if len(lines) > 256 or (nonempty and len(nonempty[0]) > 1024):
+        return {**value, "parseState": "bounds"}
+    if not nonempty:
+        return {**value, "parseState": "empty"}
+    count = sum(line.startswith(b"thread '") and b" panicked at " in line for line in lines)
+    if count != 1:
+        return {**value, "parseState": "header-missing" if count == 0 else "header-multiple"}
+    try:
+        match = re.fullmatch(
+            r"thread '[\x20-\x26\x28-\x7e]{1,128}'(?: \([1-9][0-9]{0,19}\))? panicked at "
+            r"([A-Za-z0-9_./-]{1,512}):([1-9][0-9]{0,6}):([1-9][0-9]{0,6}):",
+            nonempty[0].decode("ascii", "strict"))
+    except UnicodeError:
+        match = None
+    if match is None:
+        return {**value, "parseState": "header-format"}
+    line, column = int(match[2]), int(match[3])
+    if not 1 <= line <= 1000000 or not 1 <= column <= 1000000:
+        return {**value, "parseState": "coordinate-range"}
+    spelling = match[1]
+    if spelling.startswith(checkout + "/"):
+        spelling = spelling[len(checkout) + 1:]
+    # BEFORE fixed aliases. No normpath, basename lookup, filesystem access,
+    # or private path export. This digest intentionally permits offline guesses.
+    return {"parseState": "observed" if data_failure_rust_panic(raw, source_paths, checkout) is not None else "unmapped-source",
+            "spellingSha256": hashlib.sha256(spelling.encode("ascii")).hexdigest(), "line": line, "column": column}
+
+
 def data_failure_document(command, output, guard, context, names, source_paths, checkout):
     if (type(context) is not dict or set(context) != {"source", "workflowSource", "runId", "runAttempt", "target"}
             or context["source"] != context["workflowSource"]
@@ -294,7 +334,15 @@ def data_failure_document(command, output, guard, context, names, source_paths, 
         cargo=data_failure_cargo(captures["stdout"], source_paths, checkout) if classified and phase == "build" else None,
         rustPanic=data_failure_rust_panic(captures["stderr"], source_paths, checkout) if classified and phase == "rust" and code == 101 else None,
         diagnosticOnly=True, productReady=False)
+    if classified and phase == "rust" and code == 101:
+        try:
+            value["rustPanicDiagnostic"] = data_failure_rust_panic_diagnostic(captures["stderr"], source_paths, checkout)
+        except BaseException:
+            pass  # Optional observation must not replace the original failure/old facts.
     body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+    if len(body) > 16384 and "rustPanicDiagnostic" in value:
+        del value["rustPanicDiagnostic"]
+        body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
     if len(body) > 16384:
         raise ValueError("failure-data-output-bound")
     return body

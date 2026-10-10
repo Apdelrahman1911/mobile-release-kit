@@ -52,6 +52,27 @@ bind the raw preceding receipt, original/final image hashes, original0 and
 scoped native verification/mount observations. They do not turn synthetic DATA
 checks into native notarization, downloaded-install or Gatekeeper evidence.
 
+## Retrieve the matching temporary artifacts
+
+In GitHub Actions, open the exact reviewed run and attempt, then its **Artifacts**.
+For this supported ARM64 preview, `<target>` is `aarch64-apple-darwin`.
+Download the two separate artifacts with the same target, full source commit,
+run ID and run attempt:
+
+- `mobile-release-kit-macos26-<target>-preview-<source>-<run-id>-<run-attempt>`
+  contains the delivery, guide and **PREVIEW.json**.
+- `desktop-macos-installed-<target>-<source>-<run-id>-<run-attempt>`
+  contains **public-verification-evidence.json**, not raw local logs or native results.
+
+Keep both reports together and check their source/workflow, run/attempt and target
+bindings. Do not substitute another target, run, attempt or removal-lifecycle artifact.
+These temporary artifacts have **14-day retention** and can expire or be unavailable;
+missing evidence is not a pass or permission to use an older package.
+The delivery can be uploaded before later GUI checks complete: review the actual
+completed job and check outcomes, not just artifact availability.
+Preserve downloaded-file quarantine and macOS security policy while extracting
+and opening the files; report any refusal without removing quarantine or bypassing it.
+
 ## Install and open without a terminal
 
 1. Once an exact build has the required genuine qualification, open
@@ -74,9 +95,12 @@ against the exact ordinary app, without instrumentation: launch through the
 entry, render, open/Cancel the real project picker, Cancel the genuine Quit sheet,
 navigate safely, then genuinely Quit. One permanent-gate observation checks
 exclusion while the app/picker is live and availability after observed Quit. Look for the
-separate exact-source `normal-ui/result.json` engineering evidence; only an
-actual successful test/count receipt establishes that narrow UI observation.
-A missing, failed or skipped check is not a pass.
+matching **public-verification-evidence.json** in the separate evidence artifact.
+Its `normal-ui/test.status` and `normal-ui/summary.status` are scalar original-return
+observations, not the original XCTest counts or full UI proof. A zero scalar status
+alone does not establish the narrow UI observation: the actual completed check and
+its exact-source qualification still require review. Raw native results are not
+published in that artifact. A missing, failed or skipped check is not a pass.
 
 This check does not prove POSIX exit status or every worker's finality, direct
 payload pre-main exclusion, Finder/Installer interaction, Gatekeeper or full

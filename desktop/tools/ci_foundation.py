@@ -9785,6 +9785,8 @@ def validate_mac_observer_data_result(value: object) -> dict:
             "pythonExpectedCount", "commands", "artifact", "aggregatePassed", "pythonCounts", "sourcePost",
             "temporaryEmpty", "rustPanic", "guardCode", "pythonFailure", "nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified",
             "allWorkerFinalityEstablished"}
+    if type(value) is dict and "rustPanicDiagnostic" in value:
+        keys.add("rustPanicDiagnostic")  # Old positive receipts remain admissible.
     closed_object(value, keys, "Observer DATA public result shape differs")
     require(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
             and type(value["wrapperReturnCode"]) is int and value["wrapperReturnCode"] == 0
@@ -9812,7 +9814,8 @@ def validate_mac_observer_data_result(value: object) -> dict:
     require(type(counts["testsRun"]) is int and counts["testsRun"] == 84
             and all(type(counts[key]) is int and counts[key] == 0 for key in counts if key != "testsRun")
             and value["aggregatePassed"] is True and value["sourcePost"] is True and value["temporaryEmpty"] is True
-            and value["rustPanic"] is None and value["guardCode"] is None and value["pythonFailure"] is None
+            and value["rustPanic"] is None and value.get("rustPanicDiagnostic") is None
+            and value["guardCode"] is None and value["pythonFailure"] is None
             and all(value[key] is False for key in ("nativeVaultTestsExecuted", "uiExecutedByThisBatch", "nativeTlsQualified", "allWorkerFinalityEstablished")),
             "Observer DATA original counts/finality differ")
     return value
@@ -9930,6 +9933,30 @@ def mac_observer_data_result(value: object, context: dict, wrapper_returncode: i
                     and integer_between(panic["line"], 1, 1000000) and integer_between(panic["column"], 1, 1000000),
                     "Observer DATA panic location differs")
             result["rustPanic"] = {key: panic[key] for key in ("source", "line", "column")}
+        diagnostic = failure.get("rustPanicDiagnostic")
+        if diagnostic is not None:
+            require(classified and row["phase"] == "rust" and row["returnCode"] == 101,
+                    "Observer DATA opaque panic original differs")
+            closed_object(diagnostic, {"parseState", "spellingSha256", "line", "column"},
+                          "Observer DATA opaque panic shape differs")
+            state = diagnostic["parseState"]
+            require(type(state) is str and state in {"input-invalid", "empty", "bounds", "header-missing", "header-multiple",
+                    "header-format", "coordinate-range", "unmapped-source", "observed"},
+                    "Observer DATA opaque panic state differs")
+            if state in ("unmapped-source", "observed"):
+                require(sha256_value(diagnostic["spellingSha256"])
+                        and integer_between(diagnostic["line"], 1, 1000000)
+                        and integer_between(diagnostic["column"], 1, 1000000),
+                        "Observer DATA opaque panic location differs")
+            else:
+                require(all(diagnostic[key] is None for key in ("spellingSha256", "line", "column")),
+                        "Observer DATA refused panic contains location data")
+            require((state == "observed" and panic is not None
+                     and (diagnostic["line"], diagnostic["column"]) == (panic["line"], panic["column"]))
+                    or (state != "observed" and panic is None),
+                    "Observer DATA opaque panic verification differs")
+            # A spelling digest is not a SOURCE inventory membership assertion.
+            result["rustPanicDiagnostic"] = {key: diagnostic[key] for key in ("parseState", "spellingSha256", "line", "column")}
         python = failure.get("python")
         if python is not None:
             require(classified and row["phase"] == "python", "Observer DATA Python diagnostic original differs")
@@ -10044,6 +10071,9 @@ def mac_observer_data_checks(cargo, root, source, environment, remaining, contex
                    "originalCommandReturnCode": returned_code, "dataResult": projected, "macCompile": context["macCompile"],
                    **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")}}
         try:
+            if len(canonical_json(failure)) + 1 > 16384 and projected is not None and "rustPanicDiagnostic" in projected:
+                projected = {key: value for key, value in projected.items() if key != "rustPanicDiagnostic"}
+                failure["dataResult"] = projected
             for optional in ("pythonFailure", "guardCode", "rustPanic"):
                 if len(canonical_json(failure)) + 1 > 16384 and projected is not None:
                     projected = {**projected, optional: None}

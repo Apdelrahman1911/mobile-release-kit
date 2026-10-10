@@ -547,7 +547,8 @@ def project_data_contract_failure(value, context, statuses, inventory_paths):
         "originalReturncode", "originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow",
         "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256", "guardCode", "python", "cargo",
         "diagnosticOnly", "productReady"}
-    need(type(value) is dict and set(value) in (fields, fields | {"rustPanic"}) and type(value["schemaVersion"]) is int
+    need(type(value) is dict and fields <= set(value) <= fields | {"rustPanic", "rustPanicDiagnostic"}
+         and type(value["schemaVersion"]) is int
          and value["schemaVersion"] == 1 and value["kind"] == "mrk-native-data-contract-failure-diagnostics-v1"
          and value["diagnosticOnly"] is True and value["productReady"] is False
          and all(value[name] == context[name] for name in ("source", "workflowSource", "runId", "runAttempt", "target"))
@@ -634,6 +635,29 @@ def project_data_contract_failure(value, context, statuses, inventory_paths):
         integer(panic["line"], 1000000, 1); integer(panic["column"], 1000000, 1)
         if source in inventory_paths:
             result["rustPanic"] = dict(panic)
+    diagnostic = value.get("rustPanicDiagnostic")
+    result["rustPanicDiagnostic"] = None
+    if diagnostic is not None:
+        need(closed and value["phase"] == "rust" and code == 101
+             and type(diagnostic) is dict and set(diagnostic) == {"parseState", "spellingSha256", "line", "column"})
+        state = diagnostic["parseState"]
+        need(type(state) is str and state in ("input-invalid", "empty", "bounds", "header-missing",
+            "header-multiple", "header-format", "coordinate-range", "unmapped-source", "observed"))
+        if state in ("unmapped-source", "observed"):
+            need(type(diagnostic["spellingSha256"]) is str
+                 and re.fullmatch(r"[0-9a-f]{64}", diagnostic["spellingSha256"]) is not None)
+            integer(diagnostic["line"], 1000000, 1); integer(diagnostic["column"], 1000000, 1)
+        else:
+            need(all(diagnostic[name] is None for name in ("spellingSha256", "line", "column")))
+        if state == "observed":
+            # Crossjoin the original before the existing inventory redaction.
+            need(panic is not None and diagnostic["line"] == panic["line"] and diagnostic["column"] == panic["column"])
+            if result["rustPanic"] is not None:
+                result["rustPanicDiagnostic"] = dict(diagnostic)
+        else:
+            need(panic is None)
+            # An opaque lexical spelling is not source membership or cause.
+            result["rustPanicDiagnostic"] = dict(diagnostic)
     return {**result, "receiptState": "observed", "binding": "same-source-run-target-context",
             "callerStatus": dict(caller), "statusMatched": matched, "nativeSuccessInferred": False}
 

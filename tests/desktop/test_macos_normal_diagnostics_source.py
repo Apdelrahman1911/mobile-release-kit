@@ -3666,7 +3666,21 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             'test_android_build_tools.OwnerAndCommandDataTests.test_bundletool_requires_original_native_borrow_and_exact_snapshot',
         ])
         self.assertEqual(selected_digest(names), ROSTER_SHA256)
-        self.assertEqual(data.count(ROSTER_SHA256), 2)
+        self.assertEqual(data.count(ROSTER_SHA256), 3)
+        opening, closing = "<<'PY_DATA_CONTRACTS'\n", "\nPY_DATA_CONTRACTS\n"
+        self.assertEqual((data.count(opening), data.count(closing)), (1, 1))
+        self.assertTrue(data.endswith(closing))
+        data_python = data.split(opening, 1)[1].removesuffix(closing)
+        ci_admissions = [node for node in ast.parse(data_python).body
+                         if isinstance(node, ast.FunctionDef) and node.name == "ci_data_admission"]
+        self.assertEqual(len(ci_admissions), 1)
+        ci_admission = ast.get_source_segment(data_python, ci_admissions[0])
+        self.assertEqual(data.count(ci_admission), 1)
+        self.assertEqual(ci_admission.count(ROSTER_SHA256), 1)
+        ci_selection_guard = ast.parse('selected["selectionSha256"] != "' + ROSTER_SHA256 + '"', mode="eval").body
+        self.assertEqual(sum(isinstance(node, ast.Compare) and ast.dump(node) == ast.dump(ci_selection_guard)
+                             for node in ast.walk(ci_admissions[0])), 1)
+        self.assertEqual(data.replace(ci_admission, "", 1).count(ROSTER_SHA256), 2)
         sources = ast.literal_eval(re.search(r'\nsource_names = (\(\n.*?\n\))\n', data, re.S)[1])
         self.assertEqual(len(sources), 78)
         self.assertEqual(len(sources), len(set(sources)))

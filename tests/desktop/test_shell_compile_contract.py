@@ -569,7 +569,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('rust_binding = None', body)
 
     def test_observer_data_result_keeps_original_prefix_and_cleanup_authority(self):
-        _, _, bound, private = observer_data_fixture()
+        _, body, bound, private = observer_data_fixture()
         complete = helper.mac_observer_data_result(private, bound, 0)
         self.assertIs(helper.validate_mac_observer_data_result(complete), complete)
         self.assertEqual([row["phase"] for row in complete["commands"]], ["mount", "apfs", "build", "rust", "python"])
@@ -617,6 +617,80 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertNotIn("private inert failure text", json.dumps(observed))
         with self.assertRaises(helper.CheckFailure):
             helper.validate_mac_observer_data_result(observed)
+        # Execute only the genuine fixed pure reducers, never the native body.
+        parsed = helper.ast.parse(body)
+        wanted = {"DATA_FAILURE_GUARDS", "data_failure_json", "data_failure_python", "data_failure_cargo",
+                  "data_failure_rust_panic", "data_failure_rust_panic_diagnostic", "data_failure_document"}
+        nodes, found = [], set()
+        for node in parsed.body:
+            name = node.name if isinstance(node, helper.ast.FunctionDef) else (
+                node.targets[0].id if isinstance(node, helper.ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], helper.ast.Name) else None)
+            if name in wanted:
+                nodes.append(node); found.add(name)
+        self.assertEqual(found, wanted)
+        namespace = {"json": json, "hashlib": helper.hashlib, "re": helper.re}
+        exec(compile(helper.ast.Module(body=nodes, type_ignores=[]), "<genuine-observer-failure-data>", "exec"), namespace)
+        context = {"source": bound["sourceSha"], "workflowSource": bound["workflowSha"],
+                   "runId": bound["runId"], "runAttempt": bound["attempt"], "target": "aarch64-apple-darwin"}
+        sources = {row["path"] for row in private["sourceRows"]}
+        spelling = "tests/../src/installation.rs"
+        self.assertNotIn("desktop/src-tauri/src/installation.rs", sources)
+        opaque_result = None
+        for raw, state in ((b"\nthread 'main' (42) panicked at tests/../src/installation.rs:4271:9:\nPRIVATE_PANIC_PAYLOAD\n", "unmapped-source"),
+                           (b"thread 'main' panicked at tests/installed_shell_observation.rs:17:9:\nPRIVATE_PANIC_PAYLOAD\n", "observed"),
+                           (b"PRIVATE_PANIC_PAYLOAD without a header\n", "header-missing")):
+            genuine = json.loads(namespace["data_failure_document"](prefix["commands"][-1],
+                {"stdout": b"", "stderr": raw}, "command-not-complete", context, private["pythonTestIds"], sources, bound["source"]))
+            copied = helper.mac_observer_data_result(prefix, bound, 1, failure=genuine)
+            self.assertEqual(copied["rustPanicDiagnostic"]["parseState"], state)
+            self.assertEqual(copied["rustPanicDiagnostic"], genuine["rustPanicDiagnostic"])
+            self.assertEqual((copied["wrapperReturnCode"], copied["commands"][-1]["returnCode"]), (1, 101))
+            self.assertNotIn("PRIVATE_PANIC_PAYLOAD", json.dumps(copied))
+            if state == "unmapped-source":
+                opaque_result = copied
+                self.assertIsNone(copied["rustPanic"])
+                self.assertEqual(copied["rustPanicDiagnostic"], {"parseState": state,
+                    "spellingSha256": helper.hashlib.sha256(spelling.encode("ascii")).hexdigest(), "line": 4271, "column": 9})
+                self.assertNotIn(spelling, json.dumps(copied))
+            elif state == "observed":
+                self.assertEqual(copied["rustPanic"], site)
+            else:
+                self.assertIsNone(copied["rustPanic"])
+                self.assertTrue(all(copied["rustPanicDiagnostic"][key] is None for key in ("spellingSha256", "line", "column")))
+            with self.assertRaises(helper.CheckFailure):
+                helper.validate_mac_observer_data_result(copied)
+        opaque = opaque_result["rustPanicDiagnostic"]
+        unverified = {**failure, "rustPanic": None, "rustPanicDiagnostic": opaque}
+        self.assertIs(helper.validate_mac_observer_data_result({**complete, "rustPanicDiagnostic": None})["rustPanicDiagnostic"], None)
+        self.assertIsNone(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": None}).get("rustPanicDiagnostic"))
+        for state in ("input-invalid", "empty", "bounds", "header-missing", "header-multiple", "header-format", "coordinate-range"):
+            empty = {"parseState": state, "spellingSha256": None, "line": None, "column": None}
+            self.assertEqual(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": empty})["rustPanicDiagnostic"], empty)
+        for change in (lambda x: x.update(parseState="raw arbitrary prose"), lambda x: x.update(parseState=[]),
+                       lambda x: x.update(spellingSha256="F" * 64), lambda x: x.update(spellingSha256=True),
+                       lambda x: x.update(line=True), lambda x: x.update(line=0), lambda x: x.update(column=1000001),
+                       lambda x: x.update(raw="PRIVATE_PANIC_PAYLOAD"), lambda x: x.pop("column"),
+                       lambda x: x.update(parseState="header-format"), lambda x: x.update(parseState="observed")):
+            bad = deepcopy(opaque); change(bad)
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": bad})
+        for bad in ([], "PRIVATE_PANIC_PAYLOAD", False):
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified, "rustPanicDiagnostic": bad})
+        self.assertEqual(helper.mac_observer_data_result(prefix, bound, 1, failure={**unverified,
+            "rustPanicDiagnostic": {**opaque, "spellingSha256": "0" * 64}})["rustPanicDiagnostic"]["spellingSha256"], "0" * 64)
+        for diagnostic in (opaque, {**opaque, "parseState": "observed"}):
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(prefix, bound, 1, failure={**failure, "rustPanicDiagnostic": diagnostic})
+        for key, bad in (("originalReturned", False), ("outputComplete", False), ("captureClosed", False),
+                         ("timedOut", True), ("outputOverflow", True), ("returnCode", 1)):
+            changed = deepcopy(prefix); changed["commands"][-1][key] = bad
+            sidecar = {**unverified, "originalReturncode" if key == "returnCode" else key: bad}
+            with self.assertRaises(helper.CheckFailure):
+                helper.mac_observer_data_result(changed, bound, 1, failure=sidecar)
+        with self.assertRaises(helper.CheckFailure):
+            helper.validate_mac_observer_data_result({**complete, "rustPanicDiagnostic": opaque})
         for field, value in (("source", "2" * 40), ("phase", "build"), ("captureClosed", False),
                              ("rustPanic", {**site, "source": "desktop/src-tauri/src/not-in-inventory.rs"}),
                              ("rustPanic", {**site, "line": True}), ("rustPanic", {**site, "column": 1000001}),
@@ -667,6 +741,9 @@ class ShellCompileContractTests(unittest.TestCase):
                  "dataResult": python_result, "macCompile": dense_mac,
                  **{key: bound[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt")}}
         self.assertLessEqual(len(helper.canonical_json(dense)) + 1, 16384)
+        dense["dataResult"] = opaque_result  # Real Rust-only shape; not a combined Python/Rust claim.
+        self.assertLessEqual(len(helper.canonical_json(dense)) + 1, 16384)
+        self.assertEqual(dense["dataResult"]["commands"][-1]["returnCode"], 101)
         with self.assertRaises(helper.CheckFailure):
             helper.validate_mac_observer_data_result(python_result)
         forged = helper.mac_observer_data_result(private, bound, 1)
@@ -680,7 +757,7 @@ class ShellCompileContractTests(unittest.TestCase):
     def test_observer_data_parent_preserves_first_return_and_source_post(self):
         _, body, original, private_original = observer_data_fixture()
         binary = "/Users/runner/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
-        for fault in ("none", "rust101", "unknown", "private-malformed", "source-post", "reserve", "publication"):
+        for fault in ("none", "rust101", "opaque", "opaque-malformed", "unknown", "private-malformed", "source-post", "reserve", "publication"):
             with self.subTest(fault=fault), helper.tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); root.chmod(0o700)
                 root_stat = root.lstat()
@@ -693,7 +770,7 @@ class ShellCompileContractTests(unittest.TestCase):
                     root = OriginalRoot(original["root"])
                 bound = deepcopy(original); bound["root"] = str(root)
                 private = deepcopy(private_original)
-                if fault in ("rust101", "publication"):
+                if fault in ("rust101", "opaque", "opaque-malformed", "publication"):
                     private.update(commands=private["commands"][:4], pythonCounts=None, ciAggregatePassed=None,
                                    ciSourcePost=None, ciTemporaryEmpty=None, passed=False, failure="private")
                     private["commands"][-1]["returnCode"] = 101
@@ -701,7 +778,7 @@ class ShellCompileContractTests(unittest.TestCase):
                 selected = bound["macCompile"]["data"]
                 input_calls, reads, runs, writes, caps = [], [], [], [], []
                 primary = helper.CheckFailure("original child failed")
-                if fault in ("rust101", "publication"):
+                if fault in ("rust101", "opaque", "opaque-malformed", "publication"):
                     primary._returned_command = ("mac-observer-fixed-data", 1)
                 def inputs(source):
                     input_calls.append(str(source))
@@ -711,10 +788,19 @@ class ShellCompileContractTests(unittest.TestCase):
                     reads.append((str(path), limit, kw))
                     if path.name == "context.json": return context_raw
                     if path.name == "result.json": return b"{}" if fault == "private-malformed" else helper.canonical_json(private)
+                    if path.name == "failure-diagnostics.json" and fault in ("opaque", "opaque-malformed"):
+                        diagnostic = {"parseState": "unmapped-source", "spellingSha256": "a" * 64, "line": 17, "column": 9}
+                        if fault == "opaque-malformed": diagnostic["spellingSha256"] = "PRIVATE_INVALID_DIAGNOSTIC"
+                        return helper.canonical_json({"schemaVersion": 1, "kind": "mrk-native-data-contract-failure-diagnostics-v1",
+                            "phase": "rust", "originalReturncode": 101, "source": bound["sourceSha"], "workflowSource": bound["workflowSha"],
+                            "runId": bound["runId"], "runAttempt": bound["attempt"], "target": "aarch64-apple-darwin",
+                            **{key: private["commands"][-1][key] for key in ("originalReturned", "outputComplete", "captureClosed", "timedOut", "outputOverflow")},
+                            "diagnosticOnly": True, "productReady": False, "guardCode": "command-not-complete", "python": None,
+                            "rustPanic": None, "rustPanicDiagnostic": diagnostic})
                     raise OSError("optional sidecar absent")
                 def invoke(argv, **kw):
                     runs.append((argv, kw))
-                    if fault in ("rust101", "unknown", "publication"): raise primary
+                    if fault in ("rust101", "opaque", "opaque-malformed", "unknown", "publication"): raise primary
                     return ""
                 def publish(path, value):
                     if fault == "publication" and path.name == "compile-checks.json": raise KeyboardInterrupt()
@@ -735,7 +821,7 @@ class ShellCompileContractTests(unittest.TestCase):
                         with self.assertRaises(helper.CheckFailure) as caught:
                             helper.mac_observer_data_checks(binary + "/cargo", root, Path(bound["source"]),
                                 {"RUSTC": binary + "/rustc", "RUSTUP_AUTO_INSTALL": "0"}, remaining, bound)
-                        if fault in ("rust101", "unknown", "publication"): self.assertIs(caught.exception, primary)
+                        if fault in ("rust101", "opaque", "opaque-malformed", "unknown", "publication"): self.assertIs(caught.exception, primary)
                 self.assertEqual(len(runs), 0 if fault == "reserve" else 1)
                 if runs:
                     argv, kw = runs[0]
@@ -767,10 +853,15 @@ class ShellCompileContractTests(unittest.TestCase):
                     failed = failures[0]
                     self.assertEqual(failed["status"], "failed-or-unknown")
                     self.assertLessEqual(len(helper.canonical_json(failed)) + 1, 16384)
-                    self.assertEqual(failed["originalCommandReturnCode"], 1 if fault == "rust101" else None if fault in ("unknown", "reserve") else 0)
-                    if fault == "rust101":
+                    self.assertEqual(failed["originalCommandReturnCode"], 1 if fault in ("rust101", "opaque", "opaque-malformed") else None if fault in ("unknown", "reserve") else 0)
+                    if fault in ("rust101", "opaque", "opaque-malformed"):
                         self.assertEqual(failed["dataResult"]["commands"][-1]["returnCode"], 101)
                         self.assertIsNone(failed["dataResult"]["sourcePost"])
+                        self.assertNotIn("PRIVATE_INVALID_DIAGNOSTIC", json.dumps(failed))
+                        if fault == "opaque":
+                            self.assertEqual(failed["dataResult"]["rustPanicDiagnostic"]["parseState"], "unmapped-source")
+                        else:
+                            self.assertIsNone(failed["dataResult"].get("rustPanicDiagnostic"))
                     if fault in ("unknown", "private-malformed", "reserve"):
                         self.assertIsNone(failed["dataResult"])
                 else:

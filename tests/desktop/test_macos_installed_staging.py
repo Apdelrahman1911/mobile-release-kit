@@ -13586,7 +13586,23 @@ class MacNormalPreviewData(unittest.TestCase):
         for required in ("package-export receipt is intentionally a **build/Installer/readback snapshot**",
                          "automatic-open and normal-Quit fields remain unexecuted at that stage",
                          "same hosted job subsequently runs one external XCTest scenario",
-                         "normal-ui/result.json", "A missing, failed or skipped check is not a pass",
+                         "matching **public-verification-evidence.json** in the separate evidence artifact",
+                         "normal-ui/test.status", "normal-ui/summary.status",
+                         "not the original XCTest counts or full UI proof",
+                         "A zero scalar status alone does not establish the narrow UI observation",
+                         "actual completed check and its exact-source qualification still require review",
+                         "Raw native results are not published in that artifact",
+                         "A missing, failed or skipped check is not a pass",
+                         "exact reviewed run and attempt", "`aarch64-apple-darwin`",
+                         "mobile-release-kit-macos26-<target>-preview-<source>-<run-id>-<run-attempt>",
+                         "desktop-macos-installed-<target>-<source>-<run-id>-<run-attempt>",
+                         "check their source/workflow, run/attempt and target bindings",
+                         "Do not substitute another target, run, attempt or removal-lifecycle artifact",
+                         "**14-day retention**", "can expire or be unavailable",
+                         "missing evidence is not a pass or permission to use an older package",
+                         "review the actual completed job and check outcomes, not just artifact availability",
+                         "Preserve downloaded-file quarantine and macOS security policy",
+                         "without removing quarantine or bypassing it",
                          "does not prove POSIX exit status or every worker's finality",
                          "Gatekeeper", "Do not disable", "NOT READY / undelivered",
                          "fixed eight-case Installer fixture before ordinary install",
@@ -13605,7 +13621,7 @@ class MacNormalPreviewData(unittest.TestCase):
                          "carrier's execution/recovery remain separate obligations"):
             self.assertIn(required, guide)
         for stale in ("shipping profiles are currently unconfigured", "no old-version pruning or uninstall is provided",
-                      "any future uninstall"):
+                      "any future uninstall", "normal-ui/result.json"):
             self.assertNotIn(stale, guide)
 
         image_name = "Notarize, staple and verify only the final user image"

@@ -213,7 +213,7 @@ def data_contract_diagnostics():
     source = path.read_text().split("<<'PY_DATA_CONTRACTS'\n", 1)[1].rsplit("\nPY_DATA_CONTRACTS", 1)[0]
     tree = ast.parse(source)
     wanted = {"DATA_FAILURE_GUARDS", "data_failure_guard", "data_failure_json", "data_failure_python",
-              "data_failure_cargo", "data_failure_rust_panic", "data_failure_document"}
+              "data_failure_cargo", "data_failure_rust_panic", "data_failure_rust_panic_diagnostic", "data_failure_document"}
     nodes, found, assignments = [], set(), {}
     for node in tree.body:
         name = node.name if isinstance(node, ast.FunctionDef) else (
@@ -237,7 +237,7 @@ def data_contract_diagnostics():
 
 
 def data_contract_failure(data, names, *, phase="python", code=1, raw=None, flags=None,
-                          guard="command-not-complete", source_paths=(), failed_names=None, stderr=None):
+                          guard="command-not-complete", source_paths=frozenset(), failed_names=None, stderr=None):
     if raw is None:
         if phase == "python":
             selected = [names[0]] if failed_names is None else failed_names
@@ -1055,6 +1055,11 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(projected["receiptState"], "observed")
             self.assertEqual(len(projected["settings"]), 9)
             combined_budget_only = {**result, "buildSettingsDiagnostic": projected}
+            # Also reserve the opaque tuple beside the largest Python facts as
+            # a conservative byte-only union, never a genuine mixed-phase row.
+            combined_budget_only["dataContractFailure"] = {**result["dataContractFailure"],
+                "rustPanicDiagnostic": {"parseState": "unmapped-source", "spellingSha256": "f" * 64,
+                                        "line": 1000000, "column": 1000000}}
             encoded = (json.dumps(combined_budget_only, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
             self.assertLessEqual(len(encoded), DATA.OUTPUT_LIMIT)
 
@@ -1297,11 +1302,58 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         statuses = {"data-contracts/rust.status": {"receiptState": "observed", "returncode": 101}}
         row = DATA.project_data_contract_failure(value, CONTEXT, statuses, {site})
         self.assertEqual(row["rustPanic"], {"source": site, "line": 12, "column": 7})
+        spelling = "tests/../src/shell/installed_observation.rs"
+        expected = {"parseState": "observed", "spellingSha256": hashlib.sha256(spelling.encode()).hexdigest(),
+                    "line": 12, "column": 7}
+        self.assertEqual(row["rustPanicDiagnostic"], expected)
         self.assertEqual(row["receiptState"], "observed")
         self.assertIs(row["statusMatched"], True)
         self.assertIs(row["nativeSuccessInferred"], False)
         self.assertNotIn(SENTINEL, json.dumps(row))
-        self.assertIsNone(DATA.project_data_contract_failure(value, CONTEXT, statuses, set())["rustPanic"])
+        redacted = DATA.project_data_contract_failure(value, CONTEXT, statuses, set())
+        self.assertIsNone(redacted["rustPanic"])
+        self.assertIsNone(redacted["rustPanicDiagnostic"])
+        # A tuple is not an admitted inventory; the fixture default is an empty frozenset.
+        self.assertEqual(data["data_failure_rust_panic_diagnostic"](stderr, (), "/public/checkout"),
+            {"parseState": "input-invalid", "spellingSha256": None, "line": None, "column": None})
+        unknown = "/outside/checkout/unknown.rs"
+        unlisted = data_contract_failure(data, names, phase="rust", code=101,
+            stderr=("thread 'main' panicked at " + unknown + ":1000000:1000000:\n" + SENTINEL).encode())
+        unlisted_row = DATA.project_data_contract_failure(unlisted, CONTEXT, statuses, set())
+        self.assertIsNone(unlisted_row["rustPanic"])
+        self.assertEqual(unlisted_row["rustPanicDiagnostic"], {"parseState": "unmapped-source",
+            "spellingSha256": hashlib.sha256(unknown.encode()).hexdigest(), "line": 1000000, "column": 1000000})
+        self.assertNotIn(unknown, json.dumps(unlisted_row)); self.assertNotIn(SENTINEL, json.dumps(unlisted_row))
+        for bad in ({}, {**expected, "parseState": "other"}, {**expected, "parseState": []},
+                    {**expected, "spellingSha256": "A" * 64}, {**expected, "spellingSha256": "f" * 63},
+                    {**expected, "spellingSha256": None}, {**expected, "line": True},
+                    {**expected, "line": 0}, {**expected, "column": 1000001},
+                    {**expected, "column": 8}, {**expected, "message": SENTINEL},
+                    {**expected, "parseState": "unmapped-source"},
+                    {"parseState": "header-format", "spellingSha256": None, "line": None, "column": None}):
+            broken = copy.deepcopy(value); broken["rustPanicDiagnostic"] = bad
+            with self.subTest(diagnostic=bad), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(broken, CONTEXT, statuses, {site})
+        broken = copy.deepcopy(unlisted); broken["rustPanicDiagnostic"]["parseState"] = "observed"
+        with self.assertRaises(DATA.Refused):
+            DATA.project_data_contract_failure(broken, CONTEXT, statuses, set())
+        for state in ("input-invalid", "empty", "bounds", "header-missing", "header-multiple", "header-format", "coordinate-range"):
+            refusal = copy.deepcopy(unlisted)
+            refusal["rustPanicDiagnostic"] = {"parseState": state, "spellingSha256": None, "line": None, "column": None}
+            self.assertEqual(DATA.project_data_contract_failure(refusal, CONTEXT, statuses, set())["rustPanicDiagnostic"],
+                             refusal["rustPanicDiagnostic"])
+            for key, bad in (("spellingSha256", "f" * 64), ("line", 1), ("column", 1)):
+                broken = copy.deepcopy(refusal); broken["rustPanicDiagnostic"][key] = bad
+                with self.subTest(state=state, key=key), self.assertRaises(DATA.Refused):
+                    DATA.project_data_contract_failure(broken, CONTEXT, statuses, set())
+        for key, bad in (("phase", "python"), ("originalReturncode", 0), ("originalReturned", False),
+                         ("outputComplete", False), ("captureClosed", False), ("timedOut", True),
+                         ("outputOverflow", True), ("source", "b" * 40), ("workflowSource", "b" * 40),
+                         ("runId", "999"), ("runAttempt", "3"), ("target", "x86_64-apple-darwin")):
+            self.assertNotEqual(unlisted[key], bad, "binding mutation must change the fixture")
+            broken = copy.deepcopy(unlisted); broken[key] = bad
+            with self.subTest(diagnostic_binding=key), self.assertRaises(DATA.Refused):
+                DATA.project_data_contract_failure(broken, CONTEXT, {}, set())
         for bad in ({}, {"source": site, "line": True, "column": 7},
                     {"source": site, "line": 0, "column": 7}, {"source": site, "line": 12, "column": 1000001},
                     {"source": site, "line": 12, "column": 7, "message": SENTINEL},
@@ -1319,8 +1371,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             broken = copy.deepcopy(value); broken[key] = bad
             with self.subTest(key=key), self.assertRaises(DATA.Refused):
                 DATA.project_data_contract_failure(broken, CONTEXT, {}, {site})
-        legacy = copy.deepcopy(value); del legacy["rustPanic"]
-        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, statuses, {site})["rustPanic"])
+        legacy = copy.deepcopy(value); del legacy["rustPanicDiagnostic"]
+        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, statuses, {site})["rustPanicDiagnostic"])
+        del legacy["rustPanic"]
+        old = DATA.project_data_contract_failure(legacy, CONTEXT, statuses, {site})
+        self.assertIsNone(old["rustPanic"]); self.assertIsNone(old["rustPanicDiagnostic"])
+        value["rustPanicDiagnostic"] = None
+        self.assertIsNone(DATA.project_data_contract_failure(value, CONTEXT, statuses, {site})["rustPanicDiagnostic"])
 
     def test_data_contract_failure_closed_schema_and_bounds(self):
         data, names = data_contract_diagnostics()
@@ -1328,7 +1385,11 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         self.assertIsNone(base["rustPanic"])
         legacy = copy.deepcopy(base); del legacy["rustPanic"]
         self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, {}, set())["rustPanic"])
-        for key in base.keys() - {"rustPanic"}:
+        self.assertIsNone(base.get("rustPanicDiagnostic"))
+        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, {}, set())["rustPanicDiagnostic"])
+        legacy.pop("rustPanicDiagnostic", None)
+        self.assertIsNone(DATA.project_data_contract_failure(legacy, CONTEXT, {}, set())["rustPanicDiagnostic"])
+        for key in base.keys() - {"rustPanic", "rustPanicDiagnostic"}:
             value = copy.deepcopy(base); del value[key]
             with self.subTest(missing=key), self.assertRaises(DATA.Refused):
                 DATA.project_data_contract_failure(value, CONTEXT, {}, set())
@@ -1403,10 +1464,28 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             row = project(root)["dataContractFailure"]
             self.assertEqual(row["receiptState"], "observed")
             self.assertEqual(row["rustPanic"], {"source": site, "line": 12, "column": 7})
+            self.assertEqual(row["rustPanicDiagnostic"]["parseState"], "observed")
             self.assertIs(row["statusMatched"], True)
             self.assertIs(row["nativeSuccessInferred"], False)
             self.assertEqual([path.read_bytes() for path in originals], before)
             self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+        spelling = "tests/../src/unlisted.rs"
+        opaque_stderr = ("thread 'main' panicked at " + spelling + ":12:7:\n" + SENTINEL).encode()
+        opaque = data_contract_failure(data, names, phase="rust", code=101, stderr=opaque_stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            originals = [write(root, "data-contracts/failure-diagnostics.json", opaque),
+                         write(root, "data-contracts/rust.stderr", opaque_stderr)]
+            before = [path.read_bytes() for path in originals]
+            write(root, "data-contracts/rust.status", b"101\n")
+            row = project(root)["dataContractFailure"]
+            self.assertEqual(row["receiptState"], "observed"); self.assertIsNone(row["rustPanic"])
+            self.assertEqual(row["rustPanicDiagnostic"], {"parseState": "unmapped-source",
+                "spellingSha256": hashlib.sha256(spelling.encode()).hexdigest(), "line": 12, "column": 7})
+            self.assertIs(row["statusMatched"], True); self.assertIs(row["nativeSuccessInferred"], False)
+            self.assertEqual([path.read_bytes() for path in originals], before)
+            public = (root / DATA.OUTPUT).read_bytes()
+            self.assertNotIn(spelling.encode(), public); self.assertNotIn(SENTINEL.encode(), public)
         for raw in (b"{}", b"x" * 16385, b'{"schemaVersion":1,"schemaVersion":1}'):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); write(root, "data-contracts/failure-diagnostics.json", raw)
