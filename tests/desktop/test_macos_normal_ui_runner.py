@@ -582,6 +582,13 @@ class RunnerAdmissionDataTests(unittest.TestCase):
                 self.assertNotIn("project/gradle/verification-metadata.xml", spec["files"])
 
         project = (native / "MRKNormalAppUI.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        # Standard architectures is a one-line project baseline successor.
+        # Restore only that current line before preserving all older hashes.
+        current_archs = '\t\t\t\tARCHS = "$(ARCHS_STANDARD)";\n'
+        prior_archs = '\t\t\t\tARCHS = arm64;\n'
+        self.assertEqual(project.count(current_archs), 1)
+        self.assertNotIn(prior_archs, project)
+        project = project.replace(current_archs, prior_archs, 1)
         # The later unsigned-iOS resource is an exact reviewed successor of
         # the Android project. Undo only its four SOURCE additions FIRST so
         # the existing Android inverse and original XML-only hash stay strict.
@@ -2348,11 +2355,12 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(source.count('#if arch(arm64)'), 1)
         self.assertEqual(source.count('#elseif arch(x86_64)'), 1)
         project = (ROOT / MODULE.PROJECT / 'project.pbxproj').read_text()
-        self.assertEqual(project.count('ARCHS = arm64;'), 1)
+        self.assertEqual(project.count('ARCHS = "$(ARCHS_STANDARD)";'), 1)
         self.assertEqual(project.count('ONLY_ACTIVE_ARCH = YES;'), 1)
         runner = (ROOT / 'desktop/tools/macos_normal_ui_runner.py').read_text()
         self.assertIn('(["ARCHS=x86_64"] if target == INTEL_TARGET else [])', runner)
-        self.assertEqual(runner.count('ARCHS='), 1)
+        self.assertIn('"ARCHS=x86_64", "COMPILER_INDEX_STORE_ENABLE=NO", "build-for-testing"]', runner)
+        self.assertEqual(runner.count('ARCHS='), 2)
         self.assertEqual(source.count("try launchCancelAndQuit(profile: .packagedEntry)"), 1)
         self.assertIn("try launchCancelAndQuit(profile: .sameBuild)", source)
         self.assertIn("private func admittedJourneyApplication(profile: SourceProfile = .sameBuild)", source)
@@ -3217,7 +3225,8 @@ class NormalPhaseDataTests(unittest.TestCase):
                         self.assertEqual(source_check.call_count, 2)
                         if request["phase"] == "build":
                             expected = list(arm_build)
-                            expected[expected.index("-destination") + 1] = "platform=macOS,arch=" + machine
+                            expected[expected.index("-destination") + 1] = ("platform=macOS" if machine == "x86_64"
+                                else "platform=macOS,arch=" + machine)
                             if machine == "x86_64": expected.append("ARCHS=x86_64")
                             self.assertEqual(actual.args, expected)
                             self.assertEqual(returned[-1][2], 240)

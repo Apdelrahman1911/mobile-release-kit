@@ -789,6 +789,52 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         self.assertEqual(len(after), 8)
         self.assertNotIn("PRIVATE", json.dumps(observed))
 
+    def test_project_standard_architectures_preserve_fixed_host_build_constraints(self):
+        data = build_settings_reducers()
+        project_path = ROOT / data["PROJECT"] / "project.pbxproj"
+        with project_path.open("rb") as source:
+            body = source.read(8193)
+        current = b'\t\t\t\tARCHS = "$(ARCHS_STANDARD)";\n'
+        previous = b'\t\t\t\tARCHS = arm64;\n'
+        def checked(value):
+            self.assertIs(type(value), bytes)
+            self.assertGreater(len(value), 0); self.assertLessEqual(len(value), 8192)
+            self.assertEqual(value.count(current), 1); self.assertNotIn(previous, value)
+            self.assertEqual(value.count(b"ARCHS = "), 1)
+            self.assertEqual(hashlib.sha256(value.replace(current, previous, 1)).hexdigest(),
+                "18903dd03df852e0d6b8ca8c1f545553c4440468c3b067ead5b92cd76b5c5514")
+            text = value.decode("ascii", "strict")
+            project = text.split("\n\t\tA1000000000000000000000C = {", 1)[1].split("\n\t\t};", 1)[0]
+            target = text.split("\n\t\tA1000000000000000000000F = {", 1)[1].split("\n\t\t};", 1)[0]
+            self.assertIn('ARCHS = "$(ARCHS_STANDARD)";', project)
+            self.assertIn("ONLY_ACTIVE_ARCH = YES;", project)
+            self.assertIn("SDKROOT = macosx;", project)
+            self.assertIn("MACOSX_DEPLOYMENT_TARGET = 26.0;", project)
+            self.assertNotIn("ARCHS =", target); self.assertNotIn("ONLY_ACTIVE_ARCH =", target)
+            self.assertEqual(text.count("ONLY_ACTIVE_ARCH = YES;"), 1)
+            self.assertEqual(text.count('productType = "com.apple.product-type.bundle.ui-testing";'), 1)
+        checked(body)
+        target_start = b"\t\tA1000000000000000000000F = {\n\t\t\tisa = XCBuildConfiguration;\n\t\t\tbuildSettings = {\n"
+        mutations = [body + current, body + previous, body.replace(current, previous),
+            body.replace(current, current[1:]), body.replace(b"ONLY_ACTIVE_ARCH = YES;", b"ONLY_ACTIVE_ARCH = NO;"),
+            body.replace(b"MACOSX_DEPLOYMENT_TARGET = 26.0;", b"MACOSX_DEPLOYMENT_TARGET = 25.0;"),
+            body.replace(target_start, target_start + b"\t\t\t\tARCHS = x86_64;\n"),
+            body.replace(b"SDKROOT = macosx;", b"SDKROOT = iphoneos;"),
+            body.replace(b"SDKROOT = macosx;", b"SDKROOT = macosx; UNKNOWN_SETTING = YES;"), b"x" * 8193]
+        for index, mutation in enumerate(mutations):
+            self.assertNotEqual(mutation, body)
+            with self.subTest(mutation=index), self.assertRaises(AssertionError):
+                checked(mutation)
+        derived = Path("/inert/normal-ui/DerivedData")
+        for target, destination, overrides in ((data["ARM_TARGET"], "platform=macOS,arch=arm64", []),
+                (data["INTEL_TARGET"], "platform=macOS", ["ARCHS=x86_64"])):
+            argv = data["normal_build_arguments"](derived, target=target)
+            self.assertEqual(argv[argv.index("-destination") + 1], destination)
+            self.assertEqual([item for item in argv if item.startswith("ARCHS=")], overrides)
+            self.assertNotIn("ARCHS=x86_64h", argv)
+            self.assertNotIn("ONLY_ACTIVE_ARCH=NO", argv)
+            self.assertEqual(argv[1], "build-for-testing")
+
 
 if __name__ == "__main__":
     unittest.main()
