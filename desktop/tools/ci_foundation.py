@@ -795,6 +795,14 @@ MAC_HISTORY_CHECKS = {
                 "mac-source-slots-data-test", "node-version", "typescript-no-emit", "vite-assets",
                 "mac-normal-bin-compile-only"),
 }
+# Same shipping graph only; no auxiliary compiler or test original is entered.
+MAC_APP_MODE = "app-only"
+MAC_APP_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only"),
+}
 # One debug, embedded-frontend main application for a credential-free UI smoke.
 # This is a compiler profile only; the existing XCTest owner is a separate lane.
 ENGINEERING_COMPILE_SCOPE = "macos-engineering-ui-compile-v1"
@@ -2890,8 +2898,10 @@ def mac_compile_target(environment: dict[str, str]) -> str:
 def mac_compile_graphs(target: str, mode: str) -> tuple:
     """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
     require(target in MAC_COMPILE_HOSTS and type(mode) is str
-            and (mode in ("full4", MAC_HISTORY_MODE) or mode == "vault-only" and target == "aarch64-apple-darwin"),
+            and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) or mode == "vault-only" and target == "aarch64-apple-darwin"),
             "Normal Mac compiler graph mode differs")
+    if mode == MAC_APP_MODE:
+        return MAC_COMPILE_GRAPHS[:1]
     if mode == MAC_HISTORY_MODE:
         return (MAC_HISTORY_GRAPH, MAC_COMPILE_GRAPHS[0])
     return (MAC_COMPILE_VAULT_GRAPH, *MAC_COMPILE_GRAPHS) if mode == "full4" else (MAC_COMPILE_VAULT_GRAPH,)
@@ -2902,11 +2912,13 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
     selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
     mac_compile_graphs(target, mode)
     require(environment.get("MRK_MACOS_TARGET") == target
-            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE)
+            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE)
             and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                  or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
             "Normal Mac compiler selection differs")
-    require((selection == MAC_HISTORY_MODE and mode == MAC_HISTORY_MODE
+    require((selection == MAC_APP_MODE and mode == MAC_APP_MODE
+             and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_HISTORY_MODE and mode == MAC_HISTORY_MODE
              and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
             or (selection == "both" and mode == "full4")
             or (selection == "arm" and target == "aarch64-apple-darwin" and mode == "full4")
@@ -2919,6 +2931,8 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
 
 def mac_compile_checks(target: str, mode: str) -> dict:
     mac_compile_graphs(target, mode)
+    if mode == MAC_APP_MODE:
+        return MAC_APP_CHECKS
     if mode == MAC_HISTORY_MODE:
         return MAC_HISTORY_CHECKS
     if mode == "full4":
@@ -3155,7 +3169,7 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
                 "Normal Mac compiler receipt graphs differ")
         selected = mac_compile_checks(mac["target"], mac["mode"])
         expected.update(sourceTree=context["sourceTree"], macCompile=mac,
-                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE) else None,
+                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else None,
                         checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
         if mac["mode"] == MAC_HISTORY_MODE:
             require(mac.get("execution") == "compile-and-selected-data" and type(mac.get("tests")) is list
@@ -9589,7 +9603,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     started = time.monotonic()
     # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
     # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
-    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE) else 1500
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else 1500
     deadline = started + budget
     previous = started
     def remaining(cap: int) -> int:
@@ -9629,6 +9643,9 @@ def phase_mac_compile(name: str, context: dict) -> None:
                 ("mac-source-slots-locked-metadata", manifest, ["--features", "development-runtime"], root / "target/mac-history-metadata.json"),
                 ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json"),
             ]
+        if mode == MAC_APP_MODE:
+            metadata = [("mac-normal-locked-metadata", manifest,
+                         ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json")]
         for check, cargo_manifest, features, output_path in metadata:
             with output_path.open("x", encoding="utf-8") as output:
                 run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -9642,12 +9659,12 @@ def phase_mac_compile(name: str, context: dict) -> None:
         # Fail fast on the small separate helper BEFORE frontend or app linkage.
         if mode == MAC_HISTORY_MODE:
             history_result = mac_history_data_checks(cargo, root, source, target, environment, remaining, context)
-        else:
+        elif mode != MAC_APP_MODE:
             run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
                 check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
         remaining(30)
     observed = None
-    if mode in ("full4", MAC_HISTORY_MODE):
+    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE):
         node = shutil.which("node")
         require(node is not None, "Selected Node unavailable")
         observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
@@ -9665,7 +9682,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
             run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                  str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                 check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
-            for check, relative, profile, features, artifact in (MAC_COMPILE_GRAPHS[:1] if mode == MAC_HISTORY_MODE else MAC_COMPILE_GRAPHS):
+            for check, relative, profile, features, artifact in (MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
                 argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
                 if profile == "test":
                     argv += ["--features", features, "--test", artifact, "--no-run"]

@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - verify/desktop-macos-github-seal
+      - verify/desktop-macos-history-provider-probe
 
 permissions:
   contents: read
@@ -19,7 +20,7 @@ env:
 
 jobs:
   seal-build:
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-github-seal'
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && (github.ref == 'refs/heads/verify/desktop-macos-github-seal' || github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe')
     name: canonical seal (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -78,9 +79,14 @@ jobs:
           MRK_SEAL_PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
-          # One actual child entry; it owns all 22 native originals under one
-          # 900s work / 60s cleanup endpoint. No full UI or Python producer job.
-          "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py
+          # One actual child entry, same900s/60s owner. Seal keeps22 calls;
+          # the isolated History verification ref has exactly3 denied-network probes.
+          if [ "$GITHUB_REF" = refs/heads/verify/desktop-macos-history-provider-probe ]; then
+            "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py --history-provider-probe
+          else
+            test "$GITHUB_REF" = refs/heads/verify/desktop-macos-github-seal
+            "$MRK_SEAL_PYTHON" -I -S -B desktop/tools/macos_github_seal_build.py
+          fi
 
       - name: Verify source after the original entry returned
         id: sourcepost
@@ -97,8 +103,8 @@ jobs:
         if: always() && steps.sourcepost.outcome == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: canonical-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: /Users/runner/work/_temp/mrk-github-seal-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/public/
+          name: ${{ github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe' && 'history-provider-probe' || 'canonical-seal' }}-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /Users/runner/work/_temp/${{ github.ref == 'refs/heads/verify/desktop-macos-history-provider-probe' && 'mrk-history-provider' || 'mrk-github-seal' }}-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}/public/
           # Unknown custody produces no public directory, never guessed cleanup
           # or a successful receipt. A failed original job remains failed even
           # when its separately settled diagnostic evidence exists.
