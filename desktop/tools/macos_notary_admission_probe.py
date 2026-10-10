@@ -136,6 +136,8 @@ def census(namespace, name, deadline):
         directory, regular, symlink = stat.S_ISDIR(info.st_mode), stat.S_ISREG(info.st_mode), stat.S_ISLNK(info.st_mode)
         root, current = info.st_uid == 0, info.st_uid == os.getuid()
         group_write, other_write = bool(info.st_mode & 0o020), bool(info.st_mode & 0o002)
+        trusted_applications_group = (path == applications and directory and root
+            and info.st_gid in (0, 80) and not other_write)
         role = ('root' if path == Path('/') else 'applications' if path == applications else
             'xcode-alias' if path == xcode.parent.parent else 'fixed-tool' if path == fixed else
             'canonical-tool' if path == canonical else 'above-applications' if above else 'other-ancestor')
@@ -144,7 +146,7 @@ def census(namespace, name, deadline):
             'symlink': symlink, 'selectedAlias': alias, 'aboveApplications': above,
             'groupWritable': group_write, 'otherWritable': other_write,
             'predicateAccepted': (root or current) and (alias or (directory or regular)
-                and (above or not (group_write or other_write)))})
+                and (above or not (group_write or other_write) or trusted_applications_group))})
     clock(deadline)
     return rows
 

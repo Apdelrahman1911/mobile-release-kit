@@ -2918,11 +2918,15 @@ class Operation:
             info = path.lstat()
             selected_alias = stat.S_ISLNK(info.st_mode) and path == NOTARY_XCODE.parent.parent
             above_applications = path in applications.parents
+            # Existing macOS directory trust, confined to this exact fixed ancestor.
+            trusted_applications_group = (path == applications and stat.S_ISDIR(info.st_mode)
+                and info.st_uid == 0 and info.st_gid in (0, 80) and not info.st_mode & 0o002)
             need((info.st_uid == 0 and (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
                   and not info.st_mode & 0o022) if name == "productbuild" else
                  info.st_uid in (0, os.getuid())
                  and (selected_alias or (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode))
-                      and (above_applications or not info.st_mode & 0o022)), "notary-selected-tool-ancestry")
+                      and (above_applications or not info.st_mode & 0o022 or trusted_applications_group)),
+                 "notary-selected-tool-ancestry")
             originals.append((path, signature(info), os.readlink(path) if stat.S_ISLNK(info.st_mode) else None))
         fd = os.open(canonical, READ_FLAGS)
         entry = self.register(fd, "notary-system-tool", "notary-system-tool")

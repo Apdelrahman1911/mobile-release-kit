@@ -49,6 +49,78 @@ class NotaryAdmissionProbeData(unittest.TestCase):
         self.assertNotIn(str(self.xcode), encoded.decode())
         self.assertNotIn('fixture only', encoded.decode())
 
+    def test_only_exact_root_applications_trusted_group_write_is_admitted(self):
+        applications = self.xcode.parents[2]
+        original_lstat = Path.lstat
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        cases = (
+            ("root-group", (applications,), 0, 0, 0o40775, True),
+            ("admin-group", (applications,), 0, 80, 0o40775, True),
+            ("untrusted-group", (applications,), 0, 20, 0o40775, False),
+            ("current-owner", (applications,), os.getuid(), 80, 0o40775, False),
+            ("world-write", (applications,), 0, 80, 0o40777, False),
+            ("symlink-applications", (applications,), 0, 80, 0o120775, False),
+            ("regular-applications", (applications,), 0, 80, 0o100775, False),
+            ("descendant", (self.xcode,), 0, 80, 0o40775, False),
+            ("tools", tuple(self.xcode / "usr/bin" / name for name in ("notarytool", "stapler")),
+                0, 80, 0o100775, False),
+        )
+        for label, paths, uid, gid, mode, admitted in cases:
+            with self.subTest(case=label):
+                # Synthetic root/admin metadata only for these exact temporary fixture nodes.
+                # The real resolver and its POST still observe the same immutable rows.
+                def metadata(path):
+                    info = original_lstat(path)
+                    if path not in paths:
+                        return info
+                    values = {name: getattr(info, name) for name in fields}
+                    values.update(st_uid=uid, st_gid=gid, st_mode=mode)
+                    return SimpleNamespace(**values)
+                with mock.patch.object(Path, "lstat", metadata):
+                    value = DATA.observe(self.namespace, self.deadline)
+                self.assertEqual(value["registeredToolDescriptors"], 2 if admitted else 0)
+                self.assertTrue(value["toolDescriptorsClosed"])
+                for row in value["tools"]:
+                    self.assertEqual(row["toolAdmissionPassed"], admitted)
+                    self.assertEqual(row["laterCensus"]["state"], "observed")
+                    refused = [item for item in row["laterCensus"]["rows"] if not item["predicateAccepted"]]
+                    self.assertEqual(len(refused), 0 if admitted else 1)
+                    if admitted:
+                        self.assertEqual(row["admission"]["state"], "admitted")
+                        self.assertEqual(row["post"]["state"], "observed")
+                        application_row = next(item for item in row["laterCensus"]["rows"] if item["role"] == "applications")
+                        self.assertTrue(application_row["ownerIsRoot"] and application_row["groupIsRootOrAdmin"])
+                        self.assertTrue(application_row["groupWritable"])
+                        self.assertFalse(application_row["otherWritable"])
+                    else:
+                        self.assertEqual(row["admission"]["reason"], "notary-selected-tool-ancestry")
+                        self.assertIsNone(row["post"])
+                self.assertNotIn(str(self.xcode), DATA.encode(value).decode())
+        # A trusted Applications ancestor is still an original POST-bound object.
+        group = [80]
+        def changing_application(path):
+            info = original_lstat(path)
+            if path != applications:
+                return info
+            values = {name: getattr(info, name) for name in fields}
+            values.update(st_uid=0, st_gid=group[0], st_mode=0o40775)
+            return SimpleNamespace(**values)
+        original_census = DATA.census
+        def change_after_census(namespace, name, deadline):
+            rows = original_census(namespace, name, deadline)
+            group[0] = 20
+            return rows
+        with mock.patch.object(Path, "lstat", changing_application), \
+                mock.patch.object(DATA, "census", side_effect=change_after_census):
+            changed = DATA.observe(self.namespace, self.deadline)
+        self.assertTrue(changed["tools"][0]["toolAdmissionPassed"])
+        self.assertEqual(changed["tools"][0]["admission"]["state"], "admitted")
+        self.assertTrue(all(item["predicateAccepted"] for item in changed["tools"][0]["laterCensus"]["rows"]))
+        self.assertEqual(changed["tools"][0]["post"]["reason"], "notary-selected-tool-changed")
+        self.assertFalse(changed["tools"][1]["toolAdmissionPassed"])
+        self.assertEqual(changed["registeredToolDescriptors"], 1)
+        self.assertTrue(changed["toolDescriptorsClosed"])
+
     def test_ancestry_refusal_retains_primary_and_separates_later_metadata(self):
         applications = self.xcode.parents[2]
         applications.chmod(0o775)
