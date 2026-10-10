@@ -324,6 +324,19 @@ def without_app_signature_workflow(source):
 # This exact current two-site pin delta is independent of the historical
 # workflow additions below. Preserve their complete predecessor hash checks.
 def without_current_runtime_source_pin(source):
+    # The configured gh profile adds one real SOURCE row. Undo only the
+    # installed workflow's new two-site pin before its exact app-scope inverse.
+    # Unchanged Aqua still uses the old 177-row pin and bypasses this layer.
+    enrolled = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    preceding = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+    if enrolled in source:
+        configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + enrolled + "\n"
+        guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + enrolled + ' ]] || exit 1\n'
+        if (source.count(enrolled) != 2 or preceding in source
+                or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+            raise AssertionError("current runtime source pin exact two-site delta differs")
+        for line in (configured, guard):
+            source = source.replace("\n" + line, "\n" + line.replace(enrolled, preceding), 1)
     source = without_app_signature_workflow(source)
     current = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
     previous = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
@@ -9759,7 +9772,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertIn('"$' + variable + '" == ' + configured[0], workflow)
         # Read the actual bounded source DATA used by the stager, not a copy of
         # its historical pin. No core import, supplier extraction or execution.
-        self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source()[2])
+        self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source(history_provider=True)[2])
         # The manifest pin still needs independent runtime-regeneration evidence.
         # Its format, guards and CLI binding here do not establish its authority.
         self.assertEqual(TOOL.CURRENT_PROTOCOL, anchors["MRK_BUNDLED_PROTOCOL_SHA256"])
@@ -9770,7 +9783,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
         previous_pin = "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0"
         self.assertEqual(workflow.count(current_pin), 2)
         normalized = without_current_runtime_source_pin(workflow)
-        self.assertEqual(normalized, workflow.replace(current_pin, previous_pin))
+        preceding_pin = "f35a69f6a0e4baf2b365fc28662152d529564107738da9f477363dcc2ea6cdc2"
+        expected_before_app = workflow.replace(current_pin, preceding_pin)
+        expected_without_app = without_app_signature_workflow(expected_before_app)
+        self.assertEqual(normalized, expected_without_app.replace(preceding_pin, previous_pin))
         self.assertEqual(without_current_runtime_source_pin(normalized), normalized)
         for partial in (workflow.replace(current_pin, previous_pin, 1),
                         previous_pin.join(workflow.rsplit(current_pin, 1))):

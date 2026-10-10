@@ -1,7 +1,1 @@
-{
-  "schemaVersion": 1,
-  "targets": {
-    "aarch64-apple-darwin": {"state": "unconfigured"},
-    "x86_64-apple-darwin": {"state": "unconfigured"}
-  }
-}
+{"schemaVersion":1,"targets":{"aarch64-apple-darwin":{"producerProfileSha256":"2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2","runtimeManifestSha256":"a054a3a294ea3d4f2f981543d43a409e402d66ca73ee6760496e284020a1aed9","serviceProfileSha256":"7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663","signedPythonSha256":"649cc6c89e00132ad510bc01cb01acff10f953ededf0ef926a5b49d48ccb6ed0","signingArtifactId":"11662187042","signingReceiptSha256":"c886e0c5f179233d20defe59fc954f5b9e80f8873f3459607db68bf304746fe6","signingRunAttempt":"1","signingRunId":"38032209632","signingSourceCommit":"5cd8293b700c7edbdad8e1155e2ed0c95ab65087","sourceInputsSha256":"58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d","state":"configured"},"x86_64-apple-darwin":{"producerProfileSha256":"2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2","runtimeManifestSha256":"74bc09b347ebd9a7970640cd7546758b47343460b6c88fe3b23507ea09468ef4","serviceProfileSha256":"7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663","signedPythonSha256":"4e0c99b2d727cc592be91b5d589655f3930ace4c7f07b0b3ed6e25005f834e6a","signingArtifactId":"11662930810","signingReceiptSha256":"9963ad59050dbd1fb745adf85b3f9c3c67b4269404abf775b4fdbcc34dbca192","signingRunAttempt":"1","signingRunId":"38032209632","signingSourceCommit":"5cd8293b700c7edbdad8e1155e2ed0c95ab65087","sourceInputsSha256":"58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d","state":"configured"}}}
