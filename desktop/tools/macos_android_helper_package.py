@@ -1061,6 +1061,201 @@ def original_failure(error, owner, checkout, timeout, limit):
     return result
 
 
+# Public failure DATA only. SOURCE-selected labels, never exception text or a
+# diagnostic grant of command/cleanup/signature authority. Unknown labels stay
+# unclassified; in particular exact Refused class alone is not a sanitizer.
+_FAILURE_REASONS = frozenset((
+    'app-signature-fixed-native-phase', 'app-signature-summary-ref', 'application-no-installer-secret',
+    'build-release-identity', 'build-release-shape', 'build-release-size',
+    'build-release-version', 'build-target', 'closed-build-target',
+    'closed-entrypoint', 'closed-workflow-route', 'compiler-alias-directory-bound',
+    'compiler-alias-original', 'compiler-artifact-close-unknown', 'compiler-artifact-shape',
+    'compiler-bound', 'compiler-duplicate-key', 'compiler-finish',
+    'compiler-json', 'compiler-original-copy-changed', 'compiler-rows',
+    'compiler-terminal-order', 'credential-ancestor-mode', 'credential-base64',
+    'credential-callback-deadline', 'credential-callback-purpose', 'credential-callback-reserve',
+    'credential-callback-roster', 'credential-census-close-unknown', 'credential-certificate-format',
+    'credential-child-environment', 'credential-close-unknown', 'credential-code-purpose',
+    'credential-created-searchlist', 'credential-directory-original', 'credential-dispatch-reserve',
+    'credential-dispatch-unknown', 'credential-finality-incomplete', 'credential-fixed-original',
+    'credential-fixed-purpose', 'credential-identity-bound', 'credential-identity-format',
+    'credential-input-bound', 'credential-original-clock', 'credential-original-deadline',
+    'credential-original-nonzero', 'credential-original-return', 'credential-original-unknown',
+    'credential-p12-after-close', 'credential-p12-close-unknown', 'credential-p12-original',
+    'credential-p12-readback', 'credential-private-census', 'credential-private-file',
+    'credential-private-file-post', 'credential-private-parent', 'credential-private-query-stderr',
+    'credential-private-root-not-empty', 'credential-private-root-remains', 'credential-private-storage-reserve',
+    'credential-producer-admission', 'credential-producer-callback-post', 'credential-producer-import-post',
+    'credential-producer-original', 'credential-profile-identity', 'credential-root-exclusive',
+    'credential-root-mode', 'credential-search-format', 'credential-search-stderr',
+    'credential-search-value-changed', 'credential-short-write', 'credential-source-certificate',
+    'credential-source-certificates', 'credential-source-identity', 'credential-source-leaf',
+    'credential-source-post', 'credential-unwind-original-unknown', 'credential-user-domain',
+    'descriptor-relative-cleanup-required', 'direct-rust-source-route', 'directory-owner-mode',
+    'entry-compiler-original-changed', 'entry-library-command', 'entry-library-offset',
+    'entry-library-padding', 'entry-library-termination', 'entry-libsystem-only',
+    'entry-loader-command', 'entry-main-command', 'entry-native-initializer',
+    'entry-pie-no-executable-stack', 'entry-segment-command', 'entry-segment-sections',
+    'entry-source-changed', 'exact-detached-checkout', 'exclusive-output-original',
+    'facade-compiler-artifact-close-unknown', 'facade-compiler-original-changed', 'facade-source-changed',
+    'file-original-changed', 'file-original-read-changed', 'file-original-shape',
+    'fixed-facade-role', 'fixed-signing-requirement', 'fixed-source-driver',
+    'full-package-scope-only', 'helper-absolute-apple-system-dependency', 'helper-dyld-command',
+    'helper-dyld-offset', 'helper-dyld-terminated', 'helper-dylib-command',
+    'helper-dylib-name-offset', 'helper-dylib-terminated', 'helper-loader-override-refused',
+    'helper-one-library', 'helper-package-artifact', 'helper-package-incomplete',
+    'helper-release-graph', 'helper-release-profile', 'helper-separate-library-features',
+    'helper-system-dyld-only', 'hosted-native-platform', 'hosted-source-bindings',
+    'image-absolute-apple-system-dependency', 'image-build-version', 'image-command',
+    'image-dylib-target', 'image-fixed-install-name-and-system-closure', 'image-library-command',
+    'image-library-offset', 'image-library-padding', 'image-library-termination',
+    'image-loader-command', 'image-role-header', 'image-segment-command',
+    'image-segment-sections', 'image-source-release', 'macho-build-version',
+    'macho-command', 'macho-command-bound', 'macho-header',
+    'macho-minimum-macos26', 'macho-target', 'one-compiler-alias',
+    'one-resident-image', 'original-nonzero-build', 'original-nonzero-desktop-facade-build',
+    'original-nonzero-entry-build', 'original-nonzero-resident-facade-build', 'original-nonzero-resident-image-sign',
+    'original-nonzero-resident-image-verify-signed', 'original-nonzero-sign', 'original-nonzero-verify-signed',
+    'original-operation-refused', 'original-return-contract', 'output-close-unknown',
+    'output-readback', 'output-short-write', 'owned-work-route',
+    'receipt-bound', 'receipt-readback', 'receipt-short-write',
+    'receipt-work-changed', 'receipt-work-unavailable', 'resident-image-only-graph',
+    'run-identity', 'source-image-binding', 'source-image-release-changed',
+    'source-original-changed', 'source-producer-correspondence', 'source-producer-profile',
+    'source-producer-unconfigured', 'source-service-profile', 'source-signing-profile-changed',
+    'strict-original-verification', 'work-original',
+))
+_FAILURE_STAGES = (
+    "owned-directory-admission", "source-image-binding", "separate-resident-image-compiler",
+    "compiler-original-copy", "resident-image-source-selected-signing", "resident-image-verify-signed",
+    "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
+    "helper-source-selected-signing", "verify-signed",
+)
+_FAILURE_MAIN_STAGES = (
+    "entrypoint", "data-phase", "admission", "stager-load", "source-check", "profile-check",
+    "owner-load", "operation-create", "operation-execute", "success-output",
+)
+_FAILURE_TYPES = (
+    "helper-refused", "stager-refused", "os-error", "value-error", "type-error", "runtime-error",
+    "assertion-error", "memory-error", "recursion-error", "unicode-error", "json-error",
+    "keyboard-interrupt", "system-exit", "other",
+)
+_FAILURE_OWNER_CLASSES = ("ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "other")
+_FAILURE_OWNER_REASONS = (
+    "output-bound", "deadline", "protocol-or-original-ownership", "original-parent-ended",
+    "cleanup-unconfirmed", "failed-timeout-or-incomplete-output", "exec-rejected",
+    "stopped-before-execution", "incomplete-output", "unclassified",
+)
+
+
+def failure_exception(error, stager=None):
+    """Classify the original object without rendering it or trusting its name."""
+    selected = type(error)
+    stager_class = stager.__dict__.get("Refused") if type(stager) is type(sys) else None
+    kind = ("helper-refused" if selected is Refused else
+            "stager-refused" if selected is stager_class else "other")
+    reason, number = "unclassified", None
+    if kind in ("helper-refused", "stager-refused"):
+        values = BaseException.args.__get__(error)
+        if (type(values) is tuple and len(values) == 1 and type(values[0]) is str
+                and len(values[0]) <= 96 and values[0] in _FAILURE_REASONS):
+            reason = values[0]
+    else:
+        known = ((ValueError, "value-error"), (TypeError, "type-error"), (RuntimeError, "runtime-error"),
+                 (AssertionError, "assertion-error"), (MemoryError, "memory-error"),
+                 (RecursionError, "recursion-error"), (UnicodeDecodeError, "unicode-error"),
+                 (UnicodeEncodeError, "unicode-error"), (json.JSONDecodeError, "json-error"),
+                 (KeyboardInterrupt, "keyboard-interrupt"), (SystemExit, "system-exit"))
+        kind = next((label for cls, label in known if selected is cls), "other")
+        if any(selected is cls for cls in (OSError, PermissionError, FileNotFoundError, FileExistsError, IsADirectoryError,
+                  NotADirectoryError, InterruptedError, BlockingIOError, TimeoutError,
+                  ChildProcessError, BrokenPipeError, ConnectionError, ConnectionAbortedError,
+                  ConnectionRefusedError, ConnectionResetError, ProcessLookupError)):
+            kind = "os-error"
+            value = OSError.errno.__get__(error)
+            if type(value) is int and 0 < value < 65536:
+                number = value
+    return {"type": kind, "reason": reason, "errno": number}
+
+
+def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, operation=None, stager=None):
+    """Bounded passive DATA; no owner callbacks, file reads, or state changes."""
+    def row(value):
+        return value if type(value) is dict else {}
+    def token(value, allowed):
+        return value if type(value) is str and len(value) <= 96 and value in allowed else "unclassified"
+    def flag(value):
+        return value if type(value) is bool else None
+    def integer(value, lower=0, upper=4096):
+        return value if type(value) is int and lower <= value <= upper else None
+    def count(value, maximum):
+        return len(value) if type(value) is list and len(value) <= maximum else None
+    def last(value, maximum):
+        return row(value[-1]) if type(value) is list and 0 < len(value) <= maximum else {}
+
+    state = object.__getattribute__(operation, "__dict__") if type(operation) is Operation else {}
+    receipt = row(state.get("receipt"))
+    original = row(receipt.get("failure"))
+    captured = row(state.get("diagnostic_failure"))
+    native = last(state.get("calls"), 4096)
+    owned = row(native.get("originalFailure"))
+    credential = last(state.get("credential_calls"), 64)
+    context = last(state.get("credential_contexts"), 64)
+    purposes = ("python", "resident-image", "helper", "producer", "installer", "observer-program",
+                "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES
+    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
+              + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
+              + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
+    pending = receipt.get("directStagerIOPending")
+    return {
+        "schemaVersion": 1, "kind": "android-helper-failure", "outcome": "failure",
+        "diagnosticOnly": True, "productReady": False,
+        "phase": token(phase, phases), "target": token(target, (ARM_TARGET, INTEL_TARGET)),
+        "mainStage": token(main_stage, _FAILURE_MAIN_STAGES), "terminal": failure_exception(error, stager),
+        "originalFailure": {
+            "recorded": type(receipt.get("failure")) is dict if state else None,
+            "stage": token(original.get("stage"), _FAILURE_STAGES),
+            "type": token(captured.get("type"), _FAILURE_TYPES),
+            "reason": token(captured.get("reason", original.get("reason")), _FAILURE_REASONS),
+            "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
+        },
+        "lastRecordedNative": {
+            "role": token(native.get("role"), PREPARE_ROLES),
+            **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
+            "returncode": integer(native.get("returncode"), -65536, 65535),
+            "originalFailure": {"available": flag(owned.get("available")),
+                "ownerErrorType": token(owned.get("ownerErrorType"), _FAILURE_OWNER_CLASSES),
+                "classification": token(owned.get("classification"), _FAILURE_OWNER_REASONS)},
+        },
+        "lastRecordedCredential": {
+            "role": token(credential.get("role"), CREDENTIAL_ROLES),
+            **{key: flag(credential.get(key)) for key in ("entered", "returned", "settled")},
+            "status": integer(credential.get("status"), -65536, 65535),
+        },
+        "lastRecordedContext": {"purpose": token(context.get("purpose"), purposes),
+            **{key: flag(context.get(key)) for key in ("closed", "retired", "searchRestored", "defaultUnchanged")}},
+        "counts": {"native": count(state.get("calls"), 4096), "credential": count(state.get("credential_calls"), 64),
+                   "contexts": count(state.get("credential_contexts"), 64), "cleanupErrors": count(state.get("errors"), 4096)},
+        "cleanup": {"targetRetired": flag(receipt.get("targetRetired")),
+            "originalClosesKnown": flag(receipt.get("originalClosesKnown")),
+            "credentialUnknown": flag(state.get("credential_unknown")),
+            "directStagerIOPending": (False if pending is None else True if type(pending) is str else None)
+                if "directStagerIOPending" in receipt else None},
+    }
+
+
+def emit_failure_diagnostic(error, **context):
+    """Best effort only: diagnostic failure cannot replace the original exit1."""
+    try:
+        body = json.dumps(failure_diagnostic(error, **context), sort_keys=True, separators=(",", ":")) + "\n"
+        if body.isascii() and len(body) <= 4096:
+            written = sys.stderr.write(body)
+            if type(written) is int and written == len(body):
+                sys.stderr.flush()
+    except BaseException:
+        pass
+
+
 def package_timeout_data(now, endpoint, requested):
     """Leave the existing owner's three-second settlement inside this group."""
     need(type(now) is int and type(endpoint) is int and 0 <= now < endpoint
@@ -1348,6 +1543,7 @@ class Operation:
         self.removal_pending_outputs = set()
         self.removal_requests = None
         self.entries, self.calls, self.errors = [], [], []
+        self.diagnostic_failure = None  # Private finite DATA, never a completion/ownership latch.
         self.entry_registry = {}  # Same originals, retained even after consumed/unknown closes.
         self.credential_calls, self.credential_contexts = [], []
         self.credential_active = None
@@ -6300,6 +6496,10 @@ class Operation:
             if self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
+            try:
+                self.diagnostic_failure = failure_exception(error, self.stager)
+            except BaseException:
+                pass  # Do not replace the same original failure or its cleanup.
             self.receipt["failure"] = {"stage": self.stage, "type": type(error).__name__,
                                        "reason": str(error) if type(error) is Refused else "original-operation-refused"}
             if isinstance(error, OSError):
@@ -6841,28 +7041,43 @@ def tool_data_main(phase, target):
 
 
 def main():
+    phase = target = stager = operation = None
+    main_stage = "entrypoint"
     try:
         phase, target = entrypoint(sys.argv)
         if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
+            main_stage = "data-phase"
             return tool_data_main(phase, target)
         if phase == APP_SIGNATURE_SUMMARY:
             need(os.environ.get("GITHUB_REF") == APP_SIGNATURE_REF, "app-signature-summary-ref")
+            main_stage = "admission"
             work = admit(os.environ, target=target, phase="verify-after")
+            main_stage = "stager-load"
             stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_app_signature_stager")
+            main_stage = "source-check"
             need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+            main_stage = "data-phase"
             return app_signature_summary(target, os.environ, stager, work)
+        main_stage = "admission"
         work = admit(os.environ, target=target, phase=phase)
+        main_stage = "stager-load"
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
+        main_stage = "source-check"
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+        main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
                                      allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping") + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
                                      and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
         if phase in FINAL_PACKAGE_PHASES or phase == "prepare-removal-observers":
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
+        main_stage = "owner-load"
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
+        main_stage = "operation-create"
         operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target)
+        main_stage = "operation-execute"
         result = operation.execute(os.environ.get("MRK_MACOS_ANDROID_HELPER_SHA256"))
+        main_stage = "success-output"
         if phase == "prepare":
             print("sha256=" + result, flush=True)
             print("entry-sha256=" + operation.entry_sha256, flush=True)
@@ -6883,10 +7098,15 @@ def main():
             sys.stdout.flush()
             operation.notary_clock(work=False)
         return 0
-    except BaseException:
-        # Native/owner messages can contain local paths. Exact bounded command
-        # outputs and typed failures are retained in the private work evidence.
-        print("Fixed Android helper packaging refused; see its bounded work receipt.", file=sys.stderr)
+    except BaseException as error:
+        # Raw originals/credentials remain private. Even stderr failure must
+        # preserve exit1; the finite second line is never success evidence.
+        try:
+            print("Fixed Android helper packaging refused; see its bounded work receipt.", file=sys.stderr)
+        except BaseException:
+            pass
+        emit_failure_diagnostic(error, phase=phase, target=target, main_stage=main_stage,
+                                operation=operation, stager=stager)
         return 1
 
 

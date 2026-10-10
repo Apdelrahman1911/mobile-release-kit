@@ -642,10 +642,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 (source / "desktop/macos-installed-inputs" / name).read_bytes())
         for name in ("macos_android_helper_package.py", "stage_macos_installed.py"):
             put(checkout / "desktop/tools" / name, (source / "desktop/tools" / name).read_bytes())
-        # The real stager reads this SOURCE even when both tools are unconfigured.
-        put(checkout / module.TOOL_NOMINATION, (source / module.TOOL_NOMINATION).read_bytes())
-        # Current runtime_tree also reads the real unconfigured provider profile.
-        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, (source / TOOL.HISTORY_PROVIDER_PROFILE).read_bytes())
+        # This inert runtime deliberately has neither tool. Declare that DATA
+        # scenario explicitly; deployed SOURCE may legitimately enroll both.
+        put(checkout / module.TOOL_NOMINATION, TOOL.canonical({"schemaVersion": 1, "tools": {
+            purpose: {name: {"build": {"state": "unconfigured"}, "signed": {"state": "unconfigured"}}
+                      for name in TOOL.MAC_TARGETS} for purpose in module.TOOL_FIXED}}))
+        put(checkout / TOOL.HISTORY_PROVIDER_PROFILE, TOOL.canonical({"schemaVersion": 1,
+            "version": TOOL.HISTORY_PROVIDER_VERSION, "sourceManifestSha256": None,
+            "targets": {name: None for name in TOOL.MAC_TARGETS}}))
         notary_profile = {"schemaVersion": 1, "mode": "app-store-connect-team-key", "teamId": "TEST000001",
                           "keyId": "DATA000001", "issuerId": "11111111-2222-3333-4444-555555555555"}
         put(checkout / module.NOTARY_PROFILE, TOOL.canonical(notary_profile))
@@ -4397,6 +4401,198 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         # Actual encoded cap, not only an entry-count truncation check.
         with self.assertRaisesRegex(module.Refused,"^app-signature-inventory-bytes$"):
             module.app_signature_inventory({str(i)+"x"*4000:(b"",0o444) for i in range(300)})
+
+        # Failure diagnostics are finite passive DATA, never native qualification.
+        # Exact source classes matter: a stager Refused is not helper.Refused.
+        module = ANDROID_HELPER
+        for failure, target, code, category, status in (
+            ("wrong-architecture", module.INTEL_TARGET, "image-dylib-target", "stager-refused", 0),
+            ("nonzero", module.ARM_TARGET, "original-nonzero-build", "helper-refused", 101),
+        ):
+            with self.subTest(diagnosticOriginal=failure), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary), failure, build_target=target)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
+                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$") as raised:
+                    operation.execute()
+                self.assertEqual(len(observations), 1)
+                # The existing receipt schema/reason remains unchanged. The new
+                # private scalar preserves only the admitted stager code lost there.
+                self.assertEqual(operation.receipt["failure"]["reason"],
+                    "original-operation-refused" if category == "stager-refused" else code)
+                self.assertEqual(operation.diagnostic_failure,
+                    {"type": category, "reason": code, "errno": None})
+                value = module.failure_diagnostic(raised.exception, phase="prepare", target=target,
+                    main_stage="operation-execute", operation=operation, stager=TOOL)
+                self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                self.assertEqual((value["originalFailure"]["recorded"], value["originalFailure"]["type"],
+                                  value["originalFailure"]["reason"]), (True, category, code))
+                self.assertEqual(value["originalFailure"]["stage"],
+                    "compiler-original-copy" if category == "stager-refused" else "separate-resident-image-compiler")
+                self.assertEqual((value["lastRecordedNative"]["role"], value["lastRecordedNative"]["returncode"],
+                                  value["lastRecordedNative"]["returned"], value["lastRecordedNative"]["capturesSettled"]),
+                                 ("build", status, True, True))
+                self.assertEqual(value["counts"], {"native": 1, "credential": 0, "contexts": 0, "cleanupErrors": 0})
+                self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
+                self.assertFalse(value["cleanup"]["directStagerIOPending"])
+                self.assertIsNone(value["lastRecordedCredential"]["status"])
+                self.assertFalse(value["productReady"] or operation.receipt["passed"])
+                self.assertNotIn("passed", value)
+                diagnostic_output = io.StringIO()
+                with contextlib.redirect_stderr(diagnostic_output):
+                    module.emit_failure_diagnostic(raised.exception, phase="prepare", target=target,
+                        main_stage="operation-execute", operation=operation, stager=TOOL)
+                encoded = diagnostic_output.getvalue()
+                self.assertLessEqual(len(encoded.encode("ascii")), 4096)
+                self.assertEqual(json.loads(encoded), value)
+                self.assertNotIn(str(checkout), encoded)
+                self.assertNotIn("synthetic helper build", encoded)
+
+        class PrivateError(RuntimeError):
+            @property
+            def args(self):
+                raise AssertionError("exception property must not be inspected")
+            def __str__(self):
+                raise AssertionError("exception text must not be rendered")
+        class ForeignRefused(RuntimeError):
+            pass
+        private = "secret-shaped-but-not-a-source-code"
+        for error in (module.Refused(private), TOOL.Refused(private), ForeignRefused("image-dylib-target"),
+                      PrivateError(private), module.Refused("credential-input-bound", private),
+                      TOOL.Refused({"private": private})):
+            value = module.failure_exception(error, TOOL)
+            self.assertEqual(value["reason"], "unclassified")
+            self.assertNotIn(private, json.dumps(value))
+        self.assertEqual(module.failure_exception(OSError(5, private), TOOL),
+                         {"type": "os-error", "reason": "unclassified", "errno": 5})
+        # Failure-code capture itself is best effort. The real execute catch
+        # still keeps its existing primary record and completes known cleanup.
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                "wrong-architecture", build_target=module.INTEL_TARGET)
+            operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=module.INTEL_TARGET)
+            with (mock.patch.object(module, "failure_exception", side_effect=PrivateError(private)),
+                  self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$")):
+                operation.execute()
+            self.assertIsNone(operation.diagnostic_failure)
+            self.assertEqual(operation.receipt["failure"]["reason"], "original-operation-refused")
+            self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
+            self.assertEqual(len(observations), 1)
+        # An inert exact-class object only exercises the passive DATA reducer;
+        # it is not a constructor/original-owner or cleanup qualification.
+        passive = object.__new__(module.Operation)
+        passive.__dict__.update(
+            receipt={"failure": {"stage": private, "type": private, "reason": private, "errno": True},
+                     "passed": True, "targetRetired": False, "originalClosesKnown": False,
+                     "directStagerIOPending": private, "private": private},
+            diagnostic_failure={"type": "other", "reason": private, "errno": True},
+            calls=[{"role": "build", "entered": True, "returned": False, "capturesSettled": False,
+                    "returncode": True, "dispatched": True, "contained": False, "cleanup_complete": False,
+                    "argv": [private], "stderr": private,
+                    "originalFailure": {"available": True, "ownerErrorType": "ProcessOutcomeUnknown",
+                        "classification": "cleanup-unconfirmed", "frames": [{"private": private}]}}],
+            credential_calls=[{"role": "restore", "entered": True, "returned": True, "settled": True, "status": 0,
+                               "argv": [private], "output": private}],
+            credential_contexts=[{"purpose": "resident-image", "closed": False, "retired": False,
+                                  "searchRestored": False, "defaultUnchanged": None, "private": private}],
+            errors=[{"private": private}], credential_unknown=True, environment={"PRIVATE": private})
+        value = module.failure_diagnostic(PrivateError(private), phase=private, target=private,
+            main_stage=private, operation=passive, stager=TOOL)
+        self.assertEqual(value["outcome"], "failure")
+        self.assertTrue(value["diagnosticOnly"])
+        self.assertFalse(value["productReady"])
+        self.assertEqual(value["originalFailure"],
+            {"recorded": True, "stage": "unclassified", "type": "other", "reason": "unclassified", "errno": None})
+        self.assertEqual(value["lastRecordedNative"]["originalFailure"],
+            {"available": True, "ownerErrorType": "ProcessOutcomeUnknown", "classification": "cleanup-unconfirmed"})
+        self.assertFalse(value["lastRecordedNative"]["returned"] or value["lastRecordedNative"]["capturesSettled"])
+        self.assertIsNone(value["lastRecordedNative"]["returncode"])
+        self.assertEqual((value["lastRecordedCredential"]["role"], value["lastRecordedCredential"]["status"]), ("restore", 0))
+        self.assertFalse(value["lastRecordedContext"]["searchRestored"])
+        self.assertIsNone(value["lastRecordedContext"]["defaultUnchanged"])
+        self.assertEqual(value["cleanup"], {"targetRetired": False, "originalClosesKnown": False,
+            "credentialUnknown": True, "directStagerIOPending": True})
+        self.assertNotIn(private, json.dumps(value))
+        self.assertNotIn("passed", value)
+        # Malformed scalars and oversized lists cannot be coerced into zero/true.
+        passive.calls = [{}] * 4097
+        passive.credential_calls = [{}] * 65
+        passive.credential_contexts = [{}] * 65
+        passive.errors = [{}] * 4097
+        passive.receipt["targetRetired"] = 1
+        passive.receipt["originalClosesKnown"] = 0
+        value = module.failure_diagnostic(module.Refused(private), operation=passive, stager=TOOL)
+        self.assertTrue(all(item is None for item in value["counts"].values()))
+        self.assertIsNone(value["cleanup"]["targetRetired"])
+        self.assertIsNone(value["cleanup"]["originalClosesKnown"])
+        # Real main pre-operation failure never claims a receipt or owner exists.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (mock.patch.object(module.sys, "argv", ["fixed", "not-a-phase"]),
+              contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(stdout.getvalue(), "")
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "Fixed Android helper packaging refused; see its bounded work receipt.")
+        value = json.loads(lines[1])
+        self.assertEqual((value["mainStage"], value["terminal"]["reason"]), ("entrypoint", "closed-entrypoint"))
+        self.assertIsNone(value["originalFailure"]["recorded"])
+        self.assertTrue(all(item is None for item in value["counts"].values()))
+        self.assertTrue(all(item is None for item in value["cleanup"].values()))
+        # Formatting, generic-line writes, or diagnostic flush failures cannot
+        # replace main's original exit1. No exception text is used as fallback.
+        class BrokenStderr:
+            def write(self, body):
+                raise OSError(5, private)
+            def flush(self):
+                raise OSError(5, private)
+        for broken in ("serialize", "write", "flush"):
+            with self.subTest(diagnosticFailure=broken), contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(module.sys, "argv", ["fixed", "not-a-phase"]))
+                captured = io.StringIO()
+                stack.enter_context(contextlib.redirect_stderr(BrokenStderr() if broken == "write" else captured))
+                if broken == "serialize":
+                    stack.enter_context(mock.patch.object(module.json, "dumps", side_effect=PrivateError(private)))
+                elif broken == "flush":
+                    stack.enter_context(mock.patch.object(captured, "flush", side_effect=PrivateError(private)))
+                self.assertEqual(module.main(), 1)
+                self.assertNotIn(private, captured.getvalue())
+        # Drive genuine main -> constructor -> execute -> stager parser/cleanup
+        # using the existing actual-FS fixture and its explicit inert native port.
+        for failed in (False, True):
+            with self.subTest(diagnosticMainFailure=failed), tempfile.TemporaryDirectory() as temporary:
+                target = module.INTEL_TARGET if failed else module.ARM_TARGET
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "wrong-architecture" if failed else None, build_target=target)
+                (checkout / ".git").mkdir()
+                (checkout / ".git/HEAD").write_text(environment["GITHUB_SHA"] + "\n")
+                def load(checkout_arg, name, alias):
+                    self.assertEqual(checkout_arg, checkout)
+                    if name == "stage_macos_installed.py":
+                        self.assertEqual(alias, "_mrk_android_helper_stager")
+                        return TOOL
+                    self.assertEqual((name, alias), ("macos_aqua_qualification.py", "_mrk_android_helper_owner_loader"))
+                    return SimpleNamespace(load_owner=lambda source: owner if source == checkout else self.fail("owner source mismatch"))
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (mock.patch.object(module, "CHECKOUT", checkout), mock.patch.object(module, "load_data", side_effect=load),
+                      mock.patch.object(module, "admit", return_value=work),
+                      mock.patch.object(module.sys, "argv", ["fixed", "prepare", "--target", target]),
+                      mock.patch.dict(module.os.environ, environment, clear=True),
+                      contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
+                    self.assertEqual(module.main(), 1 if failed else 0)
+                self.assertEqual(len(observations), 1 if failed else len(module.PREPARE_ROLES))
+                if failed:
+                    self.assertEqual(stdout.getvalue(), "")
+                    lines = stderr.getvalue().splitlines()
+                    self.assertEqual(len(lines), 2)
+                    value = json.loads(lines[1])
+                    self.assertEqual((value["mainStage"], value["originalFailure"]["type"], value["originalFailure"]["reason"]),
+                                     ("operation-execute", "stager-refused", "image-dylib-target"))
+                    self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                    self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
+                else:
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertEqual([line.split("=", 1)[0] for line in stdout.getvalue().splitlines()],
+                        ["sha256", "entry-sha256", "resident-image-sha256", "desktop-facade-sha256", "image-release-id"])
 
 
 
