@@ -2486,12 +2486,18 @@ fn macos_images_selection_and_edit_share_one_sealed_profile() {
 pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
     // Explicitly called by the harness=false observer. Compiled selection and
     // method DATA only: no runtime resolution, native query or document permit.
+    use crate::android_build_protocol::Profile;
     let runtime = RuntimeConfig::packaged(PathBuf::from("/inert-mrk-evidence-profile-not-opened"));
     let selected = macos_bindings();
+    // Compiled catalogue DATA supports both Mac profiles, not the Linux profile.
+    for (profile, expected) in [(Profile::MacArm64, true), (Profile::MacX64, true), (Profile::LinuxX64, false)] {
+        if crate::android_toolchain_macos_policy::native_catalog_supports(profile) != expected { return false; }
+    }
+    let android_supported = matches!(Profile::current(), Some(Profile::MacArm64 | Profile::MacX64));
     if runtime.project_selection_profile_available() != selected
         || runtime.evidence_selection_profile_available() != selected
         || runtime.project_path_selection_profile_available() != (INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && selected)
-        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected && cfg!(target_arch = "aarch64")) { return false; }
+        || runtime.android_source_selection_profile_available() != (INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && selected && android_supported) { return false; }
     for method in ["artifacts.candidate.observe", "release.evidence.observe"] {
         if !macos_installed_passive_method(method) { return false; }
         #[cfg(not(all(feature = "development-runtime", debug_assertions)))]
