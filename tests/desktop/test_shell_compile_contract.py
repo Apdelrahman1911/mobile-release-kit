@@ -48,8 +48,8 @@ def mac_environment(target="aarch64-apple-darwin", mode="full4"):
              "MRK_DESKTOP_HOSTED_CHECKS": helper.MAC_COMPILE_SCOPE}
     if mode == "vault-only":
         value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION="remaining", MRK_EXPECTED_SHA="1" * 40)
-    if mode == "app-only":
-        value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION="app-only", MRK_EXPECTED_SHA="1" * 40)
+    if mode in ("app-only", "observer-only"):
+        value.update(GITHUB_EVENT_NAME="workflow_dispatch", MRK_COMPILE_SELECTION=mode, MRK_EXPECTED_SHA="1" * 40)
     return value
 
 
@@ -61,7 +61,8 @@ def mac_context(target="aarch64-apple-darwin", mode="full4"):
             "executionScope": helper.MAC_COMPILE_SCOPE,
             # Synthetic context only; never an admitted native/source receipt.
             "macCompile": {"target": target, "mode": mode, "release": helper.MAC_COMPILE_HOSTS[target][4] + "desktop-01",
-                           "sources": [], "graphs": ([["mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release",
+                           "sources": [], "graphs": ([["mac-observer-compile-only", "desktop/src-tauri/Cargo.toml", "test",
+                                        "desktop-shell,custom-protocol,macos-installed-observation", "installed-shell-observation"]] if mode == "observer-only" else [["mac-normal-bin-compile-only", "desktop/src-tauri/Cargo.toml", "release",
                                         "desktop-shell,custom-protocol", "mobile-release-kit-desktop"]] if mode == "app-only" else
                                       [vault, *([list(row) for row in helper.MAC_COMPILE_GRAPHS] if mode == "full4" else [])]),
                            "execution": "compile-only"}}
@@ -643,15 +644,15 @@ class ShellCompileContractTests(unittest.TestCase):
         arm_row = '{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"full4"}'
         intel_row = '{"platform":"macos","os":"macos-26-intel","target":"x86_64-apple-darwin","mode":"full4"}'
         arm_vault = '{"platform":"macos","os":"macos-26","target":"aarch64-apple-darwin","mode":"vault-only"}'
-        matrix = ("        include: ${{ fromJSON(inputs.target == 'app-only' && '[" + arm_row.replace('full4', 'app-only') + ',' + intel_row.replace('full4', 'app-only') + "]' || inputs.target == 'history-app4' && '[" + arm_row.replace('full4', 'history-app4') + ',' + intel_row.replace('full4', 'history-app4') + "]' || inputs.target == 'remaining' && '[" + arm_vault + ',' + intel_row + "]' || "
+        matrix = ("        include: ${{ fromJSON(inputs.target == 'observer-only' && '[" + arm_row.replace('full4', 'observer-only') + "]' || inputs.target == 'app-only' && '[" + arm_row.replace('full4', 'app-only') + ',' + intel_row.replace('full4', 'app-only') + "]' || inputs.target == 'history-app4' && '[" + arm_row.replace('full4', 'history-app4') + ',' + intel_row.replace('full4', 'history-app4') + "]' || inputs.target == 'remaining' && '[" + arm_vault + ',' + intel_row + "]' || "
                   "inputs.target == 'arm' && '[" + arm_row + "]' || inputs.target == 'intel' && '[" + intel_row + "]' || '[" + arm_row + ',' + intel_row + "]') }}\n")
         self.assertEqual(workflow.count(matrix), 1)
         self.assertIn("      target:\n"
-                      "        description: Fixed compiler rows; history-app4 DATA plus app, or app-only shipping compile, both architectures\n"
+                      "        description: Fixed compiler rows; history-app4 DATA, app-only both architectures, or observer-only ARM compile\n"
                       "        required: false\n"
                       "        type: choice\n"
                       "        default: both\n"
-                      "        options: [both, arm, intel, remaining, history-app4, app-only]\n", workflow)
+                      "        options: [both, arm, intel, remaining, history-app4, app-only, observer-only]\n", workflow)
         self.assertIn("      MRK_COMPILE_SELECTION: ${{ inputs.target || 'both' }}\n", workflow)
         self.assertIn("      MRK_MACOS_COMPILE_MODE: ${{ matrix.mode }}\n", workflow)
         admission = workflow.split("      - name: Require exact disposable verification source\n", 1)[1].split(
@@ -659,6 +660,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then\n'
                       '            [[ "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" ]]\n'
                       '            case "$MRK_COMPILE_SELECTION" in\n'
+                      '              observer-only) [[ "$MRK_MACOS_COMPILE_MODE" == observer-only && "$MRK_MACOS_TARGET" == aarch64-apple-darwin ]] ;;\n'
                       '              app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
                       '              history-app4) [[ "$MRK_MACOS_COMPILE_MODE" == history-app4 && ( "$MRK_MACOS_TARGET" == aarch64-apple-darwin || "$MRK_MACOS_TARGET" == x86_64-apple-darwin ) ]] ;;\n'
                       '              both) [[ "$MRK_MACOS_COMPILE_MODE" == full4 ]] ;;\n'
@@ -675,13 +677,13 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertIn('[[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-normal-compile.yml@$GITHUB_REF" ]]', admission)
         self.assertIn('[[ "$RUNNER_ENVIRONMENT" == github-hosted ]]', admission)
         header = workflow.split('    steps:\n', 1)[0]
-        self.assertIn("    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 50 || 45 }}\n", header)
+        self.assertIn("    timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 120 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only') && 50 || 45 }}\n", header)
         self.assertIn('      fail-fast: false\n      max-parallel: 2\n', header)
         acquire = workflow.split('      - name: Acquire locked active-platform inputs without npm scripts\n', 1)[1].split('      - name:', 1)[0]
         compile_step = workflow.split('      - name: Compile selected graphs and run only selected History DATA\n', 1)[1].split('      - name:', 1)[0]
         self.assertIn('        timeout-minutes: 15\n', acquire)
-        self.assertIn("        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only') && 32 || 25 }}\n", compile_step)
-        self.assertIn("      - name: Select fixed frontend compiler\n        if: matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only'\n", workflow)
+        self.assertIn("        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 92 || (matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only') && 32 || 25 }}\n", compile_step)
+        self.assertIn("      - name: Select fixed frontend compiler\n        if: matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only'\n", workflow)
         self.assertIn("desktop-macos-normal-compile-${{ matrix.target }}-${{ matrix.mode }}-", workflow)
         self.assertNotIn("ubuntu-", workflow)
         self.assertNotIn("windows-2025", workflow)
@@ -1057,7 +1059,7 @@ class ShellCompileContractTests(unittest.TestCase):
         self.assertEqual(tuple(HISTORY_APP_CASES), helper.MAC_HISTORY_TESTS)
         self.assertEqual(HISTORY_APP_CASES, sorted(HISTORY_APP_CASES))
         workflow = (HELPER.parents[2] / ".github/workflows/desktop-macos-normal-compile.yml").read_text()
-        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only]", workflow)
+        self.assertIn("options: [both, arm, intel, remaining, history-app4, app-only, observer-only]", workflow)
         self.assertIn("history-app4) [[", workflow)
         for target in MAC_RUST_EXPECTED:
             env, bound = history_app_environment(target), history_app_context(target)
@@ -1150,10 +1152,32 @@ class ShellCompileContractTests(unittest.TestCase):
                 with self.assertRaises(helper.CheckFailure):
                     helper.compile_workflow_binding({**app_env, field: bad}, helper.MAC_COMPILE_SCOPE)
         self.assertIn('app-only) [[ "$MRK_MACOS_COMPILE_MODE" == app-only', workflow)
-        self.assertIn("matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only'", workflow)
+        self.assertIn("matrix.mode == 'full4' || matrix.mode == 'history-app4' || matrix.mode == 'app-only' || matrix.mode == 'observer-only'", workflow)
         self.assertIn('"target":"aarch64-apple-darwin","mode":"app-only"', workflow)
         self.assertIn('"target":"x86_64-apple-darwin","mode":"app-only"', workflow)
         self.assertIn('"$GITHUB_EVENT_NAME" == push && "$MRK_COMPILE_SELECTION" == both && "$MRK_MACOS_COMPILE_MODE" == full4', workflow)
+
+
+        # Exactly one manual ARM graph, never a new platform or runtime role.
+        observer_env = mac_environment("aarch64-apple-darwin", "observer-only")
+        observer = mac_context("aarch64-apple-darwin", "observer-only")
+        self.assertEqual(helper.mac_compile_mode(observer_env, "aarch64-apple-darwin"), "observer-only")
+        self.assertEqual([list(row) for row in helper.mac_compile_graphs("aarch64-apple-darwin", "observer-only")],
+                         observer["macCompile"]["graphs"])
+        self.assertEqual(observer["macCompile"]["execution"], "compile-only")
+        self.assertNotIn("tests", observer["macCompile"])
+        for key, value in (("GITHUB_EVENT_NAME", "push"), ("MRK_COMPILE_SELECTION", "both"),
+                           ("MRK_MACOS_COMPILE_MODE", "full4"), ("MRK_MACOS_TARGET", "x86_64-apple-darwin")):
+            with self.subTest(observer_binding=key), self.assertRaises(helper.CheckFailure):
+                helper.mac_compile_mode({**observer_env, key: value}, "aarch64-apple-darwin")
+        with self.assertRaises(helper.CheckFailure):
+            helper.mac_compile_graphs("x86_64-apple-darwin", "observer-only")
+        self.assertEqual(workflow.count('"target":"aarch64-apple-darwin","mode":"observer-only"'), 1)
+        self.assertNotIn('"target":"x86_64-apple-darwin","mode":"observer-only"', workflow)
+        self.assertNotIn("environment:", workflow)
+        self.assertEqual(workflow.count("/compile-checks.json"), 1)
+        self.assertNotIn("source-slots-compile.stdout", workflow)
+        self.assertNotIn("source-slots-compile.stderr", workflow)
 
     def test_compile_cleanup_requires_complete_matching_original_positive_receipts(self):
         for phase in helper.COMPILE_CHECKS:
@@ -1902,7 +1926,8 @@ class ShellCompileContractTests(unittest.TestCase):
 
         pairs = (("aarch64-apple-darwin", "full4"), ("x86_64-apple-darwin", "full4"),
                  ("aarch64-apple-darwin", "vault-only"),
-                 ("aarch64-apple-darwin", "app-only"), ("x86_64-apple-darwin", "app-only"))
+                 ("aarch64-apple-darwin", "app-only"), ("x86_64-apple-darwin", "app-only"),
+                 ("aarch64-apple-darwin", "observer-only"))
         for target, mode in pairs:
             expected_rust = MAC_RUST_EXPECTED[target]
             events, calls, written, guards, input_calls = [], [], [], [], []
@@ -1920,11 +1945,11 @@ class ShellCompileContractTests(unittest.TestCase):
                 if kw["check"] == "mac-cargo-version":
                     return "cargo 1.98.0 (abcdef123 2026-09-01)"
                 if kw["check"] == "node-version":
-                    self.assertIn(mode, ("full4", "app-only"))
+                    self.assertIn(mode, ("full4", "app-only", "observer-only"))
                     return helper.NODE
                 return ""
             def selected(name):
-                self.assertIn(name, ("git", "node") if mode in ("full4", "app-only") else ("git",))
+                self.assertIn(name, ("git", "node") if mode in ("full4", "app-only", "observer-only") else ("git",))
                 return "/usr/bin/git" if name == "git" else "/selected/bin/node"
             def selected_inputs(source, selected_target, selected_mode):
                 input_calls.append((str(source), selected_target, selected_mode))
@@ -1955,21 +1980,22 @@ class ShellCompileContractTests(unittest.TestCase):
                                     and "/inert/source/desktop/helpers" in paths for paths in guards))
                 helper.phase_mac_compile("acquire", prepared)
             self.assertTrue(input_calls and all(row == (bound["source"], target, mode) for row in input_calls))
-            if mode == "app-only":
+            if mode in ("app-only", "observer-only"):
                 self.assertIn("test-execution", public["notQualified"])
                 self.assertEqual(public["scope"], "desktop-macos-normal-compile-only-v1")
-            metadata_names = ("mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata") if mode == "full4" else ("mac-normal-locked-metadata",) if mode == "app-only" else ("mac-vault-locked-metadata",)
+            metadata_names = ("mac-vault-locked-metadata", "mac-normal-locked-metadata", "mac-image-locked-metadata") if mode == "full4" else ("mac-normal-locked-metadata",) if mode in ("app-only", "observer-only") else ("mac-vault-locked-metadata",)
             commands = [row for row in calls if row[1]["check"] in metadata_names]
             self.assertEqual([row[1]["check"] for row in commands], list(metadata_names))
             self.assertEqual([row[0][0] for row in commands],
                              ["/Users/runner/.rustup/toolchains/stable-" + target + "/bin/cargo"] * len(commands))
             expected_paths = ["desktop/helpers/macos-vault-helper/Cargo.toml"] + (["desktop/src-tauri/Cargo.toml", "desktop/helpers/macos-desktop-image/Cargo.toml"] if mode == "full4" else [])
-            if mode == "app-only":
+            if mode in ("app-only", "observer-only"):
                 expected_paths = ["desktop/src-tauri/Cargo.toml"]
             self.assertEqual([row[0][-1] for row in commands], [bound["source"] + "/" + path for path in expected_paths])
             self.assertEqual([row[0][1] for row in commands], ["metadata"] * len(commands))
-            if mode == "app-only":
-                self.assertEqual(commands[0][0][commands[0][0].index("--features") + 1], "desktop-shell,custom-protocol")
+            if mode in ("app-only", "observer-only"):
+                self.assertEqual(commands[0][0][commands[0][0].index("--features") + 1],
+                                 "desktop-shell,custom-protocol,macos-installed-observation" if mode == "observer-only" else "desktop-shell,custom-protocol")
             else:
                 self.assertNotIn("--features", commands[0][0])
             if mode == "full4":
@@ -1981,9 +2007,9 @@ class ShellCompileContractTests(unittest.TestCase):
                 self.assertEqual(kw["timeout"], 600)
             self.assertFalse(any("rustup" == Path(arg).name for row, _ in calls for arg in row))
             receipt_value = next(value for path, value in written if path.endswith("acquire-checks.json"))
-            expected_checks = ["rust-version-target", "mac-cargo-version", *metadata_names] + (["node-version", "npm-locked-no-scripts"] if mode in ("full4", "app-only") else [])
+            expected_checks = ["rust-version-target", "mac-cargo-version", *metadata_names] + (["node-version", "npm-locked-no-scripts"] if mode in ("full4", "app-only", "observer-only") else [])
             self.assertEqual(receipt_value["rust"], expected_rust)
-            self.assertEqual(receipt_value["node"], helper.NODE if mode in ("full4", "app-only") else None)
+            self.assertEqual(receipt_value["node"], helper.NODE if mode in ("full4", "app-only", "observer-only") else None)
             self.assertEqual(receipt_value["checks"], [{"check": name, "exitCode": 0} for name in expected_checks])
             output_names = ["target/mac-vault-metadata.json", "metadata.json", "target/mac-image-metadata.json"] if mode == "full4" else ["metadata.json"]
             for name in output_names:
@@ -2066,17 +2092,17 @@ class ShellCompileContractTests(unittest.TestCase):
             def reset_tree():
                 files.clear(); directories.clear(); symbolic.clear(); cleanup_events.clear()
                 directories.update(bound["root"] + "/" + name for name in helper.COMPILER_DIRECTORIES + helper.EMPTY_NATIVE_DIRECTORIES)
-                if mode in ("full4", "app-only"):
+                if mode in ("full4", "app-only", "observer-only"):
                     directories.update(source_outputs)
                 files.update({bound["root"] + "/" + name: b"inert data" for name in helper.COMPILER_PRIVATE_FILES + helper.COMPILE_PUBLIC_FILES})
                 for phase in ("acquire", "compile"):
                     checks = expected_checks if phase == "acquire" else ["rust-version-target", "mac-cargo-version", "mac-vault-bin-compile-only"] + (["node-version", "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only", "mac-observer-compile-only", "mac-image-compile-only"] if mode == "full4" else [])
-                    if mode == "app-only" and phase == "compile":
+                    if mode in ("app-only", "observer-only") and phase == "compile":
                         checks = ["rust-version-target", "mac-cargo-version", "node-version",
-                                  "typescript-no-emit", "vite-assets", "mac-normal-bin-compile-only"]
+                                  "typescript-no-emit", "vite-assets", "mac-observer-compile-only" if mode == "observer-only" else "mac-normal-bin-compile-only"]
                     frame = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": phase, "status": "passed",
                              **{key: bound[key] for key in ("sourceSha", "platform", "workflowPath", "workflowSha", "workflowRef", "workflowSha256", "runId", "attempt", "sourceTree", "macCompile")},
-                             "rust": deepcopy(expected_rust), "node": helper.NODE if mode in ("full4", "app-only") else None,
+                             "rust": deepcopy(expected_rust), "node": helper.NODE if mode in ("full4", "app-only", "observer-only") else None,
                              "checks": [{"check": check, "exitCode": 0} for check in checks]}
                     files[bound["root"] + "/" + phase + "-checks.json"] = json.dumps(frame).encode()
             def original_file(path):
@@ -3922,6 +3948,100 @@ class ShellCompileContractTests(unittest.TestCase):
                             self.assertIn(("closed", app_bound["root"] + "/metadata.json"), app_events)
                 with patch.object(helper, "write_json", side_effect=AssertionError("no DATA publication")), self.assertRaises(helper.CheckFailure):
                     helper.phase_receipt(app_bound, app_phase, checks, node=helper.NODE, mac_history_result=history_app_result())
+
+
+        # The same phase/decoder, with inert originals: exact installed argv,
+        # no test execution, and failed output can never authorize cleanup.
+        observer = mac_context("aarch64-apple-darwin", "observer-only")
+        raw_error = (json.dumps({"reason": "compiler-message", "manifest_path": observer["source"] + "/desktop/src-tauri/Cargo.toml",
+            "message": {"level": "error", "code": {"code": "E0433"}, "message": "synthetic private prose",
+                        "spans": [{"is_primary": True, "file_name": "src/bridge.rs", "line_start": 467, "column_start": 9}]}})
+            + '\n{"reason":"build-finished","success":false}\n').encode()
+        for fault in (None, "returned101", "unknown", "timeout", "returned101-close", "close", "reader", "overflow", "late"):
+            events, captures, calls, publications, original_errors = [], {}, [], [], []
+            clock = [100.0]
+            ObserverPath, writer, read = source_slots_paths(events, captures)
+            original_open = ObserverPath.open
+            def opened(path, *args, **kwargs):
+                stream = original_open(path, *args, **kwargs)
+                original_exit = type(stream).__exit__
+                if fault in ("returned101-close", "close") and path.name == "source-slots-compile.stderr":
+                    class BadClose(type(stream)):
+                        def __exit__(self, *exc):
+                            original_exit(self, *exc)
+                            raise helper.CheckFailure("synthetic consuming close uncertainty")
+                    stream = BadClose(path)
+                return stream
+            def invoke_observer(argv, **kw):
+                check = kw["check"]
+                calls.append((list(argv), {k: v for k, v in kw.items() if k not in ("output", "diagnostics")}))
+                if check == "mac-observer-compile-only":
+                    kw["output"].write(raw_error.decode() if fault in ("returned101", "returned101-close") else '{"reason":"build-finished","success":true}\n')
+                    if fault in ("returned101", "returned101-close", "unknown", "timeout"):
+                        error = helper.CheckFailure("synthetic first original failure")
+                        if fault.startswith("returned101"):
+                            error._returned_command = (check, 101)
+                        original_errors.append(error)
+                        raise error
+                    if fault == "late": clock[0] = 1900.0
+                if check == "source-slots-diagnostic-source":
+                    return "100644 blob " + "a" * 40 + "\tdesktop/src-tauri/src/bridge.rs\0"
+                return helper.NODE if check == "node-version" else ""
+            def read_observer(path, expected, *, retain=False):
+                self.assertIn(("closed", str(path)), events)
+                self.assertIn(("closed", observer["root"] + "/target/source-slots-compile.stdout"), events)
+                self.assertIn(("closed", observer["root"] + "/target/source-slots-compile.stderr"), events)
+                if fault in ("reader", "overflow"):
+                    raise helper.CheckFailure("synthetic " + fault + " original admission")
+                return captures[str(path)] if retain else read(path, expected)
+            with self.subTest(observer_fault=fault), contextlib.ExitStack() as stack:
+                for manager in (
+                    patch.object(helper, "Path", ObserverPath), patch.object(ObserverPath, "open", opened),
+                    patch.object(helper, "source_unchanged"), patch.object(helper, "mac_compile_source_guard"),
+                    patch.object(helper, "mac_compile_inputs", return_value=observer["macCompile"]),
+                    patch.object(helper, "tools", return_value=("/direct/cargo", "/direct/rustc")),
+                    patch.object(helper.shutil, "which", return_value="/selected/bin/node"),
+                    patch.object(helper, "run", side_effect=invoke_observer),
+                    patch.object(helper, "source_slots_writer", side_effect=writer),
+                    patch.object(helper, "source_slots_read", side_effect=read_observer),
+                    patch.object(helper, "write_json", side_effect=lambda path, value: publications.append(deepcopy(value))),
+                    patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]),
+                    patch.dict(helper.os.environ, {"PATH": "/selected/bin", "MRK_MACOS_DEVELOPER_ID_P12_BASE64": "synthetic-never-exported"}, clear=True),
+                ): stack.enter_context(manager)
+                if fault is None:
+                    helper.phase_mac_compile("compile", observer)
+                else:
+                    with self.assertRaises(helper.CheckFailure) as failed:
+                        helper.phase_mac_compile("compile", observer)
+                    if original_errors: self.assertIs(failed.exception, original_errors[0])
+            self.assertEqual([kw["check"] for _, kw in calls if kw["check"] != "source-slots-diagnostic-source"],
+                             ["node-version", "typescript-no-emit", "vite-assets", "mac-observer-compile-only"])
+            argv, call = next(row for row in calls if row[1]["check"] == "mac-observer-compile-only")
+            self.assertEqual(argv, ["/direct/cargo", "test", "--locked", "--no-default-features", "--features",
+                "desktop-shell,custom-protocol,macos-installed-observation", "--target", "aarch64-apple-darwin",
+                "--test", "installed-shell-observation", "--no-run", "--message-format=json"])
+            self.assertEqual(str(call["cwd"]), observer["source"] + "/desktop/src-tauri")
+            self.assertEqual(call["timeout"], 1440)
+            self.assertEqual(call["env"]["CARGO_TARGET_DIR"], observer["root"] + "/target")
+            self.assertNotIn("MRK_MACOS_DEVELOPER_ID_P12_BASE64", call["env"])
+            self.assertNotIn("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256", call["env"])
+            self.assertEqual(len(publications), 1)
+            record = publications[0]
+            if fault is None:
+                self.assertEqual(helper.validate_compile_receipt(record, observer, "compile"), record)
+                self.assertEqual(record["checks"][-1], {"check": "mac-observer-compile-only", "exitCode": 0})
+                self.assertNotIn("testResult", record)
+            else:
+                self.assertEqual(record["status"], "failed-or-unknown")
+                with self.assertRaises(helper.CheckFailure): helper.validate_compile_receipt(record, observer, "compile")
+                self.assertEqual(record["originalCommandReturnCode"], 101 if fault.startswith("returned101") else None if fault in ("unknown", "timeout") else 0)
+                self.assertEqual(record["compilerDiagnostic"]["state"], "complete" if fault == "returned101" else "unavailable")
+                if fault == "returned101":
+                    self.assertEqual(record["compilerDiagnostic"]["errors"][0]["code"], "E0433")
+                    self.assertEqual(record["compilerDiagnostic"]["sources"][0]["gitBlob"], "a" * 40)
+                self.assertNotIn("synthetic", json.dumps(record))
+                self.assertNotIn("/inert", json.dumps(record["compilerDiagnostic"]))
+                self.assertLessEqual(len(json.dumps(record, separators=(",", ":")).encode()) + 1, 16384)
 
 if __name__ == "__main__":
     unittest.main()

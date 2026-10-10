@@ -18,6 +18,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/macos_install_record.rs"] mod macos_install_record;
 #[path = "../src/macos_install_maintenance.rs"] mod macos_install_maintenance;
 #[path = "../src/macos_install_transaction.rs"] mod macos_install_transaction;
+#[path = "../src/macos_remove_protocol.rs"] mod macos_remove_protocol;
 #[path = "../src/macos_install_producer.rs"] mod macos_install_producer;
 #[path = "../src/release_version_protocol.rs"] mod release_version_protocol;
 #[path = "../src/candidate_evidence_protocol.rs"] mod candidate_evidence_protocol;
@@ -25,6 +26,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/environment_diagnostics_protocol.rs"] mod environment_diagnostics_protocol;
 #[path = "../src/environment_diagnostics_owner.rs"] mod environment_diagnostics_owner;
 #[path = "../src/offline_preflight_protocol.rs"] mod offline_preflight_protocol;
+#[path = "../src/artifact_inspection_protocol.rs"] mod artifact_inspection_protocol;
 #[path = "../src/offline_preflight_owner.rs"] mod offline_preflight_owner;
 #[path = "../src/android_build_protocol.rs"] mod android_build_protocol;
 #[path = "../src/android_build_owner.rs"] mod android_build_owner;
@@ -88,6 +90,7 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/vault_store.rs"] mod vault_store;
 #[path = "../src/edit_protocol.rs"] mod edit_protocol;
 #[path = "../src/github_workflow_edit_protocol.rs"] mod github_workflow_edit_protocol;
+#[path = "../src/project_initialization_edit_protocol.rs"] mod project_initialization_edit_protocol;
 #[path = "../src/saved_text_recovery_protocol.rs"] mod saved_text_recovery_protocol;
 #[path = "../src/metadata_text_edit_protocol.rs"] mod metadata_text_edit_protocol;
 #[path = "../src/metadata_images_edit_protocol.rs"] mod metadata_images_edit_protocol;
@@ -98,6 +101,10 @@ compile_error!("installed-shell observation requires debug test + desktop-shell 
 #[path = "../src/github_preflight_session.rs"] mod github_preflight_session;
 #[path = "../src/github_release_protocol.rs"] mod github_release_protocol;
 #[path = "../src/github_release_session.rs"] mod github_release_session;
+#[path = "../src/github_setup_protocol.rs"] mod github_setup_protocol;
+#[path = "../src/github_setup_session.rs"] mod github_setup_session;
+#[path = "../src/github_history_protocol.rs"] mod github_history_protocol;
+#[path = "../src/github_history_session.rs"] mod github_history_session;
 #[path = "../src/edit_owner.rs"] mod edit_owner;
 #[path = "../src/shell.rs"] mod shell;
 fn main() -> std::process::ExitCode { shell::installed_observation::main() }

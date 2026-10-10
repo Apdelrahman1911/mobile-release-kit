@@ -797,6 +797,14 @@ MAC_HISTORY_CHECKS = {
 }
 # Same shipping graph only; no auxiliary compiler or test original is entered.
 MAC_APP_MODE = "app-only"
+# The existing observer graph only: no test execution or installed authority.
+MAC_OBSERVER_MODE = "observer-only"
+MAC_OBSERVER_CHECKS = {
+    "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
+                "node-version", "npm-locked-no-scripts"),
+    "compile": ("rust-version-target", "mac-cargo-version", "node-version",
+                "typescript-no-emit", "vite-assets", "mac-observer-compile-only"),
+}
 MAC_APP_CHECKS = {
     "acquire": ("rust-version-target", "mac-cargo-version", "mac-normal-locked-metadata",
                 "node-version", "npm-locked-no-scripts"),
@@ -2898,8 +2906,11 @@ def mac_compile_target(environment: dict[str, str]) -> str:
 def mac_compile_graphs(target: str, mode: str) -> tuple:
     """Only actual fixed workflow rows; no arbitrary graph or legacy fallback."""
     require(target in MAC_COMPILE_HOSTS and type(mode) is str
-            and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) or mode == "vault-only" and target == "aarch64-apple-darwin"),
+            and (mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE)
+                 or mode in ("vault-only", MAC_OBSERVER_MODE) and target == "aarch64-apple-darwin"),
             "Normal Mac compiler graph mode differs")
+    if mode == MAC_OBSERVER_MODE:
+        return MAC_COMPILE_GRAPHS[1:2]
     if mode == MAC_APP_MODE:
         return MAC_COMPILE_GRAPHS[:1]
     if mode == MAC_HISTORY_MODE:
@@ -2912,11 +2923,13 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
     selection, mode = environment.get("MRK_COMPILE_SELECTION"), environment.get("MRK_MACOS_COMPILE_MODE")
     mac_compile_graphs(target, mode)
     require(environment.get("MRK_MACOS_TARGET") == target
-            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE)
+            and selection in ("both", "arm", "intel", "remaining", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE)
             and (environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                  or environment.get("GITHUB_EVENT_NAME") == "push" and selection == "both"),
             "Normal Mac compiler selection differs")
-    require((selection == MAC_APP_MODE and mode == MAC_APP_MODE
+    require((selection == MAC_OBSERVER_MODE and mode == MAC_OBSERVER_MODE
+             and target == "aarch64-apple-darwin" and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
+            or (selection == MAC_APP_MODE and mode == MAC_APP_MODE
              and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
             or (selection == MAC_HISTORY_MODE and mode == MAC_HISTORY_MODE
              and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch")
@@ -2931,6 +2944,8 @@ def mac_compile_mode(environment: dict[str, str], target: str) -> str:
 
 def mac_compile_checks(target: str, mode: str) -> dict:
     mac_compile_graphs(target, mode)
+    if mode == MAC_OBSERVER_MODE:
+        return MAC_OBSERVER_CHECKS
     if mode == MAC_APP_MODE:
         return MAC_APP_CHECKS
     if mode == MAC_HISTORY_MODE:
@@ -3169,7 +3184,7 @@ def validate_compile_receipt(value: object, context: dict, phase: str) -> dict:
                 "Normal Mac compiler receipt graphs differ")
         selected = mac_compile_checks(mac["target"], mac["mode"])
         expected.update(sourceTree=context["sourceTree"], macCompile=mac,
-                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else None,
+                        node=NODE if mac["mode"] in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE) else None,
                         checks=[{"check": check, "exitCode": 0} for check in selected[phase]])
         if mac["mode"] == MAC_HISTORY_MODE:
             require(mac.get("execution") == "compile-and-selected-data" and type(mac.get("tests")) is list
@@ -3293,7 +3308,7 @@ def run(argv: list[str], *, check: str, cwd: Path, env: dict[str, str], timeout:
     require(check in TOOL_CHECKS, "Unknown fixed compiler check")
     require(not (capture and output is not None), "Conflicting compiler output destinations")
     require(diagnostics is None or (output is not None and check in {
-        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test",
+        "mac-source-slots-locked-metadata", "headless-test-compile-only", "mac-source-slots-data-test", "mac-observer-compile-only",
         "github-locked-headless-metadata", "github-headless-test-compile-only", "github-owner-native-contract",
         "github-tls-locked-headless-metadata", "github-tls-headless-test-compile-only",
         "environment-locked-headless-metadata", "environment-headless-test-compile-only",
@@ -9227,8 +9242,8 @@ def source_slots_compiler_diagnostic(context: dict, raw: bytes, stderr: bytes, c
     try:
         # New normal-owner DATA mode uses the same JSON decoder, not an
         # invented source-slots context. Existing source-slots branch is exact.
-        if context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") == MAC_HISTORY_MODE:
-            require(context.get("workflowPath") == MAC_COMPILE_WORKFLOW, "Mac History diagnostic workflow differs")
+        if context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("macCompile", {}).get("mode") in (MAC_HISTORY_MODE, MAC_OBSERVER_MODE):
+            require(context.get("workflowPath") == MAC_COMPILE_WORKFLOW, "Mac compiler diagnostic workflow differs")
             short = False
         else:
             short = source_slots_is_removal(context)
@@ -9581,6 +9596,86 @@ def mac_history_data_checks(cargo: str, root: Path, source: Path, target: str, e
     return validate_mac_history_result(result)
 
 
+def mac_observer_compile(cargo: str, root: Path, source: Path, environment: dict, remaining, context: dict) -> None:
+    """One fixed no-run original through run(); no installed receipt or new owner."""
+    require(context.get("executionScope") == MAC_COMPILE_SCOPE
+            and context.get("workflowPath") == MAC_COMPILE_WORKFLOW
+            and context.get("macCompile", {}).get("mode") == MAC_OBSERVER_MODE
+            and context["macCompile"].get("target") == "aarch64-apple-darwin",
+            "Mac observer compiler context differs")
+    check = "mac-observer-compile-only"
+    # Exact installed DATA argv/cwd. Its independent clean cache/target is not
+    # an invented same-run effective-toolchain or installed package receipt.
+    argv = [cargo, "test", "--locked", "--no-default-features", "--features",
+            "desktop-shell,custom-protocol,macos-installed-observation", "--target",
+            "aarch64-apple-darwin", "--test", "installed-shell-observation",
+            "--no-run", "--message-format=json"]
+    environment = {**environment, "CARGO_TARGET_DIR": str(root / "target")}
+    output_path = root / "target/source-slots-compile.stdout"
+    stderr_path = root / "target/source-slots-compile.stderr"
+    primary, returned_code, compiler_diagnostic = None, None, None
+    try:
+        remaining(30)
+        with output_path.open("x", encoding="utf-8") as output, stderr_path.open("x", encoding="utf-8") as diagnostics:
+            before = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+            require(all(row[6] == 0 for row in before), "Mac observer private output was not fresh")
+            try:
+                run(argv, check=check, cwd=source / "desktop/src-tauri", env=environment,
+                    timeout=remaining(1440), output=output, diagnostics=diagnostics)
+                returned_code = 0
+            except BaseException as error:
+                primary = error
+                witness = error.__dict__.get("_returned_command") if type(error) is CheckFailure else None
+                if (type(witness) is tuple and len(witness) == 2 and witness[0] == check
+                        and type(witness[1]) is int and 0 < witness[1] <= 255):
+                    returned_code = witness[1]
+            output.flush()
+            diagnostics.flush()
+            originals = (source_slots_writer(output_path, output), source_slots_writer(stderr_path, diagnostics))
+            require(all(old[:6] == new[:6] for old, new in zip(before, originals)), "Mac observer output identity changed")
+        # Both consuming closes must return before any diagnostic read. A
+        # failed close preserves the first failure but never grants custody.
+        if primary is not None:
+            if returned_code is not None:
+                compiler_diagnostic = source_slots_diagnostic_unavailable(returned_code, "capture-unavailable")
+                try:
+                    remaining(30)
+                    raw = source_slots_read(output_path, originals[0], retain=True)
+                    stderr = source_slots_read(stderr_path, originals[1], retain=True)
+                    compiler_diagnostic = source_slots_compiler_diagnostic(context, raw, stderr, returned_code,
+                                                                          timeout_for=remaining)
+                except BaseException:
+                    pass  # Optional explanation must not replace this original.
+            raise primary
+        remaining(30)
+        source_slots_read(output_path, originals[0])
+        source_slots_read(stderr_path, originals[1])
+        remaining(30)
+    except BaseException as error:
+        first = primary if primary is not None else error
+        failure = {"schemaVersion": 1, "scope": "desktop-macos-normal-compile-only-v1", "phase": "compile",
+                   "status": "failed-or-unknown", "lastFixedStage": check,
+                   "originalCommandReturnCode": returned_code, "macCompile": context["macCompile"],
+                   **{key: context[key] for key in ("sourceSha", "sourceTree", "workflowPath", "workflowSha",
+                                                   "workflowRef", "workflowSha256", "runId", "attempt")}}
+        failure["compilerDiagnostic"] = compiler_diagnostic or source_slots_diagnostic_unavailable(
+            returned_code, "capture-unavailable" if returned_code is not None else "original-unavailable")
+        try:
+            if failure["compilerDiagnostic"]["state"] == "complete":
+                try:
+                    remaining(30)
+                except BaseException:
+                    failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "deadline-unavailable")
+            if len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 > 16384:
+                failure["compilerDiagnostic"] = source_slots_diagnostic_unavailable(returned_code, "output-bound")
+            require(len(json.dumps(failure, sort_keys=True, separators=(",", ":")).encode()) + 1 <= 16384,
+                    "Mac observer diagnostic exceeds the existing receipt bound")
+            write_json(root / "compile-checks.json", failure)
+        except BaseException:
+            pass
+        raise first from None
+
+
 def phase_mac_compile(name: str, context: dict) -> None:
     """Fixed vault-first graphs through the SAME existing run/cleanup owner."""
     require(context.get("executionScope") == MAC_COMPILE_SCOPE and context.get("platform") == "macos",
@@ -9603,7 +9698,7 @@ def phase_mac_compile(name: str, context: dict) -> None:
     started = time.monotonic()
     # Actual Intel cold originals varied from1120s to an unfinished1500s cap.
     # Keep jobs1/profiles; bounded scheduling margin is not runtime authority.
-    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE) else 1500
+    budget = 900 if name == "acquire" else 5400 if target == "x86_64-apple-darwin" else 1800 if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE) else 1500
     deadline = started + budget
     previous = started
     def remaining(cap: int) -> int:
@@ -9643,9 +9738,9 @@ def phase_mac_compile(name: str, context: dict) -> None:
                 ("mac-source-slots-locked-metadata", manifest, ["--features", "development-runtime"], root / "target/mac-history-metadata.json"),
                 ("mac-normal-locked-metadata", manifest, ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json"),
             ]
-        if mode == MAC_APP_MODE:
+        if mode in (MAC_APP_MODE, MAC_OBSERVER_MODE):
             metadata = [("mac-normal-locked-metadata", manifest,
-                         ["--features", MAC_COMPILE_GRAPHS[0][3]], root / "metadata.json")]
+                         ["--features", MAC_COMPILE_GRAPHS[1 if mode == MAC_OBSERVER_MODE else 0][3]], root / "metadata.json")]
         for check, cargo_manifest, features, output_path in metadata:
             with output_path.open("x", encoding="utf-8") as output:
                 run([cargo, "metadata", "--locked", "--format-version", "1", "--no-default-features",
@@ -9659,12 +9754,12 @@ def phase_mac_compile(name: str, context: dict) -> None:
         # Fail fast on the small separate helper BEFORE frontend or app linkage.
         if mode == MAC_HISTORY_MODE:
             history_result = mac_history_data_checks(cargo, root, source, target, environment, remaining, context)
-        elif mode != MAC_APP_MODE:
+        elif mode not in (MAC_APP_MODE, MAC_OBSERVER_MODE):
             run([cargo, "build", *common, "--manifest-path", str(vault_manifest), "--release", "--bin", MAC_COMPILE_VAULT_GRAPH[4]],
                 check=MAC_COMPILE_VAULT_GRAPH[0], cwd=root, env=environment, timeout=remaining(1500))
         remaining(30)
     observed = None
-    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE):
+    if mode in ("full4", MAC_HISTORY_MODE, MAC_APP_MODE, MAC_OBSERVER_MODE):
         node = shutil.which("node")
         require(node is not None, "Selected Node unavailable")
         observed = run([node, "--version"], check="node-version", cwd=root, env=environment, timeout=remaining(15), capture=True)
@@ -9682,7 +9777,10 @@ def phase_mac_compile(name: str, context: dict) -> None:
             run([node, "--max-old-space-size=768", "node_modules/vite/bin/vite.js", "build", "--config",
                  str(desktop / "vite.config.mjs"), "--configLoader", "native", "--outDir", str(desktop / "dist")],
                 check="vite-assets", cwd=desktop, env=environment, timeout=remaining(90))
-            for check, relative, profile, features, artifact in (MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
+            if mode == MAC_OBSERVER_MODE:
+                mac_observer_compile(cargo, root, source, environment, remaining, context)
+            for check, relative, profile, features, artifact in (() if mode == MAC_OBSERVER_MODE else
+                    MAC_COMPILE_GRAPHS[:1] if mode in (MAC_HISTORY_MODE, MAC_APP_MODE) else MAC_COMPILE_GRAPHS):
                 argv = [cargo, "test" if profile == "test" else "build", *common, "--manifest-path", str(source / relative)]
                 if profile == "test":
                     argv += ["--features", features, "--test", artifact, "--no-run"]
