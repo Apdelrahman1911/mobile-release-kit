@@ -3,7 +3,7 @@
 
 Apple: https://developer.apple.com/documentation/security/customizing-the-notarization-workflow
 Only finite classifications/hashes leave memory. Successful diagnosis does not
-change the original Invalid result or qualify any application for distribution.
+change the original pipeline refusal or qualify an application for distribution.
 """
 from __future__ import annotations
 
@@ -26,10 +26,11 @@ CHECKOUT = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
 PARENT = Path('/Users/runner/work/_temp')
 PUBLIC = 'mrk-notary-diagnostic-public.json'
 SECRET = 'MRK_MACOS_NOTARY_API_KEY_BASE64'
-SOURCE = 'f3bef3e8ff06dd61623594de111ecc1b91153ca3'
-SUBMISSION = '140f7e7d-7937-4d98-842f-965ca84bb4b1'
+SOURCE = 'f75fd232402c60beb8e2fffa58158d8616426c8a'
+SUBMISSION = 'fdfc7aea-370b-42a3-b1a2-6a08a9abf37e'
+STATUS = 'Accepted'
 ARCHIVE = 'MobileReleaseKit-notary-payload.zip'
-ORIGINAL_LOG = '0a798f5bfa38da0ea41e69ec928b61f271524e8216f0d9533fe8162a0c209605'
+ORIGINAL_LOG = '1eaed3ece12e56977bfd9d260428ab5d8521d25dd08d0ca120794732ce49c969'
 TEAM = '7CGZ2343AA'
 CERTIFICATE = '5effa7d19bbe005b19c1617833cbe22186c2af96'
 KEY_ID = '59VQCHM463'
@@ -102,31 +103,94 @@ def classify_path(value):
     return PATHS.get(value, 'unclassified')
 
 
+# Exact current production notary_log_data literals, not arbitrary exception text.
+STRICT_LOG_REFUSALS = frozenset((
+    'notary-fixed-archive-name', 'notary-log-binding', 'notary-log-metadata',
+    'notary-log-status-code', 'notary-log-upload-sha256', 'notary-log-issues-bound',
+    'notary-log-issue-shape', 'notary-log-issue-metadata', 'notary-log-issue-code',
+    'notary-log-tickets-bound', 'notary-log-ticket-shape', 'notary-log-success-with-errors',
+))
+
+
+def ticket_census(value, helper):
+    """Separate closed DATA observations, never ticket or native-architecture authority."""
+    result = {'kind': 'null' if value is None else 'list' if type(value) is list else 'other',
+              'listCount': len(value) if type(value) is list else None,
+              'state': 'observed', 'groupCount': 0, 'groups': [], 'omittedGroupCount': 0,
+              'allGroupsSha256': sha(b'[]')}
+    if value is None:
+        return result
+    if type(value) is not list or len(value) > 2048:
+        result.update(state='over-bound' if type(value) is list else 'not-a-list',
+                      groupCount=None, omittedGroupCount=None, allGroupsSha256=None)
+        return result
+    groups = {}
+    for row in value:
+        is_row = type(row) is dict
+        row = row if is_row else {}
+        raw_arch = row.get('arch')
+        architecture = ('missing' if 'arch' not in row else 'null' if raw_arch is None else
+                        raw_arch if type(raw_arch) is str and raw_arch in ('arm64', 'x86_64', 'i386', 'arm64e', 'x86_64h') else 'other')
+        cdhash = row.get('cdhash')
+        key = (architecture, is_row and set(row) == {'path', 'digestAlgorithm', 'cdhash', 'arch'},
+               helper.notary_text(row.get('path'), 4096), row.get('digestAlgorithm') in ('SHA-1', 'SHA-256'),
+               type(cdhash) is str and re.fullmatch(r'[0-9a-fA-F]{40}', cdhash) is not None,
+               architecture in ('arm64', 'x86_64'))  # Exact existing ZIP rule, not expanded eligibility.
+        groups[key] = groups.get(key, 0) + 1
+    names = ('architecture', 'exactFourKeys', 'pathTextValid', 'digestAlgorithmAllowed',
+             'cdhash40HexValid', 'strictArchitectureAllowed')
+    rows = [dict(zip(names, key), count=count) for key, count in sorted(groups.items())]
+    result.update(groupCount=len(rows), groups=rows[:64], omittedGroupCount=max(0, len(rows)-64),
+                  allGroupsSha256=sha(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()))
+    return result
+
+
 def log_projection(body, helper):
     value = helper.notary_json(body, LIMIT)
+    need(type(value.get('logFormatVersion')) is int and value['logFormatVersion'] == 1
+         and value.get('jobId') == SUBMISSION and value.get('status') == STATUS
+         and value.get('archiveFilename') == ARCHIVE)
     current_sha = value.get('sha256')
     need('sha256' not in value or type(current_sha) is str and re.fullmatch('[0-9a-f]{64}', current_sha))
-    checked = helper.notary_log_data(body, {'id': SUBMISSION, 'status': 'Invalid'}, current_sha,
-                                     archive_name=ARCHIVE)
+    checked, refusal = None, None
+    try:
+        checked = helper.notary_log_data(body, {'id': SUBMISSION, 'status': STATUS}, current_sha,
+                                         archive_name=ARCHIVE)
+    except helper.Refused as error:
+        literal = str(error)
+        refusal = literal if literal in STRICT_LOG_REFUSALS else 'unclassified'
+    # The strict original result is immutable; the census cannot upgrade it.
+    census = ticket_census(value.get('ticketContents'), helper)
+    if 'ticketContents' not in value:
+        census.update(kind='missing', state='not-supplied', groupCount=None,
+                      omittedGroupCount=None, allGroupsSha256=None)
     groups = {}
-    for row in value['issues'] or ():
-        architecture = row.get('architecture')
-        architecture = architecture if architecture in ('arm64', 'x86_64') else ('not-supplied' if architecture is None else 'other')
-        key = (row['severity'], row.get('code'), architecture, classify_path(row['path']),
-               MESSAGES.get(row['message'], 'unclassified'), sha(row['path'].encode()), sha(row['message'].encode()))
-        groups[key] = groups.get(key, 0) + 1
+    if checked is not None:
+        for row in value['issues'] or ():
+            architecture = row.get('architecture')
+            architecture = architecture if architecture in ('arm64', 'x86_64') else ('not-supplied' if architecture is None else 'other')
+            key = (row['severity'], row.get('code'), architecture, classify_path(row['path']),
+                   MESSAGES.get(row['message'], 'unclassified'), sha(row['path'].encode()), sha(row['message'].encode()))
+            groups[key] = groups.get(key, 0) + 1
     rows = [dict(zip(('severity', 'code', 'architecture', 'pathRole', 'messageClass', 'pathSha256', 'messageSha256'), key), count=count)
             for key, count in sorted(groups.items(), key=lambda item: repr(item[0]))]
-    # Preserve bounded evidence of every group without emitting unbounded DATA.
     summary = value.get('statusSummary')
-    return {'currentObservedStatus': 'Invalid', 'logSha256': sha(body), 'historicalBytesMatch': sha(body) == ORIGINAL_LOG,
-            'statusCode': value.get('statusCode'),
-            'statusSummaryClass': SUMMARIES.get(summary, 'not-supplied' if summary is None else 'unclassified'),
-            'statusSummarySha256': sha(summary.encode()) if summary is not None else None,
-            'archiveShaIndependentlyCompared': False, 'errorCount': checked['errorCount'],
-            'warningCount': checked['warningCount'], 'ticketRowCount': checked['ticketRowCount'],
-            'issueGroupCount': len(rows), 'issueGroups': rows[:64], 'omittedGroupCount': max(0, len(rows) - 64),
-            'allIssueGroupsSha256': sha(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode())}
+    summary_valid = helper.notary_text(summary, 4096)
+    code = value.get('statusCode')
+    return {'currentObservedStatus': STATUS, 'logSha256': sha(body), 'historicalBytesMatch': sha(body) == ORIGINAL_LOG,
+            'strictLogAccepted': checked is not None, 'strictLogRefusal': refusal,
+            'ticketCensus': census, 'payloadNotarizationQualified': False, 'productReady': False,
+            'statusCode': code if type(code) is int and 0 <= code <= 999999 else None,
+            'statusSummaryClass': SUMMARIES.get(summary, 'unclassified') if summary_valid else 'not-supplied' if summary is None else 'unclassified',
+            'statusSummarySha256': sha(summary.encode()) if summary_valid else None,
+            'archiveShaIndependentlyCompared': False,
+            'errorCount': checked['errorCount'] if checked is not None else None,
+            'warningCount': checked['warningCount'] if checked is not None else None,
+            'ticketRowCount': checked['ticketRowCount'] if checked is not None else None,
+            'issueProjectionState': 'observed' if checked is not None else 'unavailable-strict-log-refused',
+            'issueGroupCount': len(rows) if checked is not None else None, 'issueGroups': rows[:64],
+            'omittedGroupCount': max(0, len(rows) - 64) if checked is not None else None,
+            'allIssueGroupsSha256': sha(json.dumps(rows, sort_keys=True, separators=(',', ':')).encode()) if checked is not None else None}
 
 
 class Clock:
@@ -327,8 +391,8 @@ class KeyDirectory:
 
 
 def query(owner, helper, key, profile, tool, clock):
-    report = {'historicalSubmission': {'source': SOURCE, 'runId': '38102786830', 'attempt': '1',
-        'jobId': '114362007465', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': 'Invalid'},
+    report = {'historicalSubmission': {'source': SOURCE, 'runId': '38114679901', 'attempt': '1',
+        'jobId': '114397113135', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': STATUS},
         'currentObservedStatus': None, 'diagnosticPassed': False, 'qualification': 'read-only-existing-submission-diagnostic',
         'failureStage': None, 'cleanupErrors': [], 'entered': False, 'returned': False,
         'knownExit': False, 'returncode': None, 'toolClosed': False}
@@ -375,7 +439,7 @@ def query(owner, helper, key, profile, tool, clock):
         report['authentication'] = {'created': key.created, 'closed': key.closed, 'retired': key.retired}
         report['scratchRetired'] = key.scratch_retired
         report['diagnosticPassed'] = (report['failureStage'] is None and known and key.retired and key.closed
-                                      and report['toolClosed'] and report['currentObservedStatus'] == 'Invalid')
+                                      and report['toolClosed'] and report['currentObservedStatus'] == STATUS)
     return report
 
 
