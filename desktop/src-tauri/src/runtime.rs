@@ -2595,7 +2595,7 @@ mod tests {
         assert_eq!(runtime.metadata_images_edit_profile_available(), admitted);
         assert_eq!(runtime.metadata_images_selection_profile_available(), admitted);
         assert_eq!(runtime.project_path_selection_profile_available(), INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && admitted);
-        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted && cfg!(target_arch = "aarch64"));
+        assert_eq!(runtime.android_source_selection_profile_available(), INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && admitted && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
         assert_eq!(runtime.evidence_selection_profile_available(), admitted);
     }
     #[cfg(target_os = "macos")]
@@ -2606,7 +2606,7 @@ mod tests {
             INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED && runtime.project_selection_profile_available());
         assert_eq!(runtime.evidence_selection_profile_available(), runtime.project_selection_profile_available());
         assert_eq!(runtime.android_source_selection_profile_available(),
-            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available() && cfg!(target_arch = "aarch64"));
+            INSTALLED_MAC_ANDROID_SOURCE_SELECTION_QUALIFIED && runtime.project_selection_profile_available() && cfg!(any(target_arch = "aarch64", target_arch = "x86_64")));
         #[cfg(all(target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
         {
             assert_eq!(runtime.evidence_selection_profile_available(), macos_bindings());
@@ -2829,7 +2829,7 @@ mod tests {
             not(feature = "ubuntu-runtime-publisher"), not(feature = "windows-runtime-publisher"), not(feature = "macos-installed-installer")))
             && PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
-        let expected = cfg!(target_arch = "aarch64") && macos_bindings() && !cfg!(feature = "windows-runtime-publisher");
+        let expected = cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) && macos_bindings() && !cfg!(feature = "windows-runtime-publisher");
         #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
             all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
         let expected = false;

@@ -130,7 +130,8 @@ NOTARY_ADMISSION_REASONS = frozenset((
     'notary-work-volume-reserve',
     'notary-zip-sha256-changed',
 ))
-REASONS = frozenset((*NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
+REASONS = frozenset(("notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
+    *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",
     "original-operation-refused", "helper-package-incomplete", "package-finality-incomplete",
     "package-signature-bound", "package-signature-utf8", "package-signature-format", "package-signature-header",

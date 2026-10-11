@@ -316,6 +316,23 @@ def positive_ui_data(context=None, *, ios=False):
 
 class PublicVerificationEvidenceData(unittest.TestCase):
 
+    def test_notary_key_precontext_failure_preserves_only_four_genuine_literals(self):
+        source = (ROOT / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        parsed = ast.parse(source)
+        labels = {node.value for method in ast.walk(parsed)
+            if isinstance(method, ast.FunctionDef) and method.name in {"notary_key_scope", "notary_key_data"}
+            for node in ast.walk(method) if isinstance(node, ast.Constant)
+            and type(node.value) is str and node.value.startswith("notary-key-")}
+        expected = {"notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape"}
+        self.assertTrue(expected <= labels)
+        for reason in expected:
+            value = {"stage": "payload-zip", "type": "Refused", "reason": reason, "errno": None}
+            self.assertEqual(DATA.project_failure(value), value)
+            self.assertEqual(DATA.project_failure({**value, "reason": reason + SENTINEL})["reason"],
+                             "notary-authentication")
+        self.assertNotIn(SENTINEL, json.dumps(DATA.project_failure({"reason": SENTINEL})))
+
+
     def test_notary_preflight_failure_preserves_only_fixed_current_guard_literals(self):
         source = (ROOT / "desktop/tools/macos_android_helper_package.py").read_bytes()
         parsed = ast.parse(source)
