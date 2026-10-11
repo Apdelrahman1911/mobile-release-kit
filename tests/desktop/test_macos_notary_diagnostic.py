@@ -181,6 +181,7 @@ class NotaryDiagnosticData(unittest.TestCase):
         self.assertIn('branches: [verify/desktop-macos-notary-diagnostic]', workflow)
         self.assertIn('environment: macos-developer-id', workflow)
         self.assertIn('persist-credentials: false', workflow)
+        self.assertIn('        with:\n          ref: ${{ github.sha }}\n          persist-credentials: false', workflow)
         self.assertIn('runs-on: macos-26', workflow)
         self.assertIn('path: ${{ runner.temp }}/mrk-notary-diagnostic-public.json', workflow)
         self.assertIn('include-hidden-files: false', workflow)
