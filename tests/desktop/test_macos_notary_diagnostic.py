@@ -1,0 +1,225 @@
+"""Focused DATA and real tiny-file boundaries; never invoke Apple/native tools."""
+from __future__ import annotations
+
+import ast
+import importlib.util
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+import types
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def load(relative, name):
+    spec = importlib.util.spec_from_file_location(name, ROOT / relative)
+    value = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(value)
+    return value
+
+
+class NotaryDiagnosticData(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = load('desktop/tools/macos_notary_diagnostic.py', 'notary_diagnostic_data')
+        cls.helper = load('desktop/tools/macos_android_helper_package.py', 'notary_diagnostic_helper_data')
+
+    def body(self, **changes):
+        value = {'logFormatVersion': 1, 'jobId': self.module.SUBMISSION, 'status': 'Invalid',
+                 'archiveFilename': self.module.ARCHIVE, 'issues': [], 'ticketContents': None, 'statusCode': 4000}
+        value.update(changes)
+        return json.dumps(value).encode()
+
+    def test_log_binding_privacy_classification_and_complete_group_accounting(self):
+        m = self.module
+        issues = [{'severity': 'error', 'path': m.ARCHIVE + '/payload-input/MobileReleaseKit.app/Contents/MacOS/mrk-macos-entry',
+                   'message': 'The executable does not have the hardened runtime enabled.', 'architecture': 'arm64', 'code': None},
+                  {'severity': 'warning', 'path': '/private/DO_NOT_PUBLISH_PRIVATE_PATH',
+                   'message': 'DO_NOT_PUBLISH_PRIVATE_MESSAGE', 'docUrl': 'https://private.invalid/DO_NOT_PUBLISH_URL',
+                   'architecture': 'DO_NOT_PUBLISH_ARCH', 'code': 731}]
+        projected = m.log_projection(self.body(issues=issues, sha256='c' * 64), self.helper)
+        public = json.dumps(projected)
+        self.assertNotIn('DO_NOT_PUBLISH', public)
+        self.assertFalse(projected['archiveShaIndependentlyCompared'])
+        self.assertFalse(projected['historicalBytesMatch'])
+        self.assertEqual(projected['currentObservedStatus'], 'Invalid')
+        self.assertEqual(projected['errorCount'], 1)
+        self.assertEqual(projected['warningCount'], 1)
+        self.assertEqual({r['pathRole'] for r in projected['issueGroups']}, {'outer-entry', 'unclassified'})
+        self.assertEqual({r['messageClass'] for r in projected['issueGroups']}, {'missing-hardened-runtime', 'unclassified'})
+        for changes in ({'jobId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'}, {'status': 'Accepted'},
+                        {'archiveFilename': 'Other.zip'}, {'sha256': '../path'}, {'sha256': True}, {'sha256': None},
+                        {'issues': [{'severity': 'error', 'path': 'p', 'message': 'bad\ntext'}]},
+                        {'issues': [{'severity': 'error', 'path': 'p', 'message': 'm', 'code': True}]}):
+            with self.subTest(changes=changes), self.assertRaises(Exception):
+                m.log_projection(self.body(**changes), self.helper)
+        for body in (b'{"logFormatVersion":1,"logFormatVersion":1}', b'x' * (m.LIMIT + 1)):
+            with self.assertRaises(Exception):
+                m.log_projection(body, self.helper)
+        many = [{'severity': 'error', 'path': 'p/' + str(i), 'message': 'm', 'code': None} for i in range(65)]
+        value = m.log_projection(self.body(issues=many + [many[0]]), self.helper)
+        self.assertEqual((value['errorCount'], value['issueGroupCount'], value['omittedGroupCount']), (66, 65, 1))
+        self.assertEqual(len(value['issueGroups']), 64)
+        self.assertEqual(len(value['allIssueGroupsSha256']), 64)
+        self.assertEqual(projected['statusCode'], 4000)
+        self.assertEqual(projected['statusSummaryClass'], 'not-supplied')
+        self.assertIsNone(projected['statusSummarySha256'])
+        account = m.log_projection(self.body(issues=None, statusCode=7000,
+            statusSummary='DO_NOT_PUBLISH_ACCOUNT_PRIVATE_DETAIL'), self.helper)
+        self.assertEqual((account['statusCode'], account['errorCount'], account['issueGroupCount']), (7000, 0, 0))
+        self.assertEqual(account['statusSummaryClass'], 'unclassified')
+        self.assertEqual(len(account['statusSummarySha256']), 64)
+        self.assertNotIn('DO_NOT_PUBLISH', json.dumps(account))
+        summary = m.log_projection(self.body(issues=None,
+            statusSummary='Team is not yet configured for notarization.'), self.helper)
+        self.assertEqual(summary['statusSummaryClass'], 'team-not-configured')
+        self.assertEqual(summary['currentObservedStatus'], 'Invalid')
+
+    def test_exact_key_custody_retirement_replacement_and_nonrecursive_cleanup(self):
+        m = self.module
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            key = m.KeyDirectory(parent)
+            key.create_key(b'SYNTHETIC TEST KEY ONLY')
+            path = key.path
+            self.assertEqual(stat.S_IMODE((path / key.key_name).stat().st_mode), 0o400)
+            key.finish(True)
+            self.assertTrue(key.closed and key.retired and key.scratch_retired)
+            self.assertFalse(path.exists())
+            key = m.KeyDirectory(parent); key.create_key(b'SYNTHETIC UNKNOWN KEY')
+            key.finish(False)
+            self.assertTrue(key.closed)
+            self.assertFalse(key.retired)
+            self.assertTrue((key.path / key.key_name).exists())
+            key = m.KeyDirectory(parent); key.create_key(b'SYNTHETIC REPLACEMENT TEST')
+            original = key.path / key.key_name
+            original.rename(key.path / 'retained-original')
+            original.write_bytes(b'UNRELATED REPLACEMENT')
+            with self.assertRaises(m.Refused):
+                key.finish(True)
+            self.assertTrue(key.closed)
+            self.assertFalse(key.retired)
+            self.assertEqual(original.read_bytes(), b'UNRELATED REPLACEMENT')
+            self.assertTrue((key.path / 'retained-original').exists())
+            key = m.KeyDirectory(parent); key.create_key(b'SYNTHETIC EXTRA STATE TEST')
+            extra = key.path / 'home' / 'native-created-state'
+            extra.write_bytes(b'leave task state intact')
+            key.finish(True)
+            self.assertTrue(key.retired)
+            self.assertFalse(key.scratch_retired)
+            self.assertEqual(extra.read_bytes(), b'leave task state intact')
+            with mock.patch.object(m.os, 'mkdir', side_effect=OSError('inert injected setup failure')):
+                with self.assertRaises(m.Refused):
+                    m.KeyDirectory(parent)
+
+    def test_one_owner_call_environment_knownness_deadline_and_first_failure(self):
+        m = self.module
+        profile = {'keyId': m.KEY_ID, 'issuerId': m.ISSUER}
+        calls = []
+        class Tool:
+            path = Path('/fixed-inert-test-notarytool')
+            def post(self):
+                pass
+            def close(self):
+                pass
+        for status in (0, 1, -9, True, 256, 'exception'):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                key = m.KeyDirectory(Path(temporary)); key.create_key(b'SYNTHETIC OWNER TEST')
+                def invoke(argv, **kwargs):
+                    calls.append((argv, kwargs))
+                    self.assertEqual(argv, [str(Tool.path), 'log', m.SUBMISSION, '--key', str(key.path / key.key_name),
+                                            '--key-id', m.KEY_ID, '--issuer', m.ISSUER])
+                    self.assertEqual(set(kwargs['environ']), {'PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'TZ', 'DEVELOPER_DIR'})
+                    self.assertNotIn(m.SECRET, kwargs['environ'])
+                    self.assertEqual((kwargs['timeout'], kwargs['capture'], kwargs['text'], kwargs['output_limit']), (180, True, False, m.LIMIT))
+                    key.post()
+                    if status == 'exception':
+                        raise OSError('DO_NOT_PUBLISH_EXCEPTION_PRIVATE_DATA')
+                    return types.SimpleNamespace(returncode=status, stdout=self.body(), stderr=b'')
+                report = m.query(types.SimpleNamespace(run_owned=invoke), self.helper, key, profile, Tool(), m.Clock(lambda: 0))
+                self.assertEqual(report['diagnosticPassed'], type(status) is int and status == 0)
+                known = type(status) is int and 0 <= status <= 255
+                self.assertEqual(report['knownExit'], known)
+                self.assertEqual(key.retired, known)
+                self.assertNotIn('DO_NOT_PUBLISH', json.dumps(report))
+                if status != 0:
+                    self.assertIsNone(report['currentObservedStatus'])
+        self.assertEqual(len(calls), 6)
+        with tempfile.TemporaryDirectory() as temporary:
+            key = m.KeyDirectory(Path(temporary)); key.create_key(b'SYNTHETIC DEADLINE TEST')
+            values = iter((0, 241, 242))
+            owner = types.SimpleNamespace(run_owned=lambda *args, **kwargs: self.fail('deadline dispatched'))
+            report = m.query(owner, self.helper, key, profile, Tool(), m.Clock(lambda: next(values)))
+            self.assertFalse(report['entered'])
+            self.assertEqual(report['failureStage'], 'pre-call')
+            self.assertTrue(key.retired)
+        with tempfile.TemporaryDirectory() as temporary:
+            key = m.KeyDirectory(Path(temporary)); key.create_key(b'SYNTHETIC FIRST FAILURE')
+            tool = Tool()
+            tool.close = mock.Mock(side_effect=OSError('later close failure'))
+            owner = types.SimpleNamespace(run_owned=mock.Mock(side_effect=OSError('first call failure')))
+            report = m.query(owner, self.helper, key, profile, tool, m.Clock(lambda: 0))
+            self.assertEqual(report['failureStage'], 'original-log-call')
+            self.assertEqual(report['cleanupErrors'], ['tool-close'])
+            self.assertFalse(key.retired)
+            self.assertEqual(tool.close.call_count, 1)
+
+    def test_source_workflow_is_fixed_read_only_and_public_output_exclusive(self):
+        source = (ROOT / 'desktop/tools/macos_notary_diagnostic.py').read_text()
+        syntax = ast.parse(source)
+        query = next(n for n in syntax.body if isinstance(n, ast.FunctionDef) and n.name == 'query')
+        calls = [n for n in ast.walk(query) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'run_owned']
+        self.assertEqual(len(calls), 1)
+        argv = next(n.value for n in ast.walk(query) if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'argv' for t in n.targets))
+        self.assertEqual(argv.elts[1].value, 'log')
+        self.assertFalse(any(isinstance(n, ast.Constant) and n.value in ('submit', 'staple', 'sign') for n in ast.walk(query)))
+        workflow = (ROOT / '.github/workflows/desktop-macos-notary-diagnostic.yml').read_text()
+        self.assertIn('branches: [verify/desktop-macos-notary-diagnostic]', workflow)
+        self.assertIn('environment: macos-developer-id', workflow)
+        self.assertIn('persist-credentials: false', workflow)
+        self.assertIn('runs-on: macos-26', workflow)
+        self.assertIn('path: ${{ runner.temp }}/mrk-notary-diagnostic-public.json', workflow)
+        self.assertIn('include-hidden-files: false', workflow)
+        self.assertEqual(workflow.count('${{ secrets.'), 1)
+        self.assertNotIn('workflow_dispatch:', workflow)
+        self.assertNotIn('download-artifact', workflow)
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            data = (b'from __future__ import annotations\nfrom dataclasses import dataclass\n'
+                    b'@dataclass(frozen=True)\nclass Data:\n    value: int\n')
+            (parent / 'data.py').write_bytes(data)
+            m = self.module
+            name = 'mrk_notary_diagnostic_inert_dataclass'
+            with mock.patch.dict(m.PINS, {'data.py': m.sha(data)}), mock.patch.dict(m.sys.modules):
+                self.assertNotIn(name, m.sys.modules)
+                loaded = m.load_module(parent, 'data.py', name)
+                self.assertIs(m.sys.modules[name], loaded)
+                self.assertEqual(loaded.Data(3).value, 3)
+                with self.assertRaises(m.Refused):
+                    m.load_module(parent, 'data.py', name)
+                self.assertIs(m.sys.modules[name], loaded)
+                original_read = m.source_read
+                reads = []
+                def replace_after_authenticated_read(root, relative):
+                    authenticated = original_read(root, relative)
+                    reads.append(relative)
+                    if len(reads) == 1:
+                        (parent / relative).write_bytes(b'raise AssertionError("changed bytes executed")\n')
+                    return authenticated
+                race_name = name + '_changed'
+                with mock.patch.object(m, 'source_read', side_effect=replace_after_authenticated_read):
+                    with self.assertRaises(m.Refused):
+                        m.load_module(parent, 'data.py', race_name)
+                self.assertNotIn(race_name, m.sys.modules)
+            self.assertNotIn(name, m.sys.modules)
+            (parent / 'data.py').unlink()
+            self.module.publish(parent, {'diagnosticPassed': False, 'failureStage': 'fixture'})
+            original = (parent / self.module.PUBLIC).read_bytes()
+            with self.assertRaises(FileExistsError):
+                self.module.publish(parent, {'diagnosticPassed': True})
+            self.assertEqual((parent / self.module.PUBLIC).read_bytes(), original)
+            self.assertEqual(list(parent.iterdir()), [parent / self.module.PUBLIC])
