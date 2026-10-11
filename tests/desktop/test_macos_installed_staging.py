@@ -1238,6 +1238,23 @@ INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-
 SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
 
 
+APP_ABSENCE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n\npermissions:\n', '      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n      - verify/desktop-macos-app-absence-fixture\n\npermissions:\n'), ("jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n", "jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n"), ('            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n', '            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n          fi\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'), ("      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')\n        timeout-minutes: 28\n        shell: bash\n", "      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 28\n        shell: bash\n"), ("          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 8\n        shell: bash\n", "          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 8\n        shell: bash\n"), ('            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\')\n        timeout-minutes: 18\n        shell: bash\n', '            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\' && github.ref != \'refs/heads/verify/desktop-macos-app-absence-fixture\')\n        timeout-minutes: 18\n        shell: bash\n'), ("          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 3\n        shell: bash\n", "          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 3\n        shell: bash\n"), ("          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n        id: package_install\n        timeout-minutes: 18\n        shell: bash\n        env:\n", '          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact\n        id: app_absence_prepare\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 56\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare-app-absence --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/prepare-app-absence.stdout" 2> "$MRK_MACOS_WORK/prepare-app-absence.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-preparation.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        id: package_install\n        timeout-minutes: ${{ github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\' && 32 || 18 }}\n        shell: bash\n        env:\n'), ('          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Its one990s group includes known mount retirement.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n', '          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Ordinary one990s remains unchanged. The fixed\n          # app-absence route alone adds baseline/image originals within1740s\n          # work/1800s hard; the job350min cap is never renewed.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n'), ('          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n', '          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n        id: app_absence_restore\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 13\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py app-absence-restore --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/app-absence-restore.stdout" 2> "$MRK_MACOS_WORK/app-absence-restore.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-restore.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n'))
+
+def without_app_absence_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("app-absence workflow source bound differs")
+    if "refs/heads/verify/desktop-macos-app-absence-fixture" not in source and "prepare-app-absence" not in source:
+        return source
+    for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("app-absence workflow exact delta differs")
+    for previous, current in reversed(APP_ABSENCE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02':
+        raise AssertionError("app-absence workflow predecessor differs")
+    return source
+
+
 def without_command_terminal_runtime_source_pin(source):
     # Only current core changed; preserve every older SOURCE inverse and hash.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -1257,6 +1274,7 @@ def without_command_terminal_runtime_source_pin(source):
 
 
 def without_same_package_workflow(source):
+    source = without_app_absence_workflow(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("same-package workflow source bound differs")
     source = without_command_terminal_runtime_source_pin(source)
@@ -2667,6 +2685,112 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(operation.recheck_mount, original_mount)
         self.assertEqual(operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 ** 3, 2 * 1024 ** 3))
+
+    def test_app_absence_existing_owner_dispatch_capture_and_unknown_retirement(self):
+        # A phase-body DATA port isolates the SAME Operation dispatch/capture/
+        # close contract. It is not a mock of archive/marker/history validation;
+        # those genuine reducers have separate focused cases. No native child.
+        module = ANDROID_HELPER
+        for role in ("app-absence-build", "app-absence-data-tests"):
+            self.assertEqual(module.package_timeout_data(0, 1_443_000_000_000, 1440,
+                phase="prepare-app-absence", role=role), 1440)
+            self.assertEqual(module.package_timeout_data(0, 100_000_000_000, 1440,
+                phase="prepare-app-absence", role=role), 97)
+            for requested in (False, 0, 1441):
+                with self.assertRaises(module.Refused):
+                    module.package_timeout_data(0, 2_000_000_000_000, requested,
+                        phase="prepare-app-absence", role=role)
+            with self.assertRaises(module.Refused):
+                module.package_timeout_data(0, 3_999_999_999, 1440,
+                    phase="prepare-app-absence", role=role)
+        for phase, role in ((None, None), ("package-install", "app-absence-build"),
+                            ("app-absence-restore", "app-absence-data-tests"),
+                            ("prepare-app-absence", "app-absence-adhoc")):
+            self.assertEqual(module.package_timeout_data(0, 2_000_000_000_000, 480,
+                phase=phase, role=role), 480)
+            with self.assertRaises(module.Refused):
+                module.package_timeout_data(0, 2_000_000_000_000, 481, phase=phase, role=role)
+        for target in TOOL.MAC_TARGETS:
+            for phase, fault in (("prepare-app-absence", None), ("prepare-app-absence", "tests-nonzero"),
+                                 ("prepare-app-absence", "tests-unknown"), ("app-absence-restore", None),
+                                 ("app-absence-restore", "withdraw-nonzero"), ("app-absence-restore", "withdraw-unknown")):
+                with self.subTest(target=target, phase=phase, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    checkout, work, environment, _owner, _events = self.fixture(Path(directory), build_target=target)
+                    producer, service, _selection, _history, _descriptor = packaging_fixture(target)
+                    (checkout / module.PROFILE).write_bytes(service)
+                    (checkout / module.PRODUCER_PROFILE).write_bytes(producer)
+                    path = checkout / "desktop/tools/macos_app_absence_fixture.py"
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes((Path(__file__).absolute().parents[2] / "desktop/tools/macos_app_absence_fixture.py").read_bytes())
+                    path.chmod(0o644)
+                    environment.update(GITHUB_REF=module.APP_ABSENCE_REF, MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+                    events, returned = [], []
+                    def command(argv, **options):
+                        role = operation.calls[-1]["role"]
+                        events.append(role)
+                        self.assertEqual(argv, ["/inert/fixed-data-port", role])
+                        expected_timeout = 1440 if phase == "prepare-app-absence" and role in (
+                            "app-absence-build", "app-absence-data-tests") else 30
+                        self.assertEqual(options["timeout"], expected_timeout)
+                        self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                            + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
+                        selected = "app-absence-data-tests" if phase == "prepare-app-absence" else "app-absence-withdraw"
+                        if role == selected and fault and fault.endswith("unknown"):
+                            raise RuntimeError("INERT original uncertainty")
+                        returned.append(role)
+                        return CompletedProcess(argv, 1 if role == selected and fault else 0, b"", b"")
+                    operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, phase, environment, TOOL, target=target)
+                    original_load = operation.app_absence_load
+                    def phase_port(op):
+                        adapter = op.app_absence_module
+                        expected = adapter.roles(op)
+                        if phase == "app-absence-restore":
+                            op.app_absence["case"] = op.package_directory("app-absence-case")
+                            op.app_absence["mount"] = {"entered": False, "detached": False}
+                        for role in expected:
+                            maximum = 1440 if phase == "prepare-app-absence" and role in (
+                                "app-absence-build", "app-absence-data-tests") else 30
+                            op.package_call(role, ["/inert/fixed-data-port", role], timeout=maximum, limit=65536)
+                            if role == "app-absence-restore-detach": op.app_absence["mount"]["detached"] = True
+                        op.sha256 = "a" * 64
+                        op.app_absence["complete"] = True  # Inert phase port, not product acceptance.
+                    def load():
+                        original_load()
+                        adapter = operation.app_absence_module
+                        setattr(adapter, "prepare" if phase == "prepare-app-absence" else "restore", phase_port)
+                    try:
+                        with (mock.patch.dict(sys.modules, {module.__name__: module}),
+                              mock.patch.object(operation, "app_absence_load", side_effect=load),
+                              mock.patch.object(os, "fstatvfs", return_value=SimpleNamespace(f_bavail=100*1024*1024, f_frsize=4096))):
+                            if fault is None: operation.execute()
+                            else:
+                                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"): operation.execute()
+                        self.assertEqual(operation.credential_calls, [])
+                        self.assertEqual(operation.credential_contexts, [])
+                        if fault is None:
+                            self.assertEqual(tuple(events), operation.app_absence_module.roles(operation))
+                            self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                            if phase == "app-absence-restore":
+                                self.assertEqual((work / "app-absence-case/installer-output.status").read_bytes(), b"0\n")
+                        else:
+                            self.assertFalse(operation.receipt["passed"])
+                            last = "app-absence-data-tests" if phase == "prepare-app-absence" else "app-absence-withdraw"
+                            self.assertEqual(events[-1], last)
+                            self.assertNotIn("app-absence-adhoc", events)
+                            self.assertNotIn("app-absence-install", events)
+                            self.assertNotIn("app-absence-restore-detach", events)
+                            if phase == "app-absence-restore":
+                                self.assertEqual(operation.app_absence["pendingRoot"], last)
+                                self.assertFalse(operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                            elif fault.endswith("unknown"):
+                                self.assertFalse(operation.receipt["targetRetired"])
+                        self.assertEqual(len(returned), sum(row["returned"] for row in operation.calls))
+                    finally:
+                        # The DATA port has no surviving native process. Close
+                        # test-owned originals only AFTER checking that genuine
+                        # production refused to grant unknown-root retirement.
+                        for entry in reversed(operation.entries): operation.close(entry)
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
 
     def test_same_package_owner_uses_final_carrier_once_and_retains_unknown_installer(self):
         # Native mount/Installer/readback responses are explicit DATA ports.
@@ -7603,6 +7727,50 @@ def channel_data(path, body=None, *, private=False):
 
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
+    def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        prior = without_app_absence_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
+        self.assertEqual(without_app_absence_workflow(prior), prior)
+        self.assertEqual(without_same_package_workflow(raw), without_same_package_workflow(prior))
+        self.assertEqual(raw.count("id: app_absence_prepare"), 1)
+        self.assertEqual(raw.count("id: app_absence_restore"), 1)
+        for role, minutes in (("prepare-app-absence", 56), ("app-absence-restore", 13)):
+            label = "      - name: Fixed nonshipping app-absence " + role + "; no credentials or user artifact"
+            block = raw[raw.index(label):].split("\n      - name:", 1)[0]
+            self.assertIn("timeout-minutes: " + str(minutes), block)
+            self.assertIn("refs/heads/verify/desktop-macos-app-absence-fixture", block)
+            self.assertNotIn("secrets.", block)
+            self.assertIn('"$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py ' + role, block)
+            self.assertIn('phase_status=$?', block)
+            self.assertIn('if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi', block)
+        self.assertLess(raw.index("id: data_contracts"), raw.index("id: app_absence_prepare"))
+        self.assertLess(raw.index("id: app_absence_prepare"), raw.index("id: package_install"))
+        self.assertLess(raw.index("id: package_install"), raw.index("id: app_absence_restore"))
+        self.assertEqual(raw.count("MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}"), 1)
+        self.assertNotIn("app-absence-", raw[raw.index("      - name: Upload only the normal user preview package and guide"):])
+        adapter = (root / "desktop/tools/macos_app_absence_fixture.py").read_bytes()
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        self.assertLessEqual(len(adapter), 65536)
+        self.assertLessEqual(len(helper), 512 * 1024)
+        tree = ast.parse(adapter)
+        assignments = {n.targets[0].id: n.value for n in tree.body if isinstance(n, ast.Assign)
+                       and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)}
+        self.assertEqual(ast.literal_eval(assignments["PREPARE_ROLES"]), ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
+            "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
+        self.assertEqual(ast.literal_eval(assignments["RESTORE_ROLES"]), ("app-absence-restore-attach", "app-absence-withdraw",
+            "app-absence-install", "app-absence-verify", "app-absence-restore-detach"))
+        self.assertIn(b'(3180, 3240) if op.phase == PREPARE else (660, 720)', adapter)
+        self.assertIn(b'else (1740, 1800)', adapter)
+        self.assertIn(b'expected_restore_previous=expected', adapter)
+        self.assertIn(b'MRK_APP_ABSENCE_FIXTURE_SOURCE_COMMIT', (root / "desktop/src-tauri/build.rs").read_bytes())
+        for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
+            changed = raw.replace(current, previous, 1)
+            with self.assertRaises(AssertionError): without_app_absence_workflow(changed)
+        with self.assertRaises(AssertionError): without_app_absence_workflow(raw + APP_ABSENCE_WORKFLOW_INVERSE[0][1])
+        self.assertNotIn("prepare-app-absence", prior)
+
     def test_portable_names_and_complete_directory_identity(self):
         for name in ("python/lib/python3.14/encodings/utf_8.py", "app/Contents/_CodeSignature/CodeResources"):
             self.assertTrue(TOOL.safe_path(name))
@@ -7754,6 +7922,57 @@ class MacInstalledData(unittest.TestCase):
         for archive in bad:
             with self.subTest(archive=archive[:6]), self.assertRaises(TOOL.Refused):
                 TOOL.cpio_members(archive)
+
+    def test_app_absence_archive_sequential_audits_keep_exact_scripts_and_root_owner(self):
+        # Both decoders are genuine. Only current SOURCE selection and original
+        # filesystem DATA ports are replaced; never tar/xar/pkgbuild execution.
+        for target in TOOL.MAC_TARGETS:
+            selection = TOOL.source_build_selection(target)
+            program = entry_macho_fixture(target=target)
+            inventory = b"INERT fixed inventory DATA\n"
+            hook = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+            files = {"postinstall": (hook, 0o555), "mrk-macos-app-absence-fixture": (program, 0o555),
+                     "input/" + TOOL.INSTALLATION_INVENTORY_NAME: (inventory, 0o444), "input/data": (b"DATA", 0o444)}
+            info = package_data(selection=selection)[1]["PackageInfo"].replace(
+                TOOL.PACKAGE_ID.encode(), (TOOL.PACKAGE_ID + "-app-absence-fixture").encode())
+            def members(uid=0, gid=0, changed=None):
+                values = files if changed is None else changed
+                archive = odc(".", stat.S_IFDIR | 0o755, uid=uid, gid=gid)
+                archive += odc("./input", stat.S_IFDIR | 0o555, uid=uid, gid=gid)
+                for name, (body, mode) in sorted(values.items()):
+                    archive += odc("./" + name, stat.S_IFREG | mode, body, uid=uid, gid=gid)
+                return {"PackageInfo": info, "Scripts": archive + odc("TRAILER!!!", 0)}
+            original = MacAndroidHelperPackagingData.final_package_xar(self, members(501, 20))
+            final = MacAndroidHelperPackagingData.final_package_xar(self, members())
+            args = SimpleNamespace(target=target, scripts=Path("/inert/scripts"), original_package=Path("/inert/original.pkg"),
+                package=Path("/inert/final.pkg"), expected_program=TOOL.digest(program), expected_inventory=TOOL.digest(inventory))
+            with (mock.patch.object(TOOL, "source_build_selection", return_value=selection),
+                  mock.patch.object(TOOL, "packager_ids", return_value=(501, 20)), mock.patch.object(TOOL, "tree", return_value=files),
+                  mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((91, path.name))),
+                  mock.patch.object(TOOL, "read_at", return_value=(original, SimpleNamespace(st_uid=501, st_gid=20))),
+                  mock.patch.object(TOOL, "read", return_value=final) as read):
+                compact = TOOL.app_absence_original_command(args)
+                self.assertEqual(set(compact["rows"]), set(files) | {"input"})
+                self.assertEqual(compact["rows"]["input/data"], {"size": 4, "sha256": TOOL.digest(b"DATA"), "mode": 0o444})
+                self.assertEqual([key for key, value in compact.items() if isinstance(value, bytes)], ["packageInfo"])
+                value = TOOL.app_absence_final_command(args, compact)
+                self.assertEqual(value["packageSha256"], TOOL.digest(final))
+                self.assertEqual(value["originalPackageSha256"], TOOL.digest(original))
+                self.assertEqual(value["qualification"], "nonshipping-app-absence-fixture-not-installed")
+                wrong = [members(501, 20), dict(members(), Payload=b"forbidden"),
+                         dict(members(), PackageInfo=info+b"\n"), members(changed=dict(files, **{"input/data": (b"DIFF", 0o444)})),
+                         members(changed=dict(files, **{"input/data": (b"DATA", 0o555)})),
+                         members(changed={k: v for k, v in files.items() if k != "input/data"})]
+                for row in wrong:
+                    read.return_value = MacAndroidHelperPackagingData.final_package_xar(self, row)
+                    with self.assertRaises(TOOL.Refused): TOOL.app_absence_final_command(args, compact)
+                with self.assertRaises(TOOL.Refused): TOOL.package_info(info, selection=selection)
+                with self.assertRaises(TOOL.Refused): TOOL.package_info(info, selection=selection, fixture=True, app_absence=True)
+                for changed in (dict(files, postinstall=(b"exit 0\n", 0o555)),
+                                dict(files, **{"mrk-macos-app-absence-fixture": (program+b"different", 0o555)}),
+                                dict(files, **{"input/"+TOOL.INSTALLATION_INVENTORY_NAME: (b"different", 0o444)})):
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.app_absence_scripts_data(changed, args.expected_program, args.expected_inventory)
 
     def test_original_package_preparation_cannot_substitute_for_root_audit(self):
         files, members = package_data(uid=501, gid=20)
@@ -9496,6 +9715,167 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                     self.assertEqual(closed, list(reversed(entered)))
                     for model in channel_models:
                         self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
+    def test_app_absence_restore_uses_genuine_history_status_and_current_byte_readers(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "previous", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install", "restore-fixed-app"), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    def bind(value):
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    expected = copy.deepcopy(parsed[result["invocation"]][0]["previousState"])
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    entered, closed, channel_models = [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "previous": expected["sha256"] = "f" * 64
+                        reason = {"previous": "restore-immediate-predecessor", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, expected_restore_previous=expected)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_restore_previous=expected)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertEqual("restorePredecessorMatched" in observed, fault != "default")
+                            if fault is None:
+                                self.assertIs(observed["restorePredecessorMatched"], True)
+                                ordinary_shape = {key: value for key, value in observed.items() if key != "restorePredecessorMatched"}
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(history.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous") else 1)
+                    self.assertEqual(closed, list(reversed(entered)))
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
     def test_installer_export_reader_checks_original_leaf_and_all_closes(self):
         args = result_args()
         path = TOOL.installer_result_path(args.expected_source, args.expected_inventory, args.expected_manifest, request_id=args.request_id)
@@ -9617,7 +9997,7 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                     TOOL.main([command, *options, *complete, "--installer-output", "/work/old-output.txt"])
                 call.assert_not_called()
         source = (Path(__file__).absolute().parents[2] / "desktop/tools/stage_macos_installed.py").read_text(encoding="utf-8")
-        ordinary = source.split("def observation_command(args, *, expected_previous=None):", 1)[1].split("def visible_occupant", 1)[0]
+        ordinary = source.split("def observation_command(args, *, expected_previous=None, expected_restore_previous=None):", 1)[1].split("def visible_occupant", 1)[0]
         fixture = source.split("def fixture_observation_command(args):", 1)[1].split("def main", 1)[0]
         for block in (ordinary, fixture):
             self.assertIn("installer_result_readback(args", block)
@@ -11164,7 +11544,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
                         source.replace(current_source, "0" * 64, 1)):
             with self.assertRaisesRegex(AssertionError, "^command terminal runtime SOURCE exact two-site delta differs$"):
                 without_command_terminal_runtime_source_pin(damaged)
-        source = normalized_source
+        source = without_command_terminal_runtime_source_pin(without_app_absence_workflow(source))
         active_scope = "      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n"
         self.assertEqual(source.count(active_scope), 1)
         disabled_source = source.replace(active_scope, '      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n', 1)

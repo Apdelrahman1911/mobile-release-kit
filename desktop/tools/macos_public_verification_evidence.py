@@ -892,6 +892,190 @@ def project_same_package(value, context):
     return dict(row)  # No request/instance identifiers, filesystem paths or raw native output.
 
 
+APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
+APP_ABSENCE_PREPARE_ROLES = ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc", "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar")
+APP_ABSENCE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+    "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
+    "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor", "app-absence-baseline", "installer",
+    "installer-log-capture", "distribution-detach", "app-absence-baseline-detach")
+APP_ABSENCE_RESTORE_ROLES = ("app-absence-restore-attach", "app-absence-withdraw", "app-absence-install", "app-absence-verify", "app-absence-restore-detach")
+APP_ABSENCE_HASHES = ("packageSha256", "producerDescriptorSha256", "producerSignatureSha256", "fixtureExecutableSha256", "inventorySha256", "runtimeManifestSha256", "protocolSha256")
+APP_ABSENCE_PROOFS = {
+    "baseline": ("rootAbsent", "privateDirectoryCreated", "parentCensusMatched", "recordReadback"),
+    "withdraw": ("initialFreshInstallRecorded", "createdRootMatchedPriorAbsence", "sameInstance", "reservationClosedUnderMaintenance", "renameKnownSuccess",
+        "appAbsent", "runtimeUnchanged", "historyUnchanged", "withdrawnAppVerified", "recordReadback"),
+    "verify": ("restoreFixedAppRecorded", "initialHistoryPreserved", "sameInstance", "runtimeUnchanged", "newAppOriginal", "currentAppVerified",
+        "withdrawnAppVerified", "reservationClosedUnderMaintenance", "recordReadback", "retainedPrivateEvidence"),
+}
+
+
+def app_absence_binding(value, context):
+    need(type(value) is dict and set(value) == set(APP_ABSENCE_HASHES) | {"fixtureSource", "productSource", "runId", "runAttempt", "target"}
+         and value["fixtureSource"] == value["productSource"] == context["source"]
+         and all(value[k] == context[k] for k in ("runId", "runAttempt", "target")))
+    return {key: hex_value(value[key]) for key in APP_ABSENCE_HASHES}
+
+
+def app_absence_owner(value, context, phase, roles):
+    need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1
+         and value.get("phase") == phase and value.get("packageRole") == "ordinary-image"
+         and context["profile"] == "installed"
+         and value.get("workflow") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + APP_ABSENCE_REF
+         and all(value.get(k) == context[k] for k in ("source", "workflowSource", "runId", "runAttempt", "target"))
+         and all(value.get(k) is True for k in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired"))
+         and value.get("cleanupErrors") == [] and value.get("directStagerIOPending", False) is None and "failure" not in value)
+    calls = value.get("originalCalls")
+    need(type(calls) is list and len(calls) == len(roles))
+    for row, role in zip(calls, roles):
+        need(type(row) is dict and row.get("role") == role and row.get("returned") is True and row.get("capturesSettled") is True
+             and type(row.get("returncode")) is int and (row["returncode"] == 0 or phase == "package-install"
+                 and role in ("installer-log-cursor", "installer-log-capture") and row["returncode"] == 1))
+    if phase != "package-install":
+        need(value.get("credentialOriginals") == value.get("credentialContexts") == [])
+
+
+def app_absence_phase(value, context, phase, binding, baseline):
+    need(type(value) is dict and set(value) == set(APP_ABSENCE_HASHES) | {"fixtureSource", "productSource", "runId", "runAttempt", "target",
+        "schemaVersion", "kind", "phase", "baselineSha256", "recordSha256", "proof", "originalOuterExitRequired", "systemServiceExitClaimed", "productReady"}
+        and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["kind"] == "app-absence-phase-observation"
+        and value["phase"] == phase and value["originalOuterExitRequired"] is True
+        and value["systemServiceExitClaimed"] is False and value["productReady"] is False)
+    actual = app_absence_binding({k: value[k] for k in (*APP_ABSENCE_HASHES, "fixtureSource", "productSource", "runId", "runAttempt", "target")}, context)
+    need(actual == binding and hex_value(value["baselineSha256"]) == baseline
+         and type(value["proof"]) is dict and set(value["proof"]) == set(APP_ABSENCE_PROOFS[phase])
+         and all(v is True for v in value["proof"].values()))
+    record = hex_value(value["recordSha256"])
+    need(phase != "baseline" or record == baseline)
+    return {"recordSha256": record, "preExitObservation": True}
+
+
+def project_app_absence_baseline(value, context):
+    app_absence_owner(value, context, "package-install", APP_ABSENCE_PACKAGE_ROLES)
+    need("appAbsenceBaseline" in value)
+    row = value["appAbsenceBaseline"]
+    need(type(row) is dict and set(row) == {"schemaVersion", "binding", "preparationReceiptSha256", "layout", "image", "baselineSha256",
+        "baselineOriginal", "baselineObservation", "initial", "initialFreshInstall", "initialExportCount", "originalBaselineZero",
+        "originalMountDetached", "systemServiceExitClaimed", "productReady"}
+        and type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
+        and row["initialFreshInstall"] is True and type(row["initialExportCount"]) is int and row["initialExportCount"] == 1
+        and row["originalBaselineZero"] is True and row["originalMountDetached"] is True
+        and row["systemServiceExitClaimed"] is False and row["productReady"] is False)
+    binding = app_absence_binding(row["binding"], context)
+    layout = row["layout"]
+    names = ("Install.pkg", "producer.json", "producer.sig", "MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg")
+    need(type(layout) is dict and set(layout) == set(names))
+    for name in names:
+        item = layout[name]
+        need(type(item) is dict and set(item) == {"name", "bytes", "sha256", "mode", "links"}
+             and item["name"] == name and type(item["mode"]) is int and item["mode"] == 0o444
+             and type(item["links"]) is int and item["links"] == 1)
+        integer(item["bytes"], 16384 if name == "producer.json" else 512 if name == "producer.sig" else 512*1024*1024,
+                28 if name.endswith(".pkg") else 1)
+        hex_value(item["sha256"])
+    for name, key in zip(names[:3], ("packageSha256", "producerDescriptorSha256", "producerSignatureSha256")):
+        need(layout[name]["sha256"] == binding[key])
+    fixture = layout[names[3]]
+    need(all(layout[name]["sha256"] == fixture["sha256"] and layout[name]["bytes"] == fixture["bytes"] for name in names[4:]))
+    original = row["baselineOriginal"]
+    need(type(original) is dict and set(original) == {"bytes", "sha256", "identity"}
+         and type(original["identity"]) is list and len(original["identity"]) == 9
+         and all(type(v) is int and 0 <= v < 2**64 for v in original["identity"]))
+    integer(original["bytes"], 65536, 1)
+    baseline = hex_value(row["baselineSha256"])
+    need(hex_value(original["sha256"]) == baseline)
+    app_absence_phase(row["baselineObservation"], context, "baseline", binding, baseline)
+    image = row["image"]
+    need(type(image) is dict and set(image) == {"bytes", "sha256"})
+    size = integer(image["bytes"], 2560 * 1024 * 1024, 1)
+    initial = row["initial"]
+    need(type(initial) is dict and set(initial) == {"requestId", "invocation", "stateSha256", "resultSha256", "instance"})
+    for key in ("requestId", "invocation", "instance"):
+        hex_value(initial[key], 32)
+    hex_value(initial["stateSha256"])
+    return {"binding": binding, "preparationReceiptSha256": hex_value(row["preparationReceiptSha256"]),
+        "baselineSha256": baseline, "initialResultSha256": hex_value(initial["resultSha256"]),
+        "imageSha256": hex_value(image["sha256"]), "imageBytes": size, "initialFreshInstall": True,
+        "originalBaselineZero": True, "originalMountDetached": True, "nativeCalls": 20,
+        "fixturePackageSha256": fixture["sha256"], "fixturePackageBytes": fixture["bytes"]}
+
+
+def project_app_absence_receipt(value, context, phase, raw_sha):
+    roles = APP_ABSENCE_PREPARE_ROLES if phase == "prepare-app-absence" else APP_ABSENCE_RESTORE_ROLES
+    need(phase in ("prepare-app-absence", "app-absence-restore"))
+    app_absence_owner(value, context, phase, roles)
+    result = {"receiptState": "observed", "receiptSha256": raw_sha, "nativeCalls": len(roles),
+              "originalClosesKnown": True, "originalCallerRequired": True, "productReady": False}
+    if phase == "prepare-app-absence":
+        need("appAbsencePreparation" in value)
+        row = value["appAbsencePreparation"]
+        need(type(row) is dict and set(row) == {"fixtureSource", "productSource", "runId", "runAttempt", "target",
+             "fixtureExecutableSha256", "fixtureExecutableBytes", "fixturePackageSha256", "fixturePackageBytes", "inventorySha256",
+             "runtimeManifestSha256", "protocolSha256", "cargoMessagesSha256", "pureDataTests", "archiveAudited", "adHocOnly", "productReady"}
+             and all(row.get(k) == v for k, v in {"fixtureSource": context["source"], "productSource": context["source"],
+            "runId": context["runId"], "runAttempt": context["runAttempt"], "target": context["target"]}.items())
+            and row.get("archiveAudited") is True and row.get("adHocOnly") is True and row.get("productReady") is False)
+        result.update({k: hex_value(row[k]) for k in ("fixtureExecutableSha256", "fixturePackageSha256", "inventorySha256", "runtimeManifestSha256", "protocolSha256")})
+        result["fixtureExecutableBytes"] = integer(row["fixtureExecutableBytes"], 64*1024*1024, 1)
+        result["fixturePackageBytes"] = integer(row["fixturePackageBytes"], 512*1024*1024, 28)
+        tests = row["pureDataTests"]
+        names = ("fixed_transport_and_same_source_bindings", "initial_fresh_install_and_same_gate_not_name_only",
+                 "output_quote_and_original_exit_finality_are_separate", "actual_restore_requires_new_app_and_exact_initial_history",
+                 "exclusive_rename_metadata_and_record_bounds_are_not_identity_reset",
+                 "phase_observations_are_pending_outer_exit_and_keep_private_fields_private")
+        need(type(tests) is dict and set(tests) == {"schemaVersion", "kind", "methodNames", "testCount", "passed", "failed", "ignored",
+             "filteredCount", "stdoutSha256", "stderrSha256", "productReady"}
+             and tests["kind"] == "fixture-rust-data-test-observation" and tests["productReady"] is False
+             and tests["methodNames"] == ["installer::worker::app_absence_fixture::tests::" + name for name in names]
+             and all(type(tests[k]) is int and tests[k] == v for k, v in (("schemaVersion", 1), ("testCount", 6), ("passed", 6), ("failed", 0), ("ignored", 0))))
+        need(all(tests[k] == value["originalCalls"][1].get(k) for k in ("stdoutSha256", "stderrSha256")))
+        result["pureDataTests"] = {"passed": 6, "failed": 0, "ignored": 0, "filteredCount": integer(tests["filteredCount"], 999999),
+            "stdoutSha256": hex_value(tests["stdoutSha256"]), "stderrSha256": hex_value(tests["stderrSha256"])}
+        return result
+    need("appAbsenceRestore" in value)
+    row = value["appAbsenceRestore"]
+    need(type(row) is dict and set(row) == {"schemaVersion", "binding", "preparationReceiptSha256", "baselineOwnerReceiptSha256",
+         "imageSha256", "baselineSha256", "initialResultSha256", "restoreResultSha256", "withdraw", "verify", "initialFreshInstall",
+         "restoreFixedAppObserved", "immediatePredecessorMatched", "currentBytesVerified", "initialHistoryPreserved", "beforeExportCount",
+         "afterExportCount", "newExportCount", "verifiedCurrentFiles", "originalInstallerReturnedZero", "originalMountDetached",
+         "retainedPrivateEvidence", "systemServiceExitClaimed", "productReady"}
+         and type(row.get("schemaVersion")) is int and row["schemaVersion"] == 1
+         and all(row.get(k) is True for k in ("initialFreshInstall", "restoreFixedAppObserved", "immediatePredecessorMatched",
+             "currentBytesVerified", "initialHistoryPreserved", "originalInstallerReturnedZero", "originalMountDetached", "retainedPrivateEvidence"))
+         and row.get("systemServiceExitClaimed") is False and row.get("productReady") is False
+         and all(type(row.get(k)) is int and row[k] == v for k, v in (("beforeExportCount", 1), ("afterExportCount", 2), ("newExportCount", 1))))
+    binding = app_absence_binding(row["binding"], context)
+    baseline = hex_value(row["baselineSha256"])
+    for phase in ("withdraw", "verify"):
+        app_absence_phase(row[phase], context, phase, binding, baseline)
+    result.update(binding=binding, **{k: hex_value(row[k]) for k in ("preparationReceiptSha256", "baselineOwnerReceiptSha256", "imageSha256",
+        "baselineSha256", "initialResultSha256", "restoreResultSha256")})
+    result.update(verifiedCurrentFiles=integer(row["verifiedCurrentFiles"], 4096, 1), retainedPrivateEvidence=True)
+    return result
+
+
+def app_absence_join(prepare, restore, baseline, statuses):
+    need(all(type(row) is dict and row.get("receiptState") == "observed" for row in (prepare, restore, baseline))
+         and all(type(row) is dict and row.get("receiptState") == "observed" and type(row.get("returncode")) is int
+                 and row["returncode"] == 0 for row in statuses))
+    prior = baseline.get("appAbsenceBaseline")
+    need(type(prior) is dict and prior["nativeCalls"] == 20 and prepare["nativeCalls"] == 7 and restore["nativeCalls"] == 5
+         and prior["preparationReceiptSha256"] == restore["preparationReceiptSha256"] == prepare["receiptSha256"]
+         and restore["baselineOwnerReceiptSha256"] == baseline["receiptSha256"]
+         and restore["binding"] == prior["binding"]
+         and prepare["fixturePackageSha256"] == prior["fixturePackageSha256"]
+         and prepare["fixturePackageBytes"] == prior["fixturePackageBytes"]
+         and all(restore[k] == prior[k] for k in ("baselineSha256", "imageSha256", "initialResultSha256"))
+         and all(prepare[k] == prior["binding"][k] for k in ("fixtureExecutableSha256", "inventorySha256", "runtimeManifestSha256", "protocolSha256")))
+    return {"receiptState": "observed", "proofComplete": True, "nativeCalls": {"prepare": 7, "baseline": 20, "restore": 5},
+            **{k: prior["binding"][k] for k in ("packageSha256", "inventorySha256", "runtimeManifestSha256")},
+            "initialResultSha256": prior["initialResultSha256"], "restoreResultSha256": restore["restoreResultSha256"],
+            "retainedPrivateEvidence": True, "systemServiceExitClaimed": False, "downloadedLaunchQualified": False,
+            "guiQualified": False, "productReady": False}
+
+
+NATIVE_ROLES = NATIVE_ROLES | frozenset(APP_ABSENCE_PREPARE_ROLES + APP_ABSENCE_PACKAGE_ROLES + APP_ABSENCE_RESTORE_ROLES)
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -952,6 +1136,9 @@ def project_receipt(value, context, phase):
         result["samePackageObservation"] = project_same_package(value, context)
     else:
         need(value.get("samePackageObservation") is None)
+    if value.get("appAbsenceBaseline") is not None:
+        need(phase == "package-install")
+        result["appAbsenceBaseline"] = project_app_absence_baseline(value, context)
     result["failure"] = project_failure(value.get("failure"))
     removal = value.get("removalFixture")
     need(removal is None or phase == "package-removal-fixture")
@@ -1274,7 +1461,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
          and len(set(STATUS_FILES)) == len(STATUS_FILES))
     # All fixed attempts count, including absent originals, before any read.
     need(len(STATUS_FILES) + len(PHASES) + 3
-         + (len(UI_DIAGNOSTICS) + 2 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
+         + (len(UI_DIAGNOSTICS) + 6 + len(POSITIVE_UI_INPUTS) if profile == "installed" else 0) <= 128)
     budget = {"deadline": time.monotonic_ns() + 45_000_000_000, "files": 0, "bytes": 0, "nodes": 0,
               "outputBytes": 16384}  # Reserve the fixed roster keys/envelope/caller-status duplicates.
     root = open_root(work)
@@ -1299,9 +1486,14 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         for name in STATUS_FILES:
             statuses[name] = observe(name, 16, status)
         phases = {}
+        def phase_receipt(body, phase):
+            result = project_receipt(decode(body, budget), context, phase)
+            if "appAbsenceBaseline" in result:
+                result["receiptSha256"] = hashlib.sha256(body).hexdigest()
+            return result
         for phase in PHASES:
             row = observe("android-helper-" + phase + ".json", 16384,
-                          lambda body, phase=phase: project_receipt(decode(body, budget), context, phase))
+                          lambda body, phase=phase: phase_receipt(body, phase))
             row["callerStatus"] = statuses.get(PHASE_STATUS.get(phase))
             if phase == "same-package-noop" and row.get("samePackageObservation") is not None:
                 caller = row["callerStatus"]
@@ -1322,10 +1514,22 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                 ui_diagnostics["build"])) if profile == "installed" else None
         data_failure = observe("data-contracts/failure-diagnostics.json", 16384,
             lambda body: project_data_contract_failure(decode(body, budget), context, statuses, inventory_paths)) if profile == "installed" else None
+        app_absence = None
+        if profile == "installed":
+            app_status = [observe(name, 16, status) for name in ("app-absence-preparation.status", "app-absence-restore.status")]
+            app_rows = [observe("android-helper-" + phase + ".json", 16384,
+                lambda body, phase=phase: project_app_absence_receipt(decode(body, budget), context, phase, hashlib.sha256(body).hexdigest()))
+                for phase in ("prepare-app-absence", "app-absence-restore")]
+            try:
+                app_absence = app_absence_join(*app_rows, phases["package-install"], app_status + [statuses["package-install.status"]])
+            except Refused:
+                app_absence = {"receiptState": "absent" if all(row.get("receiptState") == "absent" for row in app_rows + app_status)
+                               else "incomplete", "proofComplete": False}
+            app_absence.update(prepare=app_rows[0], restore=app_rows[1], callerStatuses=app_status)
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
-                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic}
+                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence}
         if profile == "installed":
             value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")

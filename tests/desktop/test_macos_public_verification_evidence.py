@@ -336,6 +336,113 @@ def positive_ui_data(context=None, *, ios=False):
     return android, facts, test, summary, statuses, phases, inventory
 
 
+def app_absence_documents(context=CONTEXT):
+    """Genuine pure parser and three receipt assignments; no adapter execution.
+
+    The supplied observations stand in for completed native originals solely to
+    test the public DATA boundary. They do not establish native fixture success.
+    """
+    path = ROOT / "desktop/tools/macos_app_absence_fixture.py"
+    module = ast.parse(path.read_text())
+    names = {"MIB", "NATIVE_DATA_TESTS", "need", "digest", "native_data_tests_result"}
+    selected = [node for node in module.body if isinstance(node, (ast.FunctionDef, ast.Assign))
+                and (node.name if isinstance(node, ast.FunctionDef) else
+                     node.targets[0].id if isinstance(node.targets[0], ast.Name) else None) in names]
+    actual = {node.name if isinstance(node, ast.FunctionDef) else node.targets[0].id for node in selected}
+    if actual != names:
+        raise AssertionError("app-absence pure closure changed")
+    namespace = {"hashlib": hashlib, "re": re}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
+    assignments = {}
+    for function, field in (("prepare", "appAbsencePreparation"), ("package_complete", "appAbsenceBaseline"),
+                            ("restore", "appAbsenceRestore")):
+        functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == function]
+        if len(functions) != 1:
+            raise AssertionError("app-absence writer changed")
+        rows = [node for node in functions[0].body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Subscript)
+                and ast.dump(node.targets[0].value) == ast.dump(ast.parse("op.receipt", mode="eval").body)
+                and isinstance(node.targets[0].slice, ast.Constant) and node.targets[0].slice.value == field]
+        if len(rows) != 1:
+            raise AssertionError("app-absence exact receipt clause changed")
+        assignments[field] = compile(ast.Module(body=rows, type_ignores=[]), str(path), "exec")
+    def serialized(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    def owner(phase, roles):
+        value = receipt(phase)
+        value.pop("finalImage"); value.pop("notarySubmission")
+        value.update(context, packageRole="ordinary-image", productReady=False, cleanupErrors=[], directStagerIOPending=None,
+                     workflow="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-app-absence-fixture")
+        value["notaryAuthentication"] = {"created": False, "closed": False, "retired": False}
+        value["originalCalls"] = [{"role": role, "returned": True, "capturesSettled": True, "returncode": 0,
+                                  "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64} for role in roles]
+        return value
+    binding = {"fixtureSource": context["source"], "productSource": context["source"],
+               **{key: context[key] for key in ("runId", "runAttempt", "target")}}
+    hashes = dict(zip(("packageSha256", "producerDescriptorSha256", "producerSignatureSha256", "fixtureExecutableSha256",
+                       "inventorySha256", "runtimeManifestSha256", "protocolSha256"), (format(n, "064x") for n in range(1, 8))))
+    native_binding = {**binding, **hashes}
+    baseline_sha, fixture_sha, image_sha = "8" * 64, "9" * 64, "a" * 64
+    proofs = {
+        "baseline": ("rootAbsent", "privateDirectoryCreated", "parentCensusMatched", "recordReadback"),
+        "withdraw": ("initialFreshInstallRecorded", "createdRootMatchedPriorAbsence", "sameInstance", "reservationClosedUnderMaintenance",
+                     "renameKnownSuccess", "appAbsent", "runtimeUnchanged", "historyUnchanged", "withdrawnAppVerified", "recordReadback"),
+        "verify": ("restoreFixedAppRecorded", "initialHistoryPreserved", "sameInstance", "runtimeUnchanged", "newAppOriginal",
+                   "currentAppVerified", "withdrawnAppVerified", "reservationClosedUnderMaintenance", "recordReadback", "retainedPrivateEvidence"),
+    }
+    def observation(phase):
+        return {"schemaVersion": 1, "kind": "app-absence-phase-observation", "phase": phase, **native_binding,
+                "baselineSha256": baseline_sha, "recordSha256": baseline_sha if phase == "baseline" else "b" * 64,
+                "proof": dict.fromkeys(proofs[phase], True), "originalOuterExitRequired": True,
+                "systemServiceExitClaimed": False, "productReady": False}
+    data_output = ("running 6 tests\n" + "".join("test " + name + " ... ok\n" for name in namespace["NATIVE_DATA_TESTS"])
+                   + "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 999999 filtered out; finished in 1.00s\n").encode()
+    data_original = CompletedProcess([], 0, data_output, SENTINEL.encode())
+    pure_tests = namespace["native_data_tests_result"](data_original)
+    prepare = owner("prepare-app-absence", DATA.APP_ABSENCE_PREPARE_ROLES)
+    op = SimpleNamespace(receipt=prepare, app_absence={"binding": binding},
+                         environment={"MRK_MACOS_INSTALL_INVENTORY_SHA256": hashes["inventorySha256"],
+                                      "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": hashes["runtimeManifestSha256"]},
+                         stager=SimpleNamespace(CURRENT_PROTOCOL=hashes["protocolSha256"]))
+    namespace.update(op=op, program_sha=hashes["fixtureExecutableSha256"], executable={"identity": [0]*6 + [64*1024*1024]},
+                     fixture_sha=fixture_sha, fixture={"identity": [0]*6 + [512*1024*1024]}, result=data_original, pure_tests=pure_tests)
+    exec(assignments["appAbsencePreparation"], namespace)
+    prepare["originalCalls"][1].update({key: pure_tests[key] for key in ("stdoutSha256", "stderrSha256")})
+    prepare_sha = hashlib.sha256(serialized(prepare)).hexdigest()
+    carrier_names = ("Install.pkg", "producer.json", "producer.sig", "MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg")
+    sizes = (512*1024*1024, 16384, 512, 512*1024*1024, 512*1024*1024, 512*1024*1024)
+    layout = {name: {"name": name, "bytes": size, "sha256": sha, "mode": 0o444, "links": 1}
+              for name, size, sha in zip(carrier_names, sizes,
+                  (hashes["packageSha256"], hashes["producerDescriptorSha256"], hashes["producerSignatureSha256"], fixture_sha, fixture_sha, fixture_sha))}
+    initial = {"requestId": "c"*32, "invocation": "d"*32, "stateSha256": "e"*64, "resultSha256": "f"*64, "instance": "a"*32}
+    baseline = owner("package-install", DATA.APP_ABSENCE_PACKAGE_ROLES)
+    op.receipt = baseline
+    op.app_absence = {"nativeBinding": native_binding, "preparationSha256": prepare_sha, "layout": layout,
+                      "image": {"bytes": 2560*1024*1024, "sha256": image_sha}, "baselineSha256": baseline_sha,
+                      "baselineOriginal": {"bytes": 65536, "sha256": baseline_sha, "identity": [123]*9},
+                      "baselineObservation": observation("baseline"), "initial": initial}
+    namespace["data"] = op.app_absence
+    exec(assignments["appAbsenceBaseline"], namespace)
+    body = serialized(baseline)
+    restore = owner("app-absence-restore", DATA.APP_ABSENCE_RESTORE_ROLES)
+    op.receipt = restore
+    namespace.update(previous=baseline["appAbsenceBaseline"], body=body, image_sha=image_sha, initial=initial,
+                     after={"request": {"sha256": "b"*64}}, args=SimpleNamespace(request_id="request"),
+                     withdraw=observation("withdraw"), verify=observation("verify"), restored={"nonrootReadbackFileCount": 4096})
+    exec(assignments["appAbsenceRestore"], namespace)
+    return prepare, baseline, restore
+
+
+def write_app_absence_documents(root, documents):
+    for phase, value in zip(("prepare-app-absence", "package-install", "app-absence-restore"), documents):
+        body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        if len(body) > 16384:
+            raise AssertionError("app-absence actual receipt exceeds existing bound")
+        write(root, "android-helper-" + phase + ".json", body)
+    for name in ("app-absence-preparation.status", "package-install.status", "app-absence-restore.status"):
+        write(root, name, b"0\n")
+
+
 class PublicVerificationEvidenceData(unittest.TestCase):
 
     def test_notary_key_precontext_failure_preserves_only_four_genuine_literals(self):
@@ -1070,6 +1177,158 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         del failed["samePackageObservation"]
         self.assertIsNone(DATA.project_receipt(failed, CONTEXT, "same-package-noop")["samePackageObservation"])
 
+    def test_app_absence_genuine_receipts_require_seven_twenty_five_originals(self):
+        self.assertEqual(DATA.APP_ABSENCE_PREPARE_ROLES, ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
+            "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
+        self.assertEqual(len(DATA.APP_ABSENCE_PACKAGE_ROLES), 20)
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[15], "app-absence-baseline")
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[-1], "app-absence-baseline-detach")
+        self.assertEqual(DATA.APP_ABSENCE_RESTORE_ROLES, ("app-absence-restore-attach", "app-absence-withdraw", "app-absence-install",
+            "app-absence-verify", "app-absence-restore-detach"))
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            context = {**CONTEXT, "target": target}
+            documents = app_absence_documents(context)
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_app_absence_documents(root, documents)
+                originals = {p.name: p.read_bytes() for p in root.iterdir()}
+                value = DATA.project(str(root), profile="installed", source=context["source"], workflow_source=context["workflowSource"],
+                                     run_id=context["runId"], run_attempt=context["runAttempt"], target=target)
+                row = value["appAbsence"]
+                self.assertEqual(row["receiptState"], "observed")
+                self.assertIs(row["proofComplete"], True)
+                self.assertEqual(row["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                self.assertEqual(row["prepare"]["pureDataTests"]["passed"], 6)
+                self.assertEqual(row["prepare"]["pureDataTests"]["filteredCount"], 999999)
+                self.assertIs(row["retainedPrivateEvidence"], True)
+                for key in ("systemServiceExitClaimed", "downloadedLaunchQualified", "guiQualified", "productReady"):
+                    self.assertIs(row[key], False)
+                self.assertEqual(row["restore"]["baselineOwnerReceiptSha256"], value["phases"]["package-install"]["receiptSha256"])
+                self.assertEqual(row["prepare"]["receiptSha256"], row["restore"]["preparationReceiptSha256"])
+                self.assertNotEqual(row["initialResultSha256"], row["restoreResultSha256"])
+                self.assertEqual(row["restore"]["verifiedCurrentFiles"], 4096)
+                encoded = (root / DATA.OUTPUT).read_bytes()
+                self.assertNotIn(SENTINEL.encode(), encoded)
+                for private_key in (b'"requestId"', b'"invocation"', b'"instance"', b'"identity"', b'"rootNonce"', b'"proof"'):
+                    self.assertNotIn(private_key, encoded)
+                for name, original in originals.items():
+                    self.assertEqual((root / name).read_bytes(), original)
+        # No fixture inputs is absence, never proof of a successful no-op.
+        with tempfile.TemporaryDirectory() as directory:
+            row = project(Path(directory))["appAbsence"]
+            self.assertEqual(row["receiptState"], "absent")
+            self.assertIs(row["proofComplete"], False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); write_app_absence_documents(root, documents)
+            value = DATA.project(str(root), profile="aqua", source=CONTEXT["source"], workflow_source=CONTEXT["workflowSource"],
+                                 run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"])
+            self.assertIsNone(value["appAbsence"])
+
+    def test_app_absence_refuses_incomplete_owners_cross_run_and_private_proofs(self):
+        documents = app_absence_documents()
+        phases = ("prepare-app-absence", "package-install", "app-absence-restore")
+        fields = ("appAbsencePreparation", "appAbsenceBaseline", "appAbsenceRestore")
+        def reduce(index, value):
+            if index == 1:
+                return DATA.project_app_absence_baseline(value, CONTEXT)
+            return DATA.project_app_absence_receipt(value, CONTEXT, phases[index], "a" * 64)
+        def set_at(value, path, changed):
+            for key in path[:-1]:
+                value = value[key]
+            value[path[-1]] = changed
+        # Each mutation changes a real admitted field; do not count an already
+        # invalid fixture or an identical runAttempt as negative coverage.
+        for index, original in enumerate(documents):
+            reduce(index, original)
+            faults = [(('workflow',), 'unrelated'), (('source',), '2'*40), (('workflowSource',), '2'*40),
+                (('runId',), '124'), (('runAttempt',), '3'), (('target',), 'x86_64-apple-darwin'),
+                (('packageRole',), 'removal-image'), (('schemaVersion',), True),
+                (('passed',), False), (('targetRetired',), False), (('originalClosesKnown',), False),
+                (('outerFinalityRequired',), False), (('directStagerIOPending',), SENTINEL),
+                (('cleanupErrors',), [SENTINEL]), (('originalCalls', 0, 'returned'), False),
+                (('originalCalls', 0, 'capturesSettled'), False), (('originalCalls', 0, 'returncode'), True),
+                (('originalCalls', 0, 'returncode'), 70), (('originalCalls', 0, 'role'), 'unlisted')]
+            for path, bad in faults:
+                with self.subTest(phase=phases[index], path=path, bad=bad):
+                    value = copy.deepcopy(original)
+                    old = value
+                    for key in path:
+                        old = old[key]
+                    self.assertTrue(type(old) is not type(bad) or old != bad)
+                    set_at(value, path, bad)
+                    with self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+            for change in ('missing', 'extra', 'reordered'):
+                value = copy.deepcopy(original)
+                if change == 'missing': value['originalCalls'].pop()
+                elif change == 'extra': value['originalCalls'].append(copy.deepcopy(value['originalCalls'][0]))
+                else: value['originalCalls'][0], value['originalCalls'][1] = value['originalCalls'][1], value['originalCalls'][0]
+                with self.subTest(phase=phases[index], roster=change), self.assertRaises(DATA.Refused):
+                    reduce(index, value)
+            for key in original[fields[index]]:
+                value = copy.deepcopy(original); del value[fields[index]][key]
+                with self.subTest(phase=phases[index], missing=key), self.assertRaises(DATA.Refused):
+                    reduce(index, value)
+        # The genuine DATA parser's six names/counts are not arbitrary stdout.
+        for key, bad in (("passed", 5), ("failed", 1), ("ignored", 1), ("filteredCount", 1000000),
+                         ("schemaVersion", True), ("methodNames", [SENTINEL]*6), ("stdoutSha256", SENTINEL)):
+            value = copy.deepcopy(documents[0]); value[fields[0]]["pureDataTests"][key] = bad
+            with self.subTest(data=key), self.assertRaises(DATA.Refused):
+                reduce(0, value)
+        for index, phase_fields in ((1, ("baselineObservation",)), (2, ("withdraw", "verify"))):
+            for field in phase_fields:
+                observation = documents[index][fields[index]][field]
+                for proof_key in observation["proof"]:
+                    value = copy.deepcopy(documents[index]); value[fields[index]][field]["proof"][proof_key] = False
+                    with self.subTest(phase=field, proof=proof_key), self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+                for key, bad in (("productSource", "2"*40), ("runAttempt", "3"), ("baselineSha256", "c"*64),
+                                 ("originalOuterExitRequired", False), ("systemServiceExitClaimed", True), ("productReady", True)):
+                    value = copy.deepcopy(documents[index]); value[fields[index]][field][key] = bad
+                    with self.subTest(phase=field, key=key), self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+                value = copy.deepcopy(documents[index]); value[fields[index]][field]["rootNonce"] = SENTINEL
+                with self.assertRaises(DATA.Refused): reduce(index, value)
+        for key, bad in (("initialFreshInstall", False), ("initialExportCount", True), ("originalBaselineZero", False),
+                         ("originalMountDetached", False), ("productReady", True)):
+            value = copy.deepcopy(documents[1]); value[fields[1]][key] = bad
+            with self.subTest(baseline=key), self.assertRaises(DATA.Refused): reduce(1, value)
+        for key in ("restoreFixedAppObserved", "immediatePredecessorMatched", "currentBytesVerified", "initialHistoryPreserved",
+                    "originalInstallerReturnedZero", "originalMountDetached", "retainedPrivateEvidence"):
+            value = copy.deepcopy(documents[2]); value[fields[2]][key] = False
+            with self.subTest(restore=key), self.assertRaises(DATA.Refused): reduce(2, value)
+        for key, bad in (("beforeExportCount", 0), ("afterExportCount", 3), ("newExportCount", True), ("verifiedCurrentFiles", 4097)):
+            value = copy.deepcopy(documents[2]); value[fields[2]][key] = bad
+            with self.subTest(restore=key), self.assertRaises(DATA.Refused): reduce(2, value)
+        # Cross-receipt joins and independent statuses are checked at the real
+        # fixed-file projector, not inferred from pre-exit proofs/counts alone.
+        cases = [("status", name, body) for name in ("app-absence-preparation.status", "package-install.status", "app-absence-restore.status")
+                 for body in (None, b"70\n", b"0 0 0\n")]
+        cases += [("join", key, "c"*64) for key in ("preparationReceiptSha256", "baselineOwnerReceiptSha256", "imageSha256", "initialResultSha256")]
+        for kind, key, bad in cases:
+            with self.subTest(kind=kind, key=key, bad=bad), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); values = copy.deepcopy(documents)
+                if kind == "join":
+                    self.assertNotEqual(values[2][fields[2]][key], bad)
+                    values[2][fields[2]][key] = bad
+                write_app_absence_documents(root, values)
+                if kind == "status":
+                    if bad is None: (root / key).unlink()
+                    else: write(root, key, bad)
+                row = project(root)["appAbsence"]
+                self.assertEqual(row["receiptState"], "incomplete")
+                self.assertIs(row["proofComplete"], False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); write_app_absence_documents(root, documents)
+            raw = write(root, "unpublished-private", SENTINEL.encode())
+            (root / "android-helper-app-absence-restore.json").unlink()
+            os.symlink(raw.name, root / "android-helper-app-absence-restore.json")
+            before = raw.read_bytes(); row = project(root)["appAbsence"]
+            self.assertEqual(row["restore"]["receiptState"], "refused")
+            self.assertIs(row["proofComplete"], False)
+            self.assertEqual(raw.read_bytes(), before)
+            self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+
     def test_full_preview_original_rosters_fit_fixed_public_output_bound(self):
         def literals(path, names):
             module = ast.parse(path.read_text())
@@ -1197,6 +1456,20 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             combined_budget_only["dataContractFailure"] = {**result["dataContractFailure"],
                 "rustPanicDiagnostic": {"parseState": "unmapped-source", "spellingSha256": "f" * 64,
                                         "line": 1000000, "column": 1000000}}
+            # The optional fixture route is exclusive with ordinary preview.
+            # Add its complete genuine-writer projection to the dense old report
+            # as a conservative byte-only union, not a claim of one valid run.
+            with tempfile.TemporaryDirectory() as fixture_directory:
+                fixture_root = Path(fixture_directory)
+                write_app_absence_documents(fixture_root, app_absence_documents())
+                fixture_report = project(fixture_root)
+                self.assertIs(fixture_report["appAbsence"]["proofComplete"], True)
+                self.assertEqual(fixture_report["appAbsence"]["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                combined_budget_only["appAbsence"] = fixture_report["appAbsence"]
+                # Retain all old package facts/calls AND reserve the complete
+                # additional twenty-call baseline; do not replace old coverage.
+                combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"] = fixture_report["phases"]["package-install"]
+                self.assertEqual(combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"]["originalCalls"]["recordedCount"], 20)
             encoded = (json.dumps(combined_budget_only, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
             self.assertLessEqual(len(encoded), DATA.OUTPUT_LIMIT)
 

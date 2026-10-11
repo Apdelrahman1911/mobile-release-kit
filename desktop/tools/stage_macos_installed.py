@@ -2761,10 +2761,12 @@ def cpio_members(body):
     return _cpio_members(body, (0, 0))
 
 
-def package_info(body, *, fixture=False, selection=None, remove=False):
+def package_info(body, *, fixture=False, selection=None, remove=False, app_absence=False):
     selection = selected_build(selection)
-    need(type(fixture) is bool and type(remove) is bool and not (fixture and remove), "fixed-package-kind")
-    identifier = REMOVE_PACKAGE_ID if remove else PACKAGE_ID + ("-fixture" if fixture else "")
+    need(type(fixture) is bool and type(remove) is bool and type(app_absence) is bool
+         and sum((fixture, remove, app_absence)) <= 1, "fixed-package-kind")
+    identifier = (PACKAGE_ID + "-app-absence-fixture" if app_absence else
+                  REMOVE_PACKAGE_ID if remove else PACKAGE_ID + ("-fixture" if fixture else ""))
     info = ET.fromstring(body)
     need(info.tag == "pkg-info" and info.get("identifier") == identifier
          and info.get("version") == selection.package_version and info.get("install-location") == "/" and info.get("auth") == "root", "scripts-package-identity")
@@ -2778,7 +2780,7 @@ def package_info(body, *, fixture=False, selection=None, remove=False):
 
 
 def original_package(scripts_path, package_path, *, fixture=False, selection=None, remove=False, expected_remover=None,
-                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None):
+                     removal_fixture_role=None, removal_fixture_correlation=None, removal_fixture_binding=None, app_absence=False):
     selection = selected_build(selection)
     owner = packager_ids()
     scripts = tree(scripts_path, packager=True)
@@ -2803,7 +2805,7 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
         need((info.st_uid, info.st_gid) == owner, "original-package-owner")
     members = xar_members(package)
     need(set(members) == {"PackageInfo", "Scripts"}, "original-package-roster")
-    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection, remove=remove)
+    identifier = package_info(members["PackageInfo"], fixture=fixture, selection=selection, remove=remove, app_absence=app_absence)
     archive = members["Scripts"]
     if archive[:2] == b"\x1f\x8b":
         archive = inflate(archive, MAX_BYTES, gzip=True)
@@ -2811,6 +2813,65 @@ def original_package(scripts_path, package_path, *, fixture=False, selection=Non
     expected = {**scripts, **{name: (None, 0o555) for name in directories(scripts)}}
     need(actual == expected, "complete-original-scripts-correspondence")
     return scripts, package, members, identifier, owner
+
+
+def app_absence_scripts_data(scripts, expected_program, expected_inventory):
+    """One nonshipping role, never arbitrary scripts or an ordinary parser exception."""
+    need(type(scripts) is dict and sha(expected_program) and sha(expected_inventory), "app-absence-scripts-shape")
+    fixed = b'#!/bin/sh\nset -eu\nd="${0%/*}"\nexec "$d/mrk-macos-app-absence-fixture" "$d/input" "$1"\n'
+    need(scripts.get("postinstall") == (fixed, 0o555)
+         and set(name for name in scripts if not name.startswith("input/")) == {"postinstall", "mrk-macos-app-absence-fixture"},
+         "app-absence-scripts-roster")
+    program, mode = scripts["mrk-macos-app-absence-fixture"]
+    need(type(program) is bytes and 0 < len(program) <= 64 * 1024 * 1024 and mode == 0o555
+         and digest(program) == expected_program, "app-absence-program-correspondence")
+    inventory = scripts.get("input/" + INSTALLATION_INVENTORY_NAME)
+    need(type(inventory) is tuple and inventory[1] == 0o444
+         and digest(inventory[0]) == expected_inventory, "app-absence-inventory-correspondence")
+
+
+def app_absence_original_command(args):
+    """Genuine original decoder, compacted before the independent final pass."""
+    selection = source_build_selection(command_target(args))
+    scripts, original, members, identifier, owner = original_package(args.scripts, args.original_package,
+        selection=selection, app_absence=True)
+    app_absence_scripts_data(scripts, args.expected_program, args.expected_inventory)
+    macho(scripts["mrk-macos-app-absence-fixture"][0], target=selection.target)
+    rows = {name: {"size": len(body), "sha256": digest(body), "mode": mode} for name, (body, mode) in scripts.items()}
+    rows.update({name: {"size": None, "sha256": None, "mode": 0o555} for name in directories(scripts)})
+    need(len(rows) <= MAX_FILES, "app-absence-script-count")
+    # No full original/scripts/member collection escapes this call. The next
+    # genuine decoder starts only after these local payloads have been released.
+    return {"rows": rows, "packageInfo": members["PackageInfo"], "packageIdentifier": identifier,
+            "originalPackageSha256": digest(original), "originalPackageSize": len(original),
+            "scriptFileCount": len(scripts), "packagerUid": owner[0], "packagerGid": owner[1]}
+
+
+def app_absence_final_command(args, compact):
+    """Same decoder/strict root ownership; only compact original facts remain."""
+    need(type(compact) is dict and set(compact) == {"rows", "packageInfo", "packageIdentifier", "originalPackageSha256",
+         "originalPackageSize", "scriptFileCount", "packagerUid", "packagerGid"}, "app-absence-original-facts")
+    selection = source_build_selection(command_target(args))
+    package = read(args.package, MAX_BYTES)
+    members = xar_members(package)
+    need(set(members) == {"PackageInfo", "Scripts"} and members["PackageInfo"] == compact["packageInfo"],
+         "app-absence-final-members")
+    identifier = package_info(members["PackageInfo"], selection=selection, app_absence=True)
+    need(identifier == compact["packageIdentifier"], "app-absence-final-identifier")
+    archive = members["Scripts"]
+    if archive[:2] == b"\x1f\x8b":
+        archive = inflate(archive, MAX_BYTES, gzip=True)
+    actual = cpio_members(archive)
+    need(set(actual) == set(compact["rows"]), "app-absence-final-script-roster")
+    for name, (body, mode) in actual.items():
+        row = compact["rows"][name]
+        need(mode == row["mode"] and (body is None and row["size"] is row["sha256"] is None
+             or type(body) is bytes and len(body) == row["size"] and digest(body) == row["sha256"]),
+             "app-absence-final-script-correspondence")
+    return {"schemaVersion": 1, "packageSha256": digest(package), "packageSize": len(package),
+            "originalPackageSha256": compact["originalPackageSha256"], "packageInfoSha256": digest(members["PackageInfo"]),
+            "packageIdentifier": identifier, "scriptFileCount": compact["scriptFileCount"],
+            "finalDestinationPayloadEntries": 0, "qualification": "nonshipping-app-absence-fixture-not-installed"}
 
 
 def prepare_package_command(args):
@@ -4840,11 +4901,23 @@ def same_package_previous_data(result, parsed, expected):
          and parsed[result["invocation"]][0]["previousState"] == expected, "same-package-immediate-predecessor")
 
 
-def observation_command(args, *, expected_previous=None):
+def restore_previous_data(result, parsed, expected):
+    need(type(expected) is dict and set(expected) == {"invocation", "sha256"}
+         and maintenance_hex(expected["invocation"], 32) and maintenance_hex(expected["sha256"], 64),
+         "restore-previous-shape")
+    need(result["action"] == "restore-fixed-app" and result["writerState"] == "restored-app"
+         and parsed[result["invocation"]][0]["previousState"] == expected, "restore-immediate-predecessor")
+
+
+def observation_command(args, *, expected_previous=None, expected_restore_previous=None):
     need(expected_previous is None or type(expected_previous) is dict
          and set(expected_previous) == {"invocation", "sha256"}
          and maintenance_hex(expected_previous["invocation"], 32)
          and maintenance_hex(expected_previous["sha256"], 64), "same-package-previous-shape")
+    need(expected_restore_previous is None or expected_previous is None
+         and type(expected_restore_previous) is dict and set(expected_restore_previous) == {"invocation", "sha256"}
+         and maintenance_hex(expected_restore_previous["invocation"], 32)
+         and maintenance_hex(expected_restore_previous["sha256"], 64), "restore-previous-shape")
     selection = source_build_selection(command_target(args))
     # The same-run original Installer0 is first. No export/file can certify its
     # own future close, kernel-retained gate lifetime or original outer return.
@@ -4870,6 +4943,8 @@ def observation_command(args, *, expected_previous=None):
             current, parsed = maintenance_history_data(result, records, producer)
             if expected_previous is not None:
                 same_package_previous_data(result, parsed, expected_previous)
+            if expected_restore_previous is not None:
+                restore_previous_data(result, parsed, expected_restore_previous)
             names, stages = maintenance_roster_data(current, parsed, selection.target)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
@@ -4911,7 +4986,8 @@ def observation_command(args, *, expected_previous=None):
             "maintenanceGate": gate, "registrationReservation": reservation, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
             "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance",
-            **({} if expected_previous is None else {"samePackagePredecessorMatched": True})}
+            **({} if expected_previous is None else {"samePackagePredecessorMatched": True}),
+            **({} if expected_restore_previous is None else {"restorePredecessorMatched": True})}
 
 
 def visible_occupant(case, *, selection=None):
