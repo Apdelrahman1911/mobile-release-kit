@@ -34,6 +34,75 @@ def fixture_module(relative, name):
 
 
 class MacAndroidPreparationSourceTests(unittest.TestCase):
+    def test_ui_two_target_source_selection_and_closed_acquisition_receipt(self):
+        # Whole emitted catalogues are separately source-authenticated; this
+        # bounded DATA group never projects those ~20MiB leaves or acquires tools.
+        import copy
+        from unittest.mock import patch
+        helper=fixture_module('desktop/tools/macos_android_dependency_preparation.py','_mrk_two_target_ui_preparation')
+        normal=fixture_module('desktop/tools/macos_normal_ui_runner.py','_mrk_two_target_ui_normal')
+        original_archives=copy.deepcopy(helper.ARCHIVES)
+        self.assertEqual(helper.RUN_SCOPE,'prepare-b')
+        fixed=(('aarch64-apple-darwin','arm64','ARM64',20409744,
+                '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5',550,773497465,465051546),
+               ('x86_64-apple-darwin','x86_64','X64',20434472,
+                '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb',548,750044172,459778775))
+        env={'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1'}
+        for target,machine,arch,size,sha,jdk_count,tool_bytes,archive_bytes in fixed:
+            with self.subTest(target=target):
+                selected=helper.ui_selection(target)
+                self.assertEqual(selected[:2],(machine,arch))
+                self.assertEqual(selected[3],[size,sha])
+                self.assertEqual(normal.android_catalogue(target),sha)
+                self.assertEqual(selected[5:],({'Jdk':jdk_count,'Sdk':14197,'Gradle':322},tool_bytes))
+                archives=selected[4]
+                self.assertEqual(archives[1:],helper.ARCHIVES[1:4])
+                self.assertEqual(sum(row['bytes'] for row in archives),archive_bytes)
+                self.assertEqual([row['role'] for row in archives],['jdk','sdk-platform','sdk-build-tools','gradle'])
+                acquisition=object.__new__(helper.UiAcquisition);acquisition.archives=archives;acquisition.role=archives[0]
+                self.assertEqual(acquisition.target(archives[0]['archivePrefix']+'/Contents/Home/bin/keytool'),
+                    'jdk/temurin-17.jdk/Contents/Home/bin/keytool')
+                acquisition.role=helper.ARCHIVES[4]
+                with self.assertRaises(helper.Refused): acquisition.target('aapt2')
+                clock=dict(startNs='1',deadlineNs=str(1+810*10**9),beforePublicationNs='2',postCloseDeadlineRequired=True)
+                receipt=dict(schemaVersion=1,scope='four-supplier-sources-no-native-execution',
+                    status='closed-awaiting-original-caller',sourceCommit=env['GITHUB_SHA'],target=target,
+                    runId='42',runAttempt='1',workflow=helper.UI_WORKFLOW,ref=helper.UI_REF,archives=archives,
+                    archiveBytes=archive_bytes,catalogueSha256=sha,toolRosterSha256='b'*64,sdkMetadata=helper.SDK_METADATA,
+                    toolBytes=tool_bytes,readBytes=1,files=1,entries=1,directoryCount=1,stockCaSha256='c'*64,
+                    pythonExecutable=helper.observed_python_executable(),protectedRegistration=False,uiQualification=False,phaseClock=clock)
+                identity=(1,2,0o100600,os.getuid(),os.getgid(),1,1,1,1)
+                with patch.object(helper,'N',normal),patch.dict(helper.os.environ,env,clear=True):
+                    def admit(value):
+                        def original(path,limit,*,clock):
+                            self.assertEqual((path,limit),(Path('/inert/acquisition.json'),16384))
+                            return normal.encoded(value)+b'\n',identity
+                        with patch.object(helper,'read',side_effect=original):
+                            return helper.ui_acquisition_receipt(Path('/inert'),object(),target=target)
+                    self.assertEqual(admit(receipt),receipt)
+                    other=helper.ui_selection('x86_64-apple-darwin' if target==helper.UI_TARGET else helper.UI_TARGET)
+                    for key,value in (('target','unsupported'),('catalogueSha256',other[3][1]),('archives',other[4]),
+                                      ('archiveBytes',archive_bytes+1),('protectedRegistration',True),('uiQualification',True),
+                                      ('runId','43'),('unknown','not-authority')):
+                        with self.subTest(field=key),self.assertRaises(helper.Refused): admit(dict(receipt,**{key:value}))
+        self.assertEqual(helper.ARCHIVES,original_archives)
+        intel=helper.ui_selection('x86_64-apple-darwin')[4][0]
+        self.assertEqual((intel['bytes'],intel['sha256']),(180578248,'c01975da12ed4235250ff891fe8bba73a9e73037d444b269c9d0922b5dbc8e0a'))
+        self.assertIn('OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz',intel['url'])
+        for invalid in ('arm64','linux-x64',None,True):
+            with self.assertRaises(helper.Refused): helper.ui_selection(invalid)
+        expected={'dir':('directory',0o755,0,None),'dir/file':('file',0o644,3,'d'*64)}
+        row=dict(path='dir/file',bytes=3,sha256='d'*64,mode=0o644,vendorMode=0o100644,
+                 identity=[1,2,0o100644,os.getuid(),os.getgid(),1,3,1,1])
+        dirs={'dir':[1,3,0o40755,os.getuid(),os.getgid(),1,0,1,1]}
+        self.assertEqual(helper.ui_roster_match([row],dirs,expected,sealed=True),3)
+        for changed in (dict(row,sha256='e'*64),dict(row,path='dir/foreign'),dict(row,bytes=4)):
+            with self.assertRaises(helper.Refused): helper.ui_roster_match([changed],dirs,expected,sealed=True)
+        body=(ROOT/'desktop/tools/macos_normal_ui_runner.py').read_bytes()
+        pin=[len(body),hashlib.sha256(body).hexdigest()]
+        self.assertEqual(helper.PINS['desktop/tools/macos_normal_ui_runner.py'],pin)
+        self.assertEqual(helper.UI_NORMAL_PIN,pin)
+
     def test_fixed_preparation_owner_resources_scope_and_budgets(self):
         source = (ROOT / 'desktop/tools/macos_android_dependency_preparation.py').read_text()
         tree = ast.parse(source)
@@ -189,13 +258,14 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertEqual(helper.UI_ALIAS, 'mrk-disposable-android-ui')
         self.assertEqual(helper.UI_INPUT_ENV, 'TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE')
         for operation in (helper.ui_context,):
-            with self.assertRaisesRegex(helper.Refused, '^ui-fixed-python-host$'): operation()
+            with self.assertRaises(helper.Refused): operation()
         for operation in (helper.prepare_ui_inputs, helper.acquire_ui_inputs):
             with self.assertRaises(helper.Refused): operation(work, private=object())
         self.assertEqual(sum(row['bytes'] for row in helper.ARCHIVES[:4]), 465051546)
         self.assertEqual([row['role'] for row in helper.ARCHIVES[:4]],
                          ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'])
         target = object.__new__(helper.UiAcquisition)
+        target.archives = helper.ui_selection(helper.UI_TARGET)[4]
         target.role = helper.ARCHIVES[4]
         with self.assertRaisesRegex(helper.Refused, '^ui-fixed-four-archives$'): target.target('aapt2')
         target.role = helper.ARCHIVES[0]
@@ -874,7 +944,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         try:
             helper.N = types.SimpleNamespace(PhaseClock=Clock, pairs=normal.pairs,
                 original_body=normal.original_body, saved_version_facts=normal.saved_version_facts)
-            helper.ui_source_roster = lambda clock: dict(expected)
+            helper.ui_source_roster = lambda clock, *, target=helper.UI_TARGET: dict(expected)
             with tempfile.TemporaryDirectory(prefix='ui-source-', dir=scratch) as temporary:
                 work = Path(temporary); (work / 'tools').mkdir(mode=0o700)
                 a = helper.UiAcquisition(work); a.role = helper.ARCHIVES[3]
@@ -983,7 +1053,7 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                         umask=mask, urandom=randomness, statvfs=lambda _: types.SimpleNamespace(f_bavail=8 << 30, f_frsize=1)))
                     helper.SOURCE = ROOT; helper.RUN_SCOPE = helper.UI_SCOPE
                     expected_small = {'inert-source': ('file', 0o644, 3, helper.digest(b'abc'))}
-                    helper.ui_source_roster = lambda clock: dict(expected_small)
+                    helper.ui_source_roster = lambda clock, *, target=helper.UI_TARGET: dict(expected_small)
                     tools = ('1' * 64, 3, 1, 5)
                     def tool_post(root, clock, expected):
                         self.assertEqual(root, stage); self.assertEqual(expected, expected_small)

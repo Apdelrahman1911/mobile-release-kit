@@ -420,6 +420,7 @@ jobs:
           [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
           [[ ! -e "$MRK_MACOS_WORK/fresh-python-transport" && ! -L "$MRK_MACOS_WORK/fresh-python-transport" ]] || exit 1
           [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]] || exit 1
       - name: Download the independently accepted fresh Python transport
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
         timeout-minutes: 3
@@ -854,31 +855,37 @@ jobs:
             --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
             --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
           # Only inert archive bytes were checked. Never run this exit97 hook.
+      - name: Download the fixed once-signed Android support capsule
+        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
+        timeout-minutes: 3
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: '11691308054'
+          run-id: '38109802320'
+          repository: Apdelrahman1911/mobile-release-kit
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/signed-android-transport
+          merge-multiple: 'false'
+          digest-mismatch: error
+          skip-decompress: 'false'
       - name: Acquire and verify the two fixed Android support archives as DATA
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
-        timeout-minutes: 4
+        timeout-minutes: 1
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           cd /Users/runner/work/mobile-release-kit/mobile-release-kit
           set -o noclobber
           umask 077
           work='${{ steps.work.outputs.root }}'
+          target='${{ matrix.target }}'
           [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1
-          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.
+          # No native execution or credentials in DATA admission. Exact SOURCE
+          # joins all three originals to the successful once-signed producer.
           /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
-            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
-            --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \
-            --url 'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar' \
-            > "$work/bundletool-all-1.18.3.jar"
-          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
-            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \
-            --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \
-            --url 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar' \
-            > "$work/aapt2-8.9.2-12782657-osx.jar"
-          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
-            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support \
-            --target '${{ matrix.target }}' \
-            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \
+            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \
+            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \
+            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
+            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \
             > "$work/android-support-result.json"
       - name: Require the fixed SOURCE producer identity and release before ordinary signing
         if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')
@@ -1112,8 +1119,9 @@ jobs:
             --expected-android-helper "$MRK_MACOS_ANDROID_HELPER_SHA256" \
             --resident-image "$MRK_MACOS_WORK/libmrk_resident_image.dylib" \
             --expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256" \
-            --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \
-            --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \
+            --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \
+            --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
+            --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \
             --binary "$MRK_MACOS_OBSERVER_BINARY" --expected-app-binary "$MRK_MACOS_OBSERVER_SHA256" \
             --observer-cargo-messages "$MRK_MACOS_WORK/observer-build.jsonl" \
             --observer-cargo-target-dir "$CARGO_TARGET_DIR" \

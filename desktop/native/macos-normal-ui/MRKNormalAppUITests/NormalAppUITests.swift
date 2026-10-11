@@ -1705,7 +1705,15 @@ final class NormalAppUITests: XCTestCase {
             private(set) var terminalClose = false
             private static let roles = ["jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"]
             private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]
-            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"
+            #if arch(arm64)
+            static let target = "aarch64-apple-darwin"
+            private static let hostedJob = "github-hosted-macos26-arm64"
+            private static let catalogue = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
+            #elseif arch(x86_64)
+            static let target = "x86_64-apple-darwin"
+            private static let hostedJob = "github-hosted-macos26-x86_64"
+            private static let catalogue = "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb"
+            #endif
 
             private static func matches(_ value: String, _ pattern: String) -> Bool {
                 value.range(of: pattern, options: .regularExpression) != nil
@@ -1838,7 +1846,7 @@ final class NormalAppUITests: XCTestCase {
                     "publicCertificateSha256", "keyCommands", "parentReturncodeRequired", "phaseClock"])
                 try LocalFixture.need(object["schemaVersion"] as? Int == 1 && object["parentReturncodeRequired"] as? Int == 0
                     && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] as? String == source
-                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == run
+                    && object["target"] as? String == Self.target && object["runId"] as? String == run
                     && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath
                     && object["workflow"] as? String == ".github/workflows/desktop-macos-installed.yml"
                     && object["ref"] as? String == "refs/heads/verify/desktop-macos-installed"
@@ -1937,7 +1945,7 @@ final class NormalAppUITests: XCTestCase {
                 let env = ProcessInfo.processInfo.environment
                 guard let source = env["MRK_NORMAL_UI_HARNESS_SOURCE"], Self.matches(source, #"^[0-9a-f]{40}$"#),
                       env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,
-                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
+                      env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,
                       let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, #"^[1-9][0-9]{0,19}$"#),
                       let attempt = env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"], Self.matches(attempt, #"^[1-9][0-9]{0,19}$"#),
                       let handoff = env["MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"],
@@ -3013,7 +3021,7 @@ final class NormalAppUITests: XCTestCase {
                   let source = raw["sourceCommit"] as? String,
                   source == env["MRK_NORMAL_UI_HARNESS_SOURCE"], source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
                   raw["scope"] as? String == "one-owned-saved-version-recovery-fixture",
-                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",
+                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",
                   let root = raw["root"] as? String,
                   root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
                   let transaction = raw["transactionId"] as? String,
@@ -5948,7 +5956,7 @@ final class NormalAppUITests: XCTestCase {
         try acceptFinalScenario()
         let env = ProcessInfo.processInfo.environment
         let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",
-            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",
+            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": LocalFixture.AndroidInputs.target,
             "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",
             "sourceRegistrationObserved": false, "nativeSigningVerified": true, "privateOriginalsClosed": true,
             "memorySessionDiscarded": true, "outputPostMatched": true, "normalQuitObserved": true,

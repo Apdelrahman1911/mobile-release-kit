@@ -399,6 +399,15 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(len(values), 1, name)
             return values[0]
 
+        # The update reader extends only the fixed stager. Bind its genuine
+        # final bytes and exact existing-loader bound; ordinary UI/result schema
+        # is not replaced by an update-specific shortcut or another owner.
+        stager_relative = "desktop/tools/stage_macos_installed.py"
+        stager_body = (root / stager_relative).read_bytes()
+        loader_body = (root / "desktop/tools/macos_aqua_qualification.py").read_bytes()
+        self.assertIn(('"' + stager_relative + '": "' + M.digest(stager_body) + '"').encode(), loader_body)
+        self.assertIn(('limit = ' + str(len(stager_body)) + ' if relative == "' + stager_relative + '"').encode(), loader_body)
+        self.assertIn(b"expected_update_previous=None, update_facts=None", stager_body)
         loader_relative = "desktop/tools/macos_aqua_qualification.py"
         runner_relative = "desktop/tools/macos_normal_ui_runner.py"
         runner_tree = ast.parse((root / runner_relative).read_bytes())
@@ -7183,6 +7192,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check current owner pins before native preparation",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
+            "Download the fixed once-signed Android support capsule",
             "Admit only a fresh independently pinned Python transport destination",
             "Download the independently accepted fresh Python transport",
             "Project the pinned fresh Python transport without executing it",
@@ -10032,6 +10042,7 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
         for name in ("Select fixed frontend compiler", "Record exact source and actual tool bindings only after route admission",
                      "Check current owner pins before native preparation", "Fail fast on native Scripts ownership and package format (never Installer)",
                      "Acquire and verify the two fixed Android support archives as DATA",
+                     "Download the fixed once-signed Android support capsule",
                      "Select the fixed configured signed runtime before any payload download",
                      "Download only the configured signed Python capsule",
                      "Project the configured capsule as DATA without executing it",

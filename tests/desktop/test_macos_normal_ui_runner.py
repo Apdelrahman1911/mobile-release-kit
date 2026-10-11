@@ -268,7 +268,31 @@ ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: sev
 ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
+def without_signed_android_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("signed Android Swift SOURCE bound differs")
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current in source:
+        line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+        if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+            raise AssertionError("signed Android Swift runtime line differs")
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    pairs = (("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
+             ("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"))
+    if any(current in source for current, _ in pairs):
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+                raise AssertionError("signed Android Swift catalogue pair differs")
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_artifact_wait_diagnostic_source(source):
+    source = without_signed_android_runtime_source(source)
     # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
     saved_marker = 'raw["sourceInputsSha256"] as? String'
     saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
@@ -418,7 +442,65 @@ def without_engineering_wait_status_source(source):
         source = source.replace(current, previous, 1)
     return source
 
+INTEL_ANDROID_SWIFT_INVERSE = (('            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '\n',
+  '            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            #if arch(arm64)\n'
+  '            static let target = "aarch64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-arm64"\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '            #elseif arch(x86_64)\n'
+  '            static let target = "x86_64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-x86_64"\n'
+  '            private static let catalogue = "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"\n'
+  '            #endif\n'
+  '\n'),
+ ('                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == '
+  'run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n',
+  '                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == Self.target && object["runId"] as? String == run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n'),
+ ('                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n',
+  '                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n'),
+ ('        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n',
+  '        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": '
+  'LocalFixture.AndroidInputs.target,\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n'))
+
+
+def without_intel_android_source(source):
+    source = without_signed_android_runtime_source(source)
+    if type(source) is not str or len(source.encode()) > 1048576:
+        raise AssertionError("Intel Android source bound differs")
+    if 'LocalFixture.AndroidInputs.target' not in source:
+        return source
+    for previous, current in INTEL_ANDROID_SWIFT_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_SWIFT_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '6754fa2935ac1493f5b3f0da7c50e97dd8b5eeafed339b9d7e89fde3064b1164':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
+
 def without_release_evidence_source(source):
+    source = without_intel_android_source(source)
     source = without_engineering_wait_status_source(source)
     if 'static let releaseEvidenceDocuments:' not in source:
         if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
@@ -1280,7 +1362,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
         # Current recovery SOURCE is the genuine configured runtime nomination,
         # not an arbitrary replacement digest or a claim of native qualification.
-        expected_source = 'c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09'
+        expected_source = 'fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc'
         nomination = json.loads((ROOT / "desktop/macos-installed-inputs/python-signed-runtime-binding.json").read_bytes())
         self.assertEqual(set(nomination["targets"]), {MODULE.ARM_TARGET, MODULE.INTEL_TARGET})
         for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
@@ -1300,7 +1382,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
         self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
         swift = SWIFT.read_text(encoding="utf-8")
-        current_line = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
+        current_line = '                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",\n'
         prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
         self.assertEqual(swift.count(current_line), 1)
         self.assertNotIn(prior_line, swift)
@@ -2522,6 +2604,15 @@ class NormalPhaseDataTests(unittest.TestCase):
         def admit(item):
             return MODULE.android_input_document(MODULE.encoded(item)+b'\n', source=source, run=run, attempt=attempt, root=root)
         self.assertEqual(admit(value), value)
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            selected = dict(value, target=target_value, sourceCatalogueSha256=MODULE.android_catalogue(target_value))
+            self.assertEqual(MODULE.android_input_document(MODULE.encoded(selected)+b'\n', source=source,
+                run=run, attempt=attempt, root=root, target=target_value), selected)
+            other = MODULE.INTEL_TARGET if target_value == MODULE.ARM_TARGET else MODULE.ARM_TARGET
+            for bad in (dict(selected, target=other), dict(selected, sourceCatalogueSha256=MODULE.android_catalogue(other))):
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.android_input_document(MODULE.encoded(bad)+b'\n', source=source,
+                        run=run, attempt=attempt, root=root, target=target_value)
         for key, replacement in [('runId','41'),('runAttempt','2'),('sourceCommit','b'*40),('target',MODULE.INTEL_TARGET),
             ('root',str(root/'elsewhere')),('schemaVersion',True),('parentReturncodeRequired',False),
             ('sourceCatalogueSha256','0'*64),('unknown','private message')]:
@@ -2553,6 +2644,13 @@ class NormalPhaseDataTests(unittest.TestCase):
             publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
             outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
         self.assertEqual(MODULE.android_signed_facts(public,source=source,run=run,attempt=attempt),public)
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            selected_public = dict(public, target=target_value)
+            self.assertEqual(MODULE.android_signed_facts(selected_public, source=source, run=run,
+                attempt=attempt, target=target_value), selected_public)
+            with self.assertRaises(MODULE.Refused):
+                MODULE.android_signed_facts(dict(selected_public, target='unsupported'), source=source,
+                    run=run, attempt=attempt, target=target_value)
         for field, invalid in [('source','private/path'),('source',True),('run','0'),('run','secret'),('attempt','01'),('attempt',1)]:
             context=dict(source=source,run=run,attempt=attempt);context[field]=invalid
             bad=dict(public);bad[{'source':'sourceCommit','run':'runId','attempt':'runAttempt'}[field]]=invalid
@@ -2576,7 +2674,7 @@ class NormalPhaseDataTests(unittest.TestCase):
             ((MODULE.CLASS+MODULE.ANDROID_METHOD,),900,1020,1245))
         self.assertEqual(MODULE.normal_request(['--normal-android-signed-build-summary'],str(normal/'tmp')+'/')['phaseSeconds'],90)
         self.assertNotIn(MODULE.ANDROID_RESULT,MODULE.NORMAL_SELECTIONS)
-        for args in (['--target',MODULE.INTEL_TARGET,'--normal-android-signed-build-test'],
+        for args in (['--target','unsupported','--normal-android-signed-build-test'],
                      ['--normal-android-signed-build-test','--work','/tmp/private']):
             with self.assertRaises(MODULE.Refused): MODULE.normal_request(args,str(normal/'tmp')+'/')
 
@@ -2616,11 +2714,119 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual((forwarded[MODULE.ANDROID_RUN_ENV],forwarded[MODULE.ANDROID_ATTEMPT_ENV]),(run,attempt))
             self.assertNotIn('MRK_MACOS_TARGET',forwarded)
             self.assertNotIn('GITHUB_SHA',forwarded)
+            intel_request = MODULE.normal_request(['--target', MODULE.INTEL_TARGET,
+                '--normal-android-signed-build-test'], str(normal/'tmp')+'/')
+            intel_env = dict(env, RUNNER_ARCH='X64', TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-x86_64')
+            with patch.object(MODULE.platform, 'machine', return_value='x86_64'), patch.dict(MODULE.os.environ, intel_env, clear=True):
+                self.assertEqual(MODULE.normal_context(intel_request)[:2], (checkout, source))
+            for altered in (dict(intel_env, RUNNER_ARCH='ARM64'), dict(intel_env, TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-arm64')):
+                with patch.object(MODULE.platform, 'machine', return_value='x86_64'), patch.dict(MODULE.os.environ, altered, clear=True), self.assertRaises(MODULE.Refused):
+                    MODULE.normal_context(intel_request)
             for key,badvalue in [('GITHUB_RUN_ID','0'),('GITHUB_RUN_ATTEMPT','secret'),('GITHUB_SHA','b'*40),
                 ('GITHUB_WORKFLOW_SHA','b'*40),('GITHUB_REF','refs/heads/other'),('RUNNER_ARCH','X64')]:
                 altered=dict(env);altered[key]=badvalue
                 with self.subTest(context=key),patch.dict(MODULE.os.environ,altered,clear=True),self.assertRaisesRegex(MODULE.Refused,'android-signed-fixed-installed-context'):
                     MODULE.normal_context(request)
+
+    def test_android_two_target_commands_and_private_receipt_correspondence(self):
+        # Complete synthetic receipts exercise the real fixed validators, not
+        # native signing, generated-runner admission or an installed UI claim.
+        import copy
+        source, run, attempt = 'a'*40, '42', '1'
+        normal = Path('/inert/normal-ui')
+        roster = 'b'*64
+        def clock(seconds):
+            return dict(startNs='1', deadlineNs=str(1+seconds*10**9), beforePublicationNs='2', postCloseDeadlineRequired=True)
+        def records(rows):
+            return [dict(role=role, returncode=0, timeoutSeconds=cap, roleCapSeconds=cap,
+                outputLimitBytes=limit, argvSha256=MODULE.sha(MODULE.encoded(argv)), stdoutBytes=0,
+                stderrBytes=0, stdoutSha256=MODULE.sha(b''), stderrSha256=MODULE.sha(b''))
+                for role,cap,limit,argv in rows]
+        source_row = ('normal-ui-source-roster',15,1048576,MODULE.output_data_source_argv(source))
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            with self.subTest(target=target_value):
+                request = MODULE.normal_request(['--target',target_value,'--normal-android-signed-build-test'],str(normal/'tmp')+'/')
+                self.assertEqual((request['target'],request['timeout'],request['phaseSeconds']),(target_value,1020,1245))
+                manifest = normal/'DerivedData/Build/Products/MRKNormalAppUI_macosx26.xctestrun'
+                command = MODULE.xcode_test_arguments(manifest,normal/MODULE.ANDROID_RESULT,
+                    (MODULE.CLASS+MODULE.ANDROID_METHOD,),900,target=target_value,android_positive=True)
+                self.assertEqual(command[command.index('-destination')+1],
+                    'platform=macOS' if target_value==MODULE.INTEL_TARGET else 'platform=macOS,arch=arm64')
+                self.assertEqual([part for part in command if part.startswith('-only-testing:')],
+                    ['-only-testing:'+MODULE.CLASS+MODULE.ANDROID_METHOD])
+                events=[]
+                class Products:
+                    products=manifest.parent
+                    def __init__(self, derived): self.manifest=manifest.name; events.append(('open',derived))
+                    def __enter__(self): return self
+                    def admit(self, call): events.append('admit'); return {}
+                    def check(self): events.append('post')
+                    def __exit__(self, *args): events.append('close')
+                original=SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
+                def call(role, argv, timeout):
+                    self.assertEqual((role,argv,timeout),('one-admitted-ui-test',command,1020))
+                    events.append('original'); return original
+                with patch.object(MODULE,'RunnerProducts',Products),patch.object(MODULE.os.path,'lexists',return_value=False):
+                    observed,admission=MODULE.run_admitted_test(call,normal/'DerivedData',normal/MODULE.ANDROID_RESULT,
+                        (MODULE.CLASS+MODULE.ANDROID_METHOD,),900,1020,target=target_value,android_positive=True)
+                self.assertIs(observed,original)
+                self.assertEqual(events,[('open',normal/'DerivedData'),'admit','post','original','post','close'])
+                self.assertEqual(admission,dict(originalProductsPrePostMatched=True,originalClosesCompleted=True))
+                build_argv = MODULE.normal_build_arguments(normal/'DerivedData',target=target_value)
+                self.assertEqual('ARCHS=x86_64' in build_argv,target_value==MODULE.INTEL_TARGET)
+                build = dict(schemaVersion=1,scope='normal-ui-original-command-admission-only',phase='build',
+                    resultBundle=None,originalCommandRole='normal-ui-build',originalReturncode=0,target=target_value,
+                    sourceCommit=source,sourceRosterSha256=roster,sourcePrePostMatched=True,originalCommandReturned=True,
+                    fileLimitBytes=[32*1024**3]*2,receiptPolicy='exclusive0600-readback-consuming-close',phaseClock=clock(450),
+                    commands=records([source_row,*[('normal-toolchain-'+key,15,4096,list(argv))
+                        for key,_,argv in MODULE.TOOLCHAIN_QUERIES],('normal-ui-build',240,1048576,build_argv),source_row]))
+                public=dict(schemaVersion=1,scope=MODULE.ANDROID_FACTS_SCOPE,sourceCommit=source,target=target_value,
+                    runId=run,runAttempt=attempt,sourceRegistrationObserved=False,nativeSigningVerified=True,
+                    privateOriginalsClosed=True,memorySessionDiscarded=True,outputPostMatched=True,normalQuitObserved=True,
+                    releaseQualified=False,parentReturncodeRequired=0,operationId='3'*32,ownerGeneration='4'*32,
+                    publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
+                    outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
+                row=['file',['1','2',str(0o100600),'501','20','1','100','3','4'],'c'*64]
+                runner=dict(schemaVersion=1,scope='actual-generated-xctrunner-admission-only',
+                    runnerPath=str(normal/'DerivedData/Build/Products'/MODULE.RUNNER),strictCodesignOriginalZero=True,
+                    reSignedOrRepaired=False,originalProductsPrePostMatched=True,originalClosesCompleted=True,
+                    xctestrunPath=str(manifest),runnerExecutable=copy.deepcopy(row),testExecutable=copy.deepcopy(row),
+                    xctestrun=copy.deepcopy(row),productEntryCount=5,productRosterSha256='e'*64,
+                    entitlementsSha256='f'*64,appSandboxEntitlement='absent')
+                common=dict(schemaVersion=1,scope='android-signed-private-original-admission',resultBundle=MODULE.ANDROID_RESULT,
+                    sourceCommit=source,target=target_value,runId=run,runAttempt=attempt,sourceRosterSha256=roster,
+                    sourcePrePostMatched=True,originalCommandReturned=True,originalReturncode=0,fileLimitBytes=[1024**3]*2,
+                    receiptPolicy='exclusive0600-readback-consuming-close')
+                test=dict(common,phase='test',originalCommandRole='one-admitted-ui-test',runnerAdmission=runner,
+                    parentPrivateOriginalsClosed=True,observation=public,phaseClock=clock(1245),commands=records([source_row,
+                    ('verify-generated-runner',30,1048576,['/usr/bin/codesign','--verify','--strict',runner['runnerPath']]),
+                    ('generated-runner-entitlements',30,1048576,['/usr/bin/codesign','-d','--entitlements',':-',runner['runnerPath']]),
+                    ('one-admitted-ui-test',1020,1048576,command),source_row]))
+                summary=dict(common,phase='summary',originalCommandRole='normal-ui-summary',phaseClock=clock(90),
+                    testCounts=dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0),
+                    commands=records([source_row,('normal-ui-summary',30,262144,['/usr/bin/xcrun','xcresulttool','get',
+                    'test-results','summary','--path',str(normal/MODULE.ANDROID_RESULT),'--compact']),source_row]))
+                def admit(b=build,t=test,s=summary,f=public):
+                    return MODULE.android_signed_receipts(b,t,s,f,source=source,normal=normal,run=run,attempt=attempt,target=target_value)
+                self.assertIsNone(admit())
+                other=MODULE.INTEL_TARGET if target_value==MODULE.ARM_TARGET else MODULE.ARM_TARGET
+                for index in range(4):
+                    cases=copy.deepcopy([build,test,summary,public]);cases[index]['target']=other
+                    with self.assertRaises(MODULE.Refused): admit(*cases)
+                bad=copy.deepcopy(build)
+                bad['commands'][-2]['argvSha256']=MODULE.sha(MODULE.encoded(MODULE.normal_build_arguments(normal/'DerivedData',target=other)))
+                with self.assertRaises(MODULE.Refused): admit(b=bad)
+                bad=copy.deepcopy(test);bad['commands'][3]['returncode']=65
+                with self.assertRaises(MODULE.Refused): admit(t=bad)
+                bad=copy.deepcopy(test);bad['parentPrivateOriginalsClosed']=False
+                with self.assertRaises(MODULE.Refused): admit(t=bad)
+                bad=copy.deepcopy(summary);bad['testCounts']['skippedTests']=1
+                with self.assertRaises(MODULE.Refused): admit(s=bad)
+        # No non-Android target restriction is weakened by the new selector.
+        for flag in ('--normal-output-data-test',):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_request(['--target',MODULE.INTEL_TARGET,flag],str(normal/'tmp')+'/')
+        with self.assertRaises(MODULE.Refused): MODULE.xcode_test_arguments(Path('m'),Path('r'),
+            (MODULE.ENGINEERING_METHOD,),60,target=MODULE.INTEL_TARGET,engineering=True)
 
     def test_android_private_reader_real_originals_post_and_consuming_close(self):
         # Real tiny files and FD bindings, with only the fixed Mac root mapped to
@@ -2711,6 +2917,31 @@ class NormalPhaseDataTests(unittest.TestCase):
         restored=without_positive_android_source(source)
         self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4')
         private=source.split('        final class AndroidInputs {',1)[1].split('        // Fixed public XML prerequisite only.',1)[0]
+        self.assertIn('#if arch(arm64)', private)
+        self.assertIn('#elseif arch(x86_64)', private)
+        for target_value, catalogue in ((MODULE.ARM_TARGET, MODULE.ANDROID_CATALOGUE),
+                (MODULE.INTEL_TARGET, '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb')):
+            self.assertIn('static let target = "' + target_value + '"', private)
+            self.assertIn('private static let catalogue = "' + catalogue + '"', private)
+        self.assertIn('object["target"] as? String == Self.target', private)
+        self.assertIn('env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob', private)
+        self.assertIn('"target": LocalFixture.AndroidInputs.target', source)
+        current_runtime = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        prior_runtime = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        self.assertEqual(source.count(current_runtime), 1)
+        signed_normalized = without_signed_android_runtime_source(source)
+        self.assertEqual(signed_normalized, source.replace(current_runtime, prior_runtime)
+                         .replace("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203").replace("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"))
+        self.assertEqual(without_signed_android_runtime_source(signed_normalized), signed_normalized)
+        for damaged in (source.replace("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203", 1),
+                        source.replace("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "0" * 64, 1),
+                        source + '            private static let catalogue = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"\n',
+                        source.replace(current_runtime, current_runtime + current_runtime, 1)):
+            with self.assertRaises(AssertionError): without_signed_android_runtime_source(damaged)
+        prior = without_intel_android_source(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), '6754fa2935ac1493f5b3f0da7c50e97dd8b5eeafed339b9d7e89fde3064b1164')
+        for previous, current in INTEL_ANDROID_SWIFT_INVERSE:
+            with self.assertRaises(AssertionError): without_intel_android_source(signed_normalized.replace(current, current + '// corrupt\n', 1))
         for token in ('O_NONBLOCK','descriptors.count == 18','held.count == 14','leaves.count == 4',
                       'try directoryPost(directory, full: true)','while let fd = descriptors.popLast()',
                       'scalars.removeAll()','do { try check() } catch { if primary == nil { primary = error } }'):

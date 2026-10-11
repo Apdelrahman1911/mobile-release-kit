@@ -49,9 +49,12 @@ PACKAGE_SCOPES = (
 )
 APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
 APP_ABSENCE_PHASES = ("prepare-app-absence", "app-absence-restore")
+UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
+UPDATE_PHASE = "update-baseline"
+UPDATE_ROLES = ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
 SAME_PACKAGE_PHASE = "same-package-noop"
 SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
-PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE) + APP_ABSENCE_PHASES
+PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + APP_ABSENCE_PHASES
 REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
 REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
                         "distribution-verify-signature", "distribution-verify-image")
@@ -1813,6 +1816,7 @@ class Operation:
         self.android_support = self.android_support_module = None
         self.support_started = support_started
         self.app_absence = self.app_absence_module = self.app_absence_api = None
+        self.update = self.update_module = self.update_api = None
         self.same_package_complete = False
         self.same_package_case = None
         self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
@@ -1853,6 +1857,18 @@ class Operation:
             need(sys.modules.get(spec.name) is module, "support-adapter-module-rebound")
             del sys.modules[spec.name]
 
+    def update_load(self):
+        entry = self.source_original("desktop/tools/macos_update_verification.py", "source-update-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_update_verification.py"
+        spec = importlib.util.spec_from_file_location("mrk_update_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        need(self.read(entry) == body, "update-source-changed")
+        self.package_sources.append((entry, body))
+        self.update_module = module
+        module.start(self, sys.modules[__name__])
+
     def app_absence_load(self):
         # One fixed current SOURCE leaf, held before loading any definitions.
         # Not a plug-in resolver or a new process owner.
@@ -1870,7 +1886,7 @@ class Operation:
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
-        if self.app_absence is not None:
+        if self.app_absence is not None or self.update is not None:
             need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
                  "app-absence-original-ledger-bound")
         self.entry_registry[id(entry)] = entry  # History retains the FD if this insertion raises.
@@ -1963,7 +1979,8 @@ class Operation:
 
     def publish(self, name, data, *, mode=0o600, parent=None):
         if parent is not None:
-            need(self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+            need((self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+                  or self.phase == UPDATE_PHASE and self.update is not None and parent is self.update["case"])
                  and name == "installer-output.status" and mode == 0o600, "same-package-status-purpose")
             self.recheck_directory(parent)
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -2054,6 +2071,8 @@ class Operation:
             self.android_support_module.dispatch(self, role)
         if self.app_absence is not None:
             self.app_absence_module.dispatch(self, role)
+        if self.update is not None:
+            self.update_module.dispatch(self, role, argv)
         recorded_role = self.removal_recorded_role(role)
         if self.phase == "prepare-removal-observers":
             roles = removal_preparation_roles(self.removal_case)
@@ -2113,6 +2132,8 @@ class Operation:
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
         if self.phase == SAME_PACKAGE_PHASE and role == "installer":
             self.same_package_save_status(result.returncode)
+        if self.phase == UPDATE_PHASE and role == UPDATE_ROLES[1]:
+            self.update_module.status(self, result.returncode)
         if self.app_absence is not None and role == "app-absence-install":
             self.app_absence_module.save_restore_status(self, result.returncode)
         record.update(returned=True, returncode=result.returncode,
@@ -6159,6 +6180,8 @@ class Operation:
     def package_clock(self):
         if self.app_absence is not None:
             return self.app_absence_module.clock(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            return self.update_module.clock(self)
         if self.phase in FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             return self.notary_clock()[0]  # Same clock; never the package-install990s endpoint.
         now = time.monotonic_ns()
@@ -6370,7 +6393,8 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
-        self.package_call("distribution-detach", ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=30)
+        self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
+                          ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
         if self.removal_baseline_mount is not None:
             self.removal_baseline_detached()
         else:
@@ -6623,6 +6647,8 @@ class Operation:
             installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
+        if self.update is not None:
+            self.update_module.before_current(self, actual_descriptor)
         self.package_diagnostic(args, capture=False)
         self.package_post()
         self.mounted_post()
@@ -6649,7 +6675,8 @@ class Operation:
         self.package_post()
         self.mounted_post()
         self.stage = "package-nonroot-v2-readback"
-        observed = self.package_stager_io("v2-readback", args)
+        observed = (self.update_module.current_readback(self, args) if self.update is not None
+                    else self.package_stager_io("v2-readback", args))
         if self.app_absence is not None:
             self.app_absence_module.initial_readback(self, observed)
         self.package_clock()
@@ -6662,6 +6689,8 @@ class Operation:
         self.package_post()
         if self.app_absence is not None:
             self.app_absence_module.package_complete(self)
+        if self.update is not None:
+            self.update_module.current_complete(self)
         self.receipt["distribution"] = {"schemaVersion": 1, "kind": "mrk-ordinary-package-observed-v2", "target": self.target,
             "packageVersion": selection.package_version, "release": selection.release, "requestId": request_id,
             "packageSha256": digest(body), "packageBytes": len(body), "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed),
@@ -6831,7 +6860,8 @@ class Operation:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
         if (not self.removal_finish_ready()
                 or self.android_support is not None and not self.android_support_module.finish_ready(self)
-                or self.app_absence is not None and not self.app_absence_module.finish_ready(self)):
+                or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
+                or self.update is not None and not self.update_module.finish_ready(self)):
             # SAME unresolved originals/mounts/thread remain retained. A
             # generic finally/known output close cannot grant fixture custody.
             self.receipt.update(originalClosesKnown=False, targetRetired=False,
@@ -6937,6 +6967,8 @@ class Operation:
             self.open()
             if self.phase in SUPPORT_PHASES:
                 self.android_support_load()
+            if self.environment.get("GITHUB_REF") == UPDATE_REF and self.phase in (UPDATE_PHASE, "package-install"):
+                self.update_load()
             if self.phase in APP_ABSENCE_PHASES or self.phase == "package-install" and self.environment.get("GITHUB_REF") == APP_ABSENCE_REF:
                 self.app_absence_load()
             self.profile_entry = self.source_original(PROFILE, "source-signing-profile", 1024)
@@ -6946,7 +6978,7 @@ class Operation:
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
                 allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF))
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
             if self.phase in SUPPORT_PHASES:
@@ -6962,6 +6994,8 @@ class Operation:
                 if self.phase in APP_ABSENCE_PHASES:
                     (self.app_absence_module.prepare if self.phase == APP_ABSENCE_PHASES[0]
                      else self.app_absence_module.restore)(self)
+                elif self.phase == UPDATE_PHASE:
+                    self.update_module.baseline(self)
                 elif self.phase == "prepare":
                     self.prepare()
                 elif self.phase == "package-install":
@@ -7009,6 +7043,7 @@ class Operation:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
         roles = (self.android_support_module.ROLES if self.android_support is not None else
+                 UPDATE_ROLES if self.phase == UPDATE_PHASE else
                  self.app_absence_module.roles(self) if self.app_absence is not None else
                  SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
                  (removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
@@ -7050,7 +7085,7 @@ class Operation:
                                        or (self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
                                        or (self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
-                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
@@ -7059,6 +7094,10 @@ class Operation:
             self.receipt["passed"] = (self.receipt["passed"] and self.app_absence["complete"]
                 and self.app_absence_module.finish_ready(self)
                 and (self.phase == "package-install" or not self.credential_calls and not self.credential_contexts))
+        if self.update is not None:
+            self.receipt["passed"] = self.receipt["passed"] and self.update_module.finish_ready(self)
+            if self.phase == UPDATE_PHASE:
+                self.update_module.clock(self, work=False)
         if self.phase in TOOL_SIGNING_PHASES:
             self.receipt["toolFinal"] = self.receipt["passed"] and self.tool_complete
             self.tool_clock(work=False)
@@ -7102,6 +7141,8 @@ class Operation:
             self.app_absence_module.clock(self, work=False)
         if self.phase in SUPPORT_PHASES and self.receipt["passed"]:
             self.android_support_module.publish_final(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            self.update_module.clock(self, work=False)
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
 
@@ -7159,6 +7200,12 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(scope == SAME_PACKAGE_PHASE and ref == "refs/heads/verify/desktop-macos-preview"
              and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
                          + (NOTARY_KEY_VARIABLE,)), "same-package-fixed-purpose")
+    if ref == UPDATE_REF:
+        need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
+             "finalize-package", "package-install", UPDATE_PHASE), "update-fixed-native-route")
+    if phase == UPDATE_PHASE:
+        need(ref == UPDATE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+             + (NOTARY_KEY_VARIABLE,)), "update-fixed-credential-free-baseline")
     if phase in APP_ABSENCE_PHASES:
         need(ref == APP_ABSENCE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
              + (NOTARY_KEY_VARIABLE,)), "app-absence-fixed-native-phase")
@@ -7189,7 +7236,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
                 "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -7594,6 +7641,10 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         main_stage = "source-check"
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+        if os.environ.get("GITHUB_REF") == UPDATE_REF:
+            nomination = tool_json(stager.read(CHECKOUT / "desktop/macos-installed-inputs/update-predecessors.json", 16384))
+            need(type(nomination) is dict and nomination.get("mode") == "configured",
+                 "update-qualified-predecessor-unconfigured")
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
                                      allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES

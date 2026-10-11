@@ -23,9 +23,10 @@ PHASES = (
     "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover",
     "notarize-payload", "finalize-package", "package-install", "finalize-image",
     "finalize-remove-package", "package-remove", "finalize-remove-image",
-    "prepare-removal-observers", "package-removal-fixture", "same-package-noop",
+    "prepare-removal-observers", "package-removal-fixture", "same-package-noop", "update-baseline",
 )
 PHASE_STATUS = {
+    "update-baseline": "update-baseline.status",
     "same-package-noop": "same-package-noop.status",
     "finalize-package": "package-finalization.status", "package-install": "package-install.status",
     "finalize-image": "image-finalization.status", "finalize-remove-package": "remove-package-finalization.status",
@@ -61,6 +62,7 @@ REMOVAL_ROLES = {case: REMOVAL_ROLE_PREFIX + middle + REMOVAL_ROLE_SUFFIX for ca
 REMOVAL_METHODS = {"ordinary": "testInstalledRemovalCancelThenContinue", "abrupt": "testInstalledRemovalContinueBeforeInterruption"}
 REMOVAL_RELEASE = "macos26-arm64-desktop-01"
 NATIVE_ROLES = frozenset((
+    "update-baseline-attach", "update-baseline-installer", "update-baseline-detach",
     *REMOVAL_ROLES["ordinary"], *REMOVAL_ROLES["abrupt"],
     "build", "resident-image-sign", "resident-image-verify-signed", "entry-build", "desktop-facade-build",
     "resident-facade-build", "sign", "verify-signed", "verify-before", "verify-after",
@@ -1076,6 +1078,77 @@ def app_absence_join(prepare, restore, baseline, statuses):
 NATIVE_ROLES = NATIVE_ROLES | frozenset(APP_ABSENCE_PREPARE_ROLES + APP_ABSENCE_PACKAGE_ROLES + APP_ABSENCE_RESTORE_ROLES)
 
 
+def project_update(value, context, phase):
+    row = value.get("updateBaseline" if phase == "update-baseline" else "positiveUpdate")
+    if row is None:
+        return None
+    need(phase in ("update-baseline", "package-install") and type(row) is dict
+         and type(row.get("schemaVersion")) is int and row["schemaVersion"] == 1
+         and value.get("passed") is True and value.get("originalClosesKnown") is True
+         and value.get("targetRetired") is True and row.get("productReady") is False)
+    for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
+        need(type(row.get(name)) is str and row[name] == context[name])
+    predecessor = hex_value(row.get("predecessorSource"), 40)
+    need(predecessor != context["source"])
+    calls = value.get("originalCalls")
+    need(type(calls) is list and all(type(v) is dict and v.get("entered") is True
+         and v.get("returned") is True and v.get("capturesSettled") is True
+         and type(v.get("returncode")) is int and (v["returncode"] == 0
+         or phase == "package-install" and v.get("role") in ("installer-log-cursor", "installer-log-capture")
+         and v["returncode"] == 1) for v in calls))
+    common = {"predecessorSource": predecessor, "productReady": False}
+    if phase == "update-baseline":
+        need(tuple(v.get("role") for v in calls) == ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
+             and value.get("credentialOriginals") == [] and value.get("credentialContexts") == []
+             and row.get("originalInstallerReturnedZero") is True and row.get("originalMountDetached") is True
+             and row.get("freshCurrentBytesReadback") is True)
+        readback = row.get("readback")
+        need(type(readback) is dict and set(readback) == {"previous", "rootIdentity", "generation"})
+        previous = readback["previous"]
+        need(type(previous) is dict and set(previous) == {"invocation", "sha256"})
+        return {**common, "invocation": hex_value(previous.get("invocation"), 32),
+                "stateSha256": hex_value(previous.get("sha256")),
+                "qualificationEvidenceSha256": hex_value(row.get("qualificationEvidenceSha256")),
+                "expectedCurrentDescriptorSha256": hex_value(row.get("expectedCurrentDescriptorSha256")),
+                "predecessorPackageSha256": hex_value(row.get("predecessorPackageSha256")),
+                "freshCurrentBytesReadback": True, "originalMountDetached": True}
+    required_true = ("rootIdentityPreserved", "generationInstancesDistinct", "previousExportUnchanged",
+                     "testedAppDataOriginalPreserved", "originalCurrentInstallerReturnedZero", "originalMountDetached", "currentPayloadReadback")
+    required_false = ("retainedPayloadRehashed", "downloadedLaunchQualified", "allUserDataCompatible", "productReady")
+    need(all(row.get(k) is True for k in required_true) and all(row.get(k) is False for k in required_false)
+         and type(row.get("exportCount")) is int and row["exportCount"] == 2
+         and tuple(v.get("role") for v in calls) == ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
+             "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
+             "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor",
+             "installer", "installer-log-capture", "distribution-detach"))
+    old, new = hex_value(row.get("baselineInvocation"), 32), hex_value(row.get("currentInvocation"), 32)
+    need(old != new)
+    return {**common, "baselineInvocation": old, "currentInvocation": new,
+            "predecessorPackageSha256": hex_value(row.get("predecessorPackageSha256")),
+            "predecessorQualificationEvidenceSha256": hex_value(row.get("predecessorQualificationEvidenceSha256")),
+            "currentDescriptorSha256": hex_value(row.get("currentDescriptorSha256")),
+            **{k: True for k in required_true}, **{k: False for k in required_false}, "exportCount": 2}
+
+
+def update_join(baseline, current):
+    if baseline.get("updateObservation") is None and current.get("updateObservation") is None:
+        return {"receiptState": "absent"}
+    for phase in (baseline, current):
+        status = phase.get("callerStatus")
+        need(phase.get("receiptState") == "observed" and phase.get("recordedPassed") is True
+             and type(status) is dict and status.get("receiptState") == "observed"
+             and type(status.get("returncode")) is int and status["returncode"] == 0
+             and type(phase.get("updateObservation")) is dict)
+    old, new = baseline["updateObservation"], current["updateObservation"]
+    need(old["predecessorSource"] == new["predecessorSource"] and old["invocation"] == new["baselineInvocation"]
+         and old["qualificationEvidenceSha256"] == new["predecessorQualificationEvidenceSha256"]
+         and old["predecessorPackageSha256"] == new["predecessorPackageSha256"]
+         and old["expectedCurrentDescriptorSha256"] == new["currentDescriptorSha256"])
+    return {"receiptState": "observed", "baseline": old, "current": new,
+            "qualification": "two-generation-Installer-and-synthetic-app-data-observed-not-GUI-or-download-acceptance",
+            "productReady": False}
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -1139,6 +1212,10 @@ def project_receipt(value, context, phase):
     if value.get("appAbsenceBaseline") is not None:
         need(phase == "package-install")
         result["appAbsenceBaseline"] = project_app_absence_baseline(value, context)
+    if phase in ("update-baseline", "package-install"):
+        result["updateObservation"] = project_update(value, context, phase)
+    else:
+        need(value.get("updateBaseline") is None and value.get("positiveUpdate") is None)
     result["failure"] = project_failure(value.get("failure"))
     removal = value.get("removalFixture")
     need(removal is None or phase == "package-removal-fixture")
@@ -1276,7 +1353,7 @@ def positive_ui_counts(value):
 def positive_ui_facts(value, context, *, android):
     if android:
         fixed = dict(schemaVersion=1, scope="one-ordinary-local-signed-android-build", sourceCommit=context["source"],
-            target=TARGETS[0], runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
+            target=context["target"], runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
             nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
             outputPostMatched=True, normalQuitObserved=True, releaseQualified=False)
         sizes = {"artifactBytes": 64 << 20, "outputEntries": 100000, "outputNameBytes": 2 << 20,
@@ -1385,8 +1462,8 @@ def positive_ui_prerequisites(context, statuses, phases, inventory, kind):
 
 def project_android_positive(value, context, statuses, phases, inventory):
     positive_ui_prerequisites(context, statuses, phases, inventory, "android")
-    need(context["target"] == TARGETS[0])
-    fixed = dict(schemaVersion=1, scope="ordinary-installed-one-android-signed-build-ui", target=TARGETS[0],
+    need(context["target"] in TARGETS)
+    fixed = dict(schemaVersion=1, scope="ordinary-installed-one-android-signed-build-ui", target=context["target"],
         applicationSourceCommit=context["source"], harnessSourceCommit=context["source"], sourceTree=inventory["tree"],
         workflow=".github/workflows/desktop-macos-installed.yml", runId=context["runId"], runAttempt=context["runAttempt"],
         testIdentifier="MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild",
@@ -1500,6 +1577,10 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
                 if type(caller) is not dict or caller.get("receiptState") != "observed" or caller.get("returncode") != 0:
                     row = {"receiptState": "refused", "callerStatus": caller}
             phases[phase] = row
+        try:
+            update = update_join(phases["update-baseline"], phases["package-install"])
+        except Refused:
+            update = {"receiptState": "refused"}
         inventory_paths = set()
         inventory = observe("source-inventory.json", 2 * 1024 * 1024,
             lambda body: project_inventory(decode(body, budget, inventory=True), body, context, collect_paths=inventory_paths))
@@ -1529,7 +1610,7 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
         value = {"schemaVersion": 1, "kind": "mrk-public-verification-evidence-v1", **context,
                  "diagnosticOnly": True, "productReady": False, "sourceInventory": inventory,
                  "phases": phases, "statuses": statuses, "deliveries": deliveries, "normalUiBuildDiagnostics": ui_diagnostics,
-                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence}
+                 "dataContractFailure": data_failure, "buildSettingsDiagnostic": settings_diagnostic, "appAbsence": app_absence, "positiveUpdate": update}
         if profile == "installed":
             value["positiveUiObservations"] = positive_ui_observations(root, context, statuses, phases, inventory, budget)
         body = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")

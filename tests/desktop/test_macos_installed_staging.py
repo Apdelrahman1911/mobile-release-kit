@@ -23,6 +23,7 @@ import tomllib
 from types import FunctionType, SimpleNamespace
 import unittest
 from unittest import mock
+import warnings
 
 TOOL = None
 ANDROID_HELPER = None
@@ -1238,11 +1239,368 @@ INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-
 SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
 
 
+POSITIVE_UPDATE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-app-absence-fixture\n\n',
+  '      - verify/desktop-macos-app-absence-fixture\n      - verify/desktop-macos-positive-update\n\n'),
+ ('  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '    environment: macos-developer-id\n',
+  '  engineering-install:\n'
+  "    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '    environment: macos-developer-id\n'),
+ ('          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n',
+  '          esac\n'
+  '          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || '
+  '"$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature '
+  '|| "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ) ]] || exit 1\n'
+  '          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == '
+  'refs/heads/verify/desktop-macos-positive-update ]]; then\n'
+  '            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && '
+  '"$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'),
+ ("          python-version: '3.14.7'\n"
+  '      - name: Select the fixed configured signed runtime before any payload download\n',
+  "          python-version: '3.14.7'\n"
+  '      - name: Refuse unconfigured update before any artifact download or native preparation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_selection\n'
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          MRK_PYTHON: ${{ steps.python.outputs.python-path }}\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_update_verification.py select --target '
+  '"$MRK_MACOS_TARGET")\n'
+  '          [[ ${#selection} -le 1024 && "$HOME" == /* ]] || exit 1\n'
+  '          "$MRK_PYTHON" -I -S -B - "$selection" <<\'PY_UPDATE_SELECT\'\n'
+  '          import json, os, re, sys\n'
+  '          value = json.loads(sys.argv[1])\n'
+  '          if set(value) != {"artifactId", "runId", "artifactBytes", "additionalDiskBytes"}: raise '
+  'ValueError("update selection")\n'
+  '          rows = {}\n'
+  '          for field, key in (("artifactId", "MRK_UPDATE_ARTIFACT_ID"), ("runId", "MRK_UPDATE_RUN_ID")):\n'
+  '              v = value[field]\n'
+  '              if type(v) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", v) is None: raise ValueError("update '
+  'identity")\n'
+  '              rows[key] = v\n'
+  '          for key in ("artifactBytes", "additionalDiskBytes"):\n'
+  '              if type(value[key]) is not int or not 0 < value[key] <= 8 * 1024**3: raise ValueError("update '
+  'quote")\n'
+  '          rows["MRK_UPDATE_DISK_BYTES"] = str(value["additionalDiskBytes"])\n'
+  '          home = os.environ["HOME"]\n'
+  '          if not home.startswith("/") or any(c in home for c in "\\r\\n\\0"): raise ValueError("update GUI home")\n'
+  '          rows["MRK_MACOS_GUI_HOME"] = home\n'
+  '          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:\n'
+  '              for key, value in rows.items(): output.write(key + "=" + value + "\\n")\n'
+  '          PY_UPDATE_SELECT\n'
+  '\n'
+  '      - name: Select the fixed configured signed runtime before any payload download\n'),
+ ('        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 28\n',
+  '        id: data_contracts\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || "
+  "github.ref == 'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 28\n'),
+ ('      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 8\n',
+  '      - name: Build the separate fixed eight-case Installer package from the same completed input\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 8\n'),
+ ('      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 18\n',
+  '      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 18\n'),
+ ('      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture')\n"
+  '        timeout-minutes: 3\n',
+  '      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != "
+  "'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != "
+  "'refs/heads/verify/desktop-macos-positive-update')\n"
+  '        timeout-minutes: 3\n'),
+ ('          # Closed receipt never certifies its own future original exit.\n\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n',
+  '          # Closed receipt never certifies its own future original exit.\n'
+  '\n'
+  '      - name: Admit only the reviewed update artifact incremental disk allocation\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 1\n'
+  '        shell: bash\n'
+  '        run: |\n'
+  '          set -euo pipefail\n'
+  '          umask 077\n'
+  '          "$MRK_PYTHON" -I -S -B - <<\'PY_UPDATE_SPACE\'\n'
+  '          import os, pathlib, stat\n'
+  '          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])\n'
+  '          info = root.lstat()\n'
+  '          if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700: '
+  'raise ValueError("update work")\n'
+  '          budget = int(os.environ["MRK_UPDATE_DISK_BYTES"])\n'
+  '          capacity = os.statvfs(root)\n'
+  '          if not 0 < budget <= 8 * 1024**3 or capacity.f_bavail * capacity.f_frsize < budget + 64 * 1024**2: raise '
+  'ValueError("update disk")\n'
+  '          (root / "update-predecessor").mkdir(mode=0o700)\n'
+  '          PY_UPDATE_SPACE\n'
+  '\n'
+  '      - name: Download only SOURCE-nominated qualified predecessor DATA\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        timeout-minutes: 5\n'
+  '        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c\n'
+  '        with:\n'
+  '          artifact-ids: ${{ env.MRK_UPDATE_ARTIFACT_ID }}\n'
+  '          run-id: ${{ env.MRK_UPDATE_RUN_ID }}\n'
+  '          repository: Apdelrahman1911/mobile-release-kit\n'
+  '          github-token: ${{ github.token }}\n'
+  '          path: ${{ env.MRK_MACOS_WORK }}/update-predecessor\n'
+  "          merge-multiple: 'true'\n"
+  '          digest-mismatch: error\n'
+  "          skip-decompress: 'false'\n"
+  '\n'
+  '      - name: Install the exact qualified predecessor once before the existing current Installer original\n'
+  "        if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'\n"
+  '        id: update_baseline\n'
+  '        timeout-minutes: 9\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          set +e\n'
+  '          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py update-baseline --target '
+  '"$MRK_MACOS_TARGET" \\\n'
+  '            > "$MRK_MACOS_WORK/update-baseline.stdout" 2> "$MRK_MACOS_WORK/update-baseline.stderr"\n'
+  '          phase_status=$?\n'
+  '          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/update-baseline.status"\n'
+  '          save_status=$?\n'
+  '          set -e\n'
+  '          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n'
+  '          [[ "$save_status" == 0 ]] || exit "$save_status"\n'
+  '          # P1 remains the existing one package-install original, not a replay.\n'
+  '\n'
+  '      - name: Standard Installer only is privileged; never execute the app or Python as root\n'))
+
+def without_positive_update_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("positive-update SOURCE bound differs")
+    source = without_intel_android_workflow(source)
+    if "verify/desktop-macos-positive-update" not in source:
+        if "update-baseline --target" in source or "MRK_UPDATE_ARTIFACT_ID" in source:
+            raise AssertionError("partial positive-update workflow")
+        return source
+    for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+        if source.count(after) != 1 or source.count(before) != after.count(before):
+            raise AssertionError("positive-update exact region differs")
+    for before, after in reversed(POSITIVE_UPDATE_WORKFLOW_INVERSE):
+        source = source.replace(after, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1":
+        raise AssertionError("positive-update whole predecessor differs")
+    return source
+
+
 APP_ABSENCE_WORKFLOW_INVERSE = (('      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n\npermissions:\n', '      - verify/desktop-macos-removal-lifecycle\n      - verify/desktop-macos-app-signature\n      - verify/desktop-macos-app-absence-fixture\n\npermissions:\n'), ("jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n", "jobs:\n  engineering-install:\n    if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-installed' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n    environment: macos-developer-id\n    name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}\n"), ('            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n', '            *) exit 1 ;;\n          esac\n          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ) ]] || exit 1\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture ]]; then\n            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n          fi\n          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then\n            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1\n'), ("      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')\n        timeout-minutes: 28\n        shell: bash\n", "      - name: Compile and run only fixed native DATA contracts and exact host-Python regressions\n        id: data_contracts\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 28\n        shell: bash\n"), ("          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 8\n        shell: bash\n", "          PY\n      - name: Build the separate fixed eight-case Installer package from the same completed input\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 8\n        shell: bash\n"), ('            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\')\n        timeout-minutes: 18\n        shell: bash\n', '            --original-package "$MRK_MACOS_WORK/MobileReleaseKit-InstallerFixture-original.pkg" > "$MRK_MACOS_WORK/package-fixture-audit.json"\n      - name: Standard Installer runs the one fixed fixture, never root libtest or a scenario selector\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\' && (github.ref != \'refs/heads/verify/desktop-macos-removal-lifecycle\' && github.ref != \'refs/heads/verify/desktop-macos-app-absence-fixture\')\n        timeout-minutes: 18\n        shell: bash\n'), ("          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle')\n        timeout-minutes: 3\n        shell: bash\n", "          # Any unexpected native failure/Unknown stops subsequent cases. No retry.\n      - name: Nonroot fixture readback leaves protected0700 staging closed and unchanged\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture')\n        timeout-minutes: 3\n        shell: bash\n"), ("          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'\n        id: package_install\n        timeout-minutes: 18\n        shell: bash\n        env:\n", '          # actual original0/status and the retained closed receipt, not a flag.\n\n      - name: Fixed nonshipping app-absence prepare-app-absence; no credentials or user artifact\n        id: app_absence_prepare\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 56\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py prepare-app-absence --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/prepare-app-absence.stdout" 2> "$MRK_MACOS_WORK/prepare-app-absence.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-preparation.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Standard Installer only is privileged; never execute the app or Python as root\n        if: github.ref != \'refs/heads/verify/desktop-macos-app-signature\'\n        id: package_install\n        timeout-minutes: ${{ github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\' && 32 || 18 }}\n        shell: bash\n        env:\n'), ('          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Its one990s group includes known mount retirement.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n', '          # One original existing owner: final archive audit, explicit producer,\n          # two fixed signed images, readonly mount, standard Installer and V2\n          # nonroot readback. Ordinary one990s remains unchanged. The fixed\n          # app-absence route alone adds baseline/image originals within1740s\n          # work/1800s hard; the job350min cap is never renewed.\n          # Previous pkgbuild/tar/xar construction is not relabeled as owned.\n          set +e\n'), ('          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n', '          # Unknown resources remain retained; no forced detach or root Python.\n          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD\n      - name: Fixed nonshipping app-absence app-absence-restore; no credentials or user artifact\n        id: app_absence_restore\n        if: github.ref == \'refs/heads/verify/desktop-macos-app-absence-fixture\'\n        timeout-minutes: 13\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py app-absence-restore --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/app-absence-restore.stdout" 2> "$MRK_MACOS_WORK/app-absence-restore.stderr"\n          phase_status=$?\n          printf \'%s\\n\' "$phase_status" > "$MRK_MACOS_WORK/app-absence-restore.status"\n          save_status=$?\n          set -e\n          if [[ "$phase_status" != 0 ]]; then exit "$phase_status"; fi\n          [[ "$save_status" == 0 ]] || exit "$save_status"\n          # Closed receipt never certifies its own future original exit.\n\n      - name: Prepare fresh private Android UI suppliers and disposable key inputs\n        id: normal_android_inputs\n'))
+
+SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS = (('      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'), ('      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 4\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # Fresh outputs, no inherited credentials/proxy/curlrc, no retry or fallback.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 32520401 \\\n            --url \'https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar\' \\\n            > "$work/bundletool-all-1.18.3.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            /usr/bin/curl -q --fail --silent --show-error --location --max-redirs 3 \\\n            --proto \'=https\' --proto-redir \'=https\' --connect-timeout 20 --max-time 90 --max-filesize 4339472 \\\n            --url \'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar\' \\\n            > "$work/aapt2-8.9.2-12782657-osx.jar"\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support \\\n            --target \'${{ matrix.target }}\' \\\n            --bundletool-archive "$work/bundletool-all-1.18.3.jar" --aapt2-archive "$work/aapt2-8.9.2-12782657-osx.jar" \\\n            > "$work/android-support-result.json"\n', '      - name: Download the fixed once-signed Android support capsule\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 3\n        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8\n        with:\n          artifact-ids: \'11691308054\'\n          run-id: \'38109802320\'\n          repository: Apdelrahman1911/mobile-release-kit\n          github-token: ${{ github.token }}\n          path: ${{ steps.work.outputs.root }}/signed-android-transport\n          merge-multiple: \'false\'\n          digest-mismatch: error\n          skip-decompress: \'false\'\n      - name: Acquire and verify the two fixed Android support archives as DATA\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == \'project-fields\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-current-synthetic\' || env.MRK_MACOS_AQUA_SCOPE == \'android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'project-fields-android-inputs\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping\' || env.MRK_MACOS_AQUA_SCOPE == \'installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'vault-helper-shipping-installation-inspection\' || env.MRK_MACOS_AQUA_SCOPE == \'project-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'ios-recovery-pending\' || env.MRK_MACOS_AQUA_SCOPE == \'doctor-preflight2\' || env.MRK_MACOS_AQUA_SCOPE == \'local-edits3\')\n        timeout-minutes: 1\n        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}\n        run: |\n          cd /Users/runner/work/mobile-release-kit/mobile-release-kit\n          set -o noclobber\n          umask 077\n          work=\'${{ steps.work.outputs.root }}\'\n          target=\'${{ matrix.target }}\'\n          [[ "$work" == /Users/runner/work/_temp/mrk-macos-aqua.* && -d "$work" && ! -L "$work" ]] || exit 1\n          # No native execution or credentials in DATA admission. Exact SOURCE\n          # joins all three originals to the successful once-signed producer.\n          /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \\\n            \'${{ steps.python.outputs.python-path }}\' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \\\n            --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \\\n            > "$work/android-support-result.json"\n'))
+SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON = (('          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n', '          [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1\n          [[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]] || exit 1\n'), ('            --bundletool-archive "$MRK_MACOS_WORK/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/aapt2-8.9.2-12782657-osx.jar" \\\n', '            --bundletool-archive "$MRK_MACOS_WORK/signed-android-transport/bundletool-all-1.18.3.jar" \\\n            --aapt2-archive "$MRK_MACOS_WORK/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \\\n            --android-support-signed-receipt "$MRK_MACOS_WORK/signed-android-transport/android-support-signed-receipt.json" \\\n'))
+
+
+def without_signed_android_runtime_source_pin(source):
+    # Fresh Mac core composition only; all older workflow oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android runtime SOURCE bound differs")
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("signed Android runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
+def without_signed_android_support_workflow(source):
+    source = without_signed_android_runtime_source_pin(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("signed Android support workflow SOURCE bound differs")
+    if "signed-android-transport" not in source:
+        return source
+    matches = [(old, new) for old, new in SIGNED_ANDROID_SUPPORT_WORKFLOW_REGIONS if new in source]
+    if len(matches) != 1:
+        raise AssertionError("signed Android support workflow exact download/admission differs")
+    regions = (*matches, *SIGNED_ANDROID_SUPPORT_WORKFLOW_COMMON)
+    for old, new in regions:
+        if source.count(new) != 1 or source.count(old) != new.count(old):
+            raise AssertionError("signed Android support workflow exact delta differs")
+    for old, new in reversed(regions):
+        source = source.replace(new, old, 1)
+    if any(marker in source for marker in ("signed-android-transport", "--android-support-signed-receipt",
+                                           "Download the fixed once-signed Android support capsule")):
+        raise AssertionError("signed Android support workflow extra delta differs")
+    return source
+
+
+INTEL_ANDROID_WORKFLOW_INVERSE = (('        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n',
+  '        id: normal_ui_build\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' "
+  "|| (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == "
+  "'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"
+  '        timeout-minutes: 9\n'),
+ ('        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n',
+  '        id: normal_android_inputs\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'),
+ ('          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build && "$MRK_MACOS_TARGET" == '
+  'aarch64-apple-darwin ]] || exit 1\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n',
+  '          umask 077\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == android-signed-build ]] || exit 1\n'
+  '          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in\n'
+  '            '
+  'aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64) '
+  ';;\n'
+  '            *) exit 1 ;;\n'
+  '          esac\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$GITHUB_SHA" == '
+  '"$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1\n'),
+ ('        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_inputs.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n',
+  '        id: normal_android_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_inputs.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 23\n'),
+ ('        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && matrix.target == 'aarch64-apple-darwin' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && steps.normal_android_ui_test.outcome == 'success' "
+  "&& steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n',
+  '        id: normal_android_ui_result\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build' && "
+  "steps.normal_android_ui_test.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 3\n'),
+ ("          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  "          TARGET = 'aarch64-apple-darwin'\n"
+  '          env = dict(os.environ)\n'
+  "          root = Path(env['MRK_MACOS_WORK'])\n",
+  "          SOURCE = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')\n"
+  '          env = dict(os.environ)\n'
+  "          TARGET = env['MRK_MACOS_TARGET']\n"
+  "          if TARGET not in ('aarch64-apple-darwin', 'x86_64-apple-darwin'): raise "
+  "ValueError('ui-fixed-target')\n"
+  "          root = Path(env['MRK_MACOS_WORK'])\n"),
+ ('              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/build-release.json')\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n',
+  '              N, S, P = modules\n'
+  "              release_raw = source_body('desktop/macos-installed-inputs/' +\n"
+  "                  ('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json'))\n"
+  '              release = S.build_release_data(release_raw, target=TARGET)\n'),
+ ("              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n",
+  "              facts = N.android_signed_facts(document(original(normal / 'android-signed-build.facts.json', "
+  '16384)),\n'
+  '                                             source=source, run=run, attempt=attempt, target=TARGET)\n'
+  "              build = document(original(normal / 'build.command-admission.json', 32768))\n"),
+ ("              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n",
+  "              summary = document(original(normal / 'android-signed-build-summary.command-admission.json', "
+  '32768))\n'
+  '              N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, '
+  'attempt=attempt, target=TARGET)\n'
+  "              summary_raw = original(normal / 'android-signed-build-summary.json', 262144)\n"))
+
+
+def without_intel_android_workflow(source):
+    if type(source) is not str or len(source.encode()) > 524288:
+        raise AssertionError("Intel Android source bound differs")
+    source = without_signed_android_support_workflow(source)
+    if "TARGET = env['MRK_MACOS_TARGET']" not in source:
+        return source
+    for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
 
 def without_app_absence_workflow(source):
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("app-absence workflow source bound differs")
+    source = without_positive_update_workflow(source)
     if "refs/heads/verify/desktop-macos-app-absence-fixture" not in source and "prepare-app-absence" not in source:
         return source
     for previous, current in APP_ABSENCE_WORKFLOW_INVERSE:
@@ -1973,6 +2331,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         try:
             with (mock.patch.object(TOOL, "DESKTOP", operation.checkout / "desktop"),
                   mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", state.support.manifest_path),
+                  synthetic_android_support(state.support),
                   mock.patch.object(module, "NOTARY_XCODE", state.xcode),
                   mock.patch.object(module, "WORK_PARENT", operation.work.parent),
                   mock.patch.object(module.time, "monotonic_ns", new=lambda: state.clock[0]),
@@ -2685,6 +3044,96 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(operation.recheck_mount, original_mount)
         self.assertEqual(operation.notary_tool, original_tool)
         self.assertEqual((module.NOTARY_FREE_FLOOR, module.NOTARY_STORAGE_RESERVE), (3 * 1024 ** 3, 2 * 1024 ** 3))
+
+    def test_update_baseline_existing_owner_preserves_original_failure_and_closes(self):
+        # Only baseline content/readback is an inert phase port. Actual source
+        # loading, nomination parsing, fixed dispatch, native-result capture,
+        # status, clock, POST and consuming retirement use the genuine owner.
+        module = ANDROID_HELPER
+        nomination = {"schemaVersion": 1, "mode": "configured", "targets": {}}
+        for target in TOOL.MAC_TARGETS:
+            producer, _records, _result = maintenance_documents(("fresh-install",), target=target)
+            release = producer["releaseSet"]["current"]
+            member = lambda name, digest: {"name": name, "bytes": 100, "sha256": digest}
+            image = member("MobileReleaseKit.dmg", "1" * 64)
+            nomination["targets"][target] = {"source": release["sourceCommit"], "runId": "123", "runAttempt": "1",
+                "jobId": "456", "artifactId": "789", "artifactBytes": 200, "artifactSha256": "2" * 64,
+                "members": [image], "image": image, "package": member("Install.pkg", release["packageSha256"]),
+                "descriptor": member("producer.json", "4" * 64), "signature": member("producer.sig", "5" * 64),
+                "inventory": member(TOOL.INSTALLATION_INVENTORY_NAME, release["inventorySha256"]),
+                "release": release, "signingPolicy": producer["signingPolicies"][0], "qualificationEvidenceSha256": "8" * 64,
+                "resources": {"reviewed": True, "additionalDiskBytes": 300 + 512 * 1024**2 + 4 * 1024**2,
+                              "rawPayloadBytes": 6 * 512 * 1024**2 + 80 * 1024**2, "maximumOriginals": 96}}
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "installer-nonzero", "installer-unknown"):
+                with self.subTest(target=target, fault=fault), tempfile.TemporaryDirectory() as directory:
+                    checkout, work, environment, _owner, _events = self.fixture(Path(directory), build_target=target)
+                    producer, service, _selection, _history, _descriptor = packaging_fixture(target)
+                    (checkout / module.PROFILE).write_bytes(service)
+                    (checkout / module.PRODUCER_PROFILE).write_bytes(producer)
+                    path = checkout / "desktop/tools/macos_update_verification.py"
+                    path.parent.mkdir(parents=True)
+                    path.write_bytes((Path(__file__).absolute().parents[2] / "desktop/tools/macos_update_verification.py").read_bytes())
+                    path.chmod(0o644)
+                    nomination_path = checkout / "desktop/macos-installed-inputs/update-predecessors.json"
+                    nomination_path.write_bytes(TOOL.canonical(nomination))
+                    nomination_path.chmod(0o644)
+                    self.assertEqual(stat.S_IMODE(nomination_path.stat().st_mode), 0o644)
+                    environment.update(GITHUB_REF=module.UPDATE_REF, MRK_MACOS_SAME_PACKAGE_SCOPE="disabled")
+                    events = []
+                    def command(argv, **options):
+                        role = operation.calls[-1]["role"]; events.append(role)
+                        self.assertEqual(options["timeout"], 123 if role == module.UPDATE_ROLES[1] else 60)
+                        self.assertFalse(set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                            + (module.NOTARY_KEY_VARIABLE,)) & set(options["environ"]))
+                        if role == module.UPDATE_ROLES[1] and fault == "installer-unknown": raise RuntimeError("INERT unknown")
+                        return CompletedProcess(argv, 1 if role == module.UPDATE_ROLES[1] and fault else 0, b"", b"")
+                    operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, module.UPDATE_PHASE, environment, TOOL, target=target)
+                    original_load = operation.update_load
+                    def phase_port(op):
+                        op.update["case"] = op.package_directory("update-baseline-case")
+                        commands = (["/usr/bin/hdiutil", "attach", str(work / "update-predecessor/MobileReleaseKit.dmg"),
+                            "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(work / "package-mount"), "-plist"],
+                            ["/usr/bin/sudo", "-n", "--", "/usr/sbin/installer", "-pkg", str(work / "package-mount/Install.pkg"),
+                            "-target", "/", "-dumplog", "-verboseR"], ["/usr/bin/hdiutil", "detach", "/dev/disk99"])
+                        for index, role in enumerate(module.UPDATE_ROLES):
+                            op.package_call(role, commands[index], timeout=123 if index == 1 else 60, limit=262144)
+                            if index == 0: op.mount_known = True; op.mount_device = "/dev/disk99"
+                            elif index == 1: op.installer_zero = True; op.installation_readback = True
+                            else: op.mount_detached = True
+                        op.sha256 = "a" * 64
+                        op.update["complete"] = True  # Inert phase only, not native qualification.
+                    def load():
+                        original_load(); operation.update_module.baseline = phase_port
+                    try:
+                        with mock.patch.dict(sys.modules, {module.__name__: module}), mock.patch.object(operation, "update_load", side_effect=load):
+                            if fault is None:
+                                try:
+                                    operation.execute()
+                                except module.Refused:
+                                    failure = operation.receipt.get("failure")
+                                    values = [failure.get(key) if type(failure) is dict else None
+                                              for key in ("stage", "type", "reason")]
+                                    details = tuple(value if type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value)
+                                                    else "unclassified" for value in values)
+                                    self.fail(("positive-update-fixture-refused", details))
+                            else:
+                                with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"): operation.execute()
+                        self.assertEqual(operation.credential_calls, [])
+                        self.assertEqual(operation.credential_contexts, [])
+                        if fault is None:
+                            self.assertEqual(tuple(events), module.UPDATE_ROLES)
+                            self.assertTrue(operation.receipt["passed"] and operation.receipt["originalClosesKnown"] and operation.receipt["targetRetired"])
+                            self.assertEqual((work / "update-baseline-case/installer-output.status").read_bytes(), b"0\n")
+                        else:
+                            self.assertEqual(tuple(events), module.UPDATE_ROLES[:2])
+                            self.assertFalse(operation.receipt["passed"] or operation.receipt["originalClosesKnown"] or operation.receipt["targetRetired"])
+                            self.assertFalse(operation.mount_detached)
+                            if fault == "installer-nonzero":
+                                self.assertEqual((work / "update-baseline-case/installer-output.status").read_bytes(), b"1\n")
+                    finally:
+                        for entry in reversed(operation.entries): operation.close(entry)
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
 
     def test_app_absence_existing_owner_dispatch_capture_and_unknown_retirement(self):
         # A phase-body DATA port isolates the SAME Operation dispatch/capture/
@@ -7727,9 +8176,61 @@ def channel_data(path, body=None, *, private=False):
 
 @unittest.skipUnless(TOOL is not None, "Darwin/POSIX DATA tool only")
 class MacInstalledData(unittest.TestCase):
+    def test_positive_update_is_unconfigured_and_reverses_to_current_recovery_source(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        self.assertEqual(json.loads((root / "desktop/macos-installed-inputs/update-predecessors.json").read_text()),
+                         {"schemaVersion": 1, "mode": "unconfigured"})
+        self.assertEqual(raw.count("macos_android_helper_package.py update-baseline --target"), 1)
+        self.assertEqual(raw.count("macos_android_helper_package.py package-install --target"), 1)
+        self.assertLess(raw.index("Refuse unconfigured update"), raw.index("Select fixed frontend compiler"))
+        self.assertLess(raw.index("id: update_baseline"), raw.index("id: package_install"))
+        baseline = raw.split("        id: update_baseline\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 9", baseline)
+        self.assertNotIn("secrets.", baseline)
+        self.assertIn("digest-mismatch: error", raw)
+        previous = without_positive_update_workflow(raw)
+        self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(), "024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1")
+        self.assertEqual(without_positive_update_workflow(previous), previous)
+        self.assertNotIn("verify/desktop-macos-positive-update", previous)
+        for before, after in POSITIVE_UPDATE_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError): without_positive_update_workflow(raw.replace(after, before, 1))
+        with self.assertRaises(AssertionError): without_positive_update_workflow(raw + POSITIVE_UPDATE_WORKFLOW_INVERSE[0][1])
+        # Current SOURCE S assertions remain raw; only this exact newer route
+        # is removed before the already-reviewed historical inverse chain.
+        self.assertEqual(raw.count("fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"), 2)
+        self.assertNotIn("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09", raw)
+        self.assertEqual(previous.count("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"), 2)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(previous))
+
+    def test_intel_android_ui_target_join_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        self.assertEqual(raw.count("MRK_MACOS_ANDROID_UI_SCOPE: disabled"), 1)
+        selection = "github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'"
+        self.assertEqual(raw.count(selection), 4)
+        self.assertNotIn("matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE", raw)
+        self.assertIn('case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$MRK_MACOS_HOSTED_JOB" in', raw)
+        self.assertIn('aarch64-apple-darwin/ARM64/github-hosted-macos26-arm64|x86_64-apple-darwin/X64/github-hosted-macos26-x86_64', raw)
+        self.assertIn("('build-release.json' if TARGET == 'aarch64-apple-darwin' else 'build-release-intel.json')", raw)
+        self.assertIn('N.android_signed_receipts(build, test, summary, facts, source=source, normal=normal, run=run, attempt=attempt, target=TARGET)', raw)
+        prior = without_intel_android_workflow(raw)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), '2363019ea613375c22473cb323adc4b5ee44fc42f5bedd1390fe05b524aeece8')
+        self.assertEqual(hashlib.sha256(without_positive_update_workflow(prior).encode()).hexdigest(),
+                         '024cb67a62bbc1b7ba929c044a0edffc7f27731c8eeb508ca7e373924be4afc1')
+        self.assertEqual(without_intel_android_workflow(prior), prior)
+        self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(prior))
+        # Entire predecessor equality also preserves removal ARM rows, all caps,
+        # default matrix, original exits, credential/ref and private-upload guards.
+        for previous, current in INTEL_ANDROID_WORKFLOW_INVERSE:
+            with self.subTest(region=current[:48]), self.assertRaises(AssertionError):
+                without_intel_android_workflow(raw.replace(current, current + '# corrupt\n', 1))
+        with self.assertRaises(AssertionError): without_intel_android_workflow(raw + INTEL_ANDROID_WORKFLOW_INVERSE[0][1])
+
     def test_app_absence_fixed_route_has_exact_originals_and_current_predecessor(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        raw = without_positive_update_workflow(raw)
         prior = without_app_absence_workflow(raw)
         self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'ce06d7acffac6e5d37b0bf2c3afbe86ab7cf58729e68b64408634908642b8f02')
         self.assertEqual(without_app_absence_workflow(prior), prior)
@@ -9717,6 +10218,382 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                         self.assertEqual(model.closed, list(reversed(model.opened)))
 
 
+    def test_positive_update_uses_genuine_history_status_and_both_generation_readers(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "previous", "root", "instance", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install", "update"), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    old_release = producer["releaseSet"]["acceptedPredecessors"][0]
+                    old_selection = TOOL.BuildSelection(target, old_release["packageVersion"], old_release["release"])
+                    old_record, old_inventory, _, _ = installation_record_fixture(selection=old_selection)
+                    old_inventory_data = TOOL.decode(old_inventory)
+                    old_inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in old_inventory_data["files"]: row["sha256"] = manifest_hash
+                    old_inventory = TOOL.canonical(old_inventory_data)
+                    def bind(value):
+                        if type(value) is dict and "profile" in value and "inventorySha256" in value:
+                            return {**value, "runtimeManifestSha256": manifest_hash,
+                                    "inventorySha256": TOOL.digest(old_inventory) if value["release"] == old_selection.release else inventory_hash}
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    previous = copy.deepcopy(parsed[result["invocation"]][0]["previousState"])
+                    old_generation = parsed[previous["invocation"]][1]["current"]
+                    expected = {"previous": previous, "rootIdentity": root_identity, "generation": old_generation}
+                    facts = {}
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    old_record.update(instance=old_generation["instance"], runtimeManifestSha256=manifest_hash,
+                        releaseDirectory=old_generation["releaseDirectory"],
+                        inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(old_inventory), "sha256": TOOL.digest(old_inventory)})
+                    old_producer = copy.deepcopy(producer)
+                    old_producer["releaseSet"].update(current=old_generation["release"], acceptedPredecessors=[])
+                    old_descriptor = TOOL.canonical(old_producer)
+                    old_names = TOOL.maintenance_control_names(target, old_selection.release)
+                    metadata.update({(100, old_names[0]): old_descriptor, (100, old_names[1]): signed,
+                        (105, TOOL.INSTALLATION_INVENTORY_NAME): old_inventory,
+                        (105, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(old_record)})
+                    directory_rows.update({(100, ".retained-app-" + current["invocation"]): (104, old_generation["app"]["identity"], 0o555),
+                        (101, old_selection.release): (105, old_generation["releaseDirectory"], 0o755),
+                        (105, "runtime"): (106, {**root_identity, "inode": 106, "mode": stat.S_IFDIR | 0o555}, 0o555)})
+                    entered, closed, live, channel_models = [], [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        live.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            self.assertEqual(live[-1], child)
+                            live.pop()
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release, old_selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME},
+                        105: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=lambda path, limit: inventory
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024 else self.fail("unexpected SOURCE read")))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "previous": expected = {**expected, "previous": {**previous, "sha256": "f" * 64}}
+                        elif fault == "root": expected = {**expected, "rootIdentity": {**root_identity, "inode": 9999}}
+                        elif fault == "instance": expected = {**expected, "generation": {**old_generation, "instance": "f" * 32}}
+                        reason = {"previous": "update-immediate-predecessor", "root": "update-immediate-predecessor",
+                                  "instance": "update-initial-fresh-generation", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, expected_update_previous=expected, update_facts=facts)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, expected_update_previous=expected, update_facts=facts)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertNotIn("updatePredecessorMatched", observed)
+                            if fault is None:
+                                self.assertEqual(facts["rootIdentity"], root_identity)
+                                self.assertEqual(facts["generation"], current["current"])
+                                self.assertNotEqual(facts["generation"]["instance"], old_generation["instance"])
+                                ordinary_shape = observed
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(history.call_count, 0 if fault == "status" else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "previous", "root", "instance") else 1 if fault == "current-bytes" else 2)
+                    # Current and retained generations are sequential sibling
+                    # scopes: require lexical LIFO and each original closed once,
+                    # not reversal of the combined acquisition history.
+                    self.assertEqual(live, [])
+                    self.assertEqual(len(closed), len(entered))
+                    self.assertCountEqual(closed, entered)
+                    if fault in (None, "default"):
+                        self.assertEqual(entered, [100, 101, 102, 103, 104, 105, 106])
+                        self.assertEqual(closed, [103, 102, 106, 105, 104, 101, 100])
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
+    def test_update_baseline_uses_fixed_nomination_and_genuine_fresh_current_reader(self):
+        # Whole ordinary readback wiring, not a replacement observation/history
+        # reducer. Only SOURCE selection and finite low-level IO ports are inert;
+        # the genuine status/export readers and all closed history/current-byte
+        # reducers execute. No fake FD below reaches the host and no installed
+        # ownership, signature, native Installer or Store qualification is made.
+        for target in TOOL.MAC_TARGETS:
+            for fault in (None, "default", "nomination", "status", "current-bytes"):
+                with self.subTest(target=target, ordinary_readback=fault):
+                    producer, old_records, result = maintenance_documents(("fresh-install",), target=target)
+                    release = producer["releaseSet"]["current"]
+                    selection = TOOL.BuildSelection(target, release["packageVersion"], release["release"])
+                    record, inventory, root_identity, _ = installation_record_fixture(selection=selection)
+                    inventory_data = TOOL.decode(inventory)
+                    manifest_hash = TOOL.digest(b"x")
+                    inventory_data["runtimeManifestSha256"] = manifest_hash
+                    for row in inventory_data["files"]:
+                        row["sha256"] = manifest_hash
+                    inventory = TOOL.canonical(inventory_data)
+                    inventory_hash = TOOL.digest(inventory)
+                    def bind(value):
+                        if type(value) is dict:
+                            return {key: (inventory_hash if key == "inventorySha256" else manifest_hash
+                                    if key == "runtimeManifestSha256" else bind(item)) for key, item in value.items()}
+                        if type(value) is list:
+                            return [bind(item) for item in value]
+                        return value
+                    producer = bind(producer)
+                    records, evidence = {}, []
+                    for invocation, raw in old_records.items():
+                        intent, state, capsule = [bind(TOOL.decode(body)) for body in raw]
+                        if intent["previousState"] is not None:
+                            previous = intent["previousState"]["invocation"]
+                            intent["previousState"]["sha256"] = TOOL.digest(records[previous][1])
+                        state["previousEvidence"] = copy.deepcopy(evidence)
+                        intent_body, state_body = TOOL.canonical(intent) + b"\n", TOOL.canonical(state) + b"\n"
+                        capsule.update(intentSha256=TOOL.digest(intent_body), stateSha256=TOOL.digest(state_body))
+                        capsule_body = TOOL.canonical(capsule) + b"\n"
+                        records[invocation] = (intent_body, state_body, capsule_body)
+                        hashes = {"intentSha256": TOOL.digest(intent_body), "stateSha256": TOOL.digest(state_body),
+                                  "capsuleSha256": TOOL.digest(capsule_body)}
+                        evidence.append({"invocation": invocation, **hashes})
+                    result = {**result, **hashes}
+                    descriptor, signed = TOOL.canonical(producer), b"inert-public-signature"
+                    current, parsed = TOOL.maintenance_history_data(result, records,
+                        TOOL.maintenance_producer_data(descriptor, target=target))
+                    nomination = {"release": producer["releaseSet"]["current"]}
+                    nominated_source = {"schemaVersion": 1, "mode": "configured", "targets": {
+                        item: nomination for item in TOOL.MAC_TARGETS}}
+                    facts = {}
+                    generation = current["current"]
+                    record.update(instance=generation["instance"], runtimeManifestSha256=manifest_hash,
+                                  releaseDirectory=generation["releaseDirectory"],
+                                  inventory={"name": TOOL.INSTALLATION_INVENTORY_NAME, "bytes": len(inventory), "sha256": inventory_hash})
+                    args = result_args()
+                    args.target, args.request_id = target, result["requestId"]
+                    args.expected_inventory, args.expected_manifest = inventory_hash, manifest_hash
+                    args.expected_source = producer["releaseSet"]["current"]["sourceCommit"]
+                    args.expected_package = producer["releaseSet"]["current"]["packageSha256"]
+                    export = TOOL.canonical(result) + b"\n"
+                    names, stages = TOOL.maintenance_roster_data(current, parsed, target)
+                    descriptor_name, signature_name = TOOL.maintenance_control_names(target, selection.release)
+                    metadata = {(100, TOOL.MAINTENANCE_STATE_NAME): records[current["invocation"]][1],
+                                (100, TOOL.MAINTENANCE_GATE_NAME): TOOL.MAINTENANCE_GATE_BYTES,
+                                (100, TOOL.REGISTRATION_GATE_NAME): TOOL.REGISTRATION_GATE_BYTES,
+                                (100, descriptor_name): descriptor, (100, signature_name): signed,
+                                (103, TOOL.INSTALLATION_INVENTORY_NAME): inventory,
+                                (103, TOOL.INSTALLATION_RECORD_NAME): TOOL.canonical(record)}
+                    for invocation, (intent_body, state_body, capsule_body) in records.items():
+                        metadata[(100, ".maintenance-" + invocation + ".intent.json")] = intent_body
+                        metadata[(100, ".maintenance-" + invocation + ".capsule.json")] = capsule_body
+                        if invocation != current["invocation"]:
+                            metadata[(100, ".maintenance-" + invocation + ".state.json")] = state_body
+                    payload = {row["path"]: (b"x", 0o555 if row["executable"] else 0o444) for row in inventory_data["files"]}
+                    if fault == "current-bytes":
+                        payload["app/Contents/Info.plist"] = (b"y", 0o444)
+                    directory_rows = {(90, TOOL.INSTALL_ROOT.name): (100, root_identity, 0o755),
+                                      (100, "versions"): (101, root_identity, 0o755),
+                                      (100, TOOL.APP_NAME): (102, generation["app"]["identity"], 0o555),
+                                      (101, selection.release): (103, generation["releaseDirectory"], 0o755)}
+                    entered, closed, channel_models = [], [], []
+                    original_channel, original_read_at = TOOL.installer_channel_parent, TOOL.read_at
+                    @contextlib.contextmanager
+                    def channel(path, *, private=None):
+                        if path == TOOL.INSTALL_ROOT:
+                            yield 90, path.name
+                        else:
+                            body = (b"1\n" if fault == "status" else b"0\n") if private is not None else export
+                            with channel_data(path, body, private=private is not None) as model:
+                                channel_models.append(model)
+                                with original_channel(path, private=private) as originals:
+                                    yield originals
+                    @contextlib.contextmanager
+                    def directory(fd, name, mode):
+                        child, identity, expected_mode = directory_rows[(fd, name)]
+                        self.assertEqual(mode, expected_mode)
+                        entered.append(child)
+                        try:
+                            yield child, identity
+                        finally:
+                            closed.append(child)
+                    def metadata_read(fd, name, limit):
+                        body = metadata[(fd, name)]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def read_at(fd, name, limit):
+                        if fd != 200:
+                            return original_read_at(fd, name, limit)
+                        body = {"producer.json": descriptor, "producer.sig": signed}[name]
+                        self.assertLessEqual(len(body), limit)
+                        return body, log_info(len(body), st_mode=stat.S_IFREG | 0o444)
+                    def tree(path, *, installed):
+                        self.assertIs(installed, True)
+                        prefix = {TOOL.INSTALL_ROOT / TOOL.APP_NAME: "app/",
+                                  TOOL.INSTALL_ROOT / "versions" / selection.release / "runtime": "runtime/"}[path]
+                        return {name[len(prefix):]: value for name, value in payload.items() if name.startswith(prefix)}
+                    api = mock.Mock(wraps=TOOL.os)
+                    api.O_DIRECTORY = TOOL.os.O_DIRECTORY
+                    api.getuid.return_value = api.geteuid.return_value = 501
+                    api.getgid.return_value = api.getegid.return_value = 20
+                    api.listdir.side_effect = {100: names, 101: {selection.release},
+                        103: {"runtime", TOOL.INSTALLATION_INVENTORY_NAME, TOOL.INSTALLATION_RECORD_NAME}}.__getitem__
+                    api.fstat.side_effect = lambda fd: log_info(st_ino=fd, st_mode=stat.S_IFDIR | 0o755)
+                    def stage_stat(name, *, dir_fd, follow_symlinks):
+                        self.assertEqual(dir_fd, 100); self.assertIn(name, stages); self.assertIs(follow_symlinks, False)
+                        return log_info(st_dev=root_identity["device"], st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0, st_flags=0)
+                    api.stat.side_effect = stage_stat
+                    # ExitStack avoids Python's static nested-block limit and
+                    # restores every port before the next finite scenario.
+                    with contextlib.ExitStack() as stack:
+                        for name, replacement in (("os", api), ("installer_channel_parent", channel),
+                                ("maintenance_directory", directory), ("installation_metadata_leaf", metadata_read),
+                                ("read_at", read_at), ("tree", tree)):
+                            stack.enter_context(mock.patch.object(TOOL, name, replacement))
+                        stack.enter_context(mock.patch.object(TOOL, "source_build_selection", return_value=selection))
+                        stack.enter_context(mock.patch.object(TOOL, "parent", side_effect=lambda path: contextlib.nullcontext((200, path.name))))
+                        def source_read(path, limit):
+                            if path == Path(args.input) / TOOL.INSTALLATION_INVENTORY_NAME and limit == 1024 * 1024: return inventory
+                            if path == TOOL.DESKTOP / "macos-installed-inputs/update-predecessors.json" and limit == 16384:
+                                return TOOL.canonical(nominated_source)
+                            self.fail("unexpected SOURCE read")
+                        stack.enter_context(mock.patch.object(TOOL, "read", side_effect=source_read))
+                        history = stack.enter_context(mock.patch.object(TOOL, "maintenance_history_data", wraps=TOOL.maintenance_history_data))
+                        producer_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_producer_inputs", wraps=TOOL.maintenance_producer_inputs))
+                        generation_read = stack.enter_context(mock.patch.object(TOOL, "maintenance_generation_readback", wraps=TOOL.maintenance_generation_readback))
+                        if fault == "nomination": nomination = {"release": {**nomination["release"], "sourceCommit": "f" * 40}}
+                        reason = {"nomination": "update-source-nomination", "status": "installer-status-not-original-zero",
+                                  "current-bytes": "installed-byte-mode-correspondence"}.get(fault)
+                        if reason is not None:
+                            with self.assertRaisesRegex(TOOL.Refused, reason):
+                                TOOL.observation_command(args, nominated_update_predecessor=nomination, update_facts=facts)
+                        else:
+                            observed = TOOL.observation_command(args) if fault == "default" else TOOL.observation_command(args, nominated_update_predecessor=nomination, update_facts=facts)
+                            self.assertEqual(observed["originalInstallerResult"], result)
+                            self.assertEqual(observed["nonrootReadbackFileCount"], 7)
+                            self.assertIs(observed["originalInstallerReturnedZero"], True)
+                            self.assertNotIn("updatePredecessorMatched", observed)
+                            if fault is None:
+                                self.assertEqual(facts["generation"], generation)
+                                self.assertEqual(facts["rootIdentity"], root_identity)
+                                self.assertEqual(facts["previous"], {"invocation": current["invocation"], "sha256": TOOL.digest(records[current["invocation"]][1])})
+                                ordinary_shape = observed
+                            else:
+                                self.assertEqual(observed, ordinary_shape)
+                        self.assertEqual(producer_read.call_count, 0 if fault in ("status", "nomination") else 1)
+                        self.assertEqual(history.call_count, 0 if fault in ("status", "nomination") else 1)
+                        self.assertEqual(generation_read.call_count, 0 if fault in ("status", "nomination") else 1)
+                    self.assertEqual(closed, list(reversed(entered)))
+                    for model in channel_models:
+                        self.assertEqual(model.closed, list(reversed(model.opened)))
+
+
     def test_app_absence_restore_uses_genuine_history_status_and_current_byte_readers(self):
         # Whole ordinary readback wiring, not a replacement observation/history
         # reducer. Only SOURCE selection and finite low-level IO ports are inert;
@@ -9997,7 +10874,7 @@ if self.phase in FINAL_IMAGE_PHASES and role == "final-image-attach":
                     TOOL.main([command, *options, *complete, "--installer-output", "/work/old-output.txt"])
                 call.assert_not_called()
         source = (Path(__file__).absolute().parents[2] / "desktop/tools/stage_macos_installed.py").read_text(encoding="utf-8")
-        ordinary = source.split("def observation_command(args, *, expected_previous=None, expected_restore_previous=None):", 1)[1].split("def visible_occupant", 1)[0]
+        ordinary = source.split("def observation_command(args, *, expected_previous=None, expected_restore_previous=None,", 1)[1].split("def visible_occupant", 1)[0]
         fixture = source.split("def fixture_observation_command(args):", 1)[1].split("def main", 1)[0]
         for block in (ordinary, fixture):
             self.assertIn("installer_result_readback(args", block)
@@ -11532,6 +12409,20 @@ class MacCurrentRuntimeData(unittest.TestCase):
     def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
         root = Path(__file__).absolute().parents[2]
         source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        # The current signed-runtime composition must be proven before old inverses.
+        signed_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        prior_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        self.assertEqual(source.count(signed_source), 2)
+        self.assertNotIn(prior_source, source)
+        signed_normalized = without_signed_android_runtime_source_pin(source)
+        self.assertEqual(signed_normalized, source.replace(signed_source, prior_source))
+        self.assertEqual(without_signed_android_runtime_source_pin(signed_normalized), signed_normalized)
+        for damaged in (source.replace(signed_source, prior_source, 1),
+                        source.replace(signed_source, signed_source + signed_source, 1),
+                        source.replace(signed_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^signed Android runtime SOURCE exact two-site delta differs$"):
+                without_signed_android_runtime_source_pin(damaged)
+        source = signed_normalized
         current_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
         previous_source = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
         self.assertEqual(source.count(current_source), 2)
@@ -13419,7 +14310,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
 
 
 def android_support_fixture(root=Path("/synthetic-mrk-support")):
-    # Tiny inert ZIP inputs under a replaced SOURCE manifest, never vendor code.
+    # Tiny inert notice-only ZIPs: synthetic app composition, never supplier authority.
     rows, values, files, archives = [], {}, {}, []
     for identity, filename, url, members in TOOL.ANDROID_SUPPORT_LAYOUT:
         notices = []
@@ -13440,8 +14331,35 @@ def android_support_fixture(root=Path("/synthetic-mrk-support")):
     manifest = {"schemaVersion": 1, "platform": "macos", "archives": rows}
     manifest_path = root / "android-support.json"
     values[manifest_path] = TOOL.canonical(manifest)
-    return SimpleNamespace(manifest=manifest, manifest_path=manifest_path, values=values, files=files,
+    receipt_path = root / "android-support-signed-receipt.json"
+    values[receipt_path] = b"synthetic receipt boundary only\n"
+    return SimpleNamespace(android_support_signed_receipt=receipt_path, manifest=manifest, manifest_path=manifest_path, values=values, files=files,
                            bundletool_archive=archives[0], aapt2_archive=archives[1])
+
+
+@contextlib.contextmanager
+def synthetic_android_support(fixture, *, app_seal=None):
+    """Only synthetic composition bypasses capsule authority; actual ZIP and
+    app-resource readback remain genuine. Real SOURCE/transport tests below do
+    not use this seam, and a real capsule is separately checked by its owner.
+    """
+    manifest_sha, rows = TOOL.android_support_manifest_data(TOOL.canonical(fixture.manifest))
+    relation = SimpleNamespace(archives=tuple(SimpleNamespace(file_name=row["fileName"],
+        derived=SimpleNamespace(size=row["size"], sha256=row["sha256"])) for row in rows),
+        receipt=SimpleNamespace(size=len(fixture.values[fixture.android_support_signed_receipt])))
+    source = (None, relation, manifest_sha, rows, None, None)
+    archives = {row["fileName"]: fixture.values[getattr(fixture, row["id"] + "_archive")] for row in rows}
+    # Composition callers may explicitly supply inert GitHub resource DATA.
+    # None leaves the genuine GitHub admission path entirely untouched.
+    with (contextlib.ExitStack() as stack,
+          mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path),
+          mock.patch.object(TOOL, "android_signed_source", side_effect=lambda: contextlib.nullcontext(source)),
+          mock.patch.object(TOOL, "android_signed_capsule", side_effect=lambda _args:
+              contextlib.nullcontext((manifest_sha, rows, archives, relation)))):
+        if app_seal is not None:
+            stack.enter_context(mock.patch.object(TOOL, "github_seal_files",
+                side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(app_seal)))
+        yield relation
 
 
 def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_target="aarch64-apple-darwin"):
@@ -13534,7 +14452,7 @@ class MacAndroidSupportData(unittest.TestCase):
 
     def test_original_archives_and_notices_are_nonexecuting_data_with_exact_readback(self):
         fixture = android_support_fixture()
-        with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+        with synthetic_android_support(fixture), \
                 mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
                 mock.patch.object(TOOL, "write_tree") as output:
             source_sha, files = TOOL.android_support_files(fixture)
@@ -13546,6 +14464,8 @@ class MacAndroidSupportData(unittest.TestCase):
                 TOOL.android_support_input(files)
             result = TOOL.android_support_command(fixture)
             self.assertEqual(result["androidSupportManifestSha256"], source_sha)
+            self.assertEqual(result["androidSupportSignedManifestSha256"], TOOL.ANDROID_SIGNED_MANIFEST_SHA)
+            self.assertEqual(result["qualification"], "source-pinned-signed-derivative-and-original-notices-data-only-no-vendor-execution")
             self.assertEqual(result["fileCount"], 10)
             self.assertEqual(result["payloadBytes"], sum(len(body) for body, _ in files.values()))
             self.assertEqual({mode for _, mode in files.values()}, {0o644})
@@ -13555,7 +14475,7 @@ class MacAndroidSupportData(unittest.TestCase):
         for change in (lambda b: b + b"extra", lambda b: bytes([b[0] ^ 1]) + b[1:]):
             fixture = android_support_fixture()
             fixture.values[fixture.bundletool_archive] = change(fixture.values[fixture.bundletool_archive])
-            with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+            with synthetic_android_support(fixture), \
                     mock.patch.object(TOOL, "read", side_effect=lambda path, *_: fixture.values[path]), \
                     mock.patch.object(TOOL.zipfile, "ZipFile") as parser, self.assertRaisesRegex(TOOL.Refused, "android-support-archive"):
                 TOOL.android_support_files(fixture)
@@ -13575,8 +14495,15 @@ class MacAndroidSupportData(unittest.TestCase):
                         data = b"!" + data[1:]
                     archive.writestr(notice["member"], data)
                     if index == 0 and failure == "duplicate":
-                        with self.assertWarns(UserWarning):
+                        registry = vars(TOOL.zipfile).get("__warningregistry__")
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.simplefilter("always", UserWarning)
                             archive.writestr(notice["member"], data)
+                        self.assertEqual(len(caught), 1)
+                        self.assertIs(caught[0].category, UserWarning)
+                        self.assertEqual(str(caught[0].message), "Duplicate name: " + repr(notice["member"]))
+                        if registry is not None:
+                            self.assertIs(TOOL.zipfile.__warningregistry__, registry)
             archive_bytes = buffer.getvalue()
             first.update(size=len(archive_bytes), sha256=TOOL.digest(archive_bytes))
             fixture.values[fixture.bundletool_archive] = archive_bytes
@@ -13597,14 +14524,14 @@ class MacAndroidSupportData(unittest.TestCase):
                 resident_image=resident, expected_resident_image=TOOL.digest(fixture.values[resident]),
                 entry_binary=Path("/synthetic-mrk-support/entry"), expected_entry=TOOL.digest(code),
                 output=Path("/synthetic-mrk-support/app"), bundletool_archive=fixture.bundletool_archive,
-                aapt2_archive=fixture.aapt2_archive)
+                aapt2_archive=fixture.aapt2_archive, android_support_signed_receipt=fixture.android_support_signed_receipt)
             remover_target, remover, remover_rows, remover_body = remover_cargo_fixture()
             args.remover, args.expected_remover = remover, TOOL.digest(remover_body)
             args.remover_cargo_messages, args.remover_cargo_target_dir = Path("/synthetic-mrk-support/remover.jsonl"), remover_target
             fixture.values[remover] = remover_body
             fixture.values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
             original_read = TOOL.read
-            with self.subTest(failure=failure), mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", fixture.manifest_path), \
+            with self.subTest(failure=failure), synthetic_android_support(fixture, app_seal={}), \
                     mock.patch.object(TOOL, "read", side_effect=lambda path, *limit: fixture.values[path] if path in fixture.values else original_read(path, *limit)), \
                     mock.patch.object(TOOL, "write_tree") as output, self.assertRaisesRegex(TOOL.Refused, "android-support-notice"):
                 TOOL.app_command(args)
@@ -13615,9 +14542,14 @@ class MacAndroidSupportData(unittest.TestCase):
                 "--expected-app-binary", "b" * 64, "--entry-binary", "/inert/entry", "--expected-entry", "b" * 64,
                 "--vault-helper", "/h", "--expected-vault-helper", "a" * 64,
                 "--android-helper", "/resident-facade", "--expected-android-helper", "c" * 64,
-                "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64, "--output", "/out"])):
-            for absent in ("--bundletool-archive", "--aapt2-archive"):
-                flags = ["--aapt2-archive", "/aapt2"] if absent == "--bundletool-archive" else ["--bundletool-archive", "/bundletool"]
+                "--resident-image", "/resident.dylib", "--expected-resident-image", "d" * 64,
+                "--remover", "/inert/remover", "--expected-remover", "e" * 64,
+                "--remover-cargo-messages", "/inert/remover.jsonl", "--remover-cargo-target-dir", "/inert/remover-target",
+                "--output", "/out"])):
+            for absent in ("--bundletool-archive", "--aapt2-archive", "--android-support-signed-receipt"):
+                flags = [value for flag, path in (("--bundletool-archive", "/bundletool"),
+                    ("--aapt2-archive", "/aapt2"), ("--android-support-signed-receipt", "/receipt"))
+                    if flag != absent for value in (flag, path)]
                 stderr = io.StringIO()
                 action_name = "app_command" if command == "app" else "android_support_command"
                 with mock.patch.object(TOOL, action_name) as action, mock.patch.object(TOOL, "read") as reader, \
@@ -13628,13 +14560,133 @@ class MacAndroidSupportData(unittest.TestCase):
                 action.assert_not_called()
                 reader.assert_not_called()
 
+    def test_signed_source_is_fixed_scoped_and_rejects_capsule_before_zip(self):
+        # Genuine current SOURCE, not a synthetic receipt/producer success.
+        name = "mrk_android_signed_support_data"
+        self.assertNotIn(name, sys.modules)
+        with TOOL.android_signed_source() as (module, relation, source_sha, rows, producer, service):
+            self.assertIs(sys.modules[name], module)
+            self.assertEqual(source_sha, TOOL.digest(TOOL.ANDROID_SUPPORT_MANIFEST.read_bytes()))
+            self.assertEqual([a.file_name for a in relation.archives], [row["fileName"] for row in rows])
+            self.assertEqual([a.derived.size for a in relation.archives], [32494771, 4328126])
+            self.assertEqual(relation.receipt.size, 7246)
+            self.assertEqual((len(producer), len(service)), (488, 219))
+        self.assertNotIn(name, sys.modules)
+        marker = object()
+        with mock.patch.dict(sys.modules, {name: marker}):
+            with self.assertRaisesRegex(TOOL.Refused, "android-support-loader-collision"):
+                with TOOL.android_signed_source(): self.fail("collision was admitted")
+            self.assertIs(sys.modules[name], marker)
+        self.assertNotIn(name, sys.modules)
+        with self.assertRaisesRegex(RuntimeError, "inert caller failure"):
+            with TOOL.android_signed_source(): raise RuntimeError("inert caller failure")
+        self.assertNotIn(name, sys.modules)
+        for archives, receipt in (({}, b"{}"),
+            ({"bundletool-all-1.18.3.jar": b"not the signed artifact",
+              "aapt2-8.9.2-12782657-osx.jar": b"not the signed artifact"}, b"{}")):
+            # Only the transport fixture is inert. The actual typed SOURCE
+            # parser rejects before any notice parser or app output is entered.
+            with (mock.patch.object(TOOL, "android_signed_transport", side_effect=lambda *_:
+                    contextlib.nullcontext((archives, receipt))),
+                  mock.patch.object(TOOL.zipfile, "ZipFile") as parser,
+                  mock.patch.object(TOOL, "write_tree") as output,
+                  self.assertRaisesRegex(TOOL.Refused, "android-support-signed-data")):
+                TOOL.android_support_files(SimpleNamespace())
+            parser.assert_not_called(); output.assert_not_called()
+            self.assertNotIn(name, sys.modules)
+
+    def test_signed_transport_keeps_exact_owned_originals_and_refuses_unknown_close(self):
+        # Tiny DATA exercises the real FD/parent/roster transport, not B1 receipt
+        # authority. All operations stay inside this test's temporary directory.
+        self.assertNotEqual(os.getuid(), 0, "the owner must execute this group nonroot")
+        def fixture(parent):
+            root = parent / "capsule"; root.mkdir(mode=0o700)
+            names = ("bundletool-all-1.18.3.jar", "aapt2-8.9.2-12782657-osx.jar",
+                     "android-support-signed-receipt.json")
+            bodies = (b"inert bundletool", b"inert aapt2", b"inert receipt")
+            for name, body in zip(names, bodies):
+                (root / name).write_bytes(body); (root / name).chmod(0o444)
+            args = SimpleNamespace(bundletool_archive=root/names[0], aapt2_archive=root/names[1],
+                                   android_support_signed_receipt=root/names[2])
+            relation = SimpleNamespace(archives=tuple(SimpleNamespace(file_name=name,
+                derived=SimpleNamespace(size=len(body))) for name, body in zip(names[:2], bodies[:2])),
+                receipt=SimpleNamespace(size=len(bodies[2])))
+            return root, args, relation, names, bodies
+        for failure in (None, "missing-receipt", "other-parent", "extra", "writable-root", "writable-leaf",
+                        "symlink", "hardlink", "changed-leaf", "replaced-parent", "unknown-close"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                parent = Path(temporary).resolve(strict=True)
+                root, args, relation, names, bodies = fixture(parent)
+                if failure == "missing-receipt": del args.android_support_signed_receipt
+                if failure == "other-parent": args.android_support_signed_receipt = parent / names[2]
+                if failure == "extra": (root / "unrelated").write_bytes(b"not removed by transport")
+                if failure == "writable-root": root.chmod(0o777)
+                if failure == "writable-leaf": args.bundletool_archive.chmod(0o666)
+                if failure in ("symlink", "hardlink"):
+                    original = parent / "original"; args.bundletool_archive.rename(original)
+                    if failure == "symlink": args.bundletool_archive.symlink_to(original)
+                    else: os.link(original, args.bundletool_archive)
+                closed = []; real_close = TOOL.close_once
+                def close(fd):
+                    closed.append(fd); real_close(fd)
+                    if failure == "unknown-close" and len(closed) == 1:
+                        raise TOOL.Refused("original-close-unknown")
+                with mock.patch.object(TOOL, "close_once", side_effect=close):
+                    expectation = (contextlib.nullcontext() if failure is None else self.assertRaises(TOOL.Refused))
+                    with expectation:
+                        with TOOL.android_signed_transport(args, relation) as (archives, receipt):
+                            self.assertEqual(archives, dict(zip(names[:2], bodies[:2])))
+                            self.assertEqual(receipt, bodies[2])
+                            if failure == "changed-leaf":
+                                args.bundletool_archive.chmod(0o644)
+                                args.bundletool_archive.write_bytes(b"X" * len(bodies[0]))
+                                args.bundletool_archive.chmod(0o444)
+                            if failure == "replaced-parent":
+                                root.rename(parent / "withdrawn-capsule")
+                                fixture(parent)
+                self.assertEqual(len(closed), len(set(closed)), "an original close was retried")
+                for fd in closed:
+                    with self.assertRaises(OSError): os.fstat(fd)
+                if failure is None:
+                    self.assertEqual({p.name for p in root.iterdir()}, set(names))
+                    for name, body in zip(names, bodies): self.assertEqual((root / name).read_bytes(), body)
+                if failure == "extra": self.assertEqual((root / "unrelated").read_bytes(), b"not removed by transport")
+
     def test_workflows_download_fixed_originals_without_configuration_or_credentials(self):
         root = Path(__file__).absolute().parents[2]
         _, rows = TOOL.android_support_manifest()
         name = "Acquire and verify the two fixed Android support archives as DATA"
         for filename, assembly in (("desktop-macos-installed.yml", "Assemble the ordinary image app and sign code inside-out (never --deep)"),
                                    ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing")):
-            workflow = without_remove_output_workflow((root / ".github/workflows" / filename).read_text())
+            raw = (root / ".github/workflows" / filename).read_text()
+            download = workflow_step(raw, "Download the fixed once-signed Android support capsule")
+            admission = workflow_step(raw, name)
+            self.assertIn("timeout-minutes: 3", download)
+            self.assertIn("timeout-minutes: 1", admission)
+            for expected in ("artifact-ids: '11691308054'", "run-id: '38109802320'",
+                "repository: Apdelrahman1911/mobile-release-kit", "merge-multiple: 'false'",
+                "digest-mismatch: error", "skip-decompress: 'false'",
+                "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"):
+                self.assertIn(expected, download)
+            self.assertNotIn("github.token", admission)
+            self.assertNotIn("curl", admission)
+            self.assertEqual(raw.count("--android-support-signed-receipt"), 2)
+            self.assertIn('[[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]]', raw)
+            for current in (admission, workflow_step(raw, assembly)):
+                self.assertIn("signed-android-transport/android-support-signed-receipt.json", current)
+                self.assertIn("signed-android-transport/bundletool-all-1.18.3.jar", current)
+                self.assertIn("signed-android-transport/aapt2-8.9.2-12782657-osx.jar", current)
+            if filename == "desktop-macos-aqua.yml":
+                self.assertEqual(download.splitlines()[0], admission.splitlines()[0])
+                self.assertEqual(admission.splitlines()[0], workflow_step(raw, assembly).splitlines()[0])
+            predecessor = without_signed_android_support_workflow(raw)
+            self.assertEqual(without_signed_android_support_workflow(predecessor), predecessor)
+            for changed in (raw.replace("artifact-ids: '11691308054'", "artifact-ids: '1'", 1),
+                raw.replace(download, download.replace("digest-mismatch: error", "digest-mismatch: ignore"), 1),
+                raw + "# signed-android-transport unexpected\n"):
+                with self.assertRaises(AssertionError):
+                    without_signed_android_support_workflow(changed)
+            workflow = without_remove_output_workflow(predecessor)
             block = workflow_step(workflow, name)
             self.assertIn("shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}", block)
             self.assertEqual(block.count("/usr/bin/env -i PATH=/usr/bin:/bin HOME=\"$work\""), 3)
@@ -13707,6 +14759,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 args = SimpleNamespace(target=build_target, package_role=role, binary=facade, expected_app_binary=TOOL.digest(body), output=output,
                     entry_binary=entry, expected_entry=TOOL.digest(entry_macho_fixture(target=build_target)),
                     bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
+                    android_support_signed_receipt=support.android_support_signed_receipt,
                     vault_helper=helper, expected_vault_helper=TOOL.digest(helper_body),
                     remover=remover, expected_remover=TOOL.digest(remover_body),
                     remover_cargo_messages=remover_cargo, remover_cargo_target_dir=remover_target,
@@ -13717,7 +14770,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     args.desktop_image_cargo_messages, args.desktop_image_cargo_target_dir = cargo, target
                 else:
                     args.observer_cargo_messages, args.observer_cargo_target_dir = cargo, target
-                with mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                with synthetic_android_support(support, app_seal={}):
                     result = TOOL.app_command(args)
                 icon = (TOOL.DESKTOP / "src-tauri/icons/icon.png").read_bytes()
                 expected = {TOOL.ENTRY_BINARY: (entry_macho_fixture(target=build_target), 0o755), TOOL.APP_BINARY: (body, 0o755),
@@ -13740,8 +14793,7 @@ class MacNormalPreviewData(unittest.TestCase):
                 self.assertEqual(TOOL.tree(output), expected)
                 seal = {TOOL.GITHUB_SEAL: (helper_body, 0o555), TOOL.GITHUB_SEAL_NOTICE: (b"inert notice DATA", 0o644)}
                 sealed_args = SimpleNamespace(**dict(vars(args), output=work / "with-seal.app"))
-                with mock.patch.object(TOOL, "github_seal_files", return_value=contextlib.nullcontext(seal)), \
-                     mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path):
+                with synthetic_android_support(support, app_seal=seal):
                     TOOL.app_command(sealed_args)
                 self.assertEqual(TOOL.tree(sealed_args.output), dict(expected, **seal))
                 self.assertEqual(result["packageRole"], role)
@@ -13752,7 +14804,8 @@ class MacNormalPreviewData(unittest.TestCase):
                     remover_messages, remover, remover_target, remover_body, target=build_target))
                 missing = SimpleNamespace(**{key: value for key, value in vars(args).items() if key != "remover"})
                 missing.output = work / "missing-remover-app"
-                with self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"): TOOL.app_command(missing)
+                with synthetic_android_support(support, app_seal={}), self.assertRaisesRegex(TOOL.Refused, "package-role-remover-required"):
+                    TOOL.app_command(missing)
                 self.assertFalse(missing.output.exists())
                 self.assertEqual(result["residentImageSha256"], TOOL.digest(resident_body))
                 self.assertNotIn("normalCargoArtifact", result)
@@ -13762,7 +14815,7 @@ class MacNormalPreviewData(unittest.TestCase):
                     self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o755)
                 wrong = SimpleNamespace(**dict(vars(args), output=work / "refused-app",
                     target="x86_64-apple-darwin" if build_target == "aarch64-apple-darwin" else "aarch64-apple-darwin"))
-                with self.assertRaises(TOOL.Refused): TOOL.app_command(wrong)
+                with synthetic_android_support(support, app_seal={}), self.assertRaises(TOOL.Refused): TOOL.app_command(wrong)
                 self.assertFalse(wrong.output.exists())
 
     def test_app_copy_mode_exception_is_only_the_fixed_readonly_helper(self):
@@ -13843,6 +14896,7 @@ class MacNormalPreviewData(unittest.TestCase):
             desktop_image=binary, expected_desktop_image=TOOL.digest(image_body),
             desktop_image_cargo_messages=base / "cargo.jsonl", desktop_image_cargo_target_dir=target,
             bundletool_archive=support.bundletool_archive, aapt2_archive=support.aapt2_archive,
+            android_support_signed_receipt=support.android_support_signed_receipt,
             vault_helper=base / "helper", expected_vault_helper=TOOL.digest(body),
             android_helper=base / "resident-facade", expected_android_helper=TOOL.digest(body),
             resident_image=base / "resident-image", expected_resident_image=TOOL.digest(resident))
@@ -13852,7 +14906,7 @@ class MacNormalPreviewData(unittest.TestCase):
         values[remover] = remover_body
         values[args.remover_cargo_messages] = cargo_lines(*remover_rows, {"reason": "build-finished", "success": True})
         with mock.patch.object(TOOL, "read", side_effect=lambda path, *_: values[path]), \
-                mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path), \
+                synthetic_android_support(support, app_seal={}), \
                 mock.patch.object(TOOL, "write_tree") as output:
             staged = TOOL.app_command(args)
         self.assertEqual(staged["desktopImageCargoArtifact"], result)
@@ -14179,7 +15233,7 @@ class MacNormalPreviewData(unittest.TestCase):
                   TOOL.DESKTOP / "macos-installed-inputs" / Path(TOOL.ANDROID_SERVICE_PLIST).name: plist}
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=app) as tree,
-              mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
+              synthetic_android_support(support, app_seal={}),
               mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
             result = TOOL.input_command(args)
@@ -14268,7 +15322,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "schemaVersion": 1, "packageVersion": "0.1.1", "release": intel_release})
         with (mock.patch.object(TOOL, "runtime_tree", return_value=runtime) as runtime_reader,
               mock.patch.object(TOOL, "tree", return_value=intel_app) as signed_tree,
-              mock.patch.object(TOOL, "ANDROID_SUPPORT_MANIFEST", support.manifest_path),
+              synthetic_android_support(support, app_seal={}),
               mock.patch.object(TOOL, "read", side_effect=lambda path, *_: source[path]),
               mock.patch.object(TOOL, "write_tree") as output):
             TOOL.input_command(intel_args)

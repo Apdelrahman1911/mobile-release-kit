@@ -76,6 +76,8 @@ ANDROID_SERVICE_PLIST = PAYLOAD_CONTENTS + "Library/LaunchDaemons/dev.mobile-rel
 ANDROID_SERVICE_LABEL = "dev.mobile-release-kit.desktop.android-register"
 ANDROID_SUPPORT_PREFIX = "Contents/Resources/android-support/"
 ANDROID_SUPPORT_MANIFEST = DESKTOP / "macos-installed-inputs/android-support.json"
+ANDROID_SIGNED_MANIFEST_SHA = "64c77de1505c4d8a71b848349609d26c2bef49a1bc61f277ce5d5a0a31ad59a9"
+ANDROID_SIGNED_REDUCER_SHA = "c944c670b3083909d8db2b25020fabb74891ebaff8e9890ec33873edeaf0f431"
 ANDROID_SUPPORT_LAYOUT = (
     ("bundletool", "bundletool-all-1.18.3.jar",
      "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar",
@@ -2197,7 +2199,10 @@ def remove_preview_command(args):
 
 def android_support_manifest():
     # Reviewed source DATA, not a user recipe, runtime network grant or sidecar.
-    body = read(ANDROID_SUPPORT_MANIFEST, 16384)
+    return android_support_manifest_data(read(ANDROID_SUPPORT_MANIFEST, 16384))
+
+
+def android_support_manifest_data(body):
     value = decode(body)
     need(type(value) is dict and set(value) == {"schemaVersion", "platform", "archives"}
          and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
@@ -2226,13 +2231,117 @@ def android_support_manifest():
     return digest(body), value["archives"]
 
 
-def android_support_files(args):
-    manifest_sha, rows = android_support_manifest()
+@contextlib.contextmanager
+def android_signed_source():
+    """Read fixed reviewed DATA, retaining only the captured passive loader.
+
+    Each smaller fixed input is authenticated, re-read and closed before use;
+    it remains immutable bytes. This avoids retaining duplicate parent chains
+    for all seven SOURCE leaves while the three transport originals are held.
+    """
+    source = DESKTOP / "tools/macos_android_support_signed.py"
+    module_name = "mrk_android_signed_support_data"
+    with github_tool_leaf(source, 17486) as body:
+        need(len(body) == 17486 and digest(body) == ANDROID_SIGNED_REDUCER_SHA,
+             "android-support-source-loader")
+        need(module_name not in sys.modules, "android-support-loader-collision")
+        spec = importlib.util.spec_from_file_location(module_name, source)
+        need(spec is not None, "android-support-source-loader")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            # Dataclasses need the ordinary temporary module binding; execute
+            # only the authenticated capture, never loader re-resolution.
+            exec(compile(body, str(source), "exec"), module.__dict__)
+            need(sys.modules.get(module_name) is module, "android-support-loader-binding")
+            captured = []
+            for path, size, expected in (
+                (ANDROID_SUPPORT_MANIFEST, 3023, "3450a83882cecdc9d8e402380ccf21e6dc5cec65382cbc7c18b4e6ff6a9aeb8f"),
+                (DESKTOP / "macos-installed-inputs/android-support-signed.json", 3942, ANDROID_SIGNED_MANIFEST_SHA),
+                (PRODUCER_PROFILE, 488, "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
+                (SERVICE_PROFILE, 219, "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663"),
+            ):
+                with github_tool_leaf(path, size) as original:
+                    need(len(original) == size and digest(original) == expected, "android-support-source-pin")
+                    captured.append(original)
+            upstream, signed, producer, service = captured
+            relation = module.nomination(signed, upstream)
+            manifest_sha, rows = android_support_manifest_data(upstream)
+            yield module, relation, manifest_sha, rows, producer, service
+        except module.Refused as error:
+            raise Refused("android-support-signed-data") from error
+        finally:
+            # Consume only our own temporary binding; never clear another one.
+            own = sys.modules.get(module_name) is module
+            if own:
+                del sys.modules[module_name]
+            need(own, "android-support-loader-binding")
+
+
+@contextlib.contextmanager
+def android_signed_transport(args, relation):
+    paths = (getattr(args, "bundletool_archive", None), getattr(args, "aapt2_archive", None),
+             getattr(args, "android_support_signed_receipt", None))
+    names = tuple(a.file_name for a in relation.archives) + ("android-support-signed-receipt.json",)
+    need(all(isinstance(path, Path) and path.is_absolute() and path.name == name
+             for path, name in zip(paths, names))
+         and len({path.parent for path in paths}) == 1, "android-support-transport-paths")
+    root = paths[0].parent
+    owner = packager_ids()
+    with _parent_originals(root / "unopened-roster-sentinel") as (parents, parts):
+        fd = parents[-1]
+        identities = tuple(current_directory_identity(os.fstat(item)) for item in parents)
+        original = os.fstat(fd)
+        need((original.st_uid, original.st_gid) == owner and stat.S_IMODE(original.st_mode) in (0o700, 0o755)
+             and getattr(original, "st_flags", 0) == 0, "android-support-transport-owner")
+        def post():
+            for index, held in enumerate(parents):
+                named = (os.stat("/", follow_symlinks=False) if index == 0 else
+                         os.stat(parts[index - 1], dir_fd=parents[index - 1], follow_symlinks=False))
+                need(current_directory_identity(os.fstat(held)) == current_directory_identity(named)
+                     == identities[index], "android-support-transport-parent-changed")
+            need(signature(os.fstat(fd)) == signature(original), "android-support-transport-changed")
+            no_xattrs(fd)
+            with os.scandir(fd) as entries:
+                # At most four names allocated; extras reject before reading.
+                roster = []
+                for entry in entries:
+                    roster.append(entry.name)
+                    need(len(roster) <= 3, "android-support-transport-roster")
+            need(set(roster) == set(names), "android-support-transport-roster")
+        post()
+        try:
+            with contextlib.ExitStack() as originals:
+                limits = tuple(a.derived.size for a in relation.archives) + (relation.receipt.size,)
+                bodies = tuple(originals.enter_context(github_tool_leaf(path, limit, owner=owner))
+                               for path, limit in zip(paths, limits))
+                yield dict(zip(names[:2], bodies[:2])), bodies[2]
+                post()
+            post()
+        finally:
+            # Refusals also close all held originals and check the same root.
+            post()
+
+
+@contextlib.contextmanager
+def android_signed_capsule(args):
+    with android_signed_source() as (module, relation, manifest_sha, rows, producer, service):
+        with android_signed_transport(args, relation) as (archives, receipt):
+            # Exact whole-archive pins and the complete receipt envelope precede
+            # any ZIP/notice parsing. Reviewed source enrollment is separate
+            # from the DATA reducer's intentionally non-authoritative result.
+            module.admit_capsule(relation, receipt, archives,
+                producer_profile_raw=producer, service_profile_raw=service)
+            yield manifest_sha, rows, archives, relation
+
+
+def android_support_notice_files(rows, archives, derived):
+    """Pure notice projection after full caller admission, also inert-testable."""
+    need(len(rows) == len(derived) == 2 and set(archives) == {r["fileName"] for r in rows}, "android-support-archive")
     files = {}
-    for row, path in zip(rows, (args.bundletool_archive, args.aapt2_archive)):
-        body = read(path, row["size"])
-        # Authenticate the complete original before parsing even its directory.
-        need(len(body) == row["size"] and digest(body) == row["sha256"], "android-support-archive")
+    for row, pin in zip(rows, derived):
+        body = archives[row["fileName"]]
+        need(type(body) is bytes and len(body) == pin.size and digest(body) == pin.sha256, "android-support-archive")
         files[row["resourcePath"]] = (body, 0o644)
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
             entries = archive.infolist()
@@ -2249,26 +2358,35 @@ def android_support_files(args):
                      and b"\0" not in text, "android-support-notice")
                 text.decode("utf-8", "strict")
                 files[notice["resourcePath"]] = (text, 0o644)
+    return files
+
+
+def android_support_files(args):
+    with android_signed_capsule(args) as (manifest_sha, rows, archives, relation):
+        files = android_support_notice_files(rows, archives, tuple(a.derived for a in relation.archives))
     return manifest_sha, files
 
 
 def android_support_input(app):
-    manifest_sha, rows = android_support_manifest()
-    expected = {PAYLOAD_RELATIVE + "/" + row["resourcePath"]: row for row in rows}
-    expected.update({PAYLOAD_RELATIVE + "/" + notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
-    need({name for name in app if name.startswith(PAYLOAD_RELATIVE + "/" + ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
-    for name, row in expected.items():
-        body, mode = app[name]
-        need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
-             "android-support-resource")
+    with android_signed_source() as (_module, relation, manifest_sha, rows, _producer, _service):
+        expected = {PAYLOAD_RELATIVE + "/" + row["resourcePath"]:
+                    {"size": signed.derived.size, "sha256": signed.derived.sha256}
+                    for row, signed in zip(rows, relation.archives)}
+        expected.update({PAYLOAD_RELATIVE + "/" + notice["resourcePath"]: notice for row in rows for notice in row["notices"]})
+        need({name for name in app if name.startswith(PAYLOAD_RELATIVE + "/" + ANDROID_SUPPORT_PREFIX)} == set(expected), "android-support-roster")
+        for name, row in expected.items():
+            body, mode = app[name]
+            need(mode in (0o444, 0o644) and len(body) == row["size"] and digest(body) == row["sha256"],
+                 "android-support-resource")
     return manifest_sha
 
 
 def android_support_command(args):
     manifest_sha, files = android_support_files(args)
     return {"schemaVersion": 1, "androidSupportManifestSha256": manifest_sha,
+            "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
             "fileCount": len(files), "payloadBytes": sum(len(body) for body, _ in files.values()),
-            "qualification": "original-archive-and-notice-data-only-no-vendor-execution"}
+            "qualification": "source-pinned-signed-derivative-and-original-notices-data-only-no-vendor-execution"}
 
 
 def source_app_info(*, selection=None):
@@ -2344,7 +2462,7 @@ GITHUB_SEAL_LIMIT = 16 * 1024 * 1024
 
 
 @contextlib.contextmanager
-def github_tool_leaf(path, limit, *, executable=False):
+def github_tool_leaf(path, limit, *, executable=False, owner=None):
     """Retain this exact leaf and complete parent chain through the caller."""
     with _parent_originals(path) as (parents, parts):
         outer, leaf = parents[-1], parts[-1]
@@ -2359,6 +2477,8 @@ def github_tool_leaf(path, limit, *, executable=False):
         before = os.stat(leaf, dir_fd=outer, follow_symlinks=False)
         need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 < before.st_size <= limit
              and stat.S_IMODE(before.st_mode) & 0o7022 == 0 and getattr(before, "st_flags", 0) == 0, "github-tool-original")
+        if owner is not None:
+            need((before.st_uid, before.st_gid) == owner, "github-tool-owner")
         if executable:
             need(stat.S_IMODE(before.st_mode) == 0o555 and before.st_uid == os.getuid()
                  and before.st_gid == os.getgid(), "github-tool-executable")
@@ -2510,6 +2630,7 @@ def app_with_github_seal(args, seal):
               "removerSha256": digest(remover), "removerCargoArtifact": remover_compiled,
               "entryBinarySha256BeforeSigning": digest(entry), "entryBundleIdentifier": ENTRY_BUNDLE_ID,
               "payloadBundleIdentifier": BUNDLE_ID, "androidSupportManifestSha256": support_sha,
+              "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
               "androidHelperSha256": digest(android_service[ANDROID_HELPER][0]),
               "residentImageSha256": digest(android_service[RESIDENT_IMAGE][0]),
               "androidServicePlistSha256": digest(android_service[ANDROID_SERVICE_PLIST][0]),
@@ -2638,6 +2759,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
     write_tree(args.output, files)
     result = {"schemaVersion": 1, "packageRole": role, "inventorySha256": digest(inventory),
               "runtimeManifestSha256": args.expected_manifest, "androidSupportManifestSha256": support_sha,
+              "androidSupportSignedManifestSha256": ANDROID_SIGNED_MANIFEST_SHA,
               "residentImageSha256": expected_resident, "removerSha256": args.expected_remover, "fileCount": len(rows),
               "qualification": "fresh-install-input-not-installed"}
     if role == "ordinary-image":
@@ -4909,7 +5031,46 @@ def restore_previous_data(result, parsed, expected):
          and parsed[result["invocation"]][0]["previousState"] == expected, "restore-immediate-predecessor")
 
 
-def observation_command(args, *, expected_previous=None, expected_restore_previous=None):
+def update_predecessor_selection(args, nomination):
+    # Only the fixed checked-out SOURCE nomination may select historical P0.
+    # It never changes current source_build_selection or the command-line API.
+    document = maintenance_json(read(DESKTOP / "macos-installed-inputs/update-predecessors.json", 16384), 16384)
+    need(type(document) is dict and set(document) == {"schemaVersion", "mode", "targets"}
+         and type(document["schemaVersion"]) is int and document["schemaVersion"] == 1
+         and document["mode"] == "configured" and type(document["targets"]) is dict
+         and set(document["targets"]) == set(MAC_TARGETS), "update-source-nomination")
+    target = command_target(args)
+    need(type(nomination) is dict and nomination == document["targets"][target], "update-source-nomination")
+    old = maintenance_release_data(nomination["release"], target)
+    need((args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
+         == tuple(old[k] for k in ("sourceCommit", "inventorySha256", "runtimeManifestSha256", "packageSha256")),
+         "update-baseline-source-binding")
+    return selected_build(BuildSelection(target, old["packageVersion"], old["release"]))
+
+
+def update_previous_data(result, current, parsed, root_identity, expected):
+    need(type(expected) is dict and set(expected) == {"previous", "rootIdentity", "generation"},
+         "update-previous-shape")
+    previous = expected["previous"]
+    need(type(previous) is dict and set(previous) == {"invocation", "sha256"}
+         and maintenance_hex(previous["invocation"], 32) and maintenance_hex(previous["sha256"], 64),
+         "update-previous-shape")
+    need(result["action"] == "update" and parsed[current["invocation"]][0]["previousState"] == previous
+         and root_identity == expected["rootIdentity"] and previous["invocation"] in parsed,
+         "update-immediate-predecessor")
+    old = parsed[previous["invocation"]][1]
+    need(old["intendedAction"] == "fresh-install" and not old["retained"]
+         and old["current"] == expected["generation"] and len(current["retained"]) == 1,
+         "update-initial-fresh-generation")
+    retained = dict(expected["generation"])
+    retained["app"] = dict(retained["app"], location="retained", invocation=current["invocation"])
+    need(current["retained"] == [retained]
+         and current["current"]["instance"] != retained["instance"]
+         and current["current"]["release"] != retained["release"], "update-distinct-generation")
+
+
+def observation_command(args, *, expected_previous=None, expected_restore_previous=None,
+                        nominated_update_predecessor=None, expected_update_previous=None, update_facts=None):
     need(expected_previous is None or type(expected_previous) is dict
          and set(expected_previous) == {"invocation", "sha256"}
          and maintenance_hex(expected_previous["invocation"], 32)
@@ -4918,7 +5079,13 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
          and type(expected_restore_previous) is dict and set(expected_restore_previous) == {"invocation", "sha256"}
          and maintenance_hex(expected_restore_previous["invocation"], 32)
          and maintenance_hex(expected_restore_previous["sha256"], 64), "restore-previous-shape")
-    selection = source_build_selection(command_target(args))
+    update = nominated_update_predecessor is not None or expected_update_previous is not None
+    need(not update or expected_previous is None and expected_restore_previous is None
+         and (nominated_update_predecessor is None) != (expected_update_previous is None)
+         and type(update_facts) is dict and not update_facts, "update-exclusive-readback-purpose")
+    need(update or update_facts is None, "update-exclusive-readback-purpose")
+    selection = (update_predecessor_selection(args, nominated_update_predecessor)
+                 if nominated_update_predecessor is not None else source_build_selection(command_target(args)))
     # The same-run original Installer0 is first. No export/file can certify its
     # own future close, kernel-retained gate lifetime or original outer return.
     result, exported = installer_result_readback(args)
@@ -4945,6 +5112,12 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                 same_package_previous_data(result, parsed, expected_previous)
             if expected_restore_previous is not None:
                 restore_previous_data(result, parsed, expected_restore_previous)
+            if expected_update_previous is not None:
+                update_previous_data(result, current, parsed, root_identity, expected_update_previous)
+            if nominated_update_predecessor is not None:
+                need(result["action"] == "fresh-install" and current["intendedAction"] == "fresh-install"
+                     and not current["retained"] and not current["previousEvidence"] and len(parsed) == 1,
+                     "update-baseline-not-fresh")
             names, stages = maintenance_roster_data(current, parsed, selection.target)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
@@ -4978,6 +5151,9 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                 need(signature(final) == original, "maintenance-root-roster-changed")
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster-changed")
     # No result is returned until every acquired original above has closed.
+    if update:
+        update_facts.update(previous={"invocation": current["invocation"], "sha256": digest(current_body)},
+                            rootIdentity=root_identity, generation=current["current"])
     return {"schemaVersion": 2, "sourceCommit": args.expected_source, "inventorySha256": args.expected_inventory,
             "runtimeManifestSha256": args.expected_manifest, "completedPackageSha256": args.expected_package, "release": selection.release,
             "requestId": args.request_id, "invocation": current["invocation"], "originalInstallerReturnedZero": True,
@@ -5205,9 +5381,11 @@ def main(argv=None):
     app.add_argument("--output", required=True, type=Path)
     app.add_argument("--bundletool-archive", required=True, type=Path)
     app.add_argument("--aapt2-archive", required=True, type=Path)
-    support = commands.add_parser("android-support", help="Verify only the two fixed original support archives and notices; never execute them")
+    app.add_argument("--android-support-signed-receipt", required=True, type=Path)
+    support = commands.add_parser("android-support", help="Verify the fixed signed support capsule and original notices; never execute them")
     support.add_argument("--bundletool-archive", required=True, type=Path)
     support.add_argument("--aapt2-archive", required=True, type=Path)
+    support.add_argument("--android-support-signed-receipt", required=True, type=Path)
     preview = commands.add_parser("preview")
     preview.add_argument("--work", required=True, type=Path)
     preview.add_argument("--expected-source", required=True)
