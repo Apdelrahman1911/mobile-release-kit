@@ -38,12 +38,28 @@ def environment():
 class NotaryKeyShapeProbeData(unittest.TestCase):
     def test_genuine_parser_preserves_exact_original_refusal_classes(self):
         namespace = DATA.load_parser(helper())
-        self.assertEqual(DATA.observe(namespace, encoded(PEM)), {'keyShapeAccepted': True,
-            'reason': None, 'newlineCompatibility': 'not-evaluated'})
+        for eol in (b'\n', b'\r\n', b'\r'):
+            for original in (PEM.replace(b'\n', eol), PEM[:-1].replace(b'\n', eol)):
+                self.assertEqual(namespace['notary_key_data']({DATA.VARIABLE: encoded(original)}), original)
+                self.assertEqual(DATA.observe(namespace, encoded(original)), {'keyShapeAccepted': True,
+                    'reason': None, 'newlineCompatibility': 'not-evaluated'})
+        mixed = PEM.replace(b'\n', b'\r\n', 1).replace(b'QUJDRA==\n', b'QUJDRA==\r')
+        self.assertEqual(namespace['notary_key_data']({DATA.VARIABLE: encoded(mixed)}), mixed)
+        header, footer = b'-----BEGIN PRIVATE KEY-----\n', b'-----END PRIVATE KEY-----\n'
+        space = 8192 - len(header) - len(footer)
+        prefix = b'AA\n' if space % 2 else b''
+        bounded = header + prefix + b'A\n' * ((space - len(prefix)) // 2) + footer
+        self.assertEqual(len(bounded), 8192)
+        self.assertEqual(namespace['notary_key_data']({DATA.VARIABLE: encoded(bounded)}), bounded)
         cases = [(value, 'notary-key-input') for value in (None, '', 1, 'éééé', 'AAAA\n', 'AA A', '!!!!', 'A' * 10925)]
-        cases += [('AAAAA', 'notary-key-base64')]
+        cases += [('AAAAA', 'notary-key-base64'), ('eB==', 'notary-key-pem-shape')]
         cases += [(encoded(value), 'notary-key-pem-shape') for value in
-            (b'PRIVATE-SENTINEL', PEM.replace(b'\n', b'\r\n'), PEM[:-1], b'A' * 8193, b'\0', b'\xff')]
+            (b'PRIVATE-SENTINEL', bounded.replace(header, header + b'A', 1),
+             bounded.replace(b'\n', b'\r\n', 1), b'\0', b'\xff',
+             b' ' + PEM, PEM + b' ', PEM + b'\n', PEM + PEM,
+             PEM.replace(b'END PRIVATE KEY', b'END PUBLIC KEY'),
+             PEM.replace(b'QUJDRA==', b''), PEM.replace(b'QUJDRA==', b'A' * 65),
+             PEM.replace(b'QUJDRA==', b' QUJDRA=='), PEM.replace(b'QUJDRA==', b'QUJD\tRA=='))]
         for value, reason in cases:
             with self.subTest(reason=reason):
                 observed = DATA.observe(namespace, value)
@@ -57,16 +73,19 @@ class NotaryKeyShapeProbeData(unittest.TestCase):
 
     def test_newline_observation_never_repairs_or_promotes_original_input(self):
         namespace = DATA.load_parser(helper())
-        for body, expected in ((PEM.replace(b'\n', b'\r\n'), 'crlf-only'),
-                (PEM[:-1], 'terminal-lf-only'), (PEM[:-1].replace(b'\n', b'\r\n'), 'crlf-and-terminal-lf'),
-                (b'PRIVATE-SENTINEL', 'no-match')):
+        for body, supplemental in ((PEM.replace(b'\n', b'\r\n'), 'crlf-only'),
+                (PEM[:-1], 'terminal-lf-only'), (PEM[:-1].replace(b'\n', b'\r\n'), 'crlf-only')):
             value = encoded(body)
-            observed = DATA.observe(namespace, value)
-            self.assertEqual(observed, {'keyShapeAccepted': False, 'reason': 'notary-key-pem-shape',
-                                       'newlineCompatibility': expected})
-            with self.assertRaises(namespace['Refused']):
-                namespace['notary_key_data']({DATA.VARIABLE: value})
+            # Standard inputs now pass the real parser; the diagnostic does not repair them.
+            with patch.object(DATA, 'newline_compatibility', side_effect=AssertionError('unexpected supplement')):
+                self.assertEqual(DATA.observe(namespace, value), {'keyShapeAccepted': True, 'reason': None,
+                    'newlineCompatibility': 'not-evaluated'})
+            self.assertEqual(namespace['notary_key_data']({DATA.VARIABLE: value}), body)
+            # Direct reducer coverage only, not an assertion that the primary refused.
+            self.assertEqual(DATA.newline_compatibility(namespace, value), supplemental)
             self.assertEqual(value, encoded(body))
+        self.assertEqual(DATA.observe(namespace, encoded(b'PRIVATE-SENTINEL')),
+            {'keyShapeAccepted': False, 'reason': 'notary-key-pem-shape', 'newlineCompatibility': 'no-match'})
         for body in (b'A' * 8193, b'\0', b'\xff'):
             observed = DATA.observe(namespace, encoded(body))
             self.assertEqual(observed['newlineCompatibility'], 'not-evaluated')
@@ -78,7 +97,7 @@ class NotaryKeyShapeProbeData(unittest.TestCase):
             if len(calls) == 1:
                 return original(mapping)
             raise RuntimeError('PRIVATE-SENTINEL')
-        result = DATA.observe({**namespace, 'notary_key_data': failing_supplement}, encoded(PEM[:-1]))
+        result = DATA.observe({**namespace, 'notary_key_data': failing_supplement}, encoded(b'PRIVATE-SENTINEL'))
         self.assertEqual(result, {'keyShapeAccepted': False, 'reason': 'notary-key-pem-shape',
                                  'newlineCompatibility': 'not-evaluated'})
         self.assertEqual(len(calls), 2)

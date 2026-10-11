@@ -356,8 +356,11 @@ def notary_key_data(environment):
     except ValueError:
         raise Refused("notary-key-base64") from None
     need(0 < len(body) <= 8192 and base64.b64encode(body).decode("ascii") == value
-         and body.isascii() and b"\0" not in body
-         and re.fullmatch(rb"-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n)+-----END PRIVATE KEY-----\n", body),
+         and body.isascii() and b"\0" not in body, "notary-key-pem-shape")
+    # RFC 7468 standard EOLs and optional final EOL, for validation only.
+    # The original credential bytes remain unchanged for custody and Apple.
+    view = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    need(re.fullmatch(rb"-----BEGIN PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,64}\n)+-----END PRIVATE KEY-----\n?", view),
          "notary-key-pem-shape")
     return body  # Bounded PEM shape only. Apple performs actual authentication.
 

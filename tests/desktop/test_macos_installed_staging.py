@@ -6301,9 +6301,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         key = b"-----BEGIN PRIVATE KEY-----\nSU5FUlQ=\n-----END PRIVATE KEY-----\n"
         encoded = module.base64.b64encode(key).decode("ascii")
         self.assertEqual(module.notary_key_data({module.NOTARY_KEY_VARIABLE: encoded}), key)
+        for eol in (b"\n", b"\r\n", b"\r"):
+            for original in (key.replace(b"\n", eol), key[:-1].replace(b"\n", eol)):
+                self.assertEqual(module.notary_key_data({module.NOTARY_KEY_VARIABLE:
+                    module.base64.b64encode(original).decode("ascii")}), original)
         for value in (None, "", encoded + "\n", encoded + "=", "x" * 10925,
-                      module.base64.b64encode(b"not PKCS8 PEM").decode("ascii"),
-                      module.base64.b64encode(key.replace(b"\n", b"\r\n")).decode("ascii")):
+                      module.base64.b64encode(b"not PKCS8 PEM").decode("ascii")):
             with self.subTest(notary_key_type=type(value).__name__), self.assertRaises(module.Refused):
                 module.notary_key_data({module.NOTARY_KEY_VARIABLE: value})
         submission = {"id": "abcdef12-3456-789a-bcde-0123456789ab", "status": "Accepted"}
