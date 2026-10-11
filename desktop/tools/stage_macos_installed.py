@@ -4365,6 +4365,40 @@ def installer_channel_parent(path, *, private=None):
             raise Refused("installer-channel-parent-close-unknown")
 
 
+def same_package_result_census():
+    """One dedicated-host public export namespace, not arbitrary file discovery."""
+    prefix = "MobileReleaseKit-InstallerResult-v2-"
+    rows = {}
+    with installer_channel_parent(INSTALL_ROOT) as (fd, _name):
+        with os.scandir(fd) as entries:
+            for count, entry in enumerate(entries, 1):
+                need(count <= 4096, "same-package-parent-entry-bound")
+                name = entry.name
+                if not name.startswith(prefix):
+                    continue
+                request = name[len(prefix):-5] if name.endswith(".json") else ""
+                need(maintenance_hex(request, 32) and name == prefix + request + ".json"
+                     and request not in rows and len(rows) < 2, "same-package-result-namespace")
+                before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                need(stat.S_ISREG(before.st_mode) and before.st_uid == before.st_gid == 0
+                     and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o444
+                     and 0 < before.st_size <= INSTALLER_RESULT_BYTES, "installer-export-file-policy")
+                body, actual = read_at(fd, name, INSTALLER_RESULT_BYTES)
+                need(signature(actual) == signature(before), "installer-export-file-changed")
+                rows[request] = {"bytes": len(body), "sha256": digest(body), "identity": list(signature(actual))}
+        # Parent identity/close checks remain in the SAME original context.
+    return rows
+
+
+def same_package_new_request(before, after, baseline):
+    need(type(before) is dict and type(after) is dict and maintenance_hex(baseline, 32)
+         and set(before) == {baseline} and len(after) == 2 and baseline in after
+         and after[baseline] == before[baseline], "same-package-result-delta")
+    new = next(key for key in after if key != baseline)
+    need(maintenance_hex(new, 32), "same-package-result-delta")
+    return new
+
+
 def installer_result_absent_command(args):
     need(not args.fixture or getattr(args, "request_id", None) is None, "separate-installer-outcomes-required")
     request_id = None if args.fixture else getattr(args, "request_id", None)
@@ -4798,7 +4832,19 @@ def maintenance_generation_readback(root_fd, versions_fd, root_identity, generat
             "historicalOuterExit": "unverified"}
 
 
-def observation_command(args):
+def same_package_previous_data(result, parsed, expected):
+    need(type(expected) is dict and set(expected) == {"invocation", "sha256"}
+         and maintenance_hex(expected["invocation"], 32) and maintenance_hex(expected["sha256"], 64),
+         "same-package-previous-shape")
+    need(result["action"] == "same-package-noop"
+         and parsed[result["invocation"]][0]["previousState"] == expected, "same-package-immediate-predecessor")
+
+
+def observation_command(args, *, expected_previous=None):
+    need(expected_previous is None or type(expected_previous) is dict
+         and set(expected_previous) == {"invocation", "sha256"}
+         and maintenance_hex(expected_previous["invocation"], 32)
+         and maintenance_hex(expected_previous["sha256"], 64), "same-package-previous-shape")
     selection = source_build_selection(command_target(args))
     # The same-run original Installer0 is first. No export/file can certify its
     # own future close, kernel-retained gate lifetime or original outer return.
@@ -4822,6 +4868,8 @@ def observation_command(args):
                 capsule = maintenance_metadata_leaf(root_fd, ".maintenance-" + invocation + ".capsule.json", 64 * 1024, budget)
                 records[invocation] = (intent, state, capsule)
             current, parsed = maintenance_history_data(result, records, producer)
+            if expected_previous is not None:
+                same_package_previous_data(result, parsed, expected_previous)
             names, stages = maintenance_roster_data(current, parsed, selection.target)
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
@@ -4862,7 +4910,8 @@ def observation_command(args):
             "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": generation_results,
             "maintenanceGate": gate, "registrationReservation": reservation, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
-            "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
+            "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance",
+            **({} if expected_previous is None else {"samePackagePredecessorMatched": True})}
 
 
 def visible_occupant(case, *, selection=None):

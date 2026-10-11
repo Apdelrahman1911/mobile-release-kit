@@ -23,9 +23,10 @@ PHASES = (
     "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover",
     "notarize-payload", "finalize-package", "package-install", "finalize-image",
     "finalize-remove-package", "package-remove", "finalize-remove-image",
-    "prepare-removal-observers", "package-removal-fixture",
+    "prepare-removal-observers", "package-removal-fixture", "same-package-noop",
 )
 PHASE_STATUS = {
+    "same-package-noop": "same-package-noop.status",
     "finalize-package": "package-finalization.status", "package-install": "package-install.status",
     "finalize-image": "image-finalization.status", "finalize-remove-package": "remove-package-finalization.status",
     "package-remove": "package-remove.status", "finalize-remove-image": "remove-image-finalization.status",
@@ -846,6 +847,51 @@ def project_removal_fixture(value, context, calls):
     return dict(value)
 
 
+def project_same_package(value, context):
+    row = value.get("samePackageObservation")
+    if row is None:
+        need(value.get("passed") is False)
+        return None
+    hashes = ("finalImageReceiptSha256", "imageSha256", "packageSha256", "inventorySha256",
+              "runtimeManifestSha256", "baselineResultSha256", "resultSha256")
+    counts = {"beforeExportCount": 1, "afterExportCount": 2, "newExportCount": 1,
+              "payloadWriteCount": 0, "payloadWriteBytes": 0}
+    truths = ("samePackageNoopObserved", "immediatePredecessorMatched", "currentObjectsPreserved",
+        "retainedGenerationsPreserved", "currentBytesVerified", "baselineExportUnchanged",
+        "originalInstallerReturnedZero", "mountReadOnly", "mountOriginalsMatch", "originalMountDetached")
+    need(context["profile"] == "installed" and type(row) is dict
+         and set(row) == {"schemaVersion", "kind", "verifiedCurrentFiles", "systemServiceExitClaimed", "productReady",
+                          *hashes, *counts, *truths}
+         and type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
+         and row["kind"] == "final-carrier-same-package-noop"
+         and all(row[name] is True for name in truths)
+         and row["systemServiceExitClaimed"] is False and row["productReady"] is False
+         and all(type(row[name]) is int and row[name] == number for name, number in counts.items()))
+    for name in hashes:
+        hex_value(row[name])
+    integer(row["verifiedCurrentFiles"], 2048, 1)
+    need(row["baselineResultSha256"] != row["resultSha256"])
+    calls = value.get("originalCalls")
+    need(type(calls) is list and len(calls) == 3
+         and tuple(call.get("role") for call in calls if type(call) is dict) ==
+             ("distribution-attach", "installer", "distribution-detach")
+         and all(all(call.get(key) is True for key in ("entered", "returned", "capturesSettled"))
+                 and type(call.get("returncode")) is int and call["returncode"] == 0 for call in calls)
+         and value.get("credentialOriginals") == [] and value.get("credentialContexts") == []
+         and value.get("notarySubmission") is None and value.get("finalImage") is None
+         and value.get("finalPackage") is None and value.get("payloadNotarization") is None
+         and value.get("productReady") is False
+         and value.get("notaryAuthentication") == {"created": False, "closed": False, "retired": False}
+         and value.get("directStagerIOPending") is None and value.get("cleanupErrors") == []
+         and all(value.get(key) is True for key in ("passed", "targetRetired", "originalClosesKnown", "outerFinalityRequired")))
+    mount = value.get("packageMount")
+    need(type(mount) is dict and all(type(flag) is bool for flag in mount.values())
+         and mount == {"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
+         "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True,
+         "systemServiceExitClaimed": False})
+    return dict(row)  # No request/instance identifiers, filesystem paths or raw native output.
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -902,6 +948,10 @@ def project_receipt(value, context, phase):
     need(mount is None or type(mount) is dict)
     result["finalImageMount"] = None if mount is None else {name: optional(mount, name, boolean) for name in
         ("attachEntered", "originalKnown", "detached", "retained", "installerEntered", "systemServiceExitClaimed")}
+    if phase == "same-package-noop":
+        result["samePackageObservation"] = project_same_package(value, context)
+    else:
+        need(value.get("samePackageObservation") is None)
     result["failure"] = project_failure(value.get("failure"))
     removal = value.get("removalFixture")
     need(removal is None or phase == "package-removal-fixture")
@@ -1253,6 +1303,10 @@ def project(work, *, profile, source, workflow_source, run_id, run_attempt, targ
             row = observe("android-helper-" + phase + ".json", 16384,
                           lambda body, phase=phase: project_receipt(decode(body, budget), context, phase))
             row["callerStatus"] = statuses.get(PHASE_STATUS.get(phase))
+            if phase == "same-package-noop" and row.get("samePackageObservation") is not None:
+                caller = row["callerStatus"]
+                if type(caller) is not dict or caller.get("receiptState") != "observed" or caller.get("returncode") != 0:
+                    row = {"receiptState": "refused", "callerStatus": caller}
             phases[phase] = row
         inventory_paths = set()
         inventory = observe("source-inventory.json", 2 * 1024 * 1024,

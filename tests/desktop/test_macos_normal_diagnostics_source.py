@@ -1680,7 +1680,26 @@ INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE = (('name: Desktop Mac normal pac
 INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", '    # Raw timed-step union577min (ARM) /615min (Intel)', '    # App-signature: ARM82 / Intel120 timed preparation')
 
 
+SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
+
+
+def without_same_package_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("same-package workflow source bound differs")
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" not in source:
+        return source
+    for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("same-package workflow exact delta differs")
+    for previous, current in reversed(SAME_PACKAGE_WORKFLOW_INVERSE):
+        source = source.replace(current, previous, 1)
+    if "MRK_MACOS_SAME_PACKAGE_SCOPE" in source or hashlib.sha256(source.encode()).hexdigest() != 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d':
+        raise AssertionError("same-package workflow predecessor differs")
+    return source
+
+
 def without_intel_resident_prepare_budget_workflow(source):
+    source = without_same_package_workflow(source)
     if not isinstance(source, str) or len(source.encode()) > 512 * 1024:
         raise AssertionError("Intel resident prepare budget workflow source bound differs")
     if not any(marker in source for marker in INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS):
@@ -2393,6 +2412,41 @@ def inline_python(block: str, marker: str) -> str:
 
 
 class NormalDiagnosticsSourceTests(unittest.TestCase):
+    def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
+        root = Path(__file__).absolute().parents[2]
+        source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        active_scope = "      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n"
+        self.assertEqual(source.count(active_scope), 1)
+        disabled_source = source.replace(active_scope, '      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n', 1)
+        self.assertEqual(hashlib.sha256(disabled_source.encode()).hexdigest(), '2211187a8a202d875b59e2118d80c75fd7480fbe0186e71807bb39f5db17be99')
+        self.assertEqual(disabled_source.count("      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n"), 1)
+        self.assertEqual(source.count("macos_android_helper_package.py same-package-noop --target"), 1)
+        phase = source.split("      - name: Observe one ordinary finalized-carrier same-package no-op\n", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("steps.package_install.outcome == 'success'", phase)
+        self.assertIn("steps.finalize_image.outcome == 'success'", phase)
+        self.assertNotIn("secrets.", phase)
+        self.assertNotIn("normal_ui", phase)
+        self.assertIn("timeout-minutes: 32", phase)
+        self.assertIn('"$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"', phase)
+        prior = without_same_package_workflow(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), 'cf880d883ee3f0337caf11d328356e9dff07265135a32c2edb7f4f532de0083d')
+        self.assertEqual(without_same_package_workflow(prior), prior)
+        for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
+            with self.subTest(partial=current[:48]), self.assertRaises(AssertionError):
+                without_same_package_workflow(source.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_same_package_workflow(source + "\nMRK_MACOS_SAME_PACKAGE_SCOPE\n")
+        helper = (root / "desktop/tools/macos_android_helper_package.py").read_text()
+        tree = ast.parse(helper)
+        operation = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Operation")
+        body = ast.get_source_segment(helper, next(n for n in operation.body if isinstance(n, ast.FunctionDef) and n.name == "same_package_noop"))
+        for required in ("self.final_image_input()", "self.stager.final_image_receipt_data", 'self.package_stager_io("v2-readback", args)',
+                         'self.package_stager_io("same-package-readback", args)', 'self.package_stager_io("same-package-census", None)',
+                         "self.detach_package_mount()"):
+            self.assertIn(required, body)
+        self.assertNotIn("credential_scope(", body)
+        self.assertNotIn("self.prepare(", body)
+
     def test_remaining_three_reuses_exact_singleton_bodies_and_closed_cleanup(self):
         # Actual SOURCE and finite string/AST checks only, never workflow execution.
         root = Path(__file__).absolute().parents[2]

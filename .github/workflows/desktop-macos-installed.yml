@@ -49,6 +49,8 @@ jobs:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
       MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      # Separate reviewed activation only; baseline and later UI remain independent.
+      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
       # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.
       MRK_MACOS_ANDROID_UI_SCOPE: disabled
@@ -82,6 +84,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
+            disabled) ;;
+            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
           case "$MRK_MACOS_ANDROID_UI_SCOPE" in
             disabled|android-signed-build) ;;
             *) exit 1 ;;
@@ -2370,6 +2377,7 @@ jobs:
           # and facts are evidence, never IPA/signing/distribution qualification.
 
       - name: Notarize, staple and verify only the final user image
+        id: finalize_image
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview')
         timeout-minutes: 32
         shell: bash
@@ -2399,6 +2407,36 @@ jobs:
           [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
           # Neither a provisional file nor its receipt substitutes for this
           # actual original0. Preview has no fallback to the old image.
+      - name: Observe one ordinary finalized-carrier same-package no-op
+        id: same_package_noop
+        if: github.ref == 'refs/heads/verify/desktop-macos-preview' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'same-package-noop' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # The existing baseline is immutable. Only one ordinary Install.pkg
+          # original follows it; no build, sign, notary or privileged Python.
+          # This 32-minute optional step shares a1740s work/1800s hard owner;
+          # it adds32 nominal minutes, not a350-minute job fit guarantee.
+          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1
+          set +e
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \
+            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"
+          noop_status=$?
+          printf '%s\n' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"
+          noop_status_saved=$?
+          set -e
+          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi
+          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"
+          # Actual0, closed originals and live linked-state readback are all
+          # mandatory. This is not restore/update/GUI/service-exit evidence.
+
       - name: Prepare the fixed two-file removal package without executing it
         if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle')
         timeout-minutes: 8
@@ -4722,7 +4760,7 @@ jobs:
       # The focused real Aqua/Save procedure and separate command/result gates
       # are in desktop/packaging/macos-installed.md.
       - name: Remove only this completed preview build's disposable compiler outputs
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (always() && steps.preview_upload.outcome == 'success' && steps.normal_ui_result.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success' && ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_saved_checks_ui_result.outcome == 'success') || ((env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'saved-version-recovery' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'workflow-refusal' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'release-evidence') && steps.normal_saved_version_recovery_ui_result.outcome == 'success') || (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three' && steps.normal_remaining_saved_file_ui.outcome == 'success')) && steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))
         timeout-minutes: 3
         shell: bash
         run: |

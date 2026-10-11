@@ -42,6 +42,28 @@ def receipt(phase="finalize-image"):
                 "actualStaplerValidation": True, "originalMountDetached": True}}
 
 
+def same_package_receipt():
+    value = receipt("same-package-noop")
+    del value["finalImage"], value["notarySubmission"]
+    value.update(productReady=False, notaryAuthentication={"created": False, "closed": False, "retired": False},
+        directStagerIOPending=None, cleanupErrors=[],
+        originalCalls=[{"role": role, "entered": True, "returned": True, "capturesSettled": True,
+            "returncode": 0, "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64}
+            for role in ("distribution-attach", "installer", "distribution-detach")],
+        packageMount={"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
+            "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True, "systemServiceExitClaimed": False})
+    value["samePackageObservation"] = {"schemaVersion": 1, "kind": "final-carrier-same-package-noop",
+        **{name: "a" * 64 for name in ("finalImageReceiptSha256", "imageSha256", "packageSha256", "inventorySha256",
+              "runtimeManifestSha256", "baselineResultSha256")}, "resultSha256": "b" * 64,
+        "beforeExportCount": 1, "afterExportCount": 2, "newExportCount": 1, "payloadWriteCount": 0,
+        "payloadWriteBytes": 0, "verifiedCurrentFiles": 2048,
+        **{name: True for name in ("samePackageNoopObserved", "immediatePredecessorMatched", "currentObjectsPreserved",
+            "retainedGenerationsPreserved", "currentBytesVerified", "baselineExportUnchanged", "originalInstallerReturnedZero",
+            "mountReadOnly", "mountOriginalsMatch", "originalMountDetached")},
+        "systemServiceExitClaimed": False, "productReady": False}
+    return value
+
+
 def write(root, name, value):
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1002,6 +1024,52 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(observed["notarySubmission"]["status"], "Accepted")
             self.assertIs(result["productReady"], False)
 
+    def test_same_package_positive_is_closed_data_not_service_or_ui_authority(self):
+        value = same_package_receipt()
+        value.update(arbitraryPrivateField=SENTINEL)
+        value["originalCalls"][1]["argv"] = [SENTINEL]
+        for target in DATA.TARGETS:
+            context = dict(CONTEXT, target=target)
+            result = DATA.project_receipt(dict(value, target=target), context, "same-package-noop")
+            self.assertEqual(result["samePackageObservation"], value["samePackageObservation"])
+            self.assertNotIn(SENTINEL, json.dumps(result))
+            self.assertFalse(result["samePackageObservation"]["systemServiceExitClaimed"])
+        for key, changed in (("newExportCount", 2), ("payloadWriteCount", 1), ("payloadWriteBytes", True),
+                             ("verifiedCurrentFiles", 2049), ("currentObjectsPreserved", 1),
+                             ("baselineResultSha256", "b" * 64), ("productReady", True), ("requestId", SENTINEL)):
+            invalid = copy.deepcopy(value); invalid["samePackageObservation"][key] = changed
+            with self.subTest(key=key), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(invalid, CONTEXT, "same-package-noop")
+        with self.assertRaises(DATA.Refused): DATA.project_receipt(value, dict(CONTEXT, profile="aqua"), "same-package-noop")
+        with self.assertRaises(DATA.Refused): DATA.project_receipt(dict(value, phase="package-install"), CONTEXT, "package-install")
+
+    def test_same_package_requires_originals_cleanups_and_independent_caller_zero(self):
+        value = same_package_receipt()
+        for fault in ("role", "returned", "capture", "nonzero", "close", "cleanup", "pending", "credentials", "mount"):
+            invalid = copy.deepcopy(value)
+            if fault == "role": invalid["originalCalls"].reverse()
+            elif fault == "returned": invalid["originalCalls"][1]["returned"] = False
+            elif fault == "capture": invalid["originalCalls"][1]["capturesSettled"] = False
+            elif fault == "nonzero": invalid["originalCalls"][1]["returncode"] = 1
+            elif fault == "close": invalid["originalClosesKnown"] = False
+            elif fault == "cleanup": invalid["cleanupErrors"] = [{}]
+            elif fault == "pending": invalid["directStagerIOPending"] = "same-package-readback"
+            elif fault == "credentials": invalid["credentialContexts"] = [{}]
+            else: invalid["packageMount"]["detached"] = 1
+            with self.subTest(fault=fault), self.assertRaises(DATA.Refused):
+                DATA.project_receipt(invalid, CONTEXT, "same-package-noop")
+        for code in (None, 1, 0):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write(root, "android-helper-same-package-noop.json", value)
+                if code is not None: write(root, "same-package-noop.status", (str(code) + "\n").encode())
+                result = project(root)["phases"]["same-package-noop"]
+                self.assertEqual(result["receiptState"], "observed" if code == 0 else "refused")
+                self.assertEqual("samePackageObservation" in result, code == 0)
+        failed = dict(value, passed=False, failure={"stage": "installer", "type": "RuntimeError", "reason": "original-operation-refused"})
+        del failed["samePackageObservation"]
+        self.assertIsNone(DATA.project_receipt(failed, CONTEXT, "same-package-noop")["samePackageObservation"])
+
     def test_full_preview_original_rosters_fit_fixed_public_output_bound(self):
         def literals(path, names):
             module = ast.parse(path.read_text())
@@ -1096,7 +1164,10 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertEqual(len(failure["python"]["failureTests"]), 16)
             write(root, "data-contracts/failure-diagnostics.json", failure)
             write(root, "data-contracts/python.status", b"1\n")
+            write(root, "android-helper-same-package-noop.json", same_package_receipt())
+            write(root, "same-package-noop.status", b"0\n")
             result = project(root, removal_case="ordinary")
+            self.assertEqual(result["phases"]["same-package-noop"]["receiptState"], "observed")
             self.assertEqual(result["dataContractFailure"]["receiptState"], "observed")
             self.assertEqual(len(result["dataContractFailure"]["python"]["failureTests"]), 16)
             for phase in roster:
