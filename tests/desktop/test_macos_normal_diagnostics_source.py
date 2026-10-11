@@ -1986,7 +1986,34 @@ def without_signed_android_runtime_source_pin(source):
     return source
 
 
+INSTALLED_ANDROID_ACTIVATION_INVERSE = (
+    '      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.\n      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n',
+    "      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n",
+)
+
+def without_installed_android_activation_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed Android activation SOURCE bound differs")
+    previous, current = INSTALLED_ANDROID_ACTIVATION_INVERSE
+    old_scope = previous.splitlines(keepends=True)[1]
+    new_scope = current.splitlines(keepends=True)[1]
+    scopes = [line for line in source.splitlines(keepends=True)
+              if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    if current not in source:
+        if (len(scopes) > 1 or any(line != old_scope for line in scopes)
+                or current.splitlines()[0] in source):
+            raise AssertionError("installed Android activation partial SOURCE differs")
+        return source
+    if source.count(current) != 1 or previous in source or scopes != [new_scope]:
+        raise AssertionError("installed Android activation exact SOURCE differs")
+    source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef":
+        raise AssertionError("installed Android activation whole predecessor differs")
+    return source
+
+
 def without_signed_android_support_workflow(source):
+    source = without_installed_android_activation_workflow(source)
     source = without_signed_android_runtime_source_pin(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("signed Android support workflow SOURCE bound differs")
@@ -2917,7 +2944,24 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
-        self.assertEqual(raw.count("MRK_MACOS_ANDROID_UI_SCOPE: disabled"), 1)
+        inactive, active = INSTALLED_ANDROID_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(active), 1)
+        self.assertNotIn(inactive.splitlines(keepends=True)[1], raw)
+        activation_prior = without_installed_android_activation_workflow(raw)
+        self.assertEqual(activation_prior, raw.replace(active, inactive, 1))
+        self.assertEqual(hashlib.sha256(activation_prior.encode()).hexdigest(),
+                         "b5e5776a4922100d68691f06fb0d354eb8aa6b6b92305889bd03251529d843ef")
+        self.assertEqual(activation_prior.count("MRK_MACOS_ANDROID_UI_SCOPE: disabled"), 1)
+        self.assertEqual(without_installed_android_activation_workflow(activation_prior), activation_prior)
+        for changed in (
+                raw.replace(active, active.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(active, active.splitlines(keepends=True)[0] + "      MRK_MACOS_ANDROID_UI_SCOPE: android-signed-build\n", 1),
+                raw.replace(active, active.splitlines(keepends=True)[1], 1),
+                raw.replace(active, active.splitlines(keepends=True)[0], 1),
+                raw + active,
+                raw + "# unexpected activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_android_activation_workflow(changed)
         selection = "github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build'"
         self.assertEqual(raw.count(selection), 4)
         self.assertNotIn("matrix.target == 'aarch64-apple-darwin' && env.MRK_MACOS_ANDROID_UI_SCOPE", raw)
@@ -2991,6 +3035,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         prior_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
         self.assertEqual(source.count(signed_source), 2)
         self.assertNotIn(prior_source, source)
+        source = without_installed_android_activation_workflow(source)
         signed_normalized = without_signed_android_runtime_source_pin(source)
         self.assertEqual(signed_normalized, source.replace(signed_source, prior_source))
         self.assertEqual(without_signed_android_runtime_source_pin(signed_normalized), signed_normalized)

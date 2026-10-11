@@ -54,8 +54,8 @@ jobs:
       # Separate reviewed activation only; baseline and later UI remain independent.
       MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
-      # SOURCE-owned and OFF: legal/signing/current protected-copy prerequisites remain.
-      MRK_MACOS_ANDROID_UI_SCOPE: disabled
+      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.
+      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}
       # Separately reviewed unsigned archive UI; an installed app is still mandatory.
       MRK_MACOS_IOS_UI_SCOPE: disabled
       # A separate reviewed SOURCE change selects the targeted recovery run.

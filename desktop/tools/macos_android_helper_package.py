@@ -432,13 +432,15 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
         errors += row["severity"] == "error"
         warnings += row["severity"] == "warning"
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
+    # Finite Apple ticket annotations include nested signed i386 slices;
+    # they never grant native execution, target or provenance authority.
     # Carrier-null architecture is bounded diagnostic metadata only, not
     # a native slice, certificate, ticket or current-package authority.
     for row in tickets or ():
         need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
+             and (row["arch"] in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
                   and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,

@@ -3487,10 +3487,11 @@ pub(crate) fn macos_github_actions_original_contract() {
         original_action!(Profile::GitHubRelease, github_release, GitHubReleaseRuntimeSlots, GitHubRelease,
             github_setup, GitHubSetupRuntimeSlots);
     }
+    history::history_original_data_checks();
 }
 #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[test]
-fn macos_github_actions_original_data_contract() { macos_github_actions_original_contract(); history::history_original_data_checks(); }
+fn macos_github_actions_original_data_contract() { macos_github_actions_original_contract(); }
 
 // Finite hosted fixtures only. Nothing in this module selects a runtime, grants
 // custody, changes the command, or substitutes for an original join/close.

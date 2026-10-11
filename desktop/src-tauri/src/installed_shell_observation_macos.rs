@@ -4292,6 +4292,7 @@ fn observer_data_checks() -> bool {
     // They prove routing/refusal DATA only, not native Apply or worker finality.
     crate::runtime::assert_installed_workflow_profile_contract();
     crate::runtime::assert_installed_macos_text_version_profile_contract();
+    crate::edit_owner::assert_installed_configuration_owner_contract();
     crate::edit_owner::assert_installed_workflow_owner_contract();
     crate::edit_owner::assert_installed_metadata_owner_contract();
     crate::edit_owner::assert_installed_version_owner_contract();
