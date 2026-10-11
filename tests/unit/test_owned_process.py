@@ -1098,6 +1098,95 @@ class CommandContractTests(unittest.TestCase):
                     else: pause.assert_not_called()
                 self.assertEqual(state["pumps"], 2 if ending == "delayed" else 1)
 
+    def test_outer_final_drain_waits_for_both_original_output_eofs(self):
+        # A terminal/control EOF is not an observation of either output EOF.
+        # These are bounded inert event sequences, not native producer receipts.
+        orders = {
+            "control-before-stdout": [(True, (False, True)), (True, (True, True))],
+            "control-before-stderr": [(True, (True, False)), (True, (True, True))],
+            "control-before-both": [(True, (False, False)), (True, (True, False)), (True, (True, True))],
+            "stdout-before-control": [(False, (True, False)), (True, (True, True))],
+            "all-eof-together": [(True, (True, True))],
+        }
+        for order, events in orders.items():
+            with self.subTest(order=order):
+                ctx = self.context()
+                engine = command._Outer.__new__(command._Outer)
+                engine.ctx, engine.phase, engine.sealed = ctx, "RUNNING", True
+                engine.terminal = object()  # Accepted-terminal DATA only, never an ownership proof.
+                engine.wire = SimpleNamespace(eof=False, reader=_InertLease(101))
+                engine.readers, engine.output_eof = [_InertLease(102), _InertLease(103)], [False, False]
+                state = {"pumps": 0, "now": time.monotonic_ns()}
+                def pump():
+                    self.assertLess(state["pumps"], len(events))
+                    eof, output_eof = events[state["pumps"]]
+                    state["pumps"] += 1
+                    engine.wire.eof, engine.output_eof = eof, list(output_eof)
+                engine._pump = pump
+                expected_pauses = []
+                for control_eof, output_eof in events[:-1]:
+                    readers = (() if control_eof else (engine.wire.reader,)) + tuple(
+                        reader for reader, eof in zip(engine.readers, output_eof) if not eof)
+                    expected_pauses.append(unittest.mock.call(ctx.run, readers=readers))
+                with patch.object(command.time, "monotonic_ns", side_effect=lambda: state["now"]), \
+                     patch.object(command, "_pause") as pause:
+                    engine._until(lambda: engine.terminal is not None and engine.wire.eof and all(engine.output_eof),
+                                  drain_outputs_after_terminal=True)
+                    self.assertEqual(pause.call_args_list, expected_pauses)
+                self.assertEqual(state["pumps"], len(events))
+                self.assertTrue(all(engine.output_eof))
+                self.assertEqual(ctx.run, ctx.hard - command.CLEANUP_NS)
+
+    def test_outer_final_drain_preserves_handshake_refusal_and_stop(self):
+        for phase, sealed, terminal, option in (
+            ("RUNNING", True, object(), False), ("RUNNING", True, object(), 1),
+            ("RUNNING", True, None, True), ("RUNNING", False, object(), True),
+            ("STARTING", True, object(), True), ("PREPARING", True, object(), True),
+            ("WAIT_READY", True, object(), True),
+        ):
+            with self.subTest(phase=phase, sealed=sealed, terminal=terminal is not None, option=option):
+                ctx = self.context()
+                engine = command._Outer.__new__(command._Outer)
+                engine.ctx, engine.phase, engine.sealed, engine.terminal = ctx, phase, sealed, terminal
+                engine.wire = SimpleNamespace(eof=False, reader=_InertLease(101))
+                engine.readers, engine.output_eof = [_InertLease(102), _InertLease(103)], [False, True]
+                def pump(): engine.wire.eof = True
+                engine._pump = Mock(side_effect=pump)
+                with patch.object(command, "_pause") as pause, self.assertRaises(owned.ProcessError) as caught:
+                    engine._until(lambda: engine.terminal is not None and engine.wire.eof and all(engine.output_eof),
+                                  drain_outputs_after_terminal=option)
+                self.assertEqual(str(caught.exception), command.ERROR)
+                engine._pump.assert_called_once_with(); pause.assert_not_called()
+
+        for ending in ("expired", "cancelled", "first-error-and-expired"):
+            with self.subTest(ending=ending):
+                ctx = self.context()
+                engine = command._Outer.__new__(command._Outer)
+                engine.ctx, engine.phase, engine.sealed, engine.terminal = ctx, "RUNNING", True, object()
+                engine.wire = SimpleNamespace(eof=False, reader=_InertLease(101))
+                engine.readers, engine.output_eof = [_InertLease(102), _InertLease(103)], [False, True]
+                state = {"now": time.monotonic_ns()}
+                failure = KeyboardInterrupt() if ending == "cancelled" else ValueError("first inert failure")
+                def pump(): engine.wire.eof = True
+                engine._pump = Mock(side_effect=pump)
+                def pause_original(_endpoint, *, readers):
+                    self.assertEqual(_endpoint, ctx.run)
+                    self.assertEqual(readers, (engine.readers[0],))
+                    if ending != "cancelled": state["now"] = ctx.run
+                    if ending != "expired": ctx.primary = failure
+                with patch.object(command.time, "monotonic_ns", side_effect=lambda: state["now"]), \
+                     patch.object(command, "_pause", side_effect=pause_original) as pause:
+                    expected = owned.ProcessError if ending == "expired" else type(failure)
+                    with self.assertRaises(expected) as caught:
+                        engine._until(lambda: engine.terminal is not None and engine.wire.eof and all(engine.output_eof),
+                                      drain_outputs_after_terminal=True)
+                    if ending == "expired": self.assertEqual(str(caught.exception), command.TIMEOUT)
+                    else: self.assertIs(caught.exception, failure)
+                    pause.assert_called_once_with(ctx.run, readers=(engine.readers[0],))
+                # Stop/deadline is observed BEFORE another original output read.
+                engine._pump.assert_called_once_with()
+                self.assertFalse(engine.output_eof[0])
+
     def test_fence_checkpoint_only_pauses_for_incomplete_send_or_unavailable_ack(self):
         for ending in ("ready", "partial", "eagain", "delayed-ack", "lost", "expired"):
             with self.subTest(ending=ending):
@@ -1245,6 +1334,33 @@ class CommandContractTests(unittest.TestCase):
 
 class CommandSourceOwnerTests(unittest.TestCase):
     """Real task-local locked source; no process, thread or signal mutation."""
+
+    def test_only_final_body_wait_explicitly_allows_terminal_output_drain(self):
+        import ast
+
+        # SOURCE-only: inspect the real module, never run the native body or an
+        # extracted/mutated method. The inert loop groups cover its behavior.
+        source = Path(command.__file__).read_text(encoding="utf-8")
+        def check(value):
+            module = ast.parse(value)
+            outer = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "_Outer")
+            body = next(node for node in outer.body if isinstance(node, ast.FunctionDef) and node.name == "body")
+            calls = sorted((node for node in ast.walk(body) if isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute) and node.func.attr == "_until"
+                            and isinstance(node.func.value, ast.Name) and node.func.value.id == "self"),
+                           key=lambda node: (node.lineno, node.col_offset))
+            self.assertEqual(len(calls), 4)
+            for call in calls[:3]: self.assertEqual(call.keywords, [])
+            self.assertEqual(len(calls[-1].keywords), 1)
+            option = calls[-1].keywords[0]
+            self.assertEqual(option.arg, "drain_outputs_after_terminal")
+            self.assertIsInstance(option.value, ast.Constant)
+            self.assertIs(option.value.value, True)
+        check(source)
+        marker = ",\n                    drain_outputs_after_terminal=True"
+        self.assertEqual(source.count(marker), 1)
+        with self.assertRaises(AssertionError):
+            check(source.replace(marker, "", 1))
 
     @contextmanager
     def source_lease(self, *, recovery=False):

@@ -272,7 +272,7 @@ def without_artifact_wait_diagnostic_source(source):
     # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
     saved_marker = 'raw["sourceInputsSha256"] as? String'
     saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
-    saved_current = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+    saved_current = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
     if saved_marker in source:
         if (source.count(saved_marker) != 1
                 or source.count(saved_prior) + source.count(saved_current) != 1):
@@ -1280,7 +1280,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
         # Current recovery SOURCE is the genuine configured runtime nomination,
         # not an arbitrary replacement digest or a claim of native qualification.
-        expected_source = '58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d'
+        expected_source = 'c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09'
         nomination = json.loads((ROOT / "desktop/macos-installed-inputs/python-signed-runtime-binding.json").read_bytes())
         self.assertEqual(set(nomination["targets"]), {MODULE.ARM_TARGET, MODULE.INTEL_TARGET})
         for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
@@ -1300,7 +1300,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
         self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
         swift = SWIFT.read_text(encoding="utf-8")
-        current_line = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+        current_line = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
         prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
         self.assertEqual(swift.count(current_line), 1)
         self.assertNotIn(prior_line, swift)

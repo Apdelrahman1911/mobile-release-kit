@@ -261,7 +261,7 @@ def without_artifact_wait_diagnostic_source(source):
     # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
     saved_marker = 'raw["sourceInputsSha256"] as? String'
     saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
-    saved_current = '                  raw["sourceInputsSha256"] as? String == "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d",\n'
+    saved_current = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
     if saved_marker in source:
         if (source.count(saved_marker) != 1
                 or source.count(saved_prior) + source.count(saved_current) != 1):
@@ -1683,9 +1683,28 @@ INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_MARKERS = ("${{ matrix.target == 'x86_64-
 SAME_PACKAGE_WORKFLOW_INVERSE = (("      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n", "      # Separate reviewed activation only; baseline and later UI remain independent.\n      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n      MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}\n"), ('          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n', '          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in\n            disabled) ;;\n            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;\n            *) exit 1 ;;\n          esac\n          case "$MRK_MACOS_ANDROID_UI_SCOPE" in\n'), ('      - name: Notarize, staple and verify only the final user image\n', '      - name: Notarize, staple and verify only the final user image\n        id: finalize_image\n'), ('      - name: Prepare the fixed two-file removal package without executing it\n', '      - name: Observe one ordinary finalized-carrier same-package no-op\n        id: same_package_noop\n        if: github.ref == \'refs/heads/verify/desktop-macos-preview\' && env.MRK_MACOS_SAME_PACKAGE_SCOPE == \'same-package-noop\' && steps.package_install.outcome == \'success\' && steps.finalize_image.outcome == \'success\'\n        timeout-minutes: 32\n        shell: bash\n        env:\n          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n        run: |\n          set +x\n          set +a\n          set -euo pipefail\n          set -o noclobber\n          umask 077\n          # The existing baseline is immutable. Only one ordinary Install.pkg\n          # original follows it; no build, sign, notary or privileged Python.\n          # This 32-minute optional step shares a1740s work/1800s hard owner;\n          # it adds32 nominal minutes, not a350-minute job fit guarantee.\n          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == same-package-noop && "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1\n          set +e\n          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py same-package-noop --target "$MRK_MACOS_TARGET" \\\n            > "$MRK_MACOS_WORK/same-package-noop.stdout" 2> "$MRK_MACOS_WORK/same-package-noop.stderr"\n          noop_status=$?\n          printf \'%s\\n\' "$noop_status" > "$MRK_MACOS_WORK/same-package-noop.status"\n          noop_status_saved=$?\n          set -e\n          if [[ "$noop_status" != 0 ]]; then exit "$noop_status"; fi\n          [[ "$noop_status_saved" == 0 ]] || exit "$noop_status_saved"\n          # Actual0, closed originals and live linked-state readback are all\n          # mandatory. This is not restore/update/GUI/service-exit evidence.\n\n      - name: Prepare the fixed two-file removal package without executing it\n'), ("&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success')", "&& steps.data_contracts.outcome == 'success' && steps.evidence.outcome == 'success' && (env.MRK_MACOS_SAME_PACKAGE_SCOPE == 'disabled' || steps.same_package_noop.outcome == 'success'))"))
 
 
+def without_command_terminal_runtime_source_pin(source):
+    # Only current core changed; preserve every older SOURCE inverse and hash.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("command terminal runtime SOURCE bound differs")
+    current = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    previous = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("command terminal runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_same_package_workflow(source):
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("same-package workflow source bound differs")
+    source = without_command_terminal_runtime_source_pin(source)
     if "MRK_MACOS_SAME_PACKAGE_SCOPE" not in source:
         return source
     for previous, current in SAME_PACKAGE_WORKFLOW_INVERSE:
@@ -1988,7 +2007,6 @@ def without_shipping_compile_privacy_workflow(source):
 
 
 def without_shipping_compile_workflow(source):
-    source = without_shipping_compile_privacy_workflow(source)
     source = without_install_product_workflow(source)
     marker = "  shipping-image-compile:\n"
     if marker not in source:
@@ -2415,6 +2433,19 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
         root = Path(__file__).absolute().parents[2]
         source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        current_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        previous_source = "58f6d68d2db29100ed15fd8c4f8d893b3a0a3dbe1d8cd37b385690c36b9cfa3d"
+        self.assertEqual(source.count(current_source), 2)
+        self.assertNotIn(previous_source, source)
+        normalized_source = without_command_terminal_runtime_source_pin(source)
+        self.assertEqual(normalized_source, source.replace(current_source, previous_source))
+        self.assertEqual(without_command_terminal_runtime_source_pin(normalized_source), normalized_source)
+        for damaged in (source.replace(current_source, previous_source, 1),
+                        source.replace(current_source, current_source + current_source, 1),
+                        source.replace(current_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^command terminal runtime SOURCE exact two-site delta differs$"):
+                without_command_terminal_runtime_source_pin(damaged)
+        source = normalized_source
         active_scope = "      MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}\n"
         self.assertEqual(source.count(active_scope), 1)
         disabled_source = source.replace(active_scope, '      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled\n', 1)

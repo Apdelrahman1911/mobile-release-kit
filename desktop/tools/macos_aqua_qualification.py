@@ -1607,7 +1607,7 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 
 OWNER_PINS = {
     "owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
-    "_command_process.py": "30781e5b264fbcdb4c09028829e0606095a79e5c7a194556484f5ca8b2bfad69",
+    "_command_process.py": "2acd4508352f07236fd7ed9b2bedd8e2506451fe60d75326619beb7f27779b63",
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a",
 }

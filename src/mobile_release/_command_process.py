@@ -3259,11 +3259,16 @@ class _Outer:
             self.protocol_failed = True
             raise ProcessError(ERROR)
 
-    def _until(self, predicate: Callable[[], bool]) -> None:
+    def _until(self, predicate: Callable[[], bool], *, drain_outputs_after_terminal: bool = False) -> None:
         while not predicate():
             self.ctx.check()
             self._pump()
-            _require(self.wire is not None and (not self.wire.eof or predicate()))
+            # Final control EOF does not order this reader's stdout/stderr
+            # EOF observations. Only the final RUNNING caller may keep draining
+            # after an accepted terminal; all earlier handshakes still refuse.
+            _require(self.wire is not None and (not self.wire.eof or predicate()
+                     or drain_outputs_after_terminal is True and self.phase == "RUNNING"
+                     and self.sealed and self.terminal is not None))
             self.ctx.check()
             if not predicate():
                 readers = tuple(reader for reader, eof in (
@@ -3328,7 +3333,8 @@ class _Outer:
         _require(not self.sealed and not self.run_route.retired)
         self.phase = "RUNNING"
         _send(self.wire, Tag.RUN_TOOL, _scalar(self.nonce), self._pump, route=self.run_route)
-        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof))
+        self._until(lambda: self.terminal is not None and self.wire.eof and all(self.output_eof),
+                    drain_outputs_after_terminal=True)
         _require(not self.protocol_failed and not self.output_failed)
 
     def _safe_pump(self) -> None:

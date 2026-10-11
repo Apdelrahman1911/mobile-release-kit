@@ -6,7 +6,10 @@ confirmations, owners and cleanup policy.
 
 ## Admitted environment and original launch
 
-Only a **fresh exclusive GitHub-hosted macOS26 ARM64 runner** is supported.
+The same-build normal route admits only a **fresh exclusive GitHub-hosted
+macOS26 ARM64 or Intel (x86_64) runner**. Admission is not qualification: native
+acceptance remains pending and requires reviewed evidence for the exact target,
+source and run.
 The normal route binds its same-build Cargo binary, package, standard Installer
 and independent nonroot byte/mode readback. The separately selected reuse route
 below binds its older app and current harness independently. Never point either
@@ -74,7 +77,7 @@ is not success. No skip, automatic rerun, app-path switch, global keystroke,
 permission change or live service operation is admitted.
 
 **Not proved:** POSIX app exit status, every worker/descriptor's finality,
-Finder/Installer UI, Gatekeeper/notarization, Intel/older macOS, real signing,
+Finder/Installer UI, Gatekeeper/notarization, older macOS or target-wide support, real signing,
 Store operations, release readiness or complete Desktop feature acceptance.
 cleanExitStatus remains null; allWorkerFinality remains unestablished.
 
