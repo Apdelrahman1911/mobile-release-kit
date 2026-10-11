@@ -186,6 +186,28 @@ class Tool:
             os.close(fd)  # Consumed once; never retry an uncertain close.
 
 
+_DARWIN_XATTRS = None
+
+
+def no_xattrs(fd):
+    # Same fixed read-only FD ABI as stage_macos_installed.no_xattrs. CPython's
+    # os.listxattr belongs to its Linux-only extended-attribute API.
+    global _DARWIN_XATTRS
+    if sys.platform == 'darwin':
+        if _DARWIN_XATTRS is None:
+            import ctypes
+            library = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
+            call = library.flistxattr
+            call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+            call.restype = ctypes.c_ssize_t
+            _DARWIN_XATTRS = call
+        need(_DARWIN_XATTRS(fd, None, 0, 0) == 0)
+    elif sys.platform == 'linux':
+        need(not os.listxattr(fd))
+    else:
+        raise Refused()
+
+
 class KeyDirectory:
     """Small task-owned key scope, never recursive or shared cleanup."""
     def __init__(self, parent):
@@ -250,7 +272,8 @@ class KeyDirectory:
             need(self.key_original is not None and identity(os.fstat(self.key_fd)) == self.key_original
                  == identity(os.stat(self.key_name, dir_fd=self.root_fd, follow_symlinks=False))
                  and stat.S_ISREG(os.fstat(self.key_fd).st_mode) and os.fstat(self.key_fd).st_nlink == 1
-                 and os.pread(self.key_fd, 8193, 0) == self.body and not os.listxattr(self.path / self.key_name, follow_symlinks=False))
+                 and os.pread(self.key_fd, 8193, 0) == self.body)
+            no_xattrs(self.key_fd)
 
     def finish(self, known):
         error = None

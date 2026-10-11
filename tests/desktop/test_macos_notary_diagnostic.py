@@ -81,6 +81,36 @@ class NotaryDiagnosticData(unittest.TestCase):
 
     def test_exact_key_custody_retirement_replacement_and_nonrecursive_cleanup(self):
         m = self.module
+        import ctypes
+        native = mock.Mock(return_value=0)
+        library = types.SimpleNamespace(flistxattr=native)
+        with mock.patch.dict(m.os.__dict__), mock.patch.object(m.sys, 'platform', 'darwin'), \
+             mock.patch.object(m, '_DARWIN_XATTRS', None), \
+             mock.patch.object(ctypes, 'CDLL', return_value=library) as load_library:
+            m.os.__dict__.pop('listxattr', None)  # Genuine absence, not a Linux fallback.
+            for result in (0, 1, -1):
+                native.return_value = result
+                if result == 0:
+                    m.no_xattrs(23)
+                else:
+                    with self.assertRaises(m.Refused):
+                        m.no_xattrs(23)
+            self.assertEqual(native.call_args_list, [mock.call(23, None, 0, 0)] * 3)
+            load_library.assert_called_once_with('/usr/lib/libSystem.B.dylib', use_errno=True)
+            self.assertEqual(native.argtypes, [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int])
+            self.assertIs(native.restype, ctypes.c_ssize_t)
+            native.reset_mock()
+            native.return_value = 0
+            with tempfile.TemporaryDirectory() as temporary:
+                key = m.KeyDirectory(Path(temporary))
+                key.create_key(b'SYNTHETIC DARWIN FD POST TEST')
+                original_fd = key.key_fd
+                key.finish(True)
+                self.assertTrue(key.closed and key.retired and key.scratch_retired)
+                self.assertEqual(native.call_args_list, [mock.call(original_fd, None, 0, 0)] * 2)
+        with mock.patch.object(m.sys, 'platform', 'unsupported-test-host'):
+            with self.assertRaises(m.Refused):
+                m.no_xattrs(23)
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary)
             key = m.KeyDirectory(parent)
