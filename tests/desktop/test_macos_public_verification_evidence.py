@@ -535,6 +535,43 @@ def write_app_absence_documents(root, documents):
 
 
 class PublicVerificationEvidenceData(unittest.TestCase):
+    def test_primary_owner_finality_projection_preserves_unknown_and_parent_applicability(self):
+        def project(value, *, present=True):
+            failure = {"available": True, "ownerErrorType": "ProcessError", "classification": "deadline",
+                       "timeoutSeconds": 720, "outputLimitBytes": 1024, "rawPrivate": SENTINEL}
+            if present:
+                failure["ownerFinality"] = value
+            row = {"role": "build", "entered": True, "returned": False, "capturesSettled": False,
+                   "dispatched": True, "contained": False, "cleanup_complete": False,
+                   "originalFailure": failure}
+            result = DATA.project_calls([row])["calls"][0]
+            self.assertEqual((result["returned"], result["capturesSettled"], result["contained"], result["cleanup_complete"]),
+                             (False, False, False, False))
+            self.assertIsNone(result["returncode"])
+            self.assertNotIn(SENTINEL, json.dumps(result))
+            return result["originalFailure"]
+        self.assertNotIn("ownerFinality", project(None, present=False))
+        self.assertEqual(project(None)["ownerFinality"], {"available": False})
+        for value in ([1, 0, 1023, 15, None], [1, 1, 0, 0, 0],
+                      [1, 1, (1 << 3) | (1 << 7) | (1 << 10), 15, None],
+                      *([1, 1, 0, 0, mask] for mask in (32, *range(48, 64)))):
+            self.assertEqual(project(value)["ownerFinality"], {"available": True,
+                "branch": "child" if value[1] else "no-child", "predicateMask": value[2],
+                "cleanupMask": value[3], "terminalFailureMask": value[4]})
+        invalid = [SENTINEL, {}, [], (1, 1, 0, 0, None), [1], [2, 1, 0, 0, None],
+            [True, 1, 0, 0, None], [1, True, 0, 0, None], [1, 1, False, 0, None],
+            [1, 1, 0, False, None], [1, 2, 0, 0, None], [1, 0, 1024, 0, None],
+            [1, 1, 1048576, 0, None], [1, 1, -1, 0, None], [1, 1, 0, 16, None],
+            [1, 1, 0, -1, None], [1, 0, 0, 0, 0], [1, 1, 0, 0, True],
+            [1, 1, 0, 0, -1], [1, 1, 0, 0, 1], [1, 1, 0, 0, 47], [1, 1, 0, 0, 64]]
+        # Missing parents cannot turn unset subordinate bits into positive facts.
+        for parent, children in ((3, (4, 5, 6)), (7, (8, 18, 19)), (10, (11, 12))):
+            invalid.extend([1, 1, (1 << parent) | (1 << child), 0, None] for child in children)
+        invalid.extend([1, 1, 1 << bit, 0, 32] for bit in (7, 8, 9))
+        for value in invalid:
+            with self.subTest(invalid=repr(value)), self.assertRaises(DATA.Refused):
+                project(value)
+
 
     def test_notary_key_precontext_failure_preserves_only_four_genuine_literals(self):
         source = (ROOT / "desktop/tools/macos_android_helper_package.py").read_bytes()
@@ -1272,6 +1309,41 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         for invalid in (1, "true", [True]):
             value["finalImage"][policy_fields[0]] = invalid
             with self.assertRaises(DATA.Refused): DATA.project_receipt(value, CONTEXT, "finalize-image")
+
+        # The new optional field is closed and diagnostic only. A recorded
+        # branch without completed checks never becomes native validation.
+        package = receipt("finalize-package"); del package["finalImage"]
+        self.assertIsNone(DATA.project_receipt(package, CONTEXT, "finalize-package")["packageStapleObservation"])
+        observation = {name: None for name in ("heldPreIdentityMatched", "namedPreIdentityMatched",
+            "fdNameIdentityMatched", "fdNameMetadataMatched", "namedShapeExpected")}
+        observation.update(heldLinkState="unavailable", selectedBranch="unavailable", transitionComplete=False)
+        package["packageStapleObservation"] = observation
+        self.assertEqual(DATA.project_receipt(package, CONTEXT, "finalize-package")["packageStapleObservation"], observation)
+        for branch in ("same-original", "returned-output"):
+            same = branch == "same-original"
+            observation.update(heldPreIdentityMatched=True, namedPreIdentityMatched=same, fdNameIdentityMatched=same,
+                fdNameMetadataMatched=same, namedShapeExpected=True, heldLinkState="single" if same else "unlinked",
+                selectedBranch=branch, transitionComplete=True)
+            result = DATA.project_receipt(package, CONTEXT, "finalize-package")
+            self.assertEqual(result["packageStapleObservation"], observation)
+            self.assertIsNone(result["finalPackage"])
+            self.assertIsNone(result["finalImage"])
+        package["passed"] = False
+        observation["transitionComplete"] = False
+        observation["heldPreIdentityMatched"] = False
+        result = DATA.project_receipt(package, CONTEXT, "finalize-package")
+        self.assertFalse(result["recordedPassed"] or result["packageStapleObservation"]["transitionComplete"])
+        for key in observation:
+            for bad in (SENTINEL, [], 1):
+                changed = copy.deepcopy(package); changed["packageStapleObservation"][key] = bad
+                with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-package")
+            changed = copy.deepcopy(package); del changed["packageStapleObservation"][key]
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-package")
+        for bad in (None, {}, dict(observation, extra=SENTINEL), dict(observation, transitionComplete=True)):
+            changed = copy.deepcopy(package); changed["packageStapleObservation"] = bad
+            with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-package")
+        changed = copy.deepcopy(package); changed["phase"] = "finalize-image"
+        with self.assertRaises(DATA.Refused): DATA.project_receipt(changed, CONTEXT, "finalize-image")
 
     def test_entire_exact_correlation_tuple_is_required(self):
         for field in ("source", "workflowSource", "runId", "runAttempt", "target", "phase"):

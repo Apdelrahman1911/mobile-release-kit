@@ -630,6 +630,25 @@ INSTALLER_CREDENTIAL_ROSTER = (
 )
 
 
+def package_staple_observation_data(value):
+    flags = {"heldPreIdentityMatched", "namedPreIdentityMatched", "fdNameIdentityMatched",
+             "fdNameMetadataMatched", "namedShapeExpected"}
+    need(type(value) is dict and set(value) == flags | {"heldLinkState", "selectedBranch", "transitionComplete"}
+         and all(value[key] is None or type(value[key]) is bool for key in flags)
+         and type(value["transitionComplete"]) is bool
+         and type(value["heldLinkState"]) is str and value["heldLinkState"] in ("unavailable", "single", "unlinked", "other")
+         and type(value["selectedBranch"]) is str and value["selectedBranch"] in ("unavailable", "same-original", "returned-output"),
+         "final-package-staple-observation")
+    need(not value["transitionComplete"] or all(type(value[key]) is bool for key in flags)
+         and value["heldPreIdentityMatched"] and value["namedShapeExpected"]
+         and ((value["selectedBranch"], value["heldLinkState"], value["namedPreIdentityMatched"],
+               value["fdNameIdentityMatched"], value["fdNameMetadataMatched"])
+              in (("same-original", "single", True, True, True),
+                  ("returned-output", "unlinked", False, False, False))),
+         "final-package-staple-observation")
+    return dict(value)
+
+
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
                           image_release, release_sha, *, remove=False):
     """Closed preceding original observation AND the current immutable P.
@@ -645,6 +664,9 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
             "originalClosesKnown", "passed", "outerFinalityRequired", "androidServiceAuthenticated", "androidRegisteredCopyQualified",
             "androidBuildQualified", "developerIdOrNotarizationQualified", "productReady", "notaryAuthentication", "notarySubmission",
             "finalPackage", "directStagerIOPending", "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"}
+    if type(value) is dict and "packageStapleObservation" in value:
+        package_staple_observation_data(value["packageStapleObservation"])
+        keys.add("packageStapleObservation")
     need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
          and value["phase"] == ("finalize-remove-package" if remove else "finalize-package") and value["target"] == target and target in (ARM_TARGET, INTEL_TARGET)
          and value["source"] == environment["GITHUB_SHA"] == value["workflowSource"]
@@ -1080,6 +1102,13 @@ def original_failure(error, owner, checkout, timeout, limit):
               "outputLimitBytes": limit, "captureMode": "bytes", "frames": frames,
               "visitedFrames": visited, "omittedFrames": visited - len(frames),
               "foreignFrames": foreign, "tracebackTruncated": trace is not None}
+    observed = error.__dict__.get("owner_finality_diagnostic") if error_type != "other" else None
+    valid = (type(observed) is tuple and len(observed) == 5
+             and all(type(value) is int for value in observed[:4]) and observed[0] == 1
+             and observed[1] in (0, 1) and 0 <= observed[2] <= (1023 if observed[1] == 0 else 1048575)
+             and 0 <= observed[3] <= 15 and (observed[4] is None or type(observed[4]) is int
+             and observed[1] == 1 and (observed[4] in (0, 32) or 48 <= observed[4] <= 63)))
+    result["ownerFinality"] = list(observed) if valid else None
     need(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")) <= 2048,
          "original-failure-diagnostic-bound")
     return result
@@ -1793,6 +1822,7 @@ class Operation:
         self.installer_selection = self.installer_certificates = self.installer_profile_sha = None
         self.final_package_roots, self.final_package_inputs = [], []
         self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_preimage = None
         self.final_package_complete = False
         self.install_presentation_sources = []
         self.install_product_root = self.install_product_output_root = self.install_product_original = None
@@ -3970,6 +4000,7 @@ class Operation:
     def final_package_post(self, *, work=True):
         """The S2 post/clock supplies SOURCE, scripts, selected tools and P8."""
         self.notary_clock(work=work)
+        self.stager.package_staple_preimage_post(self, need, work=work)
         for root, names in self.final_package_roots:
             self.recheck_directory(root)
             need(set(os.listdir(root["fd"])) == names, "final-package-directory-census")
@@ -4032,35 +4063,7 @@ class Operation:
         self.signing_mutation_pending = False
 
     def final_package_appended(self, before, before_sha):
-        """Bind the POST prefix to the PRE whole hash, never two POST reads."""
-        entry = self.final_package_output
-        self.recheck_directory(entry["parent_entry"])
-        after = signature(os.fstat(entry["fd"]))
-        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
-             "final-package-ticket-binding")
-        need(after[:6] == before[:6], "final-package-ticket-metadata")
-        need(before[6] < after[6] <= before[6] + 1024 * 1024 and after[6] <= self.stager.MAX_BYTES,
-             "final-package-ticket-growth")
-        # Only size/mtime/ctime may change during stapling. Mode/owner/link/
-        # identity and both original directories are unchanged throughout.
-        whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
-        self.stager.no_xattrs(entry["fd"])
-        while offset < after[6]:
-            self.notary_clock()
-            block = os.pread(entry["fd"], min(1024 * 1024, after[6] - offset), offset)
-            need(block and len(block) <= after[6] - offset, "final-package-ticket-short-read")
-            whole.update(block)
-            if offset < before[6]:
-                prefix.update(block[:before[6] - offset])
-            offset += len(block)
-        need(prefix.hexdigest() == before_sha, "final-package-signed-prefix-changed")
-        need(os.pread(entry["fd"], 1, offset) == b"", "final-package-ticket-eof")
-        need(signature(os.fstat(entry["fd"])) == after, "final-package-ticket-fd-post")
-        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
-             "final-package-ticket-name-post")
-        self.recheck_directory(entry["parent_entry"])
-        entry["identity"], self.final_package_sha = after, whole.hexdigest()
-        self.notary_mutation_pending = False  # Only after full same-original POST.
+        self.stager.package_staple_appended(self, before, before_sha, need)
 
     def final_package_call(self, role, argv, *, maximum=30, limit=65536, developer=False):
         roles = final_package_roles(self.removal, self.environment["MRK_MACOS_PACKAGE_ROLE"])
@@ -4086,6 +4089,8 @@ class Operation:
         changing = role == "final-package-staple"
         before = self.final_package_output["identity"] if changing else None
         before_sha = self.final_package_sha if changing else None
+        if changing:
+            self.receipt["packageStapleObservation"] = self.stager.package_staple_observation()
         self.notary_mutation_pending = changing or role == "final-package-productbuild"
         self.signing_mutation_pending = role == "final-package-sign"
         try:
@@ -5303,6 +5308,7 @@ class Operation:
         self.target_entry, self.target_name = parent_target, parent_name
         self.notary_roots, self.notary_tools, self.final_package_roots, self.final_package_inputs = [], {}, [], []
         self.final_package_output_root = self.final_package_output = self.final_package_sha = None
+        self.final_package_preimage = None
         self.final_package_complete = False
         self.removal_prep_phase = None
         return expected

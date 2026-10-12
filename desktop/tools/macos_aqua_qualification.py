@@ -1606,8 +1606,8 @@ IOS_WORKSPACE = b'''<?xml version="1.0" encoding="UTF-8"?>
 '''
 
 OWNER_PINS = {
-    "owned_process.py": "0c7c87c7eaf27629be2eb33c195a956b6c40b7b5883214a08e15f255ac4939b8",
-    "_command_process.py": "2acd4508352f07236fd7ed9b2bedd8e2506451fe60d75326619beb7f27779b63",
+    "owned_process.py": 'ba23e4c65a916c297190c028bd5fd934723ef496105a46ec45c2a2e4b2f22b59',
+    "_command_process.py": 'ad1b7b7140d219674efd326ec529315fdf5a9fd55701a069d7f930a86e702a43',
     "_native_process.py": "70c380adde3c2bc06a0985761f0f877355bb56ef09ad506440da93fd4e4ba3b4",
     "cancellation.py": "eff29612208b2d6d81afa5638fa998778b17f39107357bb7a2f954facdc2628a",
 }
@@ -5731,7 +5731,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": "bf7fb48f9cf502964b45ab45993106fb63817631d8dadcab452043279a422b54",
+    "desktop/tools/stage_macos_installed.py": '800143d5fc3ddf9d7d373c1cf71a44434010098ed662c64d456bdeacf90a7673',
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
@@ -6062,7 +6062,7 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=No
     target_row = target_data(target)
     selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        limit = 365382 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        limit = 373689 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
         body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)

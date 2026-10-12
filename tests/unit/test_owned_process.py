@@ -103,6 +103,217 @@ class CommandContractTests(unittest.TestCase):
         with patch.object(command.os, "set_blocking"):
             return command._Wire(ctx, _InertLease(101), _InertLease(102), diagnostics=diagnostics)
 
+    def test_owner_finality_diagnostic_is_bounded_stored_data_not_authority(self):
+        def engine(child=True):
+            value = command._Outer.__new__(command._Outer)
+            value.ctx = self.context()
+            value.handlers_complete = value.local_cleanup_complete = True
+            value.create_route = SimpleNamespace(attempted=False, retired=True)
+            value.run_route = SimpleNamespace(attempted=False, retired=True)
+            value.wait = SimpleNamespace(status_kind="exit", status_code=command.HELPER_OK)
+            value.child = SimpleNamespace(receipt=value.wait) if child else None
+            value.terminal = {"producer": True, "stdout": 0, "stderr": 0, "failure_mask": 0}
+            value.sealed = True
+            value.wire = SimpleNamespace(eof=True, poisoned=False)
+            value.protocol_failed = value.output_failed = False
+            value.readers = [object(), object()]
+            value.output_eof, value.outputs = [True, True], [bytearray(), bytearray()]
+            return value
+
+        def observed(value):
+            before = dict(value.__dict__), dict(value.ctx.__dict__)
+            authoritative = value.original_finality()
+            answer = command._owner_finality_diagnostic(value)
+            self.assertEqual((value.__dict__, value.ctx.__dict__), before)
+            self.assertIs(value.original_finality(), authoritative)
+            return answer
+
+        self.assertEqual(observed(engine()), (1, 1, 0, 0, 0))
+        self.assertEqual(observed(engine(False)), (1, 0, 0, 0, None))
+        changes = (
+            (0, lambda e: setattr(e, "handlers_complete", False)),
+            (1, lambda e: setattr(e, "local_cleanup_complete", False)),
+            (2, lambda e: setattr(e.ctx, "cleanup_unknown", True)),
+            (3, lambda e: setattr(e, "wait", None)),
+            (4, lambda e: setattr(e.child, "receipt", object())),
+            (5, lambda e: setattr(e.wait, "status_kind", "signal")),
+            (6, lambda e: setattr(e.wait, "status_code", command.HELPER_UNKNOWN)),
+            (7, lambda e: setattr(e, "terminal", None)),
+            (8, lambda e: e.terminal.update(producer=False)),
+            (9, lambda e: setattr(e, "sealed", False)),
+            (10, lambda e: setattr(e, "wire", None)),
+            (11, lambda e: setattr(e.wire, "eof", False)),
+            (12, lambda e: setattr(e.wire, "poisoned", True)),
+            (13, lambda e: setattr(e, "protocol_failed", True)),
+            (14, lambda e: e.readers.pop()),
+            (15, lambda e: e.output_eof.__setitem__(0, False)),
+            (16, lambda e: e.output_eof.__setitem__(1, False)),
+            (17, lambda e: setattr(e, "output_failed", True)),
+            (18, lambda e: e.outputs[0].extend(b"public")),
+            (19, lambda e: e.outputs[1].extend(b"public")),
+        )
+        for bit, change in changes:
+            with self.subTest(child_bit=bit):
+                value = engine(); change(value)
+                result = observed(value)
+                self.assertEqual(result[:4], (1, 1, 1 << bit, 0))
+                self.assertEqual(result[4], None if bit in (7, 8, 9) else 0)
+                self.assertFalse(value.original_finality())
+        for bit, change in (
+            (3, lambda e: setattr(e.ctx.child_acquisition, "_attempted", True)),
+            (4, lambda e: setattr(e.ctx.child_acquisition, "_creation_unknown", True)),
+            (5, lambda e: e.ctx.tasks.append(SimpleNamespace(joined=False, acquisition=e.ctx.child_acquisition))),
+            (6, lambda e: setattr(e.create_route, "attempted", True)),
+            (7, lambda e: setattr(e.run_route, "attempted", True)),
+            (8, lambda e: setattr(e.create_route, "retired", False)),
+            (9, lambda e: setattr(e.run_route, "retired", False)),
+        ):
+            with self.subTest(no_child_bit=bit):
+                value = engine(False); change(value)
+                self.assertEqual(observed(value), (1, 0, 1 << bit, {4: 2, 5: 8}.get(bit, 0), None))
+                self.assertFalse(value.original_finality())
+        for field in ("_creation_unknown", "_resource_unknown"):
+            value = engine(); setattr(value.ctx.child_acquisition, field, True)
+            self.assertEqual(observed(value)[3], 2)
+        for field, mutation in (("_create_running", True), ("_active_calls", 1)):
+            value = engine(); setattr(value.ctx.child_acquisition, field, mutation)
+            self.assertEqual(observed(value)[3], 1)
+        for state, mask in (("NEW", 0), ("CLOSED", 0), ("OPEN", 4), ("UNKNOWN", 6),
+                            ("ACQUIRING", 6), ("CLOSE_IN_FLIGHT", 6)):
+            value = engine()
+            lease = command.native.FDLease.__new__(command.native.FDLease); lease._state = state
+            value.ctx.child_acquisition._leases.append(lease)
+            self.assertEqual(observed(value)[3], mask)
+        value = engine()
+        value.ctx.tasks.append(SimpleNamespace(joined=False, acquisition=object()))
+        self.assertEqual(observed(value)[3], 0)  # Unselected task is inapplicable, not a selected acquisition.
+        value.ctx.tasks[0].acquisition = value.ctx.child_acquisition
+        self.assertEqual(observed(value)[3], 8)
+        value.ctx.tasks[0].joined = True; value.ctx.child_acquisition._active_calls = 1
+        self.assertEqual(observed(value)[3], 9)
+        value.ctx.child_acquisition._active_calls = 0; value.ctx.child_acquisition._resource_unknown = True
+        self.assertEqual(observed(value)[3], 10)
+        for mask in (0, 32, *range(48, 64), None, True, -1, 1, 31, 33, 47, 64, "private"):
+            value = engine(); value.terminal["failure_mask"] = mask
+            self.assertEqual(observed(value)[4], mask if type(mask) is int and (mask in (0, 32) or 48 <= mask <= 63) else None)
+        value = engine(); value.wait = value.terminal = value.wire = None
+        self.assertEqual(observed(value), (1, 1, (1 << 3) | (1 << 7) | (1 << 10), 0, None))
+
+        class Unentered:
+            def __init__(self, leases):
+                self._leases = leases
+            @property
+            def _create_running(self):
+                self.fail_if_entered()
+            def fail_if_entered(self):
+                raise AssertionError("diagnostic exceeded its collection admission")
+            cleanup_unknown = property(fail_if_entered)
+            leases = property(fail_if_entered)
+        for count in (65, 1000):
+            value = engine(); value.ctx.acquisitions = [Unentered([])] * count
+            self.assertIsNone(command._owner_finality_diagnostic(value))
+            value = engine(); value.ctx.tasks = [object()] * count
+            value.ctx.acquisitions = [Unentered([])]
+            self.assertIsNone(command._owner_finality_diagnostic(value))
+        for sizes in ((513,), (300, 213)):
+            value = engine(); value.ctx.acquisitions = [Unentered([object()] * size) for size in sizes]
+            self.assertIsNone(command._owner_finality_diagnostic(value))
+        # The ceiling itself is supported, not silently truncated.
+        value = engine(False)
+        value.ctx.acquisitions.extend(command.native.Acquisition() for _ in range(63))
+        lease = command.native.FDLease.__new__(command.native.FDLease); lease._state = "CLOSED"
+        for acquisition in value.ctx.acquisitions:
+            acquisition._leases = [lease] * 8
+        value.ctx.tasks = [SimpleNamespace(joined=True, acquisition=value.ctx.child_acquisition) for _ in range(64)]
+        self.assertEqual(observed(value), (1, 0, 0, 0, None))
+        value.ctx.acquisitions.clear()
+        self.assertIsNone(command._owner_finality_diagnostic(value))
+
+    def test_primary_owner_diagnostic_cannot_replace_error_or_grant_finality(self):
+        class Scope:
+            def __init__(self, *_args, **_kwargs):
+                self._cleanup_errors = []
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+        class Engine:
+            def __init__(self, failure, final):
+                self.failure, self.final, self.calls = failure, final, []
+                self.ctx = SimpleNamespace(primary=None, origin=lambda: self.calls.append("origin"), record=self.record)
+            def record(self, error, **_kwargs):
+                if self.ctx.primary is None:
+                    self.ctx.primary = error
+            def body(self, *_args):
+                self.calls.append("body")
+                if self.failure is not None:
+                    raise self.failure
+            def cleanup(self):
+                raise AssertionError("DATA scope never performs native cleanup")
+            def publish(self):
+                self.calls.append("publish")
+                return SimpleNamespace(original_finality=object() if self.final else None,
+                                       no_target=None, run_tool=SimpleNamespace(attempted=True))
+        guard = SimpleNamespace(cancelled=False, depth=0, _borrowable=lambda: None)
+        diagnostic = (1, 1, 1 << 7, 8, None)
+        def run(engine, snapshot):
+            def observe(actual):
+                self.assertIs(actual, engine)
+                self.assertEqual(engine.calls[-1], "publish")
+                return snapshot(actual)
+            with patch.object(command, "_Outer", return_value=engine), \
+                 patch.object(command, "CleanupScope", Scope), \
+                 patch.object(command, "cancellation_owner", return_value=(guard, False)), \
+                 patch.object(command, "_owner_finality_diagnostic", side_effect=observe):
+                return command.run_command(["fictional"], environ=None, cwd=None, timeout=720,
+                    capture=True, output_limit=1024, cancellation=None, on_start=None, cleanup=False,
+                    execution_scope=None, journal_binding=None)
+        for kind in (owned.ProcessError, owned.ProcessCleanupError, owned.ProcessOutcomeUnknown):
+            for snapshot_failure in (False, True):
+                with self.subTest(kind=kind.__name__, snapshot_failure=snapshot_failure):
+                    original = kind(command.TIMEOUT, dispatched=False, contained=True)
+                    cause = ValueError("public synthetic cause"); original.__cause__ = cause
+                    original.owner_finality_diagnostic = (1, 0, 0, 0, None)
+                    args, fatal_mask = original.args, original.owner_failure_mask
+                    engine = Engine(original, False)
+                    def snapshot(_engine):
+                        self.assertIsNone(original.owner_finality_diagnostic)
+                        if snapshot_failure:
+                            raise MemoryError("synthetic annotation allocation")
+                        return diagnostic
+                    with self.assertRaises(kind) as caught:
+                        run(engine, snapshot)
+                    self.assertIs(caught.exception, original)
+                    self.assertEqual(original.args, args); self.assertIs(original.__cause__, cause)
+                    self.assertEqual((original.dispatched, original.contained, original.cleanup_complete), (True, False, False))
+                    self.assertIs(original.owner_failure_mask, fatal_mask)
+                    self.assertEqual(original.owner_finality_diagnostic, None if snapshot_failure else diagnostic)
+                    self.assertTrue(original.fatal)
+        for failure in (KeyboardInterrupt("public"), SystemExit(2)):
+            with self.assertRaises(type(failure)) as caught:
+                run(Engine(failure, False), lambda _: self.fail("fatal interruption was annotated"))
+            self.assertIs(caught.exception, failure)
+        class Unsupported(owned.ProcessError):
+            pass
+        failure = Unsupported("public")
+        with self.assertRaises(Unsupported) as caught:
+            run(Engine(failure, False), lambda _: self.fail("subclass was annotated"))
+        self.assertIs(caught.exception, failure)
+        self.assertIsNone(failure.owner_finality_diagnostic)
+        for failure, final in ((ValueError("private sentinel"), False), (ValueError("private sentinel"), True), (None, False)):
+            for unavailable in (False, True):
+                def snapshot(_):
+                    if unavailable:
+                        raise MemoryError("optional")
+                    return diagnostic
+                with self.assertRaises(owned.ProcessError) as caught:
+                    run(Engine(failure, final), snapshot)
+                self.assertEqual(type(caught.exception), owned.ProcessError if final else owned.ProcessCleanupError)
+                self.assertEqual(caught.exception.owner_finality_diagnostic, None if unavailable else diagnostic)
+                self.assertEqual((caught.exception.dispatched, caught.exception.contained, caught.exception.cleanup_complete),
+                                 (True, final, final))
+                self.assertNotIn("private sentinel", str(caught.exception))
+
     def test_adapter_passes_authoritative_objects_without_manufacturing_a_result(self):
         result = subprocess.CompletedProcess(["fixture"], -9, "", "")
         source, binding, guard = object(), object(), object()
@@ -1815,6 +2026,10 @@ class OwnedProcessTests(unittest.TestCase):
                         with self.assertRaises(owned.ProcessError) as raised:
                             _run_native(self.command(code), timeout=3)
                         self.assertTrue(raised.exception.dispatched and raised.exception.contained)
+                        diagnostic = raised.exception.owner_finality_diagnostic
+                        self.assertIs(type(diagnostic), tuple)
+                        self.assertEqual(diagnostic[:4], (1, 1, 0, 0))
+                        self.assertIn(diagnostic[4], (0, 32, *range(48, 64)))
                     else:
                         result = _run_native(self.command(code), timeout=8)
                         self.assertEqual(result.returncode, 7 if mode == "failure" else 0)

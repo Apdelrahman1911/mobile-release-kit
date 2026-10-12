@@ -3049,6 +3049,118 @@ INSTALL_PRESENTATION = ("Distribution.xml", "InstallerReadMe.html")
 INSTALL_PRESENTATION_LIMIT = 8192
 
 
+def package_staple_observation():
+    """Finite observations only; neither branch selection nor exit0 is proof."""
+    return {name: None for name in ("heldPreIdentityMatched", "namedPreIdentityMatched",
+        "fdNameIdentityMatched", "fdNameMetadataMatched", "namedShapeExpected")} | {
+        "heldLinkState": "unavailable", "selectedBranch": "unavailable", "transitionComplete": False}
+
+
+def package_staple_preimage_post(operation, guard, *, work=True, record=None):
+    """The retained unlinked PRE is checked by fd only, never by its old name."""
+    if record is None:
+        record = operation.final_package_preimage
+    if record is None:
+        return
+    entry, expected, sha = record
+    guard(operation.entry_registry.get(id(entry)) is entry and entry["kind"] == "file"
+          and type(entry["fd"]) is int and not entry["closed"] and expected[3] == 0,
+          "final-package-preimage-unavailable")
+    operation.recheck_directory(entry["parent_entry"])
+    operation.notary_clock(work=work)
+    guard(signature(os.fstat(entry["fd"])) == expected, "final-package-preimage-metadata")
+    no_xattrs(entry["fd"])
+    whole, offset = hashlib.sha256(), 0
+    while offset < expected[6]:
+        operation.notary_clock(work=work)
+        block = os.pread(entry["fd"], min(1024 * 1024, expected[6] - offset), offset)
+        guard(block and len(block) <= expected[6] - offset, "final-package-preimage-short-read")
+        whole.update(block)
+        offset += len(block)
+    guard(whole.hexdigest() == sha and os.pread(entry["fd"], 1, offset) == b"",
+          "final-package-preimage-content")
+    guard(signature(os.fstat(entry["fd"])) == expected, "final-package-preimage-post")
+    operation.recheck_directory(entry["parent_entry"])
+    operation.notary_clock(work=work)
+
+
+def package_staple_appended(operation, before, before_sha, guard):
+    """Admit one predeclared returned output, not a failed-check reopen."""
+    guard(operation.notary_mutation_pending and operation.final_package_preimage is None,
+          "final-package-ticket-transition-state")
+    observed = operation.receipt["packageStapleObservation"]
+    entry = operation.final_package_output
+    parent = entry["parent_entry"]
+    operation.recheck_directory(parent)
+    guard(os.listdir(parent["fd"]) == [entry["name"]], "final-package-directory-census")
+    held = signature(os.fstat(entry["fd"]))
+    observed["heldPreIdentityMatched"] = held[:2] == before[:2]
+    observed["heldLinkState"] = "unlinked" if held[3] == 0 else "single" if held[3] == 1 else "other"
+    named = signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+    observed.update(namedPreIdentityMatched=named[:2] == before[:2],
+        fdNameIdentityMatched=held[:2] == named[:2], fdNameMetadataMatched=held[2:] == named[2:],
+        namedShapeExpected=(stat.S_ISREG(named[2]) and named[2] == before[2] and named[3] == 1
+                            and named[4:6] == before[4:6]))
+    same = held[:2] == named[:2]
+    observed["selectedBranch"] = "same-original" if same else "returned-output"
+    preimage = None
+    if same:
+        guard(held == named, "final-package-ticket-binding")
+        guard(held[:6] == before[:6], "final-package-ticket-metadata")
+        after = held
+    else:
+        # An unlink may change nlink/ctime only. PRE bytes remain retained and
+        # are rechecked through every later validation/audit/publication POST.
+        guard(held[:3] == before[:3] and held[3] == 0 and held[4:8] == before[4:8],
+              "final-package-preimage-transition")
+        guard(observed["namedShapeExpected"], "final-package-returned-shape")
+        after = named
+        preimage = (entry, held, before_sha)
+    guard(before[6] < after[6] <= before[6] + 1024 * 1024 and after[6] <= MAX_BYTES,
+          "final-package-ticket-growth")
+    if preimage is not None:
+        package_staple_preimage_post(operation, guard, record=preimage)
+        # Registry registration occurs inside original(), before its first
+        # fallible observation. Nothing closes/retries an uncertain candidate.
+        candidate = operation.original(parent, entry["name"], "final-package-returned-original",
+                                       MAX_BYTES, (stat.S_IMODE(before[2]),))
+        guard(candidate["identity"] == after, "final-package-returned-acquisition")
+        entry = candidate
+        guard(signature(os.fstat(entry["fd"])) == after
+              == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+              "final-package-returned-binding")
+        operation.recheck_directory(parent)
+    whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
+    no_xattrs(entry["fd"])
+    while offset < after[6]:
+        operation.notary_clock()
+        block = os.pread(entry["fd"], min(1024 * 1024, after[6] - offset), offset)
+        guard(block and len(block) <= after[6] - offset, "final-package-ticket-short-read")
+        whole.update(block)
+        if offset < before[6]:
+            prefix.update(block[:before[6] - offset])
+        offset += len(block)
+    guard(prefix.hexdigest() == before_sha, "final-package-signed-prefix-changed")
+    guard(os.pread(entry["fd"], 1, offset) == b"", "final-package-ticket-eof")
+    guard(signature(os.fstat(entry["fd"])) == after, "final-package-ticket-fd-post")
+    guard(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+          "final-package-ticket-name-post")
+    operation.recheck_directory(parent)
+    guard(os.listdir(parent["fd"]) == [entry["name"]], "final-package-directory-census")
+    if preimage is not None:
+        package_staple_preimage_post(operation, guard, record=preimage)
+    # Commit the dedicated book and output while still pending; a thrown
+    # first POST never becomes known completion. Both descriptors stay owned.
+    operation.final_package_preimage = preimage
+    entry["identity"] = after
+    operation.final_package_output, operation.final_package_sha = entry, whole.hexdigest()
+    # First narrow committed POST precedes completion and clearing the latch.
+    package_staple_preimage_post(operation, guard)
+    guard(operation.notary_stream(entry) == operation.final_package_sha, "final-package-output-changed")
+    observed["transitionComplete"] = True
+    operation.notary_mutation_pending = False
+
+
 def install_product_sources(selection):
     selection = selected_build(selection)
     definition, readme = (read(DESKTOP / "macos-installed-inputs" / name, INSTALL_PRESENTATION_LIMIT)

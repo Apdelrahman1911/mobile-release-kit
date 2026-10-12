@@ -2568,6 +2568,63 @@ def packaging_fixture(target="aarch64-apple-darwin", *, package=b"synthetic comp
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
+    def test_primary_owner_finality_failure_data_is_closed_bounded_and_private(self):
+        module = ANDROID_HELPER
+        class ProcessErrorData(RuntimeError):
+            def __str__(self):
+                raise AssertionError("error text must not be rendered")
+        class Foreign(ProcessErrorData):
+            @property
+            def owner_finality_diagnostic(self):
+                raise AssertionError("foreign attributes must not be consulted")
+        owner = SimpleNamespace(ProcessError=ProcessErrorData)
+        checkout = Path("/public-synthetic-checkout")
+        def emit(observed):
+            error = ProcessErrorData("owned command exceeded its original deadline")
+            error.owner_finality_diagnostic = observed
+            result = module.original_failure(error, owner, checkout, 720, 2147483647)
+            self.assertEqual(result["classification"], "deadline")
+            self.assertNotIn("contained", result)
+            self.assertNotIn("cleanup_complete", result)
+            return result
+        for observation in ((1, 0, 1023, 15, None), (1, 1, 0, 0, 0),
+                            (1, 1, (1 << 3) | (1 << 7) | (1 << 10), 15, None),
+                            *((1, 1, 0, 0, mask) for mask in (32, *range(48, 64)))):
+            self.assertEqual(emit(observation)["ownerFinality"], list(observation))
+        for invalid in (None, "PRIVATE_SENTINEL", {}, [], (1,), (True, 1, 0, 0, 0),
+                        (1, True, 0, 0, None), (1, 1, False, 0, None), (1, 1, 0, False, None),
+                        (2, 1, 0, 0, None), (1, 2, 0, 0, None), (1, 0, 1024, 0, None),
+                        (1, 1, 1048576, 0, None), (1, 1, -1, 0, None), (1, 1, 0, 16, None),
+                        (1, 1, 0, -1, None), (1, 0, 0, 0, 0), (1, 1, 0, 0, True),
+                        (1, 1, 0, 0, 1), (1, 1, 0, 0, 47), (1, 1, 0, 0, 64),
+                        (1, 1, 0, 0, "PRIVATE_SENTINEL")):
+            result = emit(invalid)
+            self.assertIsNone(result["ownerFinality"])
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        for error in (ProcessErrorData("unclassified"), Foreign("PRIVATE_SENTINEL"), RuntimeError("PRIVATE_SENTINEL")):
+            result = module.original_failure(error, owner, checkout, 720, 1024)
+            self.assertIsNone(result["ownerFinality"])
+            self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
+        # Maximal admitted retained frame names/counts plus diagnostic bounds.
+        def template(depth, recurse, error):
+            if depth:
+                return recurse(depth - 1, recurse, error)
+            raise error
+        code = template.__code__.replace(co_filename=str(checkout / "src/mobile_release/_command_process.py"),
+                                         co_name="x" * 64, co_firstlineno=999990)
+        recurse = FunctionType(code, {})
+        error = ProcessErrorData("owned command exceeded its original deadline")
+        error.owner_finality_diagnostic = (1, 1, 1048575, 15, 63)
+        try:
+            recurse(30, recurse, error)
+        except ProcessErrorData as caught:
+            result = module.original_failure(caught, owner, checkout, 2147483647, 2147483647)
+        self.assertEqual(len(result["frames"]), 8)
+        self.assertEqual(result["ownerFinality"], [1, 1, 1048575, 15, 63])
+        self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
+        self.assertLessEqual((Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").stat().st_size,
+                             524288)
+
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
 
@@ -3176,19 +3233,21 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
         def changed(row, index, value):
             values = list(row); values[index] = value; return tuple(values)
-        complete = ["directory", "fstat", "stat", "xattrs", "clock", "read", "eof", "fstat", "stat", "directory"]
-        cases = (("success", None, 10),
-                 ("binding", "final-package-ticket-binding", 3),
-                 ("metadata", "final-package-ticket-metadata", 3),
-                 ("no-growth", "final-package-ticket-growth", 3),
-                 ("excess-growth", "final-package-ticket-growth", 3),
-                 ("max-bytes", "final-package-ticket-growth", 3),
-                 ("short-read", "final-package-ticket-short-read", 6),
-                 ("prefix", "final-package-signed-prefix-changed", 6),
-                 ("eof", "final-package-ticket-eof", 7),
-                 ("fd-post", "final-package-ticket-fd-post", 8),
-                 ("name-post", "final-package-ticket-name-post", 9),
-                 ("parent-post", "directory-post", 10))
+        complete = ["directory", "census", "fstat", "stat", "xattrs", "clock", "read", "eof", "fstat", "stat", "directory", "census", "stream"]
+        cases = (
+            ('success', None, 13),
+            ('binding', 'final-package-ticket-binding', 4),
+            ('metadata', 'final-package-ticket-metadata', 4),
+            ('no-growth', 'final-package-ticket-growth', 4),
+            ('excess-growth', 'final-package-ticket-growth', 4),
+            ('max-bytes', 'final-package-ticket-growth', 4),
+            ('short-read', 'final-package-ticket-short-read', 7),
+            ('prefix', 'final-package-signed-prefix-changed', 7),
+            ('eof', 'final-package-ticket-eof', 8),
+            ('fd-post', 'final-package-ticket-fd-post', 9),
+            ('name-post', 'final-package-ticket-name-post', 10),
+            ('parent-post', 'directory-post', 11),
+        )
         for case, reason, observations in cases:
             with self.subTest(case=case):
                 events = []; counts = {"fstat": 0, "stat": 0}
@@ -3197,13 +3256,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 if case == "no-growth": current = changed(after, 6, len(prefix))
                 if case == "excess-growth": current = changed(after, 6, len(prefix) + 1024 * 1024 + 1)
                 operation = object.__new__(module.Operation)
-                parent = {"synthetic": True}
+                parent = {"synthetic": True, "fd": 90}
                 entry = {"parent_entry": parent, "parent": 90, "fd": 91, "name": "synthetic.pkg", "identity": before}
                 operation.final_package_output = entry
                 operation.final_package_sha = hashlib.sha256(prefix).hexdigest()
                 operation.notary_mutation_pending = True
-                operation.stager = SimpleNamespace(MAX_BYTES=len(body)-1 if case == "max-bytes" else 2*1024*1024,
-                    no_xattrs=lambda fd: (self.assertEqual(fd, 91), events.append("xattrs")))
+                operation.final_package_preimage = None
+                operation.receipt = {"packageStapleObservation": TOOL.package_staple_observation()}
+                operation.notary_stream = lambda value: (events.append("stream"), hashlib.sha256(body).hexdigest())[1]
+                operation.stager = TOOL
                 def directory(value):
                     self.assertIs(value, parent); events.append("directory")
                     if case == "parent-post" and events.count("directory") == 2: raise module.Refused("directory-post")
@@ -3211,7 +3272,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 operation.notary_clock = lambda: events.append("clock")
                 def observed(kind):
                     events.append(kind); counts[kind] += 1; row = current
-                    if case == "binding" and kind == "stat": row = changed(row, 1, 3)
+                    if case == "binding" and kind == "stat": row = changed(row, 8, 99)
                     if case == "fd-post" and kind == "fstat" and counts[kind] == 2: row = changed(row, 7, 99)
                     if case == "name-post" and kind == "stat" and counts[kind] == 2: row = changed(row, 8, 99)
                     return SimpleNamespace(**dict(zip(fields, row)))
@@ -3227,7 +3288,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         return b"x" if case == "eof" else b""
                     self.assertEqual((size, offset), (len(body), 0)); events.append("read")
                     return b"" if case == "short-read" else b"X" + body[1:] if case == "prefix" else body
-                with (mock.patch.object(module.os, "fstat", side_effect=fstat),
+                with (mock.patch.object(TOOL, "MAX_BYTES", len(body)-1 if case == "max-bytes" else 2*1024*1024),
+                      mock.patch.object(TOOL, "no_xattrs", side_effect=lambda fd: (self.assertEqual(fd, 91), events.append("xattrs"))),
+                      mock.patch.object(module.os, "listdir", side_effect=lambda fd: (self.assertEqual(fd, 90), events.append("census"), ["synthetic.pkg"])[2]),
+                      mock.patch.object(module.os, "fstat", side_effect=fstat),
                       mock.patch.object(module.os, "stat", side_effect=named),
                       mock.patch.object(module.os, "pread", side_effect=pread)):
                     if reason is None:
@@ -3245,7 +3309,174 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(entry["identity"], before)
                     self.assertEqual(operation.final_package_sha, hashlib.sha256(prefix).hexdigest())
                     self.assertTrue(operation.notary_mutation_pending)
-                self.assertNotIn("receipt", operation.__dict__)
+                observation = operation.receipt["packageStapleObservation"]
+                self.assertEqual(observation["transitionComplete"], reason is None)
+                self.assertEqual(observation["selectedBranch"], "same-original")
+                self.assertIsNone(operation.final_package_preimage)
+                module.package_staple_observation_data(observation)
+
+        # Tiny owned filesystem fixtures exercise the actual register/openat,
+        # stream and consuming-close functions, without native tools or owners.
+        cases = ("success", "pre-linked", "pre-mode", "pre-identity", "pre-owner", "pre-size", "pre-mtime",
+                 "pre-content", "pre-short", "pre-eof", "pre-xattrs",
+                 "new-mode", "new-owner", "new-linked", "new-symlink", "no-growth", "over-growth",
+                 "prefix", "candidate-short", "candidate-eof", "candidate-xattrs", "open-race",
+                 "read-race", "pre-during-read", "first-post", "later-pre", "close-unknown")
+        for case in cases:
+            with self.subTest(returnedOutput=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); path = root / "owned"; path.mkdir(mode=0o700)
+                named = path / "synthetic.pkg"; named.write_bytes(prefix); named.chmod(0o600)
+                operation = object.__new__(module.Operation)
+                operation.entries = []; operation.entry_registry = {}; operation.errors = []
+                operation.app_absence = operation.update = None
+                operation.stager = TOOL; operation.notary_clock = lambda **kwargs: None
+                parent = operation.register(os.open(path, module.READ_FLAGS | os.O_DIRECTORY), "parent", "directory")
+                parent["identity"] = module.directory_identity(os.fstat(parent["fd"]))
+                operation.work_entry = parent; operation.source_entry = None; operation.work = path
+                old = operation.original(parent, named.name, "signed", TOOL.MAX_BYTES, (0o600,))
+                operation.final_package_output = old
+                operation.final_package_sha = before_sha = hashlib.sha256(prefix).hexdigest()
+                operation.final_package_preimage = None; operation.notary_mutation_pending = True
+                operation.receipt = {"packageStapleObservation": TOOL.package_staple_observation()}
+                operation.final_package_roots = [(parent, {named.name})]
+                operation.final_package_inputs = []; operation.target_entry = None
+                before = old["identity"]; old_fd = old["fd"]
+                native_pread, native_stat, native_fstat, native_close = os.pread, os.stat, os.fstat, os.close
+                events = []; changed_pre = [False]
+                try:
+                    if case == "pre-linked": os.link(named, root / "alias")
+                    if case == "pre-mode": os.fchmod(old_fd, 0o644)
+                    candidate = root / "returned.pkg"
+                    candidate.write_bytes(prefix if case == "no-growth" else
+                        b"X" + body[1:] if case == "prefix" else body)
+                    candidate.chmod(0o644 if case == "new-mode" else 0o600)
+                    if case == "new-linked": os.link(candidate, root / "new-alias")
+                    if case == "new-symlink":
+                        named.unlink(); named.symlink_to(candidate)
+                    else:
+                        candidate.replace(named)
+                    different_ino = max(native_fstat(old_fd).st_ino, native_stat(named).st_ino) + 1
+                    def read_original(fd, size, offset):
+                        events.append(("read", fd, offset))
+                        if fd == old_fd:
+                            if case == "pre-content" and offset == 0: return b"X" + prefix[1:]
+                            if case == "pre-short" and offset == 0: return b""
+                            if case == "pre-eof" and offset == len(prefix): return b"x"
+                        else:
+                            if case == "candidate-short" and offset == 0: return b""
+                            if case == "candidate-eof" and offset == len(body): return b"x"
+                            if offset == 0 and not changed_pre[0]:
+                                changed_pre[0] = True
+                                if case == "read-race":
+                                    other = root / "raced.pkg"; other.write_bytes(body); other.chmod(0o600); other.replace(named)
+                                if case == "pre-during-read": os.fchmod(old_fd, 0o644)
+                        return native_pread(fd, size, offset)
+                    def fstat_original(fd):
+                        row = native_fstat(fd)
+                        field = {"pre-identity": "st_ino", "pre-owner": "st_uid", "pre-size": "st_size",
+                                 "pre-mtime": "st_mtime_ns"}.get(case) if fd == old_fd else None
+                        if field is not None:
+                            values = {key: getattr(row, key) + (1 if key == field else 0) for key in fields}
+                            if field == "st_ino": values[field] = different_ino
+                            return SimpleNamespace(**values)
+                        return row
+                    def stat_original(name, *args, **kwargs):
+                        row = native_stat(name, *args, **kwargs)
+                        if case in ("new-owner", "over-growth") and name == named.name:
+                            # Growth is rejected from the named observation before
+                            # candidate admission/read; keep the real fixture tiny.
+                            values = {key: getattr(row, key) for key in fields}
+                            if case == "new-owner": values["st_uid"] += 1
+                            else: values["st_size"] = len(prefix) + 1024 * 1024 + 1
+                            return SimpleNamespace(**values)
+                        return row
+                    original = operation.original
+                    def admit(*args, **kwargs):
+                        events.append(("admit",))
+                        self.assertTrue(operation.notary_mutation_pending)
+                        self.assertFalse(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                        self.assertTrue(any(row[0] == "read" and row[1] == old_fd for row in events))
+                        if case == "open-race":
+                            other = root / "raced.pkg"; other.write_bytes(body); other.chmod(0o600); other.replace(named)
+                        return original(*args, **kwargs)
+                    def xattrs(fd):
+                        if (case == "candidate-xattrs" and fd != old_fd or case == "pre-xattrs" and fd == old_fd):
+                            raise TOOL.Refused("synthetic-xattrs")
+                    operation.original = admit
+                    stream = operation.notary_stream
+                    def committed_post(entry, **kwargs):
+                        self.assertIs(operation.final_package_output, entry)
+                        self.assertIs(operation.final_package_preimage[0], old)
+                        self.assertTrue(operation.notary_mutation_pending)
+                        self.assertFalse(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                        return "0" * 64 if case == "first-post" else stream(entry, **kwargs)
+                    operation.notary_stream = committed_post
+                    success = case in ("success", "later-pre", "close-unknown")
+                    with (mock.patch.object(module.os, "fstat", side_effect=fstat_original),
+                          mock.patch.object(module.os, "pread", side_effect=read_original),
+                          mock.patch.object(module.os, "stat", side_effect=stat_original),
+                          mock.patch.object(TOOL, "no_xattrs", side_effect=xattrs)):
+                        if success:
+                            operation.final_package_appended(before, before_sha)
+                        else:
+                            with self.assertRaises((module.Refused, TOOL.Refused)):
+                                operation.final_package_appended(before, before_sha)
+                    observation = operation.receipt["packageStapleObservation"]
+                    self.assertEqual(observation["selectedBranch"], "returned-output")
+                    self.assertFalse(observation["fdNameIdentityMatched"])
+                    self.assertEqual(observation["transitionComplete"], success)
+                    self.assertEqual(operation.notary_mutation_pending, not success)
+                    self.assertIs(operation.entry_registry[id(old)], old)
+                    self.assertEqual(old["fd"], old_fd); self.assertFalse(old["closed"])
+                    self.assertNotIn("finalPackage", operation.receipt)
+                    self.assertLessEqual(len([v for v in events if v[0] == "admit"]), 1)
+                    self.assertLessEqual(len(operation.entries), 3)
+                    if success:
+                        self.assertIsNot(operation.final_package_output, old)
+                        self.assertIs(operation.final_package_preimage[0], old)
+                        self.assertEqual(operation.final_package_sha, hashlib.sha256(body).hexdigest())
+                        self.assertEqual(native_pread(old_fd, len(prefix), 0), prefix)
+                        self.assertEqual(os.fstat(old_fd).st_nlink, 0)
+                        operation.notary_stream = stream
+                        operation.final_package_post()
+                        if case == "later-pre":
+                            os.fchmod(old_fd, 0o644)
+                            with self.assertRaisesRegex(module.Refused, "final-package-preimage-metadata"):
+                                operation.final_package_post()
+                        if case == "close-unknown":
+                            def uncertain(fd):
+                                native_close(fd)
+                                raise OSError("synthetic uncertain close")
+                            with mock.patch.object(module.os, "close", side_effect=uncertain) as closing:
+                                operation.close(old); operation.close(old)
+                                closing.assert_called_once_with(old_fd)
+                            self.assertIsNone(old["fd"]); self.assertFalse(old["closed"])
+                            self.assertEqual(operation.errors, [{"stage": "close", "role": "signed", "type": "OSError"}])
+                    else:
+                        self.assertFalse(observation["transitionComplete"])
+                        if case != "first-post":
+                            self.assertIs(operation.final_package_output, old)
+                            self.assertEqual(operation.final_package_sha, before_sha)
+                finally:
+                    for entry in reversed(operation.entries): operation.close(entry)
+
+        # Strict closed optional DATA consumer: absent legacy receipt remains
+        # accepted by final_package_receipt; present malformed DATA never does.
+        value = TOOL.package_staple_observation()
+        self.assertEqual(module.package_staple_observation_data(value), value)
+        value.update(heldPreIdentityMatched=True, namedPreIdentityMatched=False, fdNameIdentityMatched=False,
+                     fdNameMetadataMatched=False, namedShapeExpected=True, heldLinkState="unlinked",
+                     selectedBranch="returned-output", transitionComplete=True)
+        self.assertEqual(module.package_staple_observation_data(value), value)
+        for key in value:
+            for bad in ("PRIVATE/path", [], 1):
+                broken = dict(value); broken[key] = bad
+                with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
+            broken = dict(value); del broken[key]
+            with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
+        for broken in (dict(value, unexpected="PRIVATE/path"), dict(value, heldLinkState="single"),
+                       dict(value, heldPreIdentityMatched=False), dict(value, namedShapeExpected=None)):
+            with self.assertRaises(module.Refused): module.package_staple_observation_data(broken)
 
     def test_install_product_audit_failure_is_static_and_preserves_pending(self):
         module = ANDROID_HELPER
@@ -3257,7 +3488,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(public.INSTALL_PRODUCT_AUDIT_REASONS, TOOL.INSTALL_PRODUCT_AUDIT_REASONS)
         self.assertEqual(len(TOOL.INSTALL_PRODUCT_AUDIT_REASONS), 32)
         # Literal-only diagnostics never publish arbitrary local values or success.
-        self.assertEqual(public.FINAL_PACKAGE_POST_REASONS, frozenset(('final-package-ticket-binding', 'final-package-ticket-metadata', 'final-package-ticket-growth', 'final-package-ticket-short-read', 'final-package-signed-prefix-changed', 'final-package-ticket-eof', 'final-package-ticket-fd-post', 'final-package-ticket-name-post', 'final-package-directory-census', 'final-package-input-changed', 'final-package-output-changed', 'final-package-target-census', 'final-package-original-settlement-reserve', 'final-package-fixed-role-order', 'final-package-private-role', 'final-package-original-bound')))
+        self.assertEqual(public.FINAL_PACKAGE_POST_REASONS, frozenset(('final-package-ticket-transition-state', 'final-package-preimage-unavailable', 'final-package-preimage-metadata', 'final-package-preimage-short-read', 'final-package-preimage-content', 'final-package-preimage-post', 'final-package-preimage-transition', 'final-package-returned-shape', 'final-package-returned-acquisition', 'final-package-returned-binding', 'final-package-ticket-binding', 'final-package-ticket-metadata', 'final-package-ticket-growth', 'final-package-ticket-short-read', 'final-package-signed-prefix-changed', 'final-package-ticket-eof', 'final-package-ticket-fd-post', 'final-package-ticket-name-post', 'final-package-directory-census', 'final-package-input-changed', 'final-package-output-changed', 'final-package-target-census', 'final-package-original-settlement-reserve', 'final-package-fixed-role-order', 'final-package-private-role', 'final-package-original-bound')))
         for reason in sorted(public.FINAL_PACKAGE_POST_REASONS):
             projected = public.project_failure({"stage": "final-package-staple", "type": "Refused", "reason": reason})
             self.assertEqual(projected, {"stage": "final-package-staple", "type": "Refused", "reason": reason, "errno": None})
@@ -3345,7 +3576,95 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(state.observations, [])
                 self.assertFalse((state.work / "distribution-final").exists())
 
-    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
+    def test_returned_package_preimage_survives_full_finalization_and_late_failure(self):
+        module = ANDROID_HELPER
+        for late in (False, True):
+            with self.subTest(latePreimageChange=late), tempfile.TemporaryDirectory() as directory:
+                fixture = self.final_package_fixture(Path(directory), returned_output=True,
+                    failure="retained-preimage-at-validate" if late else None)
+                operation = fixture.operation
+                observed, consumed = [], []
+                call, audit, publish, close = (operation.call, operation.final_package_audit,
+                                              operation.final_package_publish, operation.close)
+                def retained(label):
+                    original, identity, sha = operation.final_package_preimage
+                    self.assertIs(operation.entry_registry[id(original)], original)
+                    self.assertIsNot(original, operation.final_package_output)
+                    self.assertIsNotNone(original["fd"]); self.assertFalse(original["closed"])
+                    self.assertEqual(module.signature(os.fstat(original["fd"])), identity)
+                    self.assertEqual(identity[3], 0)
+                    self.assertEqual(os.pread(original["fd"], len(fixture.signed) + 1, 0), fixture.signed)
+                    self.assertEqual(sha, module.digest(fixture.signed))
+                    observed.append(label)
+                def original_call(role, *args, **kwargs):
+                    if role in ("final-package-validate", "final-package-signature-after"):
+                        retained(role)
+                    return call(role, *args, **kwargs)
+                def original_audit(*args, **kwargs):
+                    changed = operation.final_package_preimage is not None
+                    if changed: retained("audit-before")
+                    result = audit(*args, **kwargs)
+                    if changed: retained("audit-after")
+                    return result
+                def original_publish():
+                    retained("publication-before")
+                    result = publish()
+                    retained("publication-after")
+                    return result
+                def original_close(entry):
+                    if operation.final_package_preimage is not None and (entry is operation.final_package_preimage[0]
+                            or entry is operation.final_package_output):
+                        self.assertIsNotNone(entry["fd"])
+                        self.assertNotIn(id(entry), consumed); consumed.append(id(entry))
+                    return close(entry)
+                with (self.final_package_fixture_call(fixture), mock.patch.object(operation, "call", new=original_call),
+                      mock.patch.object(operation, "final_package_audit", new=original_audit),
+                      mock.patch.object(operation, "final_package_publish", new=original_publish),
+                      mock.patch.object(operation, "close", new=original_close)):
+                    if late:
+                        with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$"):
+                            operation.execute()
+                        self.assertEqual(operation.receipt["failure"], {"stage": "final-package-validate",
+                            "type": "Refused", "reason": "final-package-preimage-metadata"})
+                    else:
+                        operation.execute()
+                old = operation.final_package_preimage[0]
+                self.assertEqual(consumed, [id(old), id(operation.final_package_output)])
+                self.assertTrue(old["closed"] and operation.final_package_output["closed"])
+                self.assertTrue(operation.receipt["packageStapleObservation"]["transitionComplete"])
+                self.assertEqual(operation.receipt["packageStapleObservation"]["selectedBranch"], "returned-output")
+                if late:
+                    self.assertEqual(observed, ["final-package-validate"])
+                    self.assertFalse(operation.receipt["passed"] or operation.receipt["targetRetired"])
+                    self.assertNotIn("finalPackage", operation.receipt)
+                    self.assertFalse((fixture.work / "package-final").exists())
+                    self.assertEqual(fixture.observations[-1][0], "final-package-validate")
+                else:
+                    self.assertEqual(observed, ["final-package-validate", "final-package-signature-after",
+                        "audit-before", "audit-after", "publication-before", "publication-after"])
+                    self.assertTrue(operation.receipt["passed"] and operation.receipt["targetRetired"]
+                                    and operation.receipt["originalClosesKnown"])
+                    self.assertTrue(all(entry["closed"] for entry in operation.entries))
+                    published = fixture.work / "package-final/MobileReleaseKit.pkg"
+                    final_body = published.read_bytes()
+                    self.assertEqual(final_body, fixture.signed + fixture.ticket)
+                    self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o444)
+                    self.assertTrue(operation.receipt["finalPackage"]["actualStaplerValidation"])
+                    record_body = (fixture.work / "android-helper-finalize-package.json").read_bytes()
+                    record = json.loads(record_body)
+                    release_body = (fixture.checkout / operation.release_input).read_bytes()
+                    arguments = (fixture.environment, module.ARM_TARGET, fixture.credentials.installer,
+                        module.digest((fixture.checkout / module.INSTALLER_PROFILE).read_bytes()),
+                        module.digest((fixture.checkout / module.NOTARY_PROFILE).read_bytes()),
+                        len(final_body), module.digest(final_body),
+                        TOOL.build_release_data(release_body, target=module.ARM_TARGET)["release"], module.digest(release_body))
+                    self.assertEqual(module.final_package_receipt(record_body, *arguments), record["finalPackage"])
+                    legacy = copy.deepcopy(record); del legacy["packageStapleObservation"]
+                    self.assertEqual(module.final_package_receipt(TOOL.canonical(legacy), *arguments), record["finalPackage"])
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(dict(record, packageStapleObservation=None)), *arguments)
+
+    def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None, returned_output=False):
         """Real original files/audits/auth custody; only native returns are DATA."""
         module = ANDROID_HELPER
         checkout, work, environment, _owner, _observations = self.fixture(root, build_target=target)
@@ -3491,9 +3810,10 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(argv, [str(state.tools["stapler"]["path"]), "staple" if called.endswith("-staple") else "validate", str(path)])
                 if called == "final-package-staple":
                     before = path.stat()
-                    if failure == "ticket-replaced":
+                    if returned_output or failure == "ticket-replaced-prefix":
                         replacement = path.with_suffix(".replacement")
-                        replacement.write_bytes(signed + ticket); replacement.chmod(0o600); replacement.replace(path)
+                        replacement.write_bytes((b"X" + signed[1:] if failure == "ticket-replaced-prefix" else signed) + ticket)
+                        replacement.chmod(0o600); replacement.replace(path)
                     else:
                         with path.open("ab") as output_file:
                             output_file.write(ticket if failure != "ticket-oversize" else b"x" * (1024 * 1024 + 1))
@@ -3503,6 +3823,9 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         elif failure == "ticket-mode":
                             path.chmod(0o644)
                         self.assertEqual(path.stat().st_ino, before.st_ino)
+                elif failure == "retained-preimage-at-validate":
+                    self.assertIsNotNone(operation.final_package_preimage)
+                    os.fchmod(operation.final_package_preimage[0]["fd"], 0o644)
             return CompletedProcess(argv, 0, output, b"")
 
         state.operation = module.Operation(SimpleNamespace(run_owned=command), checkout, work, "finalize-package", environment, TOOL, target=target)
@@ -5381,6 +5704,11 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                         module.digest(notary_body), len(final_body), returned,
                         TOOL.build_release_data(release_body, target=target)["release"], module.digest(release_body))
                     self.assertEqual(module.final_package_receipt(record_body, *arguments), record["finalPackage"])
+                    legacy = copy.deepcopy(record); del legacy["packageStapleObservation"]
+                    self.assertEqual(module.final_package_receipt(TOOL.canonical(legacy), *arguments), record["finalPackage"])
+                    malformed_observation = dict(record, packageStapleObservation=None)
+                    with self.assertRaises(module.Refused):
+                        module.final_package_receipt(TOOL.canonical(malformed_observation), *arguments)
                     if role == "ordinary-image":
                         missing_product = copy.deepcopy(record)
                         missing_product["originalCalls"] = missing_product["originalCalls"][1:]
@@ -6657,7 +6985,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 "signed-input-changed", "signed-roster", "signed-scripts", "submit-json", "submit-status", "log-sha", "log-id",
                 "final-package-signature-before-untrusted", "final-package-signature-before-untimestamped", "final-package-signature-before-chain",
                 "final-package-signature-after-untrusted", "final-package-signature-after-untimestamped", "final-package-signature-after-chain",
-                "ticket-replaced", "ticket-oversize", "ticket-prefix", "ticket-mode", "invalid", "invalid-log-failure"):
+                "ticket-replaced-prefix", "ticket-oversize", "ticket-prefix", "ticket-mode", "invalid", "invalid-log-failure"):
             with self.subTest(finalPackageRefusal=failure), tempfile.TemporaryDirectory() as directory:
                 fixture = self.final_package_fixture(Path(directory), failure=failure)
                 operation = fixture.operation

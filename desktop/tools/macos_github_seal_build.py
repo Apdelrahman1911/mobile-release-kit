@@ -58,7 +58,7 @@ REUSE_PINS = {
     "macos_cpython_source_build.py": (91537, "70c7552f2b9eaace61ddc316da7482575692e4d3715eadfdef572b1aa0e44de6"),
     "macos_cpython_orchestrator.py": (105771, "963555122a18aa1a123b033becbb53a67e44b55c8f2d26f0554f79c29b07f296"),
     "macos_cpython_source_probe.py": (28617, "721b3adebde7925dbb6ee6e7c39ad4ae9aebe8f6c99f11b880378792595088c4"),
-    "macos_aqua_qualification.py": (464005, "0c6b5665cc74f21bc1fdf1c9f0d05a283d12a3dd1084d120cde96fc59fb1fe7b"),
+    "macos_aqua_qualification.py": (464005, '5372a0d63abd7a41004edc3d04a61cb1b7e5215e44ff486c02bb27cb2560552d'),
 }
 HELPER_PINS = {
     'Cargo.lock': (141, 'bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3'),

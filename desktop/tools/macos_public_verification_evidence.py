@@ -172,6 +172,16 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
 
 
 FINAL_PACKAGE_POST_REASONS = frozenset((
+    'final-package-ticket-transition-state',
+    'final-package-preimage-unavailable',
+    'final-package-preimage-metadata',
+    'final-package-preimage-short-read',
+    'final-package-preimage-content',
+    'final-package-preimage-post',
+    'final-package-preimage-transition',
+    'final-package-returned-shape',
+    'final-package-returned-acquisition',
+    'final-package-returned-binding',
     'final-package-ticket-binding',
     'final-package-ticket-metadata',
     'final-package-ticket-growth',
@@ -793,6 +803,26 @@ def decode(body, budget, *, inventory=False, ui_admission=False):
     return value
 
 
+def project_owner_finality(value):
+    """Finite post-publication DATA, not completion, cleanup or target authority."""
+    if value is None:
+        return {"available": False}
+    need(type(value) is list and len(value) == 5 and all(type(part) is int for part in value[:4]))
+    version, branch, outer, cleanup, terminal = value
+    need(version == 1 and branch in (0, 1) and 0 <= outer <= (1023 if branch == 0 else 1048575)
+         and 0 <= cleanup <= 15)
+    need(terminal is None or type(terminal) is int and branch == 1
+         and (terminal in (0, 32) or 48 <= terminal <= 63))
+    if branch == 1:
+        # No child observations may be invented for a missing parent record.
+        need(not (outer & (1 << 3) and outer & ((1 << 4) | (1 << 5) | (1 << 6))))
+        need(not (outer & (1 << 7) and outer & ((1 << 8) | (1 << 18) | (1 << 19))))
+        need(not (outer & (1 << 10) and outer & ((1 << 11) | (1 << 12))))
+        need(terminal is None or not outer & ((1 << 7) | (1 << 8) | (1 << 9)))
+    return {"available": True, "branch": "no-child" if branch == 0 else "child",
+            "predicateMask": outer, "cleanupMask": cleanup, "terminalFailureMask": terminal}
+
+
 def project_calls(rows, *, credential=False):
     if rows is None:
         return None
@@ -822,6 +852,8 @@ def project_calls(rows, *, credential=False):
                     "timeoutSeconds": optional(failure, "timeoutSeconds", lambda value: integer(value, 2**31 - 1)),
                     "outputLimitBytes": optional(failure, "outputLimitBytes", lambda value: integer(value, 2**31 - 1)),
                 }
+                if "ownerFinality" in failure:
+                    item["originalFailure"]["ownerFinality"] = project_owner_finality(failure["ownerFinality"])
         projected.append(item)
     return {"recordedCount": len(rows), "unclassifiedCount": unknown, "calls": projected}
 
@@ -1207,6 +1239,24 @@ def update_join(baseline, current):
             "productReady": False}
 
 
+def project_package_staple(value):
+    flags = {"heldPreIdentityMatched", "namedPreIdentityMatched", "fdNameIdentityMatched",
+             "fdNameMetadataMatched", "namedShapeExpected"}
+    need(type(value) is dict and set(value) == flags | {"heldLinkState", "selectedBranch", "transitionComplete"}
+         and all(value[key] is None or type(value[key]) is bool for key in flags)
+         and type(value["transitionComplete"]) is bool
+         and type(value["heldLinkState"]) is str and value["heldLinkState"] in ("unavailable", "single", "unlinked", "other")
+         and type(value["selectedBranch"]) is str and value["selectedBranch"] in ("unavailable", "same-original", "returned-output"))
+    need(not value["transitionComplete"] or all(type(value[key]) is bool for key in flags)
+         and value["heldPreIdentityMatched"] and value["namedShapeExpected"]
+         and ((value["selectedBranch"], value["heldLinkState"], value["namedPreIdentityMatched"],
+               value["fdNameIdentityMatched"], value["fdNameMetadataMatched"])
+              in (("same-original", "single", True, True, True),
+                  ("returned-output", "unlinked", False, False, False))))
+    return dict(value)
+
+
+
 def project_receipt(value, context, phase):
     need(type(value) is dict and type(value.get("schemaVersion")) is int and value["schemaVersion"] == 1)
     for name in ("source", "workflowSource", "runId", "runAttempt", "target"):
@@ -1246,6 +1296,10 @@ def project_receipt(value, context, phase):
     if submission is not None:
         need(type(submission.get("status")) is str and submission["status"] in ("Accepted", "Invalid"))
         result["notarySubmission"] = {"id": uuid_value(submission.get("id")), "status": submission["status"]}
+    result["packageStapleObservation"] = None
+    if "packageStapleObservation" in value:
+        need(phase in ("finalize-package", "finalize-remove-package", "prepare-removal-observers"))
+        result["packageStapleObservation"] = project_package_staple(value["packageStapleObservation"])
     for name in ("payloadNotarization", "finalPackage", "finalImage"):
         final = value.get(name)
         result[name] = project_final(final)
