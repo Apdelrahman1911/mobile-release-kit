@@ -32,7 +32,7 @@ ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 PROJECT = "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
 LOADER = "desktop/tools/macos_aqua_qualification.py"
-LOADER_SHA = "a95595829262f25f04eeb0c7df0c9370394e2161c6e42c143ad5d169cc832f86"
+LOADER_SHA = "0c6b5665cc74f21bc1fdf1c9f0d05a283d12a3dd1084d120cde96fc59fb1fe7b"
 LOADER_MODULE = "mrk_normal_ui_owner_loader"
 TARGET = "MRKNormalAppUITests"
 CLASS = TARGET + "/NormalAppUITests/"
@@ -378,7 +378,7 @@ class RunnerProducts:
         return False
 
 
-def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
+def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
     machine, _ = normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60)), "engineering-fixed-test-selection")
@@ -390,16 +390,19 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and Path(result).name == IOS_UNSIGNED_RESULT)),
          "ios-unsigned-fixed-test-selection")
+    need(type(ios_pending) is bool and (not ios_pending or (not any((engineering, output_data, android_positive, ios_unsigned))
+         and tuple(methods) == (CLASS + IOS_PENDING_METHOD,) and allowance == 525
+         and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-selection")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and Path(result).name == basename,
              "removal-fixed-test-selection")
-    need(removal_case is not None or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
+    need(removal_case is not None or ios_pending or ios_unsigned or android_positive or output_data or engineering or tuple(methods) == (PACKAGED_METHOD,) or
          any(tuple(methods) == tuple(CLASS + method for method in selection[0])
              and allowance == selection[1] for selection in NORMAL_SELECTIONS.values()),
          "fixed-test-selection")
-    need(((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300))
+    need((ios_pending and allowance == 525 or not ios_pending and ((android_positive or ios_unsigned) and allowance == 900 or not (android_positive or ios_unsigned) and allowance in (60, 300)))
          and (tuple(methods) != (PACKAGED_METHOD,) or allowance == 60), "test-allowance")
     return ["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifest),
         "-destination", "platform=macOS" if target == INTEL_TARGET else "platform=macOS,arch=" + machine,
@@ -409,7 +412,7 @@ def xcode_test_arguments(manifest, result, methods, allowance, *, target=ARM_TAR
         "-maximum-test-execution-time-allowance", str(allowance), "-disableAutomaticPackageResolution"]
 
 
-def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, removal_case=None):
+def run_admitted_test(call, derived, result, methods, allowance, timeout, *, target=ARM_TARGET, engineering=False, output_data=False, android_positive=False, ios_unsigned=False, ios_pending=False, removal_case=None):
     normal_target_data(target)
     need(tuple(methods) != (PACKAGED_METHOD,) or target == ARM_TARGET, "fixed-packaged-test-target")
     need(type(engineering) is bool and (not engineering or (target == ARM_TARGET and tuple(methods) == (ENGINEERING_METHOD,) and allowance == 60 and timeout == 180)), "engineering-fixed-test-owner")
@@ -421,16 +424,20 @@ def run_admitted_test(call, derived, result, methods, allowance, timeout, *, tar
     need(type(ios_unsigned) is bool and (not ios_unsigned or (not engineering and not output_data and not android_positive
          and tuple(methods) == (CLASS + IOS_UNSIGNED_METHOD,) and allowance == 900 and timeout == 1020
          and Path(result).name == IOS_UNSIGNED_RESULT)), "ios-unsigned-fixed-test-owner")
+    need(type(ios_pending) is bool and (not ios_pending or (not any((engineering, output_data, android_positive, ios_unsigned))
+         and tuple(methods) == (CLASS + IOS_PENDING_METHOD,) and allowance == 525 and timeout == 645
+         and Path(result).name == IOS_PENDING_RESULT)), "ios-pending-fixed-test-owner")
     if removal_case is not None:
         selected, basename = removal_selection(removal_case)
-        need(not any((engineering, output_data, android_positive, ios_unsigned)) and target == ARM_TARGET
+        need(not any((engineering, output_data, android_positive, ios_unsigned, ios_pending)) and target == ARM_TARGET
              and tuple(methods) == (selected,) and allowance == 300 and timeout == 420
              and Path(result).name == basename, "removal-fixed-test-owner")
     need(not os.path.lexists(result), "fresh-xcresult-required")
     with RunnerProducts(derived) as products:
         facts = products.admit(call)  # Actual generated runner, BEFORE xcodebuild can request any app.
         command = (xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, removal_case=removal_case)
-                   if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
+                   if removal_case is not None else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_pending=True)
+                   if ios_pending else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, ios_unsigned=True)
                    if ios_unsigned else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, android_positive=True)
                    if android_positive else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, engineering=True)
                    if engineering else xcode_test_arguments(products.products / products.manifest, result, methods, allowance, target=target, output_data=True)
@@ -581,6 +588,11 @@ def normal_cli_arguments(arguments, *, target=ARM_TARGET):
 
 # This fixed opt-in route reuses the normal installed launch/original-command
 # owner. It neither enables a product feature nor substitutes an engineering app.
+IOS_PENDING_METHOD = "testInstalledIOSPendingAccountRecoveryThroughUI"
+IOS_PENDING_RESULT = "ios-pending-recovery-test.xcresult"
+IOS_PENDING_PREFIX = b"MRK_MACOS_UI_IOS_PENDING_RECOVERY="
+IOS_PENDING_RUN = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"
+IOS_PENDING_ATTEMPT = "TEST_RUNNER_MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"
 IOS_UNSIGNED_METHOD = "testSyntheticProjectUnsignedIOSArchive"
 IOS_UNSIGNED_RESULT = "ios-unsigned-archive-test.xcresult"
 IOS_UNSIGNED_PREFIX = b"MRK_MACOS_IOS_UNSIGNED_ARCHIVE_UI="
@@ -635,7 +647,8 @@ SUMMARY_STEMS = {"test.xcresult": "summary", "project-test.xcresult": "project-s
     "workflow-refusal-test.xcresult": "workflow-refusal-summary",
     "release-evidence-test.xcresult": "release-evidence-summary",
     "saved-version-recovery-test.xcresult": "saved-version-recovery-summary",
-    IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary"}
+    IOS_UNSIGNED_RESULT: "ios-unsigned-archive-summary",
+    IOS_PENDING_RESULT: "ios-pending-recovery-summary"}
 TOOLCHAIN_QUERIES = (
     ("xcode", "xcode-version.txt", ("/usr/bin/xcodebuild", "-version")),
     ("sdkPath", "sdk-path.txt", ("/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")),
@@ -668,6 +681,11 @@ def normal_request(arguments, temporary):
         value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / IOS_UNSIGNED_RESULT,
             methods=(CLASS + IOS_UNSIGNED_METHOD,) if testing else (), allowance=900 if testing else None,
             timeout=1020 if testing else 30, phaseSeconds=1245 if testing else 90, iosUnsigned=True)
+    elif arguments in (["--normal-ios-pending-recovery-test"], ["--normal-ios-pending-recovery-summary"]):
+        testing = arguments[0].endswith("-test")
+        value = dict(phase="test" if testing else "summary", derived=normal / "DerivedData", result=normal / IOS_PENDING_RESULT,
+            methods=(CLASS + IOS_PENDING_METHOD,) if testing else (), allowance=525 if testing else None,
+            timeout=645 if testing else 30, phaseSeconds=1080 if testing else 90, iosPending=True)
     elif arguments == ["--normal-output-data-test"]:
         need(target == ARM_TARGET, "output-data-arm-only")
         value = dict(phase="test", derived=normal / "DerivedData", result=normal / OUTPUT_DATA_RESULT,
@@ -949,7 +967,7 @@ def publish_normal_build_settings(phase, request, source, original, host_version
 def normal_source_state(phase, source):
     arguments = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
-        "desktop/tools/macos_normal_ui_runner.py"]
+        "desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"]
     original = phase.call("normal-ui-source-roster", arguments, 15)
     need(original.returncode == 0 and len(original.stdout) <= 8192, "normal-ui-source-command")
     rows = original.stdout.split(b"\0")
@@ -960,7 +978,7 @@ def normal_source_state(phase, source):
         mode, kind, blob = header.split(b" ")
         name = raw_name.decode("utf-8", "strict")
         need(kind == b"blob" and mode in (b"100644", b"100755")
-             and (name.startswith("desktop/native/macos-normal-ui/") or name == "desktop/tools/macos_normal_ui_runner.py")
+             and (name.startswith("desktop/native/macos-normal-ui/") or name in ("desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"))
              and all(part not in ("", ".", "..") for part in name.split("/")) and name not in facts,
              "normal-ui-source-entry")
         fd = os.open(phase.root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -971,7 +989,7 @@ def normal_source_state(phase, source):
             facts[name] = [decimal(identity), digest]
         finally:
             os.close(fd)
-    need("desktop/tools/macos_normal_ui_runner.py" in facts
+    need("desktop/src/components/IOSArchive.tsx" in facts and "desktop/tools/macos_normal_ui_runner.py" in facts
          and "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift" in facts,
          "normal-ui-source-complete")
     return facts
@@ -1465,6 +1483,184 @@ def normal_saved_version_markers(stdout):
     return True
 
 
+
+def ios_pending_marker(stdout, *, binding, loader):
+    need(type(stdout) is bytes and 0 < len(stdout) <= 1048576, "ios-pending-original-output-bound")
+    lines = stdout.splitlines()
+    selected = b"-[MRKNormalAppUITests.NormalAppUITests " + IOS_PENDING_METHOD.encode("ascii") + b"]"
+    attempts = [line for line in lines if line.startswith(b"Test Case ")]
+    need(len(attempts) == 2 and attempts[0] == b"Test Case '" + selected + b"' started."
+         and re.fullmatch(rb"Test Case '" + re.escape(selected) + rb"' passed \([0-9]+(?:\.[0-9]+)? seconds\)\.", attempts[1])
+         and lines.count(ORIGINAL_MARKER.encode("ascii")) == 1
+         and sum(line.startswith(b"MRK_MACOS_UI_ORIGINAL=") for line in lines) == 1
+         and not any(b"MRK_MACOS_UI_FAILURE_CLEANUP=" in line for line in lines), "ios-pending-one-original-attempt")
+    markers = [line[len(IOS_PENDING_PREFIX):] for line in lines if line.startswith(IOS_PENDING_PREFIX)]
+    need(len(markers) == 1 and 0 < len(markers[0]) <= 4096, "ios-pending-one-closed-marker")
+    need(lines.index(attempts[0]) < lines.index(ORIGINAL_MARKER.encode("ascii"))
+         < lines.index(IOS_PENDING_PREFIX + markers[0]) < lines.index(attempts[1]), "ios-pending-original-terminal-order")
+    value = loader.normal_account_observation(document(markers[0]), binding)
+    need(encoded(value) == markers[0], "ios-pending-canonical-marker")
+    return value
+
+
+def ios_pending_summary(body):
+    value = document(body)
+    counts = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+    need(all(type(value.get(key)) is int and value[key] == count for key, count in counts.items()), "ios-pending-exact-one-pass")
+    return counts
+
+
+class NormalIOSRecoveryFixture:
+    """One genuine same-account fixture, original UI and independent readback."""
+    def __init__(self, phase, source, request):
+        self.phase, self.source, self.request = phase, source, request
+        self.loader = sys.modules.get(LOADER_MODULE)
+        need(self.loader is not None and self.loader.__file__ == str(phase.root / LOADER), "ios-pending-loader-binding")
+        self.binding = self.loader.Binding(source, phase.environment[IOS_PENDING_RUN], phase.environment[IOS_PENDING_ATTEMPT],
+                                           request["target"]).checked()
+        self.fixtures = self.loader.Fixtures(self.binding, os.getuid(), os.getgid(), self.loader.IOS_ACCOUNT_CASE)
+        self.loader_fd = None
+        self.loader_original = None
+        self.stager = None
+        self.started = False
+        self.prepared = False
+        self.cleanup_errors = []
+
+    def check_sources(self):
+        self.phase.clock.check()
+        need(sys.modules.get(LOADER_MODULE) is self.loader and self.loader_fd is not None,
+             "ios-pending-loader-registry")
+        need(original_body(self.loader_fd, 1024*1024)[1:] == self.loader_original
+             and full9(os.stat(self.phase.root / LOADER, follow_symlinks=False)) == self.loader_original[0],
+             "ios-pending-loader-original-changed")
+        if self.stager is not None:
+            need(sys.modules.get("_mrk_shipping_gate_stager") is self.stager, "ios-pending-stager-registry")
+        for original in self.fixtures.gate_files:
+            need(self.loader._gate_file_read(original)[1] == original["sha256"], "ios-pending-source-original-changed")
+        if self.fixtures.recovery_runtime is not None:
+            self.fixtures.recovery_runtime_paths()
+
+    def __enter__(self):
+        try:
+            self.loader_fd = os.open(self.phase.root / LOADER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            _, identity, digest = original_body(self.loader_fd, 1024*1024)
+            need(digest == LOADER_SHA, "ios-pending-loader-pin")
+            self.loader_original = (identity, digest)
+            self.check_sources()
+            self.fixtures.prepare()
+            need(self.fixtures.account_home == self.phase.environment["HOME"] == "/Users/runner", "ios-pending-same-account-home")
+            self.fixtures.admit_normal_account_runtime(self.phase.root, self.request["derived"].parent.parent)
+            self.stager = sys.modules.get("_mrk_shipping_gate_stager")
+            need(self.stager is not None, "ios-pending-stager-original")
+            self.prepared = True
+            self.check_sources()
+            return self
+        except BaseException as error:
+            if self.close() is not None:
+                error.add_note("normal recovery fixture also had a consuming-close refusal")
+            raise
+
+    def account_call(self, argv, *, environ, cwd, timeout, capture, text, output_limit):
+        fixtures, phase = self.fixtures, self.phase
+        mode = "produce" if fixtures.stage == "account-produce" else "observe" if fixtures.stage == "account-observe" else None
+        need(mode is not None and fixtures.inflight and not fixtures.last_returned, "ios-pending-account-call-state")
+        limit, cap = (16384, 180) if mode == "produce" else (2048, 90)
+        state = fixtures.path / "state" / self.loader.IOS_ACCOUNT_CASE
+        executable, core = fixtures.recovery_runtime
+        need(type(argv) is list and len(argv) == 12 and argv[:7] == [executable, "-I", "-S", "-B", "-c", self.loader.IOS_ACCOUNT_CORE_PROGRAM, core]
+             and argv[7] == mode and argv[8] == str(state) and all(type(arg) is str for arg in argv)
+             and all(re.fullmatch(r"[1-9][0-9]{0,19}", argv[i]) for i in (9, 10))
+             and int(argv[10]) - int(argv[9]) == 25_000_000_000
+             and argv[11] == ("-" if mode == "produce" else fixtures.account_private_sha)
+             and timeout == cap and capture is True and text is False and output_limit == limit
+             and cwd == state and environ == self.loader._account_environment(state, fixtures.uid, "runner")
+             and "HOME" not in environ, "ios-pending-account-call-contract")
+        # argv also carries its existing final deadline and private-hash argument;
+        # caller validation below checks those before entering the actual owner.
+        return self._account_original(argv, environ, cwd, cap, limit, mode)
+
+    def _account_original(self, argv, environ, cwd, cap, limit, mode):
+        phase = self.phase
+        try:
+            actual = phase.clock.allowance(cap)
+            need(actual == cap, "ios-pending-fixed-child-window")
+            value = phase.owner.run_owned(argv, environ=environ, cwd=cwd, timeout=actual,
+                                          capture=True, text=False, output_limit=limit)
+            original_command(value, argv, limit)
+            if phase.first_nonzero is None and value.returncode != 0:
+                phase.first_nonzero = value
+            phase.records.append({"role": "ios-account-" + mode, "returncode": value.returncode,
+                "timeoutSeconds": actual, "roleCapSeconds": cap, "outputLimitBytes": limit,
+                "argvSha256": sha(encoded(argv)), "stdoutBytes": len(value.stdout), "stdoutSha256": sha(value.stdout),
+                "stderrBytes": len(value.stderr), "stderrSha256": sha(value.stderr)})
+            phase.clock.check()
+            return value
+        except BaseException:
+            phase.clock.failed = True
+            raise
+
+    def ui_call(self, role, argv, seconds, limit=1048576):
+        need(self.prepared and not self.started, "ios-pending-ui-order")
+        self.check_sources()
+        if role != "one-admitted-ui-test":
+            need(role in ("verify-generated-runner", "generated-runner-entitlements") and seconds == 30,
+                 "ios-pending-runner-admission-role")
+            return self.phase.call(role, argv, seconds, limit)
+        need(seconds == 645 and limit == 1048576 and [row["role"] for row in self.phase.records]
+             == ["normal-ui-source-roster", "verify-generated-runner", "generated-runner-entitlements"]
+             and all(row["returncode"] == 0 for row in self.phase.records), "ios-pending-prior-originals")
+        self.started = True
+        self.phase.clock.allowance(180)
+        self.loader._run_ios_account_child(self.fixtures, self.account_call, self.fixtures.uid, "runner", "produce")
+        self.check_sources()
+        self.fixtures.case, self.fixtures.stage = self.loader.IOS_ACCOUNT_CASE, "normal-ui-original"
+        self.fixtures.inflight, self.fixtures.last_returned = True, False
+        original = self.phase.call(role, argv, seconds, limit)
+        self.fixtures.inflight, self.fixtures.last_returned = False, True
+        self.fixtures.normal_account_original = original
+        return original
+
+    def recovered(self, original, runner_facts):
+        need(self.started and original is self.fixtures.normal_account_original, "ios-pending-original-identity")
+        self.check_sources()
+        observation = ios_pending_marker(original.stdout, binding=self.binding, loader=self.loader)
+        self.fixtures.accept_normal_account_app(observation, original, runner_facts)
+        self.phase.clock.allowance(90)
+        self.loader._run_ios_account_child(self.fixtures, self.account_call, self.fixtures.uid, "runner", "observe")
+        self.check_sources()
+        account = self.fixtures.readback_normal_account(observation)
+        return {"schemaVersion": 1, "scope": "normal-ui-pending-account-recovery-v1", "observation": observation,
+                "account": account, "originalClosesCompleted": False}
+
+    def close(self):
+        failure = None
+        try:
+            self.fixtures.close()  # Refuses unknown originals; never deletes account state.
+        except BaseException as error:
+            failure = error
+            self.cleanup_errors.append(type(error).__name__)
+        if self.loader_fd is not None:
+            fd, self.loader_fd = self.loader_fd, None
+            try:
+                os.close(fd)
+            except BaseException as error:
+                self.cleanup_errors.append(type(error).__name__)
+                if failure is None:
+                    failure = error
+        for module in self.fixtures.normal_stager_registrations:
+            if sys.modules.get("_mrk_shipping_gate_stager") is module:
+                del sys.modules["_mrk_shipping_gate_stager"]
+        return failure
+
+    def __exit__(self, exc_type, exc, tb):
+        failure = self.close()
+        if failure is not None and exc is None:
+            raise failure
+        if failure is not None and exc is not None:
+            exc.add_note("normal recovery fixture also had a consuming-close refusal")
+        return False
+
+
 class SavedVersionFixture:
     """Retained fixed SOURCE/fixture originals, borrowed by exactly one XCTest.
 
@@ -1824,7 +2020,7 @@ def output_data_records(commands, expected):
 def output_data_source_argv(source):
     return ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
-        "desktop/tools/macos_normal_ui_runner.py"]
+        "desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"]
 
 
 def output_data_build_receipt(value, source, normal, roster, *, target=ARM_TARGET):
@@ -2295,6 +2491,8 @@ def execute_normal_phase(phase, request, source, file_limit):
                  "resultBundle": result.name, "originalCommandRole": "normal-ui-summary", "originalReturncode": original.returncode}
         if request.get("iosUnsigned") is True and original.returncode == 0:
             facts["iosUnsignedTestCounts"] = ios_unsigned_summary(original.stdout)
+        if request.get("iosPending") is True and original.returncode == 0:
+            facts["iosPendingRecoveryTestCounts"] = ios_pending_summary(original.stdout)
         receipt = result.parent / (SUMMARY_STEMS[result.name] + ".command-admission.json")
     else:
         need(mode == "test", "normal-phase-selection")
@@ -2309,6 +2507,16 @@ def execute_normal_phase(phase, request, source, file_limit):
                     facts["savedVersionRecovery"] = fixture.restored()
             if original.returncode == 0:
                 facts["savedVersionRecovery"]["originalClosesCompleted"] = True
+        elif request.get("iosPending") is True:
+            with NormalIOSRecoveryFixture(phase, source, request) as fixture:
+                original, facts = run_admitted_test(fixture.ui_call, derived, result, request["methods"],
+                    request["allowance"], request["timeout"], target=target, ios_pending=True)
+                if original.returncode == 0:
+                    # The actual RunnerProducts POST and consuming closes completed
+                    # before this normal acceptance and independent native readback.
+                    facts["iosPendingRecovery"] = fixture.recovered(original, facts)
+            if original.returncode == 0:
+                facts["iosPendingRecovery"]["originalClosesCompleted"] = True
         elif request.get("iosUnsigned") is True:
             original, facts = run_admitted_test(phase.call, derived, result, request["methods"],
                 request["allowance"], request["timeout"], target=target, ios_unsigned=True)
@@ -2333,6 +2541,9 @@ def execute_normal_phase(phase, request, source, file_limit):
                  phaseClock=phase.clock.before_publication(), receiptPolicy="exclusive0600-readback-consuming-close")
     exclusive_output(receipt, encoded(facts) + b"\n", 32768)
     phase.clock.check()  # Includes actual original receipt close, never inferred from a persisted flag.
+    if request.get("iosPending") is True and mode == "test" and original.returncode == 0:
+        exclusive_output(derived.parent / "ios-pending-recovery.facts.json", encoded(facts["iosPendingRecovery"]) + b"\n", 16384)
+        phase.clock.check()
     if request.get("iosUnsigned") is True and mode == "test" and original.returncode == 0:
         exclusive_output(derived.parent / "ios-unsigned-archive.facts.json", encoded(facts["iosUnsignedObservation"]) + b"\n", 16384)
         phase.clock.check()
@@ -3226,7 +3437,7 @@ def normal_context(request, *, diagnostics=None):
     need(all(environment[key] == value for key, value in {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
          "HOME": "/Users/runner", "USER": "runner", "LOGNAME": "runner", "LANG": "en_US.UTF-8",
          "LC_ALL": "en_US.UTF-8", "TZ": "UTC"}.items()), "normal-clean-environment")
-    if request.get("androidPositive") is True:
+    if request.get("androidPositive") is True or request.get("iosPending") is True:
         env = os.environ
         need(sys.version_info[:3] == (3, 14, 7)
              and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
@@ -3238,10 +3449,13 @@ def normal_context(request, *, diagnostics=None):
              and env.get("RUNNER_OS") == "macOS" and env.get("RUNNER_ARCH") == ("ARM64" if request["target"] == ARM_TARGET else "X64")
              and all(re.fullmatch(r"[1-9][0-9]{0,19}", env.get(k, "")) for k in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT")),
              "android-signed-fixed-installed-context")
-        handoff = str(derived.parent / "android-input-fixture.json")
-        # Derived from this admitted fixed work, never a caller-supplied private path.
-        environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
-                            ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+        if request.get("androidPositive") is True:
+            handoff = str(derived.parent / "android-input-fixture.json")
+            # Derived from this admitted fixed work, never a caller-supplied private path.
+            environment.update({ANDROID_INPUT_ENV: handoff, ANDROID_RUN_ENV: env["GITHUB_RUN_ID"],
+                                ANDROID_ATTEMPT_ENV: env["GITHUB_RUN_ATTEMPT"]})
+        else:
+            environment.update({IOS_PENDING_RUN: env["GITHUB_RUN_ID"], IOS_PENDING_ATTEMPT: env["GITHUB_RUN_ATTEMPT"]})
     if diagnostics is not None:
         diagnostics["hostVersion"] = host_version
     return root, source, environment, file_limit
@@ -3853,7 +4067,7 @@ def main():
         owner = load_normal_owner(root)
         stage = "phase"
         phase = (NormalPhase(owner, environment, root, clock, retain_nonzero=True)
-                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True else NormalPhase(owner, environment, root, clock))
+                 if request.get("outputData") is True or request.get("androidPositive") is True or request.get("iosUnsigned") is True or request.get("iosPending") is True else NormalPhase(owner, environment, root, clock))
         records = phase.records
         try:
             stage = "execute"
@@ -3908,7 +4122,7 @@ def main():
             except BaseException:
                 pass
             return retained_intel_build.returncode  # Query/final-clock errors cannot replace original70.
-        if request is not None and request.get("iosUnsigned") is True:
+        if request is not None and (request.get("iosUnsigned") is True or request.get("iosPending") is True):
             code = phase.first_nonzero.returncode if phase is not None and phase.first_nonzero is not None else 1
             try:
                 # Optional closed diagnostics cannot replace an original return or

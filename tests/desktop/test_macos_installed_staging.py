@@ -1465,7 +1465,405 @@ INSTALLED_ANDROID_ACTIVATION_INVERSE = (
     "      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n",
 )
 
+NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n",
+  '      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-pending-recovery' || 'disabled' }}\n"),
+ ('            ios-unsigned-archive)\n', '            ios-unsigned-archive|ios-pending-recovery)\n'),
+ ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n",
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"),
+ ('      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n',
+  '      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'
+  '      - name: Recover one genuine pending iOS account session through the ordinary app\n'
+  '        id: normal_ios_pending_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 19\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # Seven originals: sourcePRE/runner-signature/entitlements/producer180/\n'
+  '          # XCTest645 (525case)/observer90/sourcePOST, one1080s phase. The real\n'
+  '          # producer/UI/readback all must settle; logs and private baseline stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the one pending iOS recovery XCTest summary under the same source\n'
+  '        id: normal_ios_pending_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'))
+
+
+def without_normal_ios_pending_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("normal iOS pending workflow SOURCE bound differs")
+    if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
+        return source
+    for previous, current in reversed(NORMAL_IOS_PENDING_WORKFLOW_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending workflow exact SOURCE differs")
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65":
+        raise AssertionError("normal iOS pending workflow whole predecessor differs")
+    return source
+
+
+INSTALLED_IOS_ACTIVATION_INVERSE = (('      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'android-signed-build' || 'disabled' }}\n",
+  '      # This installed verification run exercises iOS; Android keeps its separate qualification.\n'
+  '      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'),
+ ('      # Separately reviewed unsigned archive UI; an installed app is still mandatory.\n'
+  '      MRK_MACOS_IOS_UI_SCOPE: disabled\n',
+  '      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n"))
+
+def without_installed_ios_activation_workflow(source):
+    source = without_normal_ios_pending_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed iOS activation SOURCE bound differs")
+    (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+    android_scopes = [line for line in source.splitlines(keepends=True)
+                      if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    ios_scopes = [line for line in source.splitlines(keepends=True)
+                  if line.startswith("      MRK_MACOS_IOS_UI_SCOPE:")]
+    if new_android not in source and new_ios not in source:
+        # Historical scope mutations belong to their unchanged exact inverse;
+        # only this new activation's own incomplete markers are refused here.
+        if (new_android.splitlines()[0] in source or new_ios.splitlines()[0] in source
+                or new_ios.splitlines(keepends=True)[1] in ios_scopes):
+            raise AssertionError("installed iOS activation partial SOURCE differs")
+        return source
+    if (source.count(new_android) != 1 or source.count(new_ios) != 1
+            or old_android in source or old_ios in source
+            or android_scopes != [new_android.splitlines(keepends=True)[1]]
+            or ios_scopes != [new_ios.splitlines(keepends=True)[1]]):
+        raise AssertionError("installed iOS activation exact SOURCE differs")
+    for previous, current in reversed(INSTALLED_IOS_ACTIVATION_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc":
+        raise AssertionError("installed iOS activation whole predecessor differs")
+    return source
+
+
 def without_installed_android_activation_workflow(source):
+    source = without_installed_ios_activation_workflow(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("installed Android activation SOURCE bound differs")
     previous, current = INSTALLED_ANDROID_ACTIVATION_INVERSE
@@ -2551,7 +2949,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif argv[1] == "verify-cert":
                 self.assertIsNotNone(installer)
                 paths_ = [str(checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der")) for name in ("leaf", "issuer", "root")]
-                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
+                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
                 if state.failure == "installer-chain":
                     return CompletedProcess(argv, 1, b"", b"INERT wrong Installer certificate purpose")
             elif argv[1] == "delete-keychain":
@@ -6738,15 +7136,29 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
                                      dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
             carrier = dict(ticket(None), path=archive)
-            current = dict(log, archiveFilename=archive, ticketContents=[carrier])
-            if archive == module.NOTARY_ZIP_NAME:
+            omitted = dict(carrier); del omitted["arch"]
+            # Signed containers may omit arch rather than explicitly use null.
+            # This is the same exact top-level carrier exception, never ZIP/code.
+            for annotation in (carrier, omitted):
+                current = dict(log, archiveFilename=archive, ticketContents=[annotation])
+                encoded = body(current)
+                if archive == module.NOTARY_ZIP_NAME:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive)
+                else:
+                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
+                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
                 with self.assertRaises(module.Refused):
-                    module.notary_log_data(body(current), submission, "d" * 64, archive_name=archive)
-            else:
-                self.assertEqual(module.notary_log_data(body(current), submission, "d" * 64, archive_name=archive)["ticketRowCount"], 1)
-            with self.assertRaises(module.Refused):
-                module.notary_log_data(body(dict(current, ticketContents=[dict(carrier, path=archive + "/nested")])),
-                                       submission, "d" * 64, archive_name=archive)
+                    module.notary_log_data(body(dict(current, ticketContents=[dict(annotation, path=archive + "/nested")])),
+                                           submission, "d" * 64, archive_name=archive)
+                invalid_carriers = [dict(annotation, extra=True)]
+                for required_key in ("path", "digestAlgorithm", "cdhash"):
+                    missing_required = dict(annotation); del missing_required[required_key]
+                    invalid_carriers.append(missing_required)
+                for invalid_carrier in invalid_carriers:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(body(dict(current, ticketContents=[invalid_carrier])),
+                                               submission, "d" * 64, archive_name=archive)
         row = ticket("i386")
         missing = dict(row); del missing["arch"]
         bad_rows = [dict(row, arch=value) for value in ("arm64e", "x86_64h", "ppc", "", "null", True, 386, [], None)]
@@ -6897,7 +7309,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             TOOL.packaging_selection_command(SimpleNamespace(target=selection.target))
 
         self.assertEqual(module.PYTHON_SUPPLIERS, TOOL.SIGNED_ORIGINAL_SUPPLIERS)
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove", "same-package-noop"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         for phase in module.PYTHON_PHASES:
             self.assertEqual(module.entrypoint(["inert", phase, "--target", module.INTEL_TARGET]), (phase, module.INTEL_TARGET))
         for phase in ("python-auto", "python-shipping ", "python-engineering-fallback"):
@@ -7093,7 +7506,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         for value in (display + b"CDHash=malformed\n", display + display, display + b"Signature=other\n", b"\xff",
                       display.replace(b"adhoc", b"configured"), display.replace(b"c" * 40, b"c" * 39), b"x" * 16385):
             with self.subTest(displayBytes=len(value)), self.assertRaises(module.Refused): module.credential_cdhash(value)
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove", "same-package-noop"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         self.assertEqual(module.SIGNING_PHASES, ("sign-vault-helper", "sign-desktop-image", "sign-desktop-payload", "sign-root-app", "sign-root-installer", "sign-remover"))
         for phase in module.SIGNING_PHASES:
             for target in (module.ARM_TARGET, module.INTEL_TARGET):
@@ -7227,6 +7641,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(module.package_signature_data(signature, selection, certificates, path),
                          {"trusted": True, "timestamp": True, "certificateSha256": [module.digest(value) for value in certificates]})
         self.assertEqual(module.package_signature_data(signature.replace(b'trusted by macOS', b'trusted by Mac OS X'), selection, certificates, path)["trusted"], True)
+        modern_signature = signature.replace(b'signed by a certificate trusted by macOS',
+            b'signed by a developer certificate issued by Apple for distribution')
+        self.assertEqual(module.package_signature_data(modern_signature, selection, certificates, path),
+                         module.package_signature_data(signature, selection, certificates, path))
+        for body in (modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                     modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                     modern_signature.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                     modern_signature.replace(selection["identityCommonName"].encode(), b'Developer ID Installer: FOREIGN (TEST000001)')):
+            with self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, path)
         for body in (signature.replace(b'trusted by macOS', b'untrusted by macOS'),
                      signature.replace(b'Signed with a trusted timestamp on:', b'Signed without a trusted timestamp on:'),
                      signature.replace(b'1. Developer ID Installer:', b'2. Developer ID Installer:'),
@@ -7346,10 +7770,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     getgid=mock.Mock(return_value=20),getegid=mock.Mock(return_value=20))):
                 for phase in expected:
                     self.assertEqual(module.admit(selected,target=target,phase=phase),Path(selected["MRK_MACOS_WORK"]))
-                for phase in set(module.PHASES + module.PYTHON_PHASES + module.SIGNING_PHASES + module.TOOL_SIGNING_PHASES
-                                 + module.NOTARY_PHASES + module.FINAL_PACKAGE_PHASES + module.FINAL_IMAGE_PHASES
-                                 + module.REMOVAL_OWNER_PHASES) - set(expected):
-                    with self.subTest(appRefPhase=phase), self.assertRaisesRegex(module.Refused,"^app-signature-fixed-native-phase$"):
+                phase_refusals = {
+                    "same-package-noop": "same-package-fixed-purpose",
+                    "update-baseline": "update-fixed-credential-free-baseline",
+                    "prepare-app-absence": "app-absence-fixed-native-phase",
+                    "app-absence-restore": "app-absence-fixed-native-phase",
+                }
+                for phase in sorted(set(module.PHASES + module.PYTHON_PHASES + module.SIGNING_PHASES + module.TOOL_SIGNING_PHASES
+                                        + module.NOTARY_PHASES + module.FINAL_PACKAGE_PHASES + module.FINAL_IMAGE_PHASES
+                                        + module.REMOVAL_OWNER_PHASES) - set(expected)):
+                    reason = phase_refusals.get(phase, "app-signature-fixed-native-phase")
+                    with self.subTest(appRefPhase=phase), self.assertRaisesRegex(module.Refused, "^" + reason + "$"):
                         module.admit(selected,target=target,phase=phase)
                 for phase in module.APP_SIGNATURE_DATA:
                     module.tool_data_context(selected,phase,target)
@@ -7365,14 +7796,75 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         main_node = next(n for n in helper_ast.body if isinstance(n,ast.FunctionDef) and n.name == "main")
         operation_node = next(n for n in helper_ast.body if isinstance(n,ast.ClassDef) and n.name == "Operation")
         execute_node = next(n for n in operation_node.body if isinstance(n,ast.FunctionDef) and n.name == "execute")
-        for callable_node in (main_node,execute_node):
-            self.assertIn('get("GITHUB_REF") != APP_SIGNATURE_REF',ast.get_source_segment(helper_source,callable_node))
+        for callable_node, expected_guard in (
+                (main_node, 'get("GITHUB_REF") != APP_SIGNATURE_REF'),
+                (execute_node, 'get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF)')):
+            with self.subTest(signingProfileGuard=callable_node.name):
+                self.assertIn(expected_guard, ast.get_source_segment(helper_source, callable_node))
         with self.assertRaises(TOOL.Refused):
             TOOL.packaging_signing_data(b"schema=1\nstate=unconfigured\n",module.UNCONFIGURED_PROFILE,
                                        allow_unconfigured=environment["GITHUB_REF"] != module.APP_SIGNATURE_REF)
 
 
 
+
+    def test_installer_basic_chain_keeps_exact_public_originals_and_refuses_before_signing(self):
+        # Genuine current package/credential methods with inert native returns;
+        # this does not establish certificate validity or native signing.
+        module = ANDROID_HELPER
+        for failure in (None, "installer-chain"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                fixture = self.final_package_fixture(Path(directory))
+                legacy_signature = fixture.signature_text
+                fixture.signature_text = legacy_signature.replace(b'signed by a certificate trusted by macOS',
+                    b'signed by a developer certificate issued by Apple for distribution')
+                self.assertNotEqual(fixture.signature_text, legacy_signature)
+                fixture.credentials.failure = failure
+                operation = fixture.operation
+                with self.final_package_fixture_call(fixture):
+                    if failure is None:
+                        operation.execute()
+                    else:
+                        with self.assertRaises(module.Refused):
+                            operation.execute()
+                originals = [row for row in operation.credential_calls if row["role"] == "installer-chain"]
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(originals[0]["status"], 0 if failure is None else 1)
+                self.assertTrue(originals[0]["entered"] and originals[0]["returned"] and originals[0]["settled"])
+                args = [argv for role, argv in fixture.credentials.events if role == "installer-chain"]
+                paths = [str(fixture.checkout / "desktop/packaging/macos-installer-certificates" / (role + ".der"))
+                         for role in ("leaf", "issuer", "root")]
+                self.assertEqual(args, [("/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
+                                         "-c", paths[0], "-c", paths[1], "-r", paths[2])])
+                self.assertEqual(fixture.credentials.search, fixture.credentials.initial)
+                self.assertFalse(Path(fixture.credentials.keychain).exists())
+                self.assertTrue(all(row["closed"] and row["retired"] and row["searchRestored"]
+                                    and row["defaultUnchanged"] for row in operation.credential_contexts))
+                callbacks = [row[0] for row in fixture.observations]
+                self.assertEqual(operation.receipt["passed"], failure is None)
+                if failure is None:
+                    selection, certificates = fixture.credentials.installer, fixture.credentials.certificates
+                    path = Path('/DATA-only/MobileReleaseKit.pkg')
+                    expected = {"trusted": True, "timestamp": True,
+                                "certificateSha256": [module.digest(value) for value in certificates]}
+                    for body in (legacy_signature, legacy_signature.replace(b'trusted by macOS', b'trusted by Mac OS X'),
+                                 fixture.signature_text):
+                        self.assertEqual(module.package_signature_data(body, selection, certificates, path), expected)
+                    fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
+                    for body in (fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                                 fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                                 fixture.signature_text.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                                 fixture.signature_text.replace(fingerprint, b'00 ' * 31 + b'00')):
+                        with self.assertRaises(module.Refused):
+                            module.package_signature_data(body, selection, certificates, path)
+                    self.assertIn("final-package-sign", callbacks)
+                    self.assertIn("final-package-signature-before", callbacks)
+                    self.assertIn("final-package-submit", callbacks)
+                    self.assertIn("finalPackage", operation.receipt)
+                else:
+                    self.assertNotIn("final-package-sign", callbacks)
+                    self.assertNotIn("final-package-submit", callbacks)
+                    self.assertNotIn("finalPackage", operation.receipt)
 
     def test_ios_recovery_admission_keeps_the_full_package_scope_closed(self):
         module = ANDROID_HELPER
@@ -7382,7 +7874,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             "installation-inspection", "vault-helper-shipping-installation-inspection",
             "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
         ))
-        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove", "same-package-noop"))
+        self.assertEqual(module.PHASES, ("prepare", "verify-before", "verify-after", "package-install", "package-remove",
+                                       "same-package-noop", "update-baseline", "prepare-app-absence", "app-absence-restore"))
         sha, ref = "a" * 40, "refs/heads/verify/desktop-macos-aqua"
         work = module.WORK_PARENT / "mrk-macos-aqua.AbC12345"
         environment = {
@@ -7464,9 +7957,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertEqual(uname.call_count, observed)
                 aqua = dict(environment, RUNNER_ARCH=runner, RUSTUP_TOOLCHAIN=toolchain)
                 self.assertEqual(module.admit(aqua, target=target), work)
+                phase_refusals = {
+                    "package-remove": "final-image-preview-ref-only",
+                    "same-package-noop": "same-package-fixed-purpose",
+                    "update-baseline": "update-fixed-credential-free-baseline",
+                    "prepare-app-absence": "app-absence-fixed-native-phase",
+                    "app-absence-restore": "app-absence-fixed-native-phase",
+                }
                 for phase in module.PHASES:
-                    if phase == "package-remove":
-                        with self.assertRaisesRegex(module.Refused, "^final-image-preview-ref-only$"):
+                    if phase in phase_refusals:
+                        with self.subTest(aquaRefPhase=phase), self.assertRaisesRegex(module.Refused, "^" + phase_refusals[phase] + "$"):
                             module.admit(aqua, target=target, phase=phase)
                     else:
                         self.assertEqual(module.admit(aqua, target=target, phase=phase), work)
@@ -8291,6 +8791,44 @@ class MacInstalledData(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        pending_current = raw
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("&& 'ios-pending-recovery' || 'disabled'", raw)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_test\n"), 1)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_summary\n"), 1)
+        self.assertIn("--normal-ios-pending-recovery-test", raw)
+        self.assertIn("--normal-ios-pending-recovery-summary", raw)
+        raw = without_normal_ios_pending_workflow(raw)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65")
+        self.assertEqual(without_normal_ios_pending_workflow(raw), raw)
+        for previous, current in NORMAL_IOS_PENDING_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError):
+                without_normal_ios_pending_workflow(pending_current.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current + "# unexpected pending recovery tail\n")
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current.replace("timeout-minutes: 19", "timeout-minutes: 20", 1))
+        (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(new_android), 1)
+        self.assertEqual(raw.count(new_ios), 1)
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled'", new_ios)
+        self.assertIn("MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}", raw)
+        ios_prior = without_installed_ios_activation_workflow(raw)
+        self.assertEqual(ios_prior, raw.replace(new_android, old_android, 1).replace(new_ios, old_ios, 1))
+        self.assertEqual(hashlib.sha256(ios_prior.encode()).hexdigest(),
+                         "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc")
+        self.assertEqual(without_installed_ios_activation_workflow(ios_prior), ios_prior)
+        for changed in (
+                raw.replace(new_ios, new_ios.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(new_ios, new_ios.splitlines(keepends=True)[0] + "      MRK_MACOS_IOS_UI_SCOPE: ios-unsigned-archive\n", 1),
+                raw.replace(new_android, old_android, 1),
+                raw.replace(new_ios, old_ios, 1),
+                raw + new_ios,
+                raw + "# unexpected iOS activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_ios_activation_workflow(changed)
+        raw = ios_prior
         inactive, active = INSTALLED_ANDROID_ACTIVATION_INVERSE
         self.assertEqual(raw.count(active), 1)
         self.assertNotIn(inactive.splitlines(keepends=True)[1], raw)

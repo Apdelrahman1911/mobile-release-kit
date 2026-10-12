@@ -384,6 +384,49 @@ def positive_ui_data(context=None, *, ios=False):
     return android, facts, test, summary, statuses, phases, inventory
 
 
+def ios_pending_recovery_data(context=CONTEXT):
+    """Synthetic completed originals for the DATA boundary, not native evidence.
+
+    Reuse only the private runner-admission shape. Recovery facts/roles are the
+    separate normal-account interface; unsigned success is never transformed
+    into a claim that account recovery actually ran.
+    """
+    _, _, test, summary, _, phases, inventory = positive_ui_data(context, ios=True)
+    fixture = f"/private/tmp/mrk-macos-aqua-{context['source']}-{context['runId']}-{context['runAttempt']}/ios-recovery-pending"
+    observation = dict(schemaVersion=1, sourceCommit=context["source"], target=context["target"],
+        runId=context["runId"], runAttempt=context["runAttempt"], fixtureSha256=hashlib.sha256(fixture.encode()).hexdigest(),
+        sessionSha256="f" * 64, inspectUnchecked=True, recoverUnchecked=True, ordinaryQuit=True,
+        inspect=dict(operationId="4" * 32, ownerGeneration="5" * 32, phase="terminal", outcome="complete",
+                     reason="none", accountStatus="pending"),
+        recover=dict(operationId="6" * 32, ownerGeneration="7" * 32, phase="terminal", outcome="complete",
+                     reason="none", accountStatus="recovered"))
+    common = dict(schemaVersion=1, case="ios-recovery-pending", profileCalls=0, commandFinalities=True,
+        leaseClosed=True, sessionClosed=True, handlersRestored=True, fixtureDescriptorsClosed=True,
+        originalDeadlineMet=True, keychainContentsRead=False)
+    account = dict(producer=dict(common, scope="real-core-pending-account-fixture-v1", commands=3, pendingLeft=True),
+        nativeReadback=dict(common, scope="real-core-account-baseline-readback-v1", commands=2, pendingAbsent=True,
+                           baselinePreferencesMatched=True, baselineMemberIdentitiesMatched=True),
+        exactPendingSessionRecovered=True, originalOwnedNativeAndControlsRemoved=True, persistentOriginalLeaseRetained=True,
+        nativeBaselineMembers=1, baselineIdentitiesMatched=True, baselinePreferencesMatched=True, projectMarkerUnchanged=True,
+        privateContentsExported=False, foreignPreferenceConflictInjected=False, appleSigningMaterialUsed=False,
+        signedExportQualified=False)
+    facts = dict(schemaVersion=1, scope="normal-ui-pending-account-recovery-v1", observation=observation,
+                 account=account, originalClosesCompleted=True)
+    test.pop("iosUnsignedObservation"); summary.pop("iosUnsignedTestCounts")
+    test.update(iosPendingRecovery=copy.deepcopy(facts), resultBundle="ios-pending-recovery-test.xcresult")
+    summary.update(iosPendingRecoveryTestCounts=dict(DATA.POSITIVE_UI_COUNTS), resultBundle="ios-pending-recovery-test.xcresult")
+    test["phaseClock"]["deadlineNs"] = str(1 + 1080 * 10**9)
+    test["commands"] = [dict(role=role, returncode=0, roleCapSeconds=cap, timeoutSeconds=cap, outputLimitBytes=limit,
+        argvSha256="1" * 64, stdoutSha256="2" * 64, stderrSha256="3" * 64, stdoutBytes=1, stderrBytes=0)
+        for role, cap, limit in (("normal-ui-source-roster", 15, 1048576), ("verify-generated-runner", 30, 1048576),
+            ("generated-runner-entitlements", 30, 1048576), ("ios-account-produce", 180, 16384),
+            ("one-admitted-ui-test", 645, 1048576), ("ios-account-observe", 90, 2048), ("normal-ui-source-roster", 15, 1048576))]
+    statuses = {name: {"receiptState": "observed", "returncode": 0} for name in
+        ("package-install.status", "normal-ui/build.status", "normal-ui/ios-pending-recovery-test.status",
+         "normal-ui/ios-pending-recovery-summary.status")}
+    return facts, test, summary, statuses, phases, inventory
+
+
 def app_absence_documents(context=CONTEXT):
     """Genuine pure parser and three receipt assignments; no adapter execution.
 
@@ -647,7 +690,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 if fault == "status-failure": statuses[DATA.POSITIVE_UI_STATUSES["ios"][0]]["returncode"] = 70
                 if fault == "wrong-source": summary["sourceCommit"] = "2" * 40
                 if fault == "closed-false": phases["package-install"]["originalClosesKnown"] = False
-                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS[1:]:
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS:
+                    if key not in ("iosFacts", "iosTest", "iosSummary"): continue
                     if fault == "missing-summary" and key == "iosSummary": continue
                     item = write(root, path, {"iosFacts": facts, "iosTest": test, "iosSummary": summary}[key])
                     if key == "iosFacts" and fault == "malformed-facts": item.write_bytes(b'{"source":NaN}')
@@ -678,10 +722,12 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         with self.assertRaises(DATA.Refused): DATA.decode(b"{}", budget(), inventory=True, ui_admission=True)
         for body in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":1.5}', b'{"a":Infinity}'):
             with self.assertRaises(DATA.Refused): DATA.decode(body, budget(), ui_admission=True)
-        self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 4)
-        self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768])
-        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 2 + len(DATA.POSITIVE_UI_INPUTS)
-        self.assertEqual(attempts, 98)
+        self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 7)
+        self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768, 16384, 32768, 32768])
+        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 6 + len(DATA.POSITIVE_UI_INPUTS)
+        self.assertEqual((len(DATA.STATUS_FILES), len(DATA.PHASES), len(DATA.UI_DIAGNOSTICS), len(DATA.POSITIVE_UI_INPUTS)),
+                         (76, 20, 3, 7))
+        self.assertEqual(attempts, 115)
         self.assertLessEqual(attempts, 128)
         self.assertEqual((DATA.INPUT_LIMIT, DATA.OUTPUT_LIMIT), (3 * 1024 * 1024, 128 * 1024))
         # Each legal positive maximum remains finite without displacing old report facts.
@@ -692,7 +738,162 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         _, facts, test, summary, statuses, phases, inventory = positive_ui_data(ios=True)
         facts.update(originalEntries=100000, originalBytes=8 << 30); test["iosUnsignedObservation"] = copy.deepcopy(facts)
         ios = DATA.project_ios_positive(facts, test, summary, CONTEXT, statuses, phases, inventory)
-        self.assertLessEqual(len(json.dumps(android)) + len(json.dumps(ios)), 16384)
+        recovery_facts, recovery_test, recovery_summary, recovery_statuses, recovery_phases, recovery_inventory = ios_pending_recovery_data()
+        recovery_facts["account"].update(nativeBaselineMembers=8)
+        recovery_facts["account"]["producer"]["commands"] = 64
+        recovery_test["iosPendingRecovery"] = copy.deepcopy(recovery_facts)
+        recovery = DATA.project_ios_pending_recovery(recovery_facts, recovery_test, recovery_summary, CONTEXT,
+                                                    recovery_statuses, recovery_phases, recovery_inventory)
+        self.assertLessEqual(len(json.dumps(android)) + len(json.dumps(ios)) + len(json.dumps(recovery)), 16384)
+
+    def test_ios_pending_recovery_requires_distinct_ui_and_real_account_readback(self):
+        for target in DATA.TARGETS:
+            context = dict(CONTEXT, target=target)
+            facts, test, summary, statuses, phases, inventory = ios_pending_recovery_data(context)
+            result = DATA.project_ios_pending_recovery(facts, test, summary, context, statuses, phases, inventory)
+            self.assertEqual(result["observation"], facts["observation"])
+            self.assertEqual(result["account"], facts["account"])
+            self.assertEqual(result["testCounts"], DATA.POSITIVE_UI_COUNTS)
+            self.assertEqual(result["allWorkerFinality"], "not-established-by-XCTest-UI-state")
+            self.assertIsNone(result["cleanExitStatus"])
+            for name in ("nativeSuccessInferred", "appleSigningMaterialUsed", "signedExportQualified",
+                         "fullUIQualified", "distributionQualified", "productReady"):
+                self.assertIs(result[name], False)
+            self.assertNotIn(SENTINEL, json.dumps(result))
+            for section, key, value in (
+                ("observation", "sourceCommit", "9" * 40), ("observation", "target", "wrong"),
+                ("observation", "runId", "124"), ("observation", "runAttempt", "3"),
+                ("observation", "fixtureSha256", "9" * 64), ("observation", "sessionSha256", "not-hex"),
+                ("observation", "inspectUnchecked", False), ("observation", "recoverUnchecked", 1),
+                ("observation", "ordinaryQuit", False), ("observation", "session", SENTINEL),
+                ("account", "exactPendingSessionRecovered", False), ("account", "originalOwnedNativeAndControlsRemoved", False),
+                ("account", "persistentOriginalLeaseRetained", False), ("account", "baselineIdentitiesMatched", False),
+                ("account", "baselinePreferencesMatched", False), ("account", "projectMarkerUnchanged", False),
+                ("account", "nativeBaselineMembers", 0), ("account", "nativeBaselineMembers", 9),
+                ("account", "nativeBaselineMembers", True), ("account", "privateContentsExported", True),
+                ("account", "foreignPreferenceConflictInjected", True), ("account", "appleSigningMaterialUsed", True),
+                ("account", "signedExportQualified", True), ("account", "private", SENTINEL)):
+                bad = copy.deepcopy(facts); bad[section][key] = value
+                bad_test = copy.deepcopy(test); bad_test["iosPendingRecovery"] = copy.deepcopy(bad)
+                with self.subTest(target=target, section=section, field=key), self.assertRaises(DATA.Refused):
+                    DATA.project_ios_pending_recovery(bad, bad_test, summary, context, statuses, phases, inventory)
+            for side in ("inspect", "recover"):
+                for key, value in (("phase", "running"), ("outcome", "unknown"), ("reason", "failed"),
+                                   ("operationId", "x" * 32), ("ownerGeneration", "x" * 32),
+                                   ("accountStatus", "absent"), ("lifetime", {"allFinality": True})):
+                    bad = copy.deepcopy(facts); bad["observation"][side][key] = value
+                    with self.subTest(side=side, field=key), self.assertRaises(DATA.Refused):
+                        DATA.ios_pending_recovery_facts(bad, context)
+            for key in ("operationId", "ownerGeneration"):
+                bad = copy.deepcopy(facts); bad["observation"]["recover"][key] = bad["observation"]["inspect"][key]
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            for side in ("producer", "nativeReadback"):
+                for key, value in (("scope", "invented"), ("case", "ios-recovery-empty"), ("commands", True),
+                    ("profileCalls", 1), ("commandFinalities", False), ("leaseClosed", False), ("sessionClosed", False),
+                    ("handlersRestored", False), ("fixtureDescriptorsClosed", False), ("originalDeadlineMet", False),
+                    ("keychainContentsRead", True), ("private", SENTINEL)):
+                    bad = copy.deepcopy(facts); bad["account"][side][key] = value
+                    with self.subTest(side=side, field=key), self.assertRaises(DATA.Refused):
+                        DATA.ios_pending_recovery_facts(bad, context)
+            for side, key, value in (("producer", "commands", 2), ("producer", "commands", 65),
+                    ("producer", "pendingLeft", False), ("nativeReadback", "commands", 3),
+                    ("nativeReadback", "pendingAbsent", False), ("nativeReadback", "baselinePreferencesMatched", False),
+                    ("nativeReadback", "baselineMemberIdentitiesMatched", False)):
+                bad = copy.deepcopy(facts); bad["account"][side][key] = value
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            for side in ("producer", "nativeReadback"):
+                bad = copy.deepcopy(facts); del bad["account"][side]
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            maximum = copy.deepcopy(facts); maximum["account"]["nativeBaselineMembers"] = 8
+            maximum["account"]["producer"]["commands"] = 64
+            self.assertEqual(DATA.ios_pending_recovery_facts(maximum, context), maximum)
+
+    def test_ios_pending_recovery_requires_seven_originals_deadlines_and_summary(self):
+        facts, test, summary, statuses, phases, inventory = ios_pending_recovery_data()
+        def project(selected=test, summed=summary, status=statuses):
+            return DATA.project_ios_pending_recovery(facts, selected, summed, CONTEXT, status, phases, inventory)
+        result = project()
+        self.assertEqual([row["role"] for row in result["commands"]["test"]], [
+            "normal-ui-source-roster", "verify-generated-runner", "generated-runner-entitlements",
+            "ios-account-produce", "one-admitted-ui-test", "ios-account-observe", "normal-ui-source-roster"])
+        self.assertEqual(len(result["commands"]["summary"]), 3)
+        for slot in range(7):
+            for key, value in (("returncode", 1), ("returncode", -1), ("returncode", True), ("timeoutSeconds", 0),
+                    ("timeoutSeconds", test["commands"][slot]["roleCapSeconds"] + 1), ("role", "made-up"),
+                    ("outputLimitBytes", test["commands"][slot]["outputLimitBytes"] + 1),
+                    ("stdoutBytes", test["commands"][slot]["outputLimitBytes"] + 1), ("argvSha256", SENTINEL)):
+                bad = copy.deepcopy(test); bad["commands"][slot][key] = value
+                with self.subTest(slot=slot, field=key), self.assertRaises(DATA.Refused): project(bad)
+            bad = copy.deepcopy(test); del bad["commands"][slot]
+            with self.assertRaises(DATA.Refused): project(bad)
+        for fault in ("reordered", "duplicate", "legacy-ui-cap", "late", "phase-duration", "unknown-close", "facts-differ", "facts-close",
+                      "nonzero-test", "unsigned-result", "no-source-post", "no-runner-verification", "private-roster"):
+            bad = copy.deepcopy(test)
+            if fault == "reordered": bad["commands"][3], bad["commands"][5] = bad["commands"][5], bad["commands"][3]
+            if fault == "duplicate": bad["commands"].append(copy.deepcopy(bad["commands"][-1]))
+            if fault == "legacy-ui-cap": bad["commands"][4].update(roleCapSeconds=1020, timeoutSeconds=1020)
+            if fault == "late": bad["phaseClock"]["beforePublicationNs"] = bad["phaseClock"]["deadlineNs"]
+            if fault == "phase-duration": bad["phaseClock"]["deadlineNs"] = str(1 + 1245 * 10**9)
+            if fault == "unknown-close": bad["originalClosesCompleted"] = False
+            if fault == "facts-differ": bad["iosPendingRecovery"]["observation"]["sessionSha256"] = "e" * 64
+            if fault == "facts-close": bad["iosPendingRecovery"]["originalClosesCompleted"] = False
+            if fault == "nonzero-test": bad["originalTestReturncode"] = 1
+            if fault == "unsigned-result": bad["resultBundle"] = "ios-unsigned-archive-test.xcresult"
+            if fault == "no-source-post": bad["sourcePrePostMatched"] = False
+            if fault == "no-runner-verification": bad["strictCodesignOriginalZero"] = False
+            if fault == "private-roster": bad["runnerExecutable"][1][5] = "2"
+            with self.subTest(fault=fault), self.assertRaises(DATA.Refused): project(bad)
+        for slot in range(3):
+            bad = copy.deepcopy(summary); bad["commands"][slot]["returncode"] = 1
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for key, value in (("sourceRosterSha256", "e" * 64), ("sourceCommit", "e" * 40), ("originalReturncode", 1)):
+            bad = copy.deepcopy(summary); bad[key] = value
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for key in DATA.POSITIVE_UI_COUNTS:
+            bad = copy.deepcopy(summary); bad["iosPendingRecoveryTestCounts"][key] += 1
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for names in DATA.POSITIVE_UI_STATUSES.values():
+            bad = copy.deepcopy(statuses)
+            if names == DATA.POSITIVE_UI_STATUSES["iosRecovery"]: bad[names[0]]["returncode"] = 1
+            else: bad[names[0]] = {"receiptState": "observed", "returncode": 0}
+            with self.assertRaises(DATA.Refused): project(status=bad)
+        _, old_facts, old_test, old_summary, old_status, _, _ = positive_ui_data(ios=True)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ios_pending_recovery(old_facts, old_test, old_summary, CONTEXT, statuses, phases, inventory)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ios_positive(facts, test, summary, CONTEXT, old_status, phases, inventory)
+
+    def test_ios_pending_recovery_fixed_reader_keeps_private_inputs_and_refuses_partial(self):
+        for fault in (None, "missing-observer", "partial", "linked", "private-field", "failed-status"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                facts, test, summary, statuses, _, inventory = ios_pending_recovery_data()
+                if fault == "missing-observer": del facts["account"]["nativeReadback"]
+                if fault == "private-field": facts["account"]["private"] = SENTINEL
+                if fault == "failed-status": statuses["normal-ui/ios-pending-recovery-test.status"]["returncode"] = 1
+                write(root, "source-inventory.json", {"source": CONTEXT["source"], "tree": inventory["tree"],
+                    "files": [{"path": "public.rs", "gitMode": "100644", "blob": "2" * 40, "size": 1, "sha256": "3" * 64}]})
+                write(root, "android-helper-package-install.json", receipt("package-install"))
+                for name, row in statuses.items(): write(root, name, (str(row["returncode"]) + "\n").encode())
+                supplied = {"iosRecoveryFacts": facts, "iosRecoveryTest": test, "iosRecoverySummary": summary}
+                originals = []
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS:
+                    if key not in supplied or fault == "partial" and key == "iosRecoverySummary": continue
+                    item = write(root, path, supplied[key]); originals.append((item, item.read_bytes()))
+                    if fault == "linked" and key == "iosRecoveryFacts": os.link(item, root / "second-link")
+                raw = write(root, "normal-ui/ios-pending-recovery-summary.json", SENTINEL.encode())
+                private = write(root, "normal-ui/account-baseline.json", SENTINEL.encode())
+                value = project(root)["positiveUiObservations"]
+                if fault is None:
+                    self.assertEqual(value["iosPendingRecovery"]["receiptState"], "observed")
+                    self.assertTrue(value["iosPendingRecovery"]["account"]["baselinePreferencesMatched"])
+                else: self.assertEqual(value["iosPendingRecovery"], {"receiptState": "refused"})
+                self.assertEqual(value["iosUnsignedArchive"], {"receiptState": "absent"})
+                self.assertEqual(value["androidSignedBuild"], {"receiptState": "absent"})
+                self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+                self.assertEqual(private.read_bytes(), SENTINEL.encode()); self.assertEqual(raw.read_bytes(), SENTINEL.encode())
+                for item, body in originals: self.assertEqual(item.read_bytes(), body)
+                self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
 
     def test_genuine_removal_data_preserves_case_facts_and_expected_nonzero(self):
         stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)

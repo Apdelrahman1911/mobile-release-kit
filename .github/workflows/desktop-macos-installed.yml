@@ -54,10 +54,10 @@ jobs:
       # Separate reviewed activation only; baseline and later UI remain independent.
       MRK_MACOS_SAME_PACKAGE_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'same-package-noop' || 'disabled' }}
       MRK_MACOS_REMOVAL_CASE: ${{ matrix.removal_case || 'disabled' }}
-      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.
-      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}
-      # Separately reviewed unsigned archive UI; an installed app is still mandatory.
-      MRK_MACOS_IOS_UI_SCOPE: disabled
+      # This installed verification run exercises iOS; Android keeps its separate qualification.
+      MRK_MACOS_ANDROID_UI_SCOPE: disabled
+      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.
+      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-pending-recovery' || 'disabled' }}
       # A separate reviewed SOURCE change selects the targeted recovery run.
       # Default seven cases and each closed singleton are distinct native obligations.
       MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}
@@ -97,7 +97,7 @@ jobs:
           esac
           case "$MRK_MACOS_IOS_UI_SCOPE" in
             disabled) ;;
-            ios-unsigned-archive)
+            ios-unsigned-archive|ios-pending-recovery)
               [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
               ;;
             *) exit 1 ;;
@@ -767,7 +767,7 @@ jobs:
             --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"
       - name: Build only the external normal-app XCTest runner, not an instrumented app
         id: normal_ui_build
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))
         timeout-minutes: 9
         shell: bash
         env:
@@ -2523,6 +2523,94 @@ jobs:
             > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"
           ios_summary_status=$?
           printf '%s\n' "$ios_summary_status" > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"
+          ios_summary_status_saved=$?
+          set -e
+          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi
+          [[ "$ios_summary_status_saved" == 0 ]] || exit 1
+          # The existing summary owner requires actual1/1 with no failure/skip.
+          # Its closed source/command receipt plus the separately retained test0
+          # and facts are evidence, never IPA/signing/distribution qualification.
+
+      - name: Recover one genuine pending iOS account session through the ordinary app
+        id: normal_ios_pending_ui_test
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        timeout-minutes: 19
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == ios-pending-recovery ]] || exit 1
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          # The same installed normal app, real console account, fixed fixture
+          # and original runner are required. No signing material/Store action.
+          # Never clean account state or private pending controls after failure.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-pending-recovery-test \
+            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.log" 2>&1
+          ios_test_status=$?
+          printf '%s\n' "$ios_test_status" > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.status"
+          ios_test_status_saved=$?
+          set -e
+          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi
+          [[ "$ios_test_status_saved" == 0 ]] || exit 1
+          # Seven originals: sourcePRE/runner-signature/entitlements/producer180/
+          # XCTest645 (525case)/observer90/sourcePOST, one1080s phase. The real
+          # producer/UI/readback all must settle; logs and private baseline stay PRIVATE.
+
+      - name: Observe the one pending iOS recovery XCTest summary under the same source
+        id: normal_ios_pending_ui_summary
+        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == ios-pending-recovery ]] || exit 1
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit 1
+          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}$ ]] || exit 1
+          # The same installed normal app, real console account, fixed fixture
+          # and original runner are required. No signing material/Store action.
+          # Never clean account state or private pending controls after failure.
+          ulimit -f 1048576
+          set +e
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \
+            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-ios-pending-recovery-summary \
+            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.json" 2> "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.stderr"
+          ios_summary_status=$?
+          printf '%s\n' "$ios_summary_status" > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.status"
           ios_summary_status_saved=$?
           set -e
           if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi

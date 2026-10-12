@@ -43,6 +43,7 @@ STATUS_FILES = (
     "normal-ui/android-inputs.status", "normal-ui/android-signed-build-test.status",
     "normal-ui/android-signed-build-summary.status", "normal-ui/android-signed-build-result.status",
     "normal-ui/ios-unsigned-archive-test.status", "normal-ui/ios-unsigned-archive-summary.status",
+    "normal-ui/ios-pending-recovery-test.status", "normal-ui/ios-pending-recovery-summary.status",
     *("normal-ui/" + role + suffix for role in ("project", "persistence", "diagnostics", "saved-checks",
       "saved-version-recovery", "github-local-bundle", "removal-ordinary") for suffix in ("-test.status", "-summary.status")),
     "normal-ui/workflow-refusal-test.status", "normal-ui/workflow-refusal-summary.status",
@@ -1331,12 +1332,16 @@ POSITIVE_UI_INPUTS = (
     ("iosFacts", "normal-ui/ios-unsigned-archive.facts.json", 16384, False),
     ("iosTest", "normal-ui/ios-unsigned-archive-test.runner-admission.json", 32768, True),
     ("iosSummary", "normal-ui/ios-unsigned-archive-summary.command-admission.json", 32768, True),
+    ("iosRecoveryFacts", "normal-ui/ios-pending-recovery.facts.json", 16384, False),
+    ("iosRecoveryTest", "normal-ui/ios-pending-recovery-test.runner-admission.json", 32768, True),
+    ("iosRecoverySummary", "normal-ui/ios-pending-recovery-summary.command-admission.json", 32768, True),
 )
 POSITIVE_UI_COUNTS = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
 POSITIVE_UI_STATUSES = {
     "android": ("normal-ui/android-inputs.status", "normal-ui/android-signed-build-test.status",
                 "normal-ui/android-signed-build-summary.status", "normal-ui/android-signed-build-result.status"),
     "ios": ("normal-ui/ios-unsigned-archive-test.status", "normal-ui/ios-unsigned-archive-summary.status"),
+    "iosRecovery": ("normal-ui/ios-pending-recovery-test.status", "normal-ui/ios-pending-recovery-summary.status"),
 }
 
 
@@ -1451,10 +1456,10 @@ def positive_ui_prerequisites(context, statuses, phases, inventory, kind):
     for name in required:
         row = statuses.get(name)
         positive_ui_fixed(row, {"receiptState": "observed", "returncode": 0})
-    other = "ios" if kind == "android" else "android"
     # Simultaneous positive scopes are not admitted by the actual workflow.
     need(not any(statuses.get(name, {}).get("receiptState") == "observed"
-                 and statuses[name].get("returncode") == 0 for name in POSITIVE_UI_STATUSES[other]))
+                 and statuses[name].get("returncode") == 0
+                 for other, names in POSITIVE_UI_STATUSES.items() if other != kind for name in names))
     installed = phases.get("package-install", {})
     need(installed.get("receiptState") == "observed" and installed.get("recordedPassed") is True
          and installed.get("originalClosesKnown") is True and installed.get("targetRetired") is True)
@@ -1498,6 +1503,122 @@ def project_ios_positive(facts, test, summary, context, statuses, phases, invent
             "fullUIQualified": False, "distributionQualified": False, "productReady": False}
 
 
+def ios_pending_recovery_facts(value, context):
+    """Closed observations and independent account readback, never UI-only success."""
+    positive_ui_fixed(value, dict(schemaVersion=1, scope="normal-ui-pending-account-recovery-v1",
+                                 originalClosesCompleted=True), ("observation", "account"))
+    observation = value["observation"]
+    fixture = (f"/private/tmp/mrk-macos-aqua-{context['source']}-{context['runId']}-"
+               f"{context['runAttempt']}/ios-recovery-pending")
+    positive_ui_fixed(observation, dict(schemaVersion=1, sourceCommit=context["source"], target=context["target"],
+        runId=context["runId"], runAttempt=context["runAttempt"], fixtureSha256=hashlib.sha256(fixture.encode("utf-8")).hexdigest(),
+        inspectUnchecked=True, recoverUnchecked=True, ordinaryQuit=True), ("inspect", "recover", "sessionSha256"))
+    hex_value(observation["sessionSha256"])
+    for key, status in (("inspect", "pending"), ("recover", "recovered")):
+        row = observation[key]
+        positive_ui_fixed(row, dict(phase="terminal", outcome="complete", reason="none", accountStatus=status),
+                          ("operationId", "ownerGeneration"))
+        hex_value(row["operationId"], 32); hex_value(row["ownerGeneration"], 32)
+    need(all(observation["inspect"][key] != observation["recover"][key] for key in ("operationId", "ownerGeneration")))
+    account = value["account"]
+    positive_ui_fixed(account, dict(exactPendingSessionRecovered=True, originalOwnedNativeAndControlsRemoved=True,
+        persistentOriginalLeaseRetained=True, baselineIdentitiesMatched=True, baselinePreferencesMatched=True,
+        projectMarkerUnchanged=True, privateContentsExported=False, foreignPreferenceConflictInjected=False,
+        appleSigningMaterialUsed=False, signedExportQualified=False), ("producer", "nativeReadback", "nativeBaselineMembers"))
+    integer(account["nativeBaselineMembers"], 8, 1)
+    common = dict(schemaVersion=1, case="ios-recovery-pending", profileCalls=0, commandFinalities=True,
+        leaseClosed=True, sessionClosed=True, handlersRestored=True, fixtureDescriptorsClosed=True,
+        originalDeadlineMet=True, keychainContentsRead=False)
+    positive_ui_fixed(account["producer"], dict(common, scope="real-core-pending-account-fixture-v1", pendingLeft=True),
+                      ("commands",))
+    integer(account["producer"]["commands"], 64, 3)
+    positive_ui_fixed(account["nativeReadback"], dict(common, scope="real-core-account-baseline-readback-v1", commands=2,
+        pendingAbsent=True, baselinePreferencesMatched=True, baselineMemberIdentitiesMatched=True))
+    return dict(value)
+
+
+def ios_pending_recovery_admission(value, context, *, summary):
+    """Separate fixed recovery contract; never reinterpret an unsigned admission."""
+    common = dict(target=context["target"], sourceCommit=context["source"], sourcePrePostMatched=True,
+        originalCommandReturned=True, receiptPolicy="exclusive0600-readback-consuming-close",
+        resultBundle="ios-pending-recovery-test.xcresult")
+    extra = {"sourceRosterSha256", "commands", "fileLimitBytes", "phaseClock"}
+    if summary:
+        fixed = dict(common, schemaVersion=1, scope="normal-ui-original-command-admission-only", phase="summary",
+                     originalCommandRole="normal-ui-summary", originalReturncode=0)
+        extra.add("iosPendingRecoveryTestCounts")
+    else:
+        fixed = dict(common, schemaVersion=1, scope="actual-generated-xctrunner-admission-only",
+            strictCodesignOriginalZero=True, reSignedOrRepaired=False, originalProductsPrePostMatched=True,
+            originalClosesCompleted=True, originalTestReturncode=0, normalPhase="test")
+        extra.update(("runnerPath", "xctestrunPath", "runnerExecutable", "testExecutable", "xctestrun",
+                      "productEntryCount", "productRosterSha256", "entitlementsSha256", "appSandboxEntitlement", "iosPendingRecovery"))
+    positive_ui_fixed(value, fixed, extra)
+    hex_value(value["sourceRosterSha256"])
+    need(type(value["fileLimitBytes"]) is list and len(value["fileLimitBytes"]) == 2
+         and all(type(item) is int and item == 1024**3 for item in value["fileLimitBytes"]))
+    clock_row = value["phaseClock"]
+    positive_ui_fixed(clock_row, {"postCloseDeadlineRequired": True}, ("startNs", "deadlineNs", "beforePublicationNs"))
+    for key in ("startNs", "deadlineNs", "beforePublicationNs"):
+        need(type(clock_row[key]) is str and re.fullmatch(r"0|[1-9][0-9]{0,19}", clock_row[key]) is not None)
+    start, end, before = (int(clock_row[key]) for key in ("startNs", "deadlineNs", "beforePublicationNs"))
+    need(start <= before < end and end - start == (90 if summary else 1080) * 10**9)
+    source_role = ("normal-ui-source-roster", 15, 1048576)
+    roles = (source_role, ("normal-ui-summary", 30, 262144), source_role) if summary else (
+        source_role, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+        ("ios-account-produce", 180, 16384), ("one-admitted-ui-test", 645, 1048576),
+        ("ios-account-observe", 90, 2048), source_role)
+    rows = value["commands"]
+    need(type(rows) is list and len(rows) == len(roles))
+    commands = []
+    for row, (role, cap, limit) in zip(rows, roles):
+        positive_ui_fixed(row, dict(role=role, returncode=0, roleCapSeconds=cap, outputLimitBytes=limit),
+            ("timeoutSeconds", "argvSha256", "stdoutBytes", "stdoutSha256", "stderrBytes", "stderrSha256"))
+        integer(row["timeoutSeconds"], cap, 1)
+        integer(row["stdoutBytes"], limit); integer(row["stderrBytes"], limit)
+        need(row["stdoutBytes"] + row["stderrBytes"] <= limit)
+        for key in ("argvSha256", "stdoutSha256", "stderrSha256"):
+            hex_value(row[key])
+        commands.append({key: row[key] for key in ("role", "returncode", "stdoutBytes", "stderrBytes")})
+    if summary:
+        positive_ui_counts(value["iosPendingRecoveryTestCounts"])
+    else:
+        # Private identities are shape-checked, not exported or treated as new
+        # authentication. The actual runner remains the original's authority.
+        for key in ("runnerPath", "xctestrunPath"):
+            need(type(value[key]) is str and 0 < len(value[key]) <= 4096
+                 and not any(ord(char) < 32 or ord(char) == 127 for char in value[key]))
+        integer(value["productEntryCount"], 4096, 5)
+        for key in ("productRosterSha256", "entitlementsSha256"):
+            hex_value(value[key])
+        need(type(value["appSandboxEntitlement"]) is str and value["appSandboxEntitlement"] in ("absent", "false"))
+        for key in ("runnerExecutable", "testExecutable", "xctestrun"):
+            item = value[key]
+            need(type(item) is list and len(item) == 3 and item[0] == "file" and type(item[1]) is list
+                 and len(item[1]) == 9 and all(type(part) is str and re.fullmatch(r"[0-9]{1,20}", part) for part in item[1]))
+            need(stat.S_ISREG(int(item[1][2])) and int(item[1][5]) == 1 and 0 < int(item[1][6]) <= 256 << 20)
+            hex_value(item[2])
+        ios_pending_recovery_facts(value["iosPendingRecovery"], context)
+    return commands
+
+
+def project_ios_pending_recovery(facts, test, summary, context, statuses, phases, inventory):
+    positive_ui_prerequisites(context, statuses, phases, inventory, "iosRecovery")
+    need(context["target"] in TARGETS)
+    checked = ios_pending_recovery_facts(facts, context)
+    test_commands = ios_pending_recovery_admission(test, context, summary=False)
+    summary_commands = ios_pending_recovery_admission(summary, context, summary=True)
+    need(test["iosPendingRecovery"] == checked and test["sourceRosterSha256"] == summary["sourceRosterSha256"])
+    return {"receiptState": "observed", "binding": "same-work-root-parent-context-only", "nativeSuccessInferred": False,
+        "observation": checked["observation"], "account": checked["account"],
+        "testCounts": positive_ui_counts(summary["iosPendingRecoveryTestCounts"]),
+        "sourceRosterSha256": test["sourceRosterSha256"], "sourceAndTargetMatched": True, "runContextMatched": True,
+        "callerStatusesMatched": True, "recordedRunnerOriginalsClosed": True,
+        "commands": {"test": test_commands, "summary": summary_commands}, "cleanExitStatus": None,
+        "allWorkerFinality": "not-established-by-XCTest-UI-state", "appleSigningMaterialUsed": False,
+        "signedExportQualified": False, "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+
+
 def positive_ui_observations(root, context, statuses, phases, inventory, budget):
     inputs = {}
     for key, path, limit, admission in POSITIVE_UI_INPUTS:
@@ -1509,7 +1630,8 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget)
             inputs[key] = ("refused", None)
     result = {}
     for name, kind, keys in (("androidSignedBuild", "android", ("android",)),
-                             ("iosUnsignedArchive", "ios", ("iosFacts", "iosTest", "iosSummary"))):
+                             ("iosUnsignedArchive", "ios", ("iosFacts", "iosTest", "iosSummary")),
+                             ("iosPendingRecovery", "iosRecovery", ("iosRecoveryFacts", "iosRecoveryTest", "iosRecoverySummary"))):
         states = [inputs[key][0] for key in keys]
         if all(state == "absent" for state in states):
             result[name] = {"receiptState": "absent"}
@@ -1517,8 +1639,9 @@ def positive_ui_observations(root, context, statuses, phases, inventory, budget)
         try:
             need(all(state == "observed" for state in states))
             values = [inputs[key][1] for key in keys]
-            result[name] = (project_android_positive(*values, context, statuses, phases, inventory) if kind == "android"
-                            else project_ios_positive(*values, context, statuses, phases, inventory))
+            projector = {"android": project_android_positive, "ios": project_ios_positive,
+                         "iosRecovery": project_ios_pending_recovery}[kind]
+            result[name] = projector(*values, context, statuses, phases, inventory)
         except Refused:
             result[name] = {"receiptState": "refused"}
     size = len(json.dumps(result, sort_keys=True, separators=(",", ":"), ensure_ascii=True))

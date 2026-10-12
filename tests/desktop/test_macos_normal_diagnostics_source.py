@@ -257,9 +257,409 @@ ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: sev
 ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
+NORMAL_IOS_PENDING_SWIFT_INVERSE = (('init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             engineeringDiagnostic: Bool = false) throws {',
+  'init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {'),
+ ('guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? '
+  'seconds == 900 : (seconds == 60 || seconds == 300)),',
+  'guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,\n'
+  '                  (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : '
+  '(seconds == 60 || seconds == 300))),'),
+ ('@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws '
+  '{',
+  '@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      iosRecovery: Bool = false, removal: Bool = false, '
+  'engineeringDiagnostic: Bool = false) throws {'),
+ ('&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))',
+  '&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned && !iosRecovery))'),
+ ('let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  engineeringDiagnostic: engineeringDiagnostic)',
+  'let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  iosRecovery: iosRecovery, engineeringDiagnostic: '
+  'engineeringDiagnostic)'),
+ ('    private final class LocalFixture {',
+  '    // Read-only directory custody for the existing parent-produced fixture.\n'
+  '    // Account/native contents and their restoration are checked by the parent;\n'
+  '    // this observation never creates state, recovers by CLI or deletes anything.\n'
+  '    @MainActor private final class IOSRecoveryFixture {\n'
+  '        enum Profile: String { case pending = "ios-recovery-pending" }\n'
+  '        private struct Directory {\n'
+  '            let fd: Int32\n'
+  '            let parent: Int32?\n'
+  '            let name: String\n'
+  '            let identity: StatFacts\n'
+  '        }\n'
+  '        private let clock: CaseClock\n'
+  '        private var descriptors: [Int32] = []\n'
+  '        private var directories: [Directory] = []\n'
+  '        private var entered = false, closed = false, closeFailed = false\n'
+  '        private(set) var source = "", run = "", attempt = "", projectPath = ""\n'
+  '        init(clock: CaseClock) { self.clock = clock }\n'
+  '        private func need(_ yes: Bool, _ reason: String) throws {\n'
+  '            guard yes else { throw clock.fail(reason) }\n'
+  '            _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '        }\n'
+  '        private func info(_ fd: Int32) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstat(fd, &value) == 0 && fcntl(fd, F_GETFD) == FD_CLOEXEC,\n'
+  '                     "recovery fixture original descriptor unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        private func named(_ parent: Int32, _ name: String) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,\n'
+  '                     "recovery fixture original name unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        func open(_ profile: Profile) throws {\n'
+  '            try need(!entered && !closed && descriptors.isEmpty && getuid() != 0\n'
+  '                     && getuid() == geteuid() && getgid() == getegid(), "recovery fixture admission '
+  'reused")\n'
+  '            entered = true\n'
+  '            let context = ProcessInfo.processInfo.environment\n'
+  '            source = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""\n'
+  '            run = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"] ?? ""\n'
+  '            attempt = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"] ?? ""\n'
+  '            let decimal: (String) -> Bool = { value in\n'
+  '                let bytes = Array(value.utf8)\n'
+  '                return (1...20).contains(bytes.count) && bytes[0] >= 49 && bytes[0] <= 57\n'
+  '                    && bytes.allSatisfy { (48...57).contains($0) }\n'
+  '            }\n'
+  '            try need(source.utf8.count == 40 && source.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) }\n'
+  '                && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source && decimal(run) && '
+  'decimal(attempt),\n'
+  '                "recovery fixture exact same-build context unavailable")\n'
+  '            let task = "mrk-macos-aqua-\\(source)-\\(run)-\\(attempt)"\n'
+  '            projectPath = "/private/tmp/" + task + "/" + profile.rawValue\n'
+  '            let parts = ["/", "private", "tmp", task, profile.rawValue]\n'
+  '            for (index, name) in parts.enumerated() {\n'
+  '                _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '                let parent = directories.last?.fd\n'
+  '                let fd = parent.map { openat($0, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) '
+  '}\n'
+  '                    ?? Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)\n'
+  '                if fd >= 0 { descriptors.append(fd) } // Custody before any fallible observation.\n'
+  '                try need(fd >= 0, "recovery fixture original directory open failed")\n'
+  '                let identity = try info(fd)\n'
+  '                try need(identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "recovery fixture is not a '
+  'directory")\n'
+  '                if let parent { try need(identity == named(parent, name), "recovery fixture entry changed '
+  'at admission") }\n'
+  '                if index < 3 {\n'
+  '                    try need(identity.uid == 0 && (index == 2 ? identity.mode & 0o7777 == 0o1777 : '
+  'identity.mode & 0o022 == 0),\n'
+  '                             "recovery fixture fixed anchor ownership differs")\n'
+  '                } else {\n'
+  '                    try need(identity.uid == getuid() && identity.gid == getgid() && identity.mode & '
+  '0o7777 == 0o700\n'
+  '                             && identity.flags == 0 && identity.device == directories[index - '
+  '1].identity.device,\n'
+  '                             "recovery fixture private original differs")\n'
+  '                }\n'
+  '                directories.append(Directory(fd: fd, parent: parent, name: name, identity: identity))\n'
+  '            }\n'
+  '            try post()\n'
+  '        }\n'
+  '        func post() throws {\n'
+  '            try need(entered && !closed && directories.count == 5 && descriptors.count == 5,\n'
+  '                     "recovery fixture original census unavailable")\n'
+  '            for directory in directories {\n'
+  '                let actual = try info(directory.fd)\n'
+  '                try need(directory.identity.sameDirectory(actual), "recovery fixture held identity '
+  'changed")\n'
+  '                if let parent = directory.parent {\n'
+  '                    try need(actual.sameDirectory(named(parent, directory.name)), "recovery fixture name '
+  'binding changed")\n'
+  '                } else {\n'
+  '                    var root = stat()\n'
+  '                    try need(lstat("/", &root) == 0 && actual.sameDirectory(StatFacts(root)), "recovery '
+  'fixture root binding changed")\n'
+  '                }\n'
+  '            }\n'
+  '        }\n'
+  '        func closeOriginals() throws {\n'
+  '            if closed {\n'
+  '                if closeFailed { throw Refusal.condition("recovery fixture prior close remains '
+  'unconfirmed") }\n'
+  '                return\n'
+  '            }\n'
+  '            var failure: Error?\n'
+  '            do { try post() } catch { failure = error }\n'
+  '            closed = true // Consuming closes, even after partial admission/Unknown; no retry.\n'
+  '            while let fd = descriptors.popLast() {\n'
+  '                if Darwin.close(fd) != 0 && failure == nil { failure = Refusal.condition("recovery '
+  'fixture consuming close failed") }\n'
+  '            }\n'
+  '            directories.removeAll()\n'
+  '            closeFailed = failure != nil\n'
+  '            if let failure { throw failure }\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    private final class LocalFixture {'),
+ ('    @MainActor private var ownedFixture: LocalFixture?',
+  '    @MainActor private var ownedIOSRecoveryFixture: IOSRecoveryFixture?\n'
+  '    @MainActor private var ownedFixture: LocalFixture?'),
+ ('    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {',
+  '    private struct IOSRecoveryObservation: Equatable {\n'
+  '        let operationID: String, ownerGeneration: String, phase: String, outcome: String, reason: String\n'
+  '        var fields: [String: String] { ["operationId": operationID, "ownerGeneration": ownerGeneration,\n'
+  '                                      "phase": phase, "outcome": outcome, "reason": reason] }\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryObservation(_ renderer: XCUIElement, phase: String) throws -> '
+  'IOSRecoveryObservation {\n'
+  '        let details = try unique(named(renderer, "Recovery details"), "current recovery details missing '
+  'or repeated")\n'
+  '        try reveal(details, in: renderer)\n'
+  '        var values: [String] = []\n'
+  '        for prefix in ["Recovery operation ID: ", "Recovery owner generation: ", "Recovery phase: ",\n'
+  '                       "Recovery outcome: ", "Recovery reason: "] {\n'
+  '            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '
+  '%@", prefix)),\n'
+  '                                   "current recovery field missing or repeated")\n'
+  '            try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not '
+  'visible")\n'
+  '            let value = String(field.label.dropFirst(prefix.count))\n'
+  '            try require(value.utf8.count <= 64, "current recovery field exceeds its bound")\n'
+  '            values.append(value)\n'
+  '        }\n'
+  '        for value in values.prefix(2) {\n'
+  '            try require(value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) },\n'
+  '                        "current recovery identity shape differs")\n'
+  '        }\n'
+  '        try require((phase == "awaiting-consent" || phase == "terminal") && values[2] == phase\n'
+  '            && values[3] == (phase == "terminal" ? "complete" : "not-observed") && values[4] == "none",\n'
+  '            "current recovery phase/outcome/reason differs")\n'
+  '        return IOSRecoveryObservation(operationID: values[0], ownerGeneration: values[1], phase: '
+  'values[2],\n'
+  '                                      outcome: values[3], reason: values[4])\n'
+  '    }\n'
+  '    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> '
+  'String {\n'
+  '        let text = try iosPublicText(container)\n'
+  '        let pattern = review ? #"(?:^| )Inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '                             : #"(?:^| )Exact inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '        let expression = try NSRegularExpression(pattern: pattern)\n'
+  '        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))\n'
+  '        guard matches.count == 1, let range = Range(matches[0].range(at: 1), in: text) else {\n'
+  '            throw Refusal.condition("current account session absent or ambiguous")\n'
+  '        }\n'
+  '        return String(text[range]) // Retained in memory only; only its digest may be printed.\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryAccount(_ renderer: XCUIElement, status: String) throws -> '
+  '(String, String) {\n'
+  '        let group = try unique(named(renderer, "Account signing recovery state"), "current account report '
+  'missing or repeated")\n'
+  '        try reveal(group, in: renderer)\n'
+  '        let prefix = "Account signing state · "\n'
+  '        let heading = try unique(group.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", '
+  'prefix)),\n'
+  '                                 "current account state missing or repeated")\n'
+  '        try require(heading.isHittable && heading.label == prefix + status && (status == "pending" || '
+  'status == "recovered"),\n'
+  '                    "current account state differs")\n'
+  '        return (String(heading.label.dropFirst(prefix.count)), try iosRecoverySession(group))\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {\n'
+  '        continueAfterFailure = false\n'
+  '        executionTimeAllowance = 525\n'
+  '        try beginCase(seconds: 525, iosRecovery: true)\n'
+  '        guard let clock = caseClock else { throw Refusal.condition("recovery original case clock '
+  'missing") }\n'
+  '        journeyDeadline = clock.deadline - 10 // 515s work including Quit, then only original reporting '
+  'reserve.\n'
+  '        let fixture = IOSRecoveryFixture(clock: clock)\n'
+  '        ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.\n'
+  '        do {\n'
+  '            try stage("ios-recovery-admission") {\n'
+  '                _ = try admitHostedAccount()\n'
+  '                try fixture.open(.pending)\n'
+  '            }\n'
+  '            let (app, window, renderer) = try launchForJourney()\n'
+  '            try stage("ios-recovery-project") {\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Open project folder", renderer: renderer)\n'
+  '                let sheet = try nativeSheet(window, title: "Choose a mobile project folder")\n'
+  '                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", '
+  '"Let’s get ios-recovery-pending ready.")),\n'
+  '                                    in: renderer, failures: ["Static observation unavailable", "Only a '
+  'partial static observation is available"])\n'
+  '                _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery '
+  'selected project differs")\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Recovery", renderer: renderer)\n'
+  '            }\n'
+  '            let failures = ["No new local recovery outcome was confirmed", "Recovery phase: unknown", '
+  '"Cleanup needs attention"]\n'
+  '            var inspect: IOSRecoveryObservation?, recover: IOSRecoveryObservation?\n'
+  '            var session = "", inspectStatus = "", recoverStatus = ""\n'
+  '            var inspectUnchecked = false, recoverUnchecked = false\n'
+  '            try stage("ios-recovery-inspect") {\n'
+  '                try fixture.post()\n'
+  '                try require(named(renderer, "Recovery details").count == 0, "prior recovery cannot supply '
+  'this journey")\n'
+  '                try press(renderer, "Review local recovery inspection", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I authorize one local inspection of the account signing and selected project '
+  'build-input recovery controls.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "inspection consent must begin unchecked")\n'
+  '                inspectUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "inspection explicit consent not observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, '
+  '"inspection review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Inspect local state once", renderer: renderer, failures: failures) // '
+  'One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 210, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "inspection terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "pending")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"inspection changed during account read")\n'
+  '                inspect = observed; inspectStatus = account.0; session = account.1\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let inspected = inspect else { throw Refusal.condition("inspection original absent") }\n'
+  '            try stage("ios-recovery-account") {\n'
+  '                try press(renderer, "Review ordinary account recovery", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                try require(pair.operationID != inspected.operationID && pair.ownerGeneration != '
+  'inspected.ownerGeneration,\n'
+  '                            "account recovery requires a fresh original pair")\n'
+  '                try require(try iosRecoverySession(review, review: true) == session, "account recovery '
+  'review session differs")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I confirm this macOS account and signing services are idle and authorize ordinary '
+  'restoration of only this inspected account session’s owned state.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "account recovery consent must begin '
+  'unchecked")\n'
+  '                recoverUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "account recovery explicit consent not '
+  'observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair\n'
+  '                            && iosRecoverySession(review, review: true) == session, "account recovery '
+  'review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Recover inspected account session", renderer: renderer, failures: '
+  'failures) // One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 240, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "account recovery terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "recovered")\n'
+  '                try require(account.1 == session, "recovered account session differs from original '
+  'inspection")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"recovery changed during account read")\n'
+  '                recover = observed; recoverStatus = account.0\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let recovered = recover else { throw Refusal.condition("account recovery original '
+  'absent") }\n'
+  '            try stage("ios-recovery-quit") {\n'
+  '                let sheet = try quitSheet(app, window)\n'
+  '                try click(sheet.buttons.matching(identifier: "Quit"), "recovery ordinary Quit '
+  'unavailable")\n'
+  '                try completeNormalQuit(app)\n'
+  '                ownedIOSRecoveryFixture = nil\n'
+  '                try fixture.closeOriginals() // Descriptor closes only, never account/fixture deletion.\n'
+  '                _ = try remaining(1)\n'
+  '            }\n'
+  '            journeyDeadline = clock.deadline // Same immutable end, only the reserved reporting window.\n'
+  '            try acceptFinalScenario()\n'
+  '            #if arch(arm64)\n'
+  '            let target = "aarch64-apple-darwin"\n'
+  '            #elseif arch(x86_64)\n'
+  '            let target = "x86_64-apple-darwin"\n'
+  '            #endif\n'
+  '            var inspectFields = inspected.fields, recoverFields = recovered.fields\n'
+  '            inspectFields["accountStatus"] = inspectStatus; recoverFields["accountStatus"] = '
+  'recoverStatus\n'
+  '            let facts: [String: Any] = ["schemaVersion": 1, "sourceCommit": fixture.source, "target": '
+  'target,\n'
+  '                "runId": fixture.run, "runAttempt": fixture.attempt,\n'
+  '                "fixtureSha256": SHA256.hash(data: Data(fixture.projectPath.utf8)).map { String(format: '
+  '"%02x", $0) }.joined(),\n'
+  '                "inspect": inspectFields, "recover": recoverFields,\n'
+  '                "sessionSha256": SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) '
+  '}.joined(),\n'
+  '                "inspectUnchecked": inspectUnchecked, "recoverUnchecked": recoverUnchecked, '
+  '"ordinaryQuit": normalQuitObserved]\n'
+  '            let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, '
+  '.withoutEscapingSlashes])\n'
+  '            try require(raw.count <= 4096 && inspectUnchecked && recoverUnchecked && normalQuitObserved,\n'
+  '                        "recovery bounded observation incomplete")\n'
+  '            _ = try remaining(1)\n'
+  '            print("MRK_MACOS_UI_IOS_PENDING_RECOVERY=" + String(decoding: raw, as: UTF8.self))\n'
+  '        } catch {\n'
+  '            let primary = error\n'
+  '            _ = clock.fail("pending account recovery observation failed")\n'
+  '            // No CLI recovery, subsequent observer, automatic new Start or state\n'
+  '            // deletion. Existing original-owner teardown retains unknown finality.\n'
+  '            throw primary\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {'),
+ ('        // Never delete possibly live fixture/app state or seek a replacement owner.',
+  '        // Independent read-only fixture closes, even after failed/Unknown UI.\n'
+  '        do {\n'
+  '            try await MainActor.run {\n'
+  '                if let fixture = ownedIOSRecoveryFixture {\n'
+  '                    ownedIOSRecoveryFixture = nil\n'
+  '                    try fixture.closeOriginals()\n'
+  '                }\n'
+  '            }\n'
+  '        } catch { if cleanupFailure == nil { cleanupFailure = error } }\n'
+  '        // Never delete possibly live fixture/app state or seek a replacement owner.'))
+
+def without_normal_ios_pending_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("normal iOS pending Swift SOURCE bound differs")
+    markers = ("testInstalledIOSPendingAccountRecoveryThroughUI", "IOSRecoveryFixture", "iosRecovery:")
+    if not any(marker in source for marker in markers):
+        return source  # Earlier exact SOURCE layers retain their own guards.
+    for before, current in reversed(NORMAL_IOS_PENDING_SWIFT_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending Swift SOURCE region differs")
+        source = source.replace(current, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "f1e19af70b5b8f85384aa2515d515bddb749ae043b4bf560d88a2d3c39281386":
+        raise AssertionError("normal iOS pending Swift SOURCE predecessor differs")
+    return source
+
+
 def without_signed_android_runtime_source(source):
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("signed Android Swift SOURCE bound differs")
+    source = without_normal_ios_pending_source(source)
     current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
     previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
     if current in source:
@@ -1991,7 +2391,405 @@ INSTALLED_ANDROID_ACTIVATION_INVERSE = (
     "      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && 'android-signed-build' || 'disabled' }}\n",
 )
 
+NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n",
+  '      # SOURCE-owned: pending iOS recovery journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-pending-recovery' || 'disabled' }}\n"),
+ ('            ios-unsigned-archive)\n', '            ios-unsigned-archive|ios-pending-recovery)\n'),
+ ("        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n",
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == "
+  "'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed' "
+  "&& env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' || "
+  "env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery') && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && "
+  "env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven'))\n"),
+ ('      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n',
+  '      - name: Exercise one ordinary unsigned iOS archive and normal Quit\n'
+  '        id: normal_ios_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 22\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # One900s case /1020s original /1245s phase; success observation must\n'
+  '          # latch by750s. The same original reserve is for failure/cancel/close,\n'
+  '          # not a replacement Start. Raw log, xcresult and archive stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the single unsigned iOS XCTest summary under the same source\n'
+  '        id: normal_ios_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-unsigned-archive ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # Actual same-job installed producer and fresh external-runner originals\n'
+  '          # are required above. No engineering app, signing substitute, SDK\n'
+  '          # download, test key or product operation is introduced by this wrapper.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-unsigned-archive-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-unsigned-archive-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'
+  '      - name: Recover one genuine pending iOS account session through the ordinary app\n'
+  '        id: normal_ios_pending_ui_test\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 19\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-test \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.log" 2>&1\n'
+  '          ios_test_status=$?\n'
+  '          printf \'%s\\n\' "$ios_test_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-test.status"\n'
+  '          ios_test_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_test_status" != 0 ]]; then exit "$ios_test_status"; fi\n'
+  '          [[ "$ios_test_status_saved" == 0 ]] || exit 1\n'
+  '          # Seven originals: sourcePRE/runner-signature/entitlements/producer180/\n'
+  '          # XCTest645 (525case)/observer90/sourcePOST, one1080s phase. The real\n'
+  '          # producer/UI/readback all must settle; logs and private baseline stay PRIVATE.\n'
+  '\n'
+  '      - name: Observe the one pending iOS recovery XCTest summary under the same source\n'
+  '        id: normal_ios_pending_ui_summary\n'
+  "        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == "
+  "'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery' && "
+  "env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && "
+  "steps.normal_ios_pending_ui_test.outcome == 'success' && steps.normal_ui_build.outcome == 'success' && "
+  "steps.package_install.outcome == 'success')\n"
+  '        timeout-minutes: 2\n'
+  '        shell: bash\n'
+  '        env:\n'
+  '          RUNNER_ENVIRONMENT: ${{ runner.environment }}\n'
+  '          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer\n'
+  '        run: |\n'
+  '          set +x\n'
+  '          set +a\n'
+  '          set -euo pipefail\n'
+  '          set -o noclobber\n'
+  '          umask 077\n'
+  '          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_IOS_UI_SCOPE" == '
+  'ios-pending-recovery ]] || exit 1\n'
+  '          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == '
+  'ordinary-seven ]] || exit 1\n'
+  '          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_SHA" == "$MRK_EXPECTED_SHA" ]] || exit '
+  '1\n'
+  '          [[ "$MRK_MACOS_WORK" =~ ^/Users/runner/work/_temp/mrk-macos-installed\\.[A-Za-z0-9]{8}$ ]] || '
+  'exit 1\n'
+  '          # The same installed normal app, real console account, fixed fixture\n'
+  '          # and original runner are required. No signing material/Store action.\n'
+  '          # Never clean account state or private pending controls after failure.\n'
+  '          ulimit -f 1048576\n'
+  '          set +e\n'
+  '          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner '
+  'LOGNAME=runner \\\n'
+  '            "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \\\n'
+  '            "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" '
+  '\\\n'
+  '            "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" '
+  '"TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \\\n'
+  '            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY" "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME" \\\n'
+  '            "GITHUB_REF=$GITHUB_REF" "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" '
+  '\\\n'
+  '            "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" "GITHUB_WORKSPACE=$GITHUB_WORKSPACE" \\\n'
+  '            "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \\\n'
+  '            "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "RUNNER_OS=$RUNNER_OS" "RUNNER_ARCH=$RUNNER_ARCH" '
+  '\\\n'
+  '            "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" '
+  '--normal-ios-pending-recovery-summary \\\n'
+  '            > "$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.json" 2> '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.stderr"\n'
+  '          ios_summary_status=$?\n'
+  '          printf \'%s\\n\' "$ios_summary_status" > '
+  '"$MRK_MACOS_WORK/normal-ui/ios-pending-recovery-summary.status"\n'
+  '          ios_summary_status_saved=$?\n'
+  '          set -e\n'
+  '          if [[ "$ios_summary_status" != 0 ]]; then exit "$ios_summary_status"; fi\n'
+  '          [[ "$ios_summary_status_saved" == 0 ]] || exit 1\n'
+  '          # The existing summary owner requires actual1/1 with no failure/skip.\n'
+  '          # Its closed source/command receipt plus the separately retained test0\n'
+  '          # and facts are evidence, never IPA/signing/distribution qualification.\n'
+  '\n'))
+
+
+def without_normal_ios_pending_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("normal iOS pending workflow SOURCE bound differs")
+    if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
+        return source
+    for previous, current in reversed(NORMAL_IOS_PENDING_WORKFLOW_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending workflow exact SOURCE differs")
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65":
+        raise AssertionError("normal iOS pending workflow whole predecessor differs")
+    return source
+
+
+INSTALLED_IOS_ACTIVATION_INVERSE = (('      # SOURCE-owned: signed Android journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_ANDROID_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'android-signed-build' || 'disabled' }}\n",
+  '      # This installed verification run exercises iOS; Android keeps its separate qualification.\n'
+  '      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n'),
+ ('      # Separately reviewed unsigned archive UI; an installed app is still mandatory.\n'
+  '      MRK_MACOS_IOS_UI_SCOPE: disabled\n',
+  '      # SOURCE-owned: unsigned iOS journey only on the fixed installed verification ref.\n'
+  "      MRK_MACOS_IOS_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-installed' && "
+  "'ios-unsigned-archive' || 'disabled' }}\n"))
+
+def without_installed_ios_activation_workflow(source):
+    source = without_normal_ios_pending_workflow(source)
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("installed iOS activation SOURCE bound differs")
+    (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+    android_scopes = [line for line in source.splitlines(keepends=True)
+                      if line.startswith("      MRK_MACOS_ANDROID_UI_SCOPE:")]
+    ios_scopes = [line for line in source.splitlines(keepends=True)
+                  if line.startswith("      MRK_MACOS_IOS_UI_SCOPE:")]
+    if new_android not in source and new_ios not in source:
+        # Historical scope mutations belong to their unchanged exact inverse;
+        # only this new activation's own incomplete markers are refused here.
+        if (new_android.splitlines()[0] in source or new_ios.splitlines()[0] in source
+                or new_ios.splitlines(keepends=True)[1] in ios_scopes):
+            raise AssertionError("installed iOS activation partial SOURCE differs")
+        return source
+    if (source.count(new_android) != 1 or source.count(new_ios) != 1
+            or old_android in source or old_ios in source
+            or android_scopes != [new_android.splitlines(keepends=True)[1]]
+            or ios_scopes != [new_ios.splitlines(keepends=True)[1]]):
+        raise AssertionError("installed iOS activation exact SOURCE differs")
+    for previous, current in reversed(INSTALLED_IOS_ACTIVATION_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc":
+        raise AssertionError("installed iOS activation whole predecessor differs")
+    return source
+
+
 def without_installed_android_activation_workflow(source):
+    source = without_installed_ios_activation_workflow(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("installed Android activation SOURCE bound differs")
     previous, current = INSTALLED_ANDROID_ACTIVATION_INVERSE
@@ -2944,6 +3742,44 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_intel_android_ui_target_join_precedes_historical_projection(self):
         root = Path(__file__).absolute().parents[2]
         raw = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        pending_current = raw
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("&& 'ios-pending-recovery' || 'disabled'", raw)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_test\n"), 1)
+        self.assertEqual(raw.count("        id: normal_ios_pending_ui_summary\n"), 1)
+        self.assertIn("--normal-ios-pending-recovery-test", raw)
+        self.assertIn("--normal-ios-pending-recovery-summary", raw)
+        raw = without_normal_ios_pending_workflow(raw)
+        self.assertEqual(hashlib.sha256(raw.encode()).hexdigest(), "b96a9fe68f93b9eceeaf4297cdc4e1f54cb70b9c5ef51c346c84519e83ab4e65")
+        self.assertEqual(without_normal_ios_pending_workflow(raw), raw)
+        for previous, current in NORMAL_IOS_PENDING_WORKFLOW_INVERSE:
+            with self.assertRaises(AssertionError):
+                without_normal_ios_pending_workflow(pending_current.replace(current, previous, 1))
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current + "# unexpected pending recovery tail\n")
+        with self.assertRaises(AssertionError):
+            without_normal_ios_pending_workflow(pending_current.replace("timeout-minutes: 19", "timeout-minutes: 20", 1))
+        (old_android, new_android), (old_ios, new_ios) = INSTALLED_IOS_ACTIVATION_INVERSE
+        self.assertEqual(raw.count(new_android), 1)
+        self.assertEqual(raw.count(new_ios), 1)
+        self.assertEqual(raw.count("      MRK_MACOS_ANDROID_UI_SCOPE: disabled\n"), 1)
+        self.assertIn("github.ref == 'refs/heads/verify/desktop-macos-installed' && 'ios-unsigned-archive' || 'disabled'", new_ios)
+        self.assertIn("MRK_MACOS_SAVED_FILE_UI_SCOPE: ${{ github.ref == 'refs/heads/verify/desktop-macos-preview' && 'remaining-three' || 'ordinary-seven' }}", raw)
+        ios_prior = without_installed_ios_activation_workflow(raw)
+        self.assertEqual(ios_prior, raw.replace(new_android, old_android, 1).replace(new_ios, old_ios, 1))
+        self.assertEqual(hashlib.sha256(ios_prior.encode()).hexdigest(),
+                         "ec216ac8fceb8d35cd91f793c7e496c620f1ba212278026b8da883a88907a2dc")
+        self.assertEqual(without_installed_ios_activation_workflow(ios_prior), ios_prior)
+        for changed in (
+                raw.replace(new_ios, new_ios.replace("verify/desktop-macos-installed", "verify/desktop-macos-preview"), 1),
+                raw.replace(new_ios, new_ios.splitlines(keepends=True)[0] + "      MRK_MACOS_IOS_UI_SCOPE: ios-unsigned-archive\n", 1),
+                raw.replace(new_android, old_android, 1),
+                raw.replace(new_ios, old_ios, 1),
+                raw + new_ios,
+                raw + "# unexpected iOS activation tail\n"):
+            with self.assertRaises(AssertionError):
+                without_installed_ios_activation_workflow(changed)
+        raw = ios_prior
         inactive, active = INSTALLED_ANDROID_ACTIVATION_INVERSE
         self.assertEqual(raw.count(active), 1)
         self.assertNotIn(inactive.splitlines(keepends=True)[1], raw)
