@@ -47,9 +47,14 @@ PACKAGE_SCOPES = (
     "installation-inspection", "vault-helper-shipping-installation-inspection",
     "project-recovery-pending", "ios-recovery-pending", "doctor-preflight2", "local-edits3",
 )
+APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
+APP_ABSENCE_PHASES = ("prepare-app-absence", "app-absence-restore")
+UPDATE_REF = "refs/heads/verify/desktop-macos-positive-update"
+UPDATE_PHASE = "update-baseline"
+UPDATE_ROLES = ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")
 SAME_PACKAGE_PHASE = "same-package-noop"
 SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
-PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE)
+PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + APP_ABSENCE_PHASES
 REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
 REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
                         "distribution-verify-signature", "distribution-verify-image")
@@ -60,6 +65,10 @@ MAX_HELPER = 32 * 1024 * 1024
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
+SUPPORT_PHASES = ("android-support-shipping",)
+SUPPORT_REF = "refs/heads/verify/desktop-macos-android-support-signing"
+SUPPORT_IDENTIFIERS = tuple("dev.mobile-release-kit.desktop.android-support." + role
+                            for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2"))
 PYTHON_PHASES = ("python-engineering", "python-shipping")
 PYTHON_IDENTIFIER = "dev.mobile-release-kit.desktop.python"
 PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python-loader", "python-tls", "python-cancellation")
@@ -423,14 +432,17 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
         errors += row["severity"] == "error"
         warnings += row["severity"] == "warning"
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
-    # Carrier-null architecture is bounded diagnostic metadata only, not
-    # a native slice, certificate, ticket or current-package authority.
+    # Finite Apple ticket annotations include nested signed i386 slices;
+    # they never grant native execution, target or provenance authority.
+    # An absent or null carrier architecture is diagnostic metadata only,
+    # not a native slice, certificate, ticket or current-package authority.
     for row in tickets or ():
-        need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
+        need(type(row) is dict and {"path", "digestAlgorithm", "cdhash"} <= set(row)
+             <= {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row["arch"] in ("arm64", "x86_64") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
-                  and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
+             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
+                  and row["path"] == archive_name and row.get("arch") is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
@@ -563,7 +575,8 @@ def package_signature_data(body, selection, certificates, path):
     need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines)
          and lines[0] in ('Package "' + path.name + '":', 'Package "' + str(path) + '":'),
          "package-signature-header")
-    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X")
+    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X",
+               "Status: signed by a developer certificate issued by Apple for distribution")
     need(len(lines) > 4 and lines[1] in trusted
          and lines[2].startswith("Signed with a trusted timestamp on: ")
          and 0 < len(lines[2][len("Signed with a trusted timestamp on: "):]) <= 128
@@ -902,7 +915,7 @@ def build_profile(target):
 
 def entrypoint(argv):
     need(type(argv) is list and len(argv) in (2, 4) and all(type(value) is str for value in argv)
-         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
+         and argv[1] in (APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES and (len(argv) == 2 or argv[2] == "--target"), "closed-entrypoint")
     target = ARM_TARGET if len(argv) == 2 else argv[3]
     build_profile(target)
     return argv[1], target
@@ -1408,7 +1421,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
     context = last(state.get("credential_contexts"), 64)
     purposes = ("python", "resident-image", "helper", "producer", "installer", "observer-program",
                 "distribution-image", "observation-image") + SIGNING_PHASES + TOOL_SIGNING_PHASES
-    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
+    phases = ((APP_SIGNATURE_SUMMARY,) + PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES
               + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES
               + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES)
     pending = receipt.get("directStagerIOPending")
@@ -1469,10 +1482,14 @@ def emit_failure_diagnostic(error, **context):
         pass
 
 
-def package_timeout_data(now, endpoint, requested):
+def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
     """Leave the existing owner's three-second settlement inside this group."""
+    need((phase is None and role is None) or (type(phase) is str and type(role) is str),
+         "package-group-clock")
+    maximum = (1440 if phase == "prepare-app-absence" and role in
+               ("app-absence-build", "app-absence-data-tests") else 480)
     need(type(now) is int and type(endpoint) is int and 0 <= now < endpoint
-         and type(requested) is int and 0 < requested <= 480, "package-group-clock")
+         and type(requested) is int and 0 < requested <= maximum, "package-group-clock")
     remaining = (endpoint - now - 3_000_000_000) // 1_000_000_000
     need(remaining >= 1, "package-group-settlement-reserve")
     return min(requested, remaining)
@@ -1485,7 +1502,7 @@ def signing_requirement(identity, identifier):
          and identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()]), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -1716,8 +1733,8 @@ def removal_prepared_data(value, environment, target, case, correlation):
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
-    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET):
-        need(phase in PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
+    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None):
+        need(phase in PHASES + SUPPORT_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
@@ -1800,6 +1817,10 @@ class Operation:
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
         self.removal_package_complete = False
+        self.android_support = self.android_support_module = None
+        self.support_started = support_started
+        self.app_absence = self.app_absence_module = self.app_absence_api = None
+        self.update = self.update_module = self.update_api = None
         self.same_package_complete = False
         self.same_package_case = None
         self.entry_sha256 = self.desktop_facade_sha256 = self.resident_image_sha256 = None
@@ -1821,9 +1842,57 @@ class Operation:
             self.receipt.update(notaryAuthentication={"created": False, "closed": False, "retired": False},
                                 toolchain=None, helperIdentifier=None)
 
+    def android_support_load(self):
+        entry = self.source_original("desktop/tools/macos_android_support_signing.py", "source-support-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_android_support_signing.py"
+        spec = importlib.util.spec_from_file_location("mrk_android_support_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        need(spec.name not in sys.modules, "support-adapter-module-collision")
+        sys.modules[spec.name] = module
+        try:
+            exec(compile(body, str(path), "exec"), module.__dict__)
+            module.Refused = Refused
+            need(self.read(entry) == body, "support-source-changed")
+            self.package_sources.append((entry, body))
+            self.android_support_module = module
+            module.start(self, sys.modules[__name__], self.support_started)
+        finally:
+            need(sys.modules.get(spec.name) is module, "support-adapter-module-rebound")
+            del sys.modules[spec.name]
+
+    def update_load(self):
+        entry = self.source_original("desktop/tools/macos_update_verification.py", "source-update-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_update_verification.py"
+        spec = importlib.util.spec_from_file_location("mrk_update_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        need(self.read(entry) == body, "update-source-changed")
+        self.package_sources.append((entry, body))
+        self.update_module = module
+        module.start(self, sys.modules[__name__])
+
+    def app_absence_load(self):
+        # One fixed current SOURCE leaf, held before loading any definitions.
+        # Not a plug-in resolver or a new process owner.
+        entry = self.source_original("desktop/tools/macos_app_absence_fixture.py", "source-app-absence-adapter", 65536)
+        body = self.read(entry)
+        path = self.checkout / "desktop/tools/macos_app_absence_fixture.py"
+        spec = importlib.util.spec_from_file_location("mrk_app_absence_adapter", path)
+        module = importlib.util.module_from_spec(spec)
+        exec(compile(body, str(path), "exec"), module.__dict__)
+        need(self.read(entry) == body, "app-absence-source-changed")
+        self.package_sources.append((entry, body))
+        self.app_absence_module = module
+        module.start(self, sys.modules[__name__])
+
     def register(self, fd, role, kind, parent=None, name=None):
         entry = {"fd": fd, "role": role, "kind": kind, "parent": parent, "name": name, "closed": False}
         self.entries.append(entry)  # Before any fallible identity/content observation.
+        if self.app_absence is not None or self.update is not None:
+            need(len(self.entries) <= 24576 and sum(e["fd"] is not None for e in self.entries) <= 96,
+                 "app-absence-original-ledger-bound")
         self.entry_registry[id(entry)] = entry  # History retains the FD if this insertion raises.
         return entry
 
@@ -1914,7 +1983,8 @@ class Operation:
 
     def publish(self, name, data, *, mode=0o600, parent=None):
         if parent is not None:
-            need(self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+            need((self.phase == SAME_PACKAGE_PHASE and parent is self.same_package_case
+                  or self.phase == UPDATE_PHASE and self.update is not None and parent is self.update["case"])
                  and name == "installer-output.status" and mode == 0o600, "same-package-status-purpose")
             self.recheck_directory(parent)
         fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
@@ -1931,6 +2001,8 @@ class Operation:
         os.fchmod(fd, mode)
         os.fsync(fd)
         need(os.pread(fd, len(data) + 1, 0) == data, "output-readback")
+        if self.android_support is not None:
+            self.android_support_module.output_record(self, name, entry)
         self.close(entry)
         need(entry["closed"], "output-close-unknown")
 
@@ -1999,6 +2071,12 @@ class Operation:
                  and all(c.get("returned") is True and c.get("capturesSettled") is True for c in self.calls),
                  "tool-original-dispatch-boundary")
             self.tool_clock()
+        if self.android_support is not None:
+            self.android_support_module.dispatch(self, role)
+        if self.app_absence is not None:
+            self.app_absence_module.dispatch(self, role)
+        if self.update is not None:
+            self.update_module.dispatch(self, role, argv)
         recorded_role = self.removal_recorded_role(role)
         if self.phase == "prepare-removal-observers":
             roles = removal_preparation_roles(self.removal_case)
@@ -2052,11 +2130,16 @@ class Operation:
              and type(result.args) in (list, tuple) and tuple(result.args) == tuple(argv)
              and type(result.stdout) is bytes and type(result.stderr) is bytes
              and len(result.stdout) + len(result.stderr) <= limit, "original-return-contract")
+        need(self.android_support is None or 0 <= result.returncode <= 255, "support-native-return-unknown")
         if self.phase == "package-install" and role == "installer":
             # Save the actual original status before any diagnostics/readback.
             self.publish("installer-output.status", (str(result.returncode) + "\n").encode("ascii"))
         if self.phase == SAME_PACKAGE_PHASE and role == "installer":
             self.same_package_save_status(result.returncode)
+        if self.phase == UPDATE_PHASE and role == UPDATE_ROLES[1]:
+            self.update_module.status(self, result.returncode)
+        if self.app_absence is not None and role == "app-absence-install":
+            self.app_absence_module.save_restore_status(self, result.returncode)
         record.update(returned=True, returncode=result.returncode,
                       stdoutSha256=digest(result.stdout), stderrSha256=digest(result.stderr))
         prefix = "android-helper-" + ((self.phase + "-") if self.removal or self.phase == SAME_PACKAGE_PHASE else "") + recorded_role
@@ -2075,6 +2158,10 @@ class Operation:
         need(result.returncode == 0 or diagnostic and result.returncode == 1
              or self.phase == "package-removal-fixture" and removal_native_result_data(self.removal_case, role, result.returncode),
              "original-nonzero-" + role)
+        if self.android_support is not None:
+            self.android_support_module.returned(self, role)
+        if self.app_absence is not None:
+            self.app_absence_module.returned(self, role)
         if self.credential_active is not None:
             self.credential_clock(self.credential_active)
             self.credential_census(self.credential_active)
@@ -2088,7 +2175,9 @@ class Operation:
         need(type(now) is int and context["observed"] <= now < context["endpoint"] - (0 if cleanup else 30_000_000_000),
              "credential-original-deadline")
         context["observed"] = now
-        if self.phase in PYTHON_PHASES:
+        if self.android_support is not None:
+            self.android_support_module.clock(self, work=not cleanup)
+        elif self.phase in PYTHON_PHASES:
             self.python_clock(work=not cleanup)
         elif self.phase in TOOL_SIGNING_PHASES:
             self.tool_clock(work=not cleanup)
@@ -2102,7 +2191,10 @@ class Operation:
         now = time.monotonic_ns()
         need(type(now) is int, "credential-original-clock")
         endpoint = now + 240_000_000_000
-        if self.phase in PYTHON_PHASES:
+        if self.android_support is not None:
+            _observed, outer = self.android_support_module.clock(self)
+            endpoint = min(endpoint, outer)
+        elif self.phase in PYTHON_PHASES:
             _observed, outer = self.python_clock()
             endpoint = min(endpoint, outer)
         elif self.phase in TOOL_SIGNING_PHASES:
@@ -2209,6 +2301,7 @@ class Operation:
                  and type(result.args) in (tuple, list) and tuple(result.args) == tuple(argv)
                  and type(result.stdout) is bytes and type(result.stderr) is bytes
                  and len(result.stdout) + len(result.stderr) <= 16384, "credential-original-return")
+            need(self.android_support is None or 0 <= result.returncode <= 255, "support-credential-return-unknown")
             record.update(returned=True, settled=True, status=result.returncode)
             self.removal_credential_records_post()
             self.credential_clock(context, cleanup=context["retiring"])
@@ -2331,13 +2424,15 @@ class Operation:
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
                  "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
-                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES}}
+                 **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES},
+                 **{role: (role + "-sign", role + "-verify") for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2")}}
         need((purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
               or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
               or self.phase == "prepare-removal-observers" and purpose in ("observer-program", "installer", "producer", "distribution-image")
-              or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose)
+              or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose
+              or self.phase in SUPPORT_PHASES and purpose in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2"))
              and self.credential_active is None and not self.credential_failed and self.credential_known(), "credential-fixed-purpose")
         if self.phase == "python-engineering" or self.phase == "prepare" and self.signing is None:
             yield  # No secret read, directory, keychain or auxiliary call.
@@ -2406,12 +2501,15 @@ class Operation:
             need(not identities.stderr and not certs.stderr, "credential-private-query-stderr")
             if purpose == "installer":
                 installer_identity(identities.stdout, certs.stdout, self.installer_selection, certificates)
-                # This explicitly anchored local check does NOT establish system
-                # trust. Independent pkgutil trust/timestamp/chain and Accepted
-                # remain required after signing the actual package.
+                # Exact SOURCE-enrolled DER binds the reviewed Installer role;
+                # this is not a live semantic EKU parser. pkgSign requires a
+                # different CodeSigning EKU, so use basic for the local anchored
+                # crypto/time chain. It proves neither system trust nor revocation.
+                # Actual productsign, pkgutil trust/timestamp/chain and Accepted
+                # remain mandatory after signing the actual package.
                 paths = [str(self.checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der"))
                          for name in ("leaf", "issuer", "root")]
-                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L",
+                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
                     "-c", paths[0], "-c", paths[1], "-r", paths[2]], timeout=30)
             else:
                 credential_identity(identities.stdout, certs.stdout, self.signing, certificates)
@@ -6087,6 +6185,10 @@ class Operation:
         self.removal_directory_post(self.removal_slash)
 
     def package_clock(self):
+        if self.app_absence is not None:
+            return self.app_absence_module.clock(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            return self.update_module.clock(self)
         if self.phase in FINAL_IMAGE_PHASES or self.phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             return self.notary_clock()[0]  # Same clock; never the package-install990s endpoint.
         now = time.monotonic_ns()
@@ -6143,7 +6245,7 @@ class Operation:
             return self.final_image_call("final-image-detach", argv)
         need(self.package_settled(), "package-io-finality-unknown")
         endpoint = self.notary_clock()[1] if self.phase == SAME_PACKAGE_PHASE else self.package_endpoint
-        timeout = package_timeout_data(self.package_clock(), endpoint, timeout)
+        timeout = package_timeout_data(self.package_clock(), endpoint, timeout, phase=self.phase, role=role)
         result = self.call(role, argv, self.native_environment() if environment is None else environment,
                            cwd=self.work if cwd is None else cwd, timeout=timeout, limit=limit)
         self.package_clock()  # Original return AND the existing capture/status closes.
@@ -6298,7 +6400,8 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
-        self.package_call("distribution-detach", ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=30)
+        self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
+                          ["/usr/bin/hdiutil", "detach", self.mount_device], timeout=60 if self.phase == UPDATE_PHASE else 30)
         if self.removal_baseline_mount is not None:
             self.removal_baseline_detached()
         else:
@@ -6443,8 +6546,9 @@ class Operation:
 
     def package_install(self):
         self.stage = "package-final-audit"
-        self.package_started = self.package_observed = time.monotonic_ns()
-        self.package_endpoint = self.package_started + 990_000_000_000
+        if self.app_absence is None:
+            self.package_started = self.package_observed = time.monotonic_ns()
+            self.package_endpoint = self.package_started + 990_000_000_000
         self.package_clock()
         if self.environment.get("GITHUB_REF") == REMOVAL_REF:
             self.removal_baseline_admit()
@@ -6512,6 +6616,8 @@ class Operation:
             need(actual_descriptor == descriptor, "producer-exact-descriptor-emission")
             summary = self.stager.emitted_package_data(emitted.stdout, emitted.stderr, emitted.returncode, body, actual_descriptor, signed, target=self.target)
             self.package_outputs.extend(((signed_entry, digest(signed)), (descriptor_entry, digest(descriptor))))
+        if self.app_absence is not None:
+            self.app_absence_module.image_prepare(self, root)
         expected = {"Install.pkg": body, "producer.json": descriptor, "producer.sig": signed}
         self.stager.distribution_layout_data(os.listdir(root["fd"]), "Install.pkg", expected,
             {name: (value, 0o444) for name, value in expected.items()})
@@ -6548,9 +6654,13 @@ class Operation:
             installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
+        if self.update is not None:
+            self.update_module.before_current(self, actual_descriptor)
         self.package_diagnostic(args, capture=False)
         self.package_post()
         self.mounted_post()
+        if self.app_absence is not None:
+            self.app_absence_module.baseline(self)
         self.stage = "standard-original-installer"
         # Require the unchanged inner120s plus this owner's existing3s reserve;
         # neither starts a renewed package-group deadline.
@@ -6572,7 +6682,10 @@ class Operation:
         self.package_post()
         self.mounted_post()
         self.stage = "package-nonroot-v2-readback"
-        observed = self.package_stager_io("v2-readback", args)
+        observed = (self.update_module.current_readback(self, args) if self.update is not None
+                    else self.package_stager_io("v2-readback", args))
+        if self.app_absence is not None:
+            self.app_absence_module.initial_readback(self, observed)
         self.package_clock()
         self.publish("installation-observation.json", self.stager.canonical(observed) + b"\n")
         self.installation_readback = True
@@ -6581,6 +6694,10 @@ class Operation:
         self.mounted_post()
         self.detach_package_mount()
         self.package_post()
+        if self.app_absence is not None:
+            self.app_absence_module.package_complete(self)
+        if self.update is not None:
+            self.update_module.current_complete(self)
         self.receipt["distribution"] = {"schemaVersion": 1, "kind": "mrk-ordinary-package-observed-v2", "target": self.target,
             "packageVersion": selection.package_version, "release": selection.release, "requestId": request_id,
             "packageSha256": digest(body), "packageBytes": len(body), "descriptorSha256": digest(descriptor), "signatureSha256": digest(signed),
@@ -6738,12 +6855,20 @@ class Operation:
         self.package_clock()
 
     def finish(self):
+        if self.android_support is not None:
+            try:
+                self.android_support_module.retire(self)
+            except BaseException as error:
+                self.errors.append({"stage": "support-retirement", "type": type(error).__name__})
         if self.phase in TOOL_SIGNING_PHASES and self.tool_started is not None:
             try:
                 self.tool_clock(work=False)
             except BaseException as error:
                 self.errors.append({"stage": "tool-retirement-clock", "type": type(error).__name__})
-        if not self.removal_finish_ready():
+        if (not self.removal_finish_ready()
+                or self.android_support is not None and not self.android_support_module.finish_ready(self)
+                or self.app_absence is not None and not self.app_absence_module.finish_ready(self)
+                or self.update is not None and not self.update_module.finish_ready(self)):
             # SAME unresolved originals/mounts/thread remain retained. A
             # generic finally/known output close cannot grant fixture custody.
             self.receipt.update(originalClosesKnown=False, targetRetired=False,
@@ -6826,6 +6951,11 @@ class Operation:
                                                and (self.phase not in NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or not self.notary_unknown
                                                     and not self.notary_mutation_pending and self.notary_key is None)
                                                and all(entry["closed"] for entry in self.entries))
+        if self.app_absence is not None:
+            try:
+                self.app_absence_module.clock(self, work=False)
+            except BaseException as error:
+                self.errors.append({"stage": "app-absence-post-close-clock", "type": type(error).__name__})
         self.receipt["cleanupErrors"] = self.errors
 
     def execute(self, expected=None):
@@ -6842,17 +6972,25 @@ class Operation:
                 self.python_clock()
                 self.receipt.update(toolchain=None, helperIdentifier=None, pythonIdentifier=PYTHON_IDENTIFIER)
             self.open()
+            if self.phase in SUPPORT_PHASES:
+                self.android_support_load()
+            if self.environment.get("GITHUB_REF") == UPDATE_REF and self.phase in (UPDATE_PHASE, "package-install"):
+                self.update_load()
+            if self.phase in APP_ABSENCE_PHASES or self.phase == "package-install" and self.environment.get("GITHUB_REF") == APP_ABSENCE_REF:
+                self.app_absence_load()
             self.profile_entry = self.source_original(PROFILE, "source-signing-profile", 1024)
             self.service_profile = self.read(self.profile_entry)
             self.signing = self.stager.service_signing_data(self.service_profile)
             self.producer_profile_entry = self.source_original(PRODUCER_PROFILE, "source-producer-profile", 1024)
             self.producer_profile = self.read(self.producer_profile_entry)
             selection = self.stager.packaging_signing_data(self.producer_profile, self.service_profile,
-                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
-                and self.environment.get("GITHUB_REF") != APP_SIGNATURE_REF)
+                allow_unconfigured=self.phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                and self.environment.get("GITHUB_REF") not in (APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF))
             need((selection is None) == (self.signing is None), "source-signing-profile-pair")
             self.package_sources.extend(((self.profile_entry, self.service_profile), (self.producer_profile_entry, self.producer_profile)))
-            if self.phase in PYTHON_PHASES:
+            if self.phase in SUPPORT_PHASES:
+                self.android_support_module.prepare(self)
+            elif self.phase in PYTHON_PHASES:
                 self.python_prepare()
             elif self.phase in TOOL_SIGNING_PHASES:
                 self.tool_prepare()
@@ -6860,7 +6998,12 @@ class Operation:
                 need(self.environment.get("MRK_MACOS_PACKAGE_ROLE") in self.stager.PACKAGE_ROLES, "source-package-role")
                 release_body = self.image_binding()
                 self.package_sources.append((self.release_entry, release_body))
-                if self.phase == "prepare":
+                if self.phase in APP_ABSENCE_PHASES:
+                    (self.app_absence_module.prepare if self.phase == APP_ABSENCE_PHASES[0]
+                     else self.app_absence_module.restore)(self)
+                elif self.phase == UPDATE_PHASE:
+                    self.update_module.baseline(self)
+                elif self.phase == "prepare":
                     self.prepare()
                 elif self.phase == "package-install":
                     self.package_install()
@@ -6884,7 +7027,7 @@ class Operation:
                     self.verify_staged(expected, self.environment.get("MRK_MACOS_RESIDENT_IMAGE_SHA256"))
             need(self.read(self.profile_entry) == self.service_profile
                  and self.read(self.producer_profile_entry) == self.producer_profile, "source-signing-profile-changed")
-            if self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES:
+            if self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES:
                 need(self.read(self.release_entry) == release_body, "source-image-release-changed")
         except BaseException as error:
             try:
@@ -6906,7 +7049,10 @@ class Operation:
                 except BaseException as error:
                     self.errors.append({"stage": "package-mount-retained", "type": type(error).__name__})
             self.finish()
-        roles = (SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
+        roles = (self.android_support_module.ROLES if self.android_support is not None else
+                 UPDATE_ROLES if self.phase == UPDATE_PHASE else
+                 self.app_absence_module.roles(self) if self.app_absence is not None else
+                 SAME_PACKAGE_ROLES if self.phase == SAME_PACKAGE_PHASE else
                  (removal_preparation_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "prepare-removal-observers" else
                  (removal_runtime_roles(self.removal_case) if self.removal_case in REMOVAL_CASES else ()) if self.phase == "package-removal-fixture" else
                  FINAL_IMAGE_ROLES if self.phase in FINAL_IMAGE_PHASES else
@@ -6941,14 +7087,24 @@ class Operation:
                                         and self.notary_result is not None and self.notary_key is None
                                         and not self.credential_calls and not self.credential_contexts
                                         and self.receipt["notaryAuthentication"] == {"created": True, "closed": True, "retired": True})
-                                  and ((self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
+                                  and ((self.phase in SUPPORT_PHASES and self.android_support is not None
+                                        and self.android_support_module.success(self))
+                                       or (self.phase in PYTHON_PHASES and self.python_signed is not None and self.python_known())
                                        or (self.phase in TOOL_SIGNING_PHASES and self.tool_complete and self.tool_quote_ready)
-                                       or (self.phase not in PYTHON_PHASES + TOOL_SIGNING_PHASES
-                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE) + REMOVAL_OWNER_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
+                                       or (self.phase not in SUPPORT_PHASES + PYTHON_PHASES + TOOL_SIGNING_PHASES
+                                            and (self.phase in ("package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE) + REMOVAL_OWNER_PHASES + APP_ABSENCE_PHASES or self.phase in FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES or self.resident_image_sha256 is not None
                                                  or self.phase in SIGNING_PHASES and self.fixed_sign_complete)
                                            and self.image_source is not None and self.image_release is not None
                                            and (self.phase != "prepare" or self.entry_sha256 is not None
                                                 and self.desktop_facade_sha256 is not None))))
+        if self.app_absence is not None:
+            self.receipt["passed"] = (self.receipt["passed"] and self.app_absence["complete"]
+                and self.app_absence_module.finish_ready(self)
+                and (self.phase == "package-install" or not self.credential_calls and not self.credential_contexts))
+        if self.update is not None:
+            self.receipt["passed"] = self.receipt["passed"] and self.update_module.finish_ready(self)
+            if self.phase == UPDATE_PHASE:
+                self.update_module.clock(self, work=False)
         if self.phase in TOOL_SIGNING_PHASES:
             self.receipt["toolFinal"] = self.receipt["passed"] and self.tool_complete
             self.tool_clock(work=False)
@@ -6988,6 +7144,12 @@ class Operation:
             self.package_clock()  # Receipt write/readback/closes are inside the SAME original group.
         if self.phase in TOOL_SIGNING_PHASES:
             self.tool_clock(work=False)
+        if self.app_absence is not None:
+            self.app_absence_module.clock(self, work=False)
+        if self.phase in SUPPORT_PHASES and self.receipt["passed"]:
+            self.android_support_module.publish_final(self)
+        if self.phase == UPDATE_PHASE and self.update is not None:
+            self.update_module.clock(self, work=False)
         need(self.receipt["passed"], "helper-package-incomplete")
         return self.sha256
 
@@ -7045,6 +7207,18 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(scope == SAME_PACKAGE_PHASE and ref == "refs/heads/verify/desktop-macos-preview"
              and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
                          + (NOTARY_KEY_VARIABLE,)), "same-package-fixed-purpose")
+    if ref == UPDATE_REF:
+        need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
+             "finalize-package", "package-install", UPDATE_PHASE), "update-fixed-native-route")
+    if phase == UPDATE_PHASE:
+        need(ref == UPDATE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+             + (NOTARY_KEY_VARIABLE,)), "update-fixed-credential-free-baseline")
+    if phase in APP_ABSENCE_PHASES:
+        need(ref == APP_ABSENCE_REF and not any(k in environment for k in CREDENTIAL_VARIABLES + INSTALLER_CREDENTIAL_VARIABLES
+             + (NOTARY_KEY_VARIABLE,)), "app-absence-fixed-native-phase")
+    if ref == APP_ABSENCE_REF:
+        need(scope == "disabled" and phase in APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer", "finalize-package", "package-install")
+             + APP_ABSENCE_PHASES, "app-absence-fixed-native-route")
     if ref == APP_SIGNATURE_REF:
         need(phase in APP_SIGNATURE_PHASES, "app-signature-fixed-native-phase")
     if ref == REMOVAL_REF:
@@ -7054,6 +7228,11 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         raise Refused("removal-fixture-fixed-ref-only")
     if (phase in FINAL_IMAGE_PHASES or phase in REMOVE_PHASES) and ref != REMOVAL_REF:
         need(ref == "refs/heads/verify/desktop-macos-preview", "final-image-preview-ref-only")
+    support_phase = phase in SUPPORT_PHASES
+    if support_phase or ref == SUPPORT_REF:
+        need(support_phase and ref == SUPPORT_REF and target == ARM_TARGET
+             and not any(k in environment for k in INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)),
+             "support-fixed-purpose-ref")
     tool_phase = phase in TOOL_SIGNING_PHASES
     if tool_phase:
         need(ref == TOOL_REF, "closed-tool-purpose-ref")
@@ -7061,9 +7240,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if python_phase:
         need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
              "closed-python-purpose-ref")
-    workflow = ("desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
+    workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
+                "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, UPDATE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -7073,7 +7253,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
                 "MRK_EXPECTED_SHA": sha, "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
                 "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation" if workflow == "desktop-macos-aqua.yml" else "ordinary-image",
                 "RUSTUP_TOOLCHAIN": rust_toolchain(target), "DEVELOPER_DIR": "/Library/Developer/CommandLineTools", "MACOSX_DEPLOYMENT_TARGET": "26.0"}
-    if python_phase or tool_phase:
+    if python_phase or tool_phase or support_phase:
         del required["MRK_MACOS_PACKAGE_ROLE"]
         del required["RUSTUP_TOOLCHAIN"]
         need(environment.get("MRK_MACOS_PACKAGE_ROLE") is None, "python-no-install-package-role")
@@ -7083,7 +7263,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if workflow == "desktop-macos-aqua.yml":
         need(environment.get("MRK_MACOS_AQUA_SCOPE") in PACKAGE_SCOPES, "full-package-scope-only")
     work = Path(environment.get("MRK_MACOS_WORK", ""))
-    prefix = "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
+    prefix = "mrk-macos-android-support-signing" if support_phase else "mrk-macos-tool-signing" if tool_phase else "mrk-macos-python-signing" if python_phase else "mrk-macos-aqua" if workflow == "desktop-macos-aqua.yml" else "mrk-macos-installed"
     need(work.parent == WORK_PARENT and re.fullmatch(re.escape(prefix) + r"\.[A-Za-z0-9]{8}", work.name), "owned-work-route")
     return work
 
@@ -7338,11 +7518,11 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref == APP_SIGNATURE_REF:
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
     need(ref == TOOL_REF if build_selection else ref in
-         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF), "tool-data-ref")
+         ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
@@ -7448,6 +7628,7 @@ def main():
     main_stage = "entrypoint"
     try:
         phase, target = entrypoint(sys.argv)
+        support_started = time.monotonic_ns() if phase in SUPPORT_PHASES else None
         if phase in TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES:
             main_stage = "data-phase"
             return tool_data_main(phase, target)
@@ -7467,9 +7648,13 @@ def main():
         stager = load_data(CHECKOUT, "stage_macos_installed.py", "_mrk_android_helper_stager")
         main_stage = "source-check"
         need(stager.read(CHECKOUT / ".git/HEAD", 64) == (os.environ["GITHUB_SHA"] + "\n").encode("ascii"), "exact-detached-checkout")
+        if os.environ.get("GITHUB_REF") == UPDATE_REF:
+            nomination = tool_json(stager.read(CHECKOUT / "desktop/macos-installed-inputs/update-predecessors.json", 16384))
+            need(type(nomination) is dict and nomination.get("mode") == "configured",
+                 "update-qualified-predecessor-unconfigured")
         main_stage = "profile-check"
         stager.packaging_signing_data(stager.read(CHECKOUT / PRODUCER_PROFILE, 1024), stager.read(CHECKOUT / PROFILE, 1024),
-                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
+                                     allow_unconfigured=phase not in ("package-install", "package-remove", "python-shipping", SAME_PACKAGE_PHASE) + SUPPORT_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES
                                      and os.environ.get("GITHUB_REF") != APP_SIGNATURE_REF)
         if phase in FINAL_PACKAGE_PHASES or phase in ("prepare-removal-observers", SAME_PACKAGE_PHASE):
             need(installer_profile(stager.read(CHECKOUT / INSTALLER_PROFILE, 1024)) is not None, "installer-source-unconfigured")
@@ -7477,7 +7662,10 @@ def main():
         qualification = load_data(CHECKOUT, "macos_aqua_qualification.py", "_mrk_android_helper_owner_loader")
         owner = qualification.load_owner(CHECKOUT)
         main_stage = "operation-create"
-        operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target)
+        if support_started is not None:
+            need(type(support_started) is int and support_started <= time.monotonic_ns() < support_started + 960_000_000_000,
+                 "support-admission-deadline")
+        operation = Operation(owner, CHECKOUT, work, phase, os.environ, stager, target=target, support_started=support_started)
         main_stage = "operation-execute"
         result = operation.execute(os.environ.get("MRK_MACOS_ANDROID_HELPER_SHA256"))
         main_stage = "success-output"

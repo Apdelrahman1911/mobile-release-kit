@@ -1502,7 +1502,8 @@ mod tests {
             }
             if name == "com/sun/jna/darwin/libjnidispatch.jnilib" {
                 assert_eq!(pin.member.mode, 0);
-                assert_eq!((pin.slice.offset, pin.slice.size), (94208, 86724));
+                // Exact x86_64 slice of signed supplier38109802320; i386 stays opaque.
+                assert_eq!((pin.slice.offset, pin.slice.size), (131072, 106592));
                 assert_eq!(&prefix[..8], &[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]);
                 assert_eq!(u32::from_be_bytes(prefix[8..12].try_into().unwrap()), 7);
                 assert!(policy::native_slice(prefix, pin.member.bytes, MachArchitecture::X86_64).is_none());

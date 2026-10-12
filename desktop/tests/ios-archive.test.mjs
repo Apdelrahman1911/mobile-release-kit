@@ -782,6 +782,69 @@ test('recovery lost Start and Unknown keep original ownership while hidden or ex
   }
 });
 
+
+test('current recovery details bind the original native pair without saved inputs or automatic consent', async (t) => {
+  // SOURCE projection joins plus real controller transitions, not JSX rendering,
+  // native accessibility, account recovery or worker-finality evidence.
+  const component = readFileSync(new URL('../src/components/IOSArchive.tsx', import.meta.url), 'utf8');
+  const details = component.slice(component.indexOf('function RecoveryDetails('), component.indexOf('export function IOSRecovery('));
+  assert.ok(details.startsWith('function RecoveryDetails('));
+  for (const guard of ["state.mode !== 'native'", '!isIOSRecoveryOperation(op)', 'state.historical',
+    'state.integrityFailed', 'state.nativeBlocked', 'state.originalUnconfirmed', 'state.generationLost',
+    'state.selectionPending', 'state.observationIssue !== null', '!project', 'op.context.projectId !== project.projectId',
+    "op.phase !== 'awaiting-consent'", '!op.intentUsable', 'sameIOSArchiveIdentity(op, consent)',
+    'sameIOSArchiveData(op.context, consent.binding.context)',
+    ...['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration']
+      .map((key) => `consent.binding.${key} !== state.${key}`)]) assert.ok(details.includes(guard), guard);
+  assert.doesNotMatch(details, /savedConfig|savedVersion|sameIOSArchiveSavedPair|project\.inputIssue/);
+  for (const literal of ['role="group" aria-label="Recovery details"', 'Recovery operation ID: {op.operationId}',
+    'Recovery owner generation: {op.ownerGeneration}', 'Recovery phase: {op.phase}',
+    "Recovery outcome: {op.outcome ?? 'not-observed'}", 'Recovery reason: {op.reason}']) assert.ok(details.includes(literal), literal);
+  assert.equal((component.match(/<RecoveryDetails state=\{state\} \/>/g) ?? []).length, 1);
+  assert.ok(component.includes("role=\"group\" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}"));
+
+  const h = harness(t, { savedSnapshot: null, completeVersion: false }), inspect = await reviewedRecovery(h);
+  assert.equal(h.state.project.savedConfig, null); assert.equal(h.state.project.savedVersion, null);
+  assert.equal(h.versionCalls.length, 0); assert.equal(h.state.consent.acknowledged, false);
+  assert.deepEqual(clone(h.state.consent.binding.context), inspect.context);
+  assert.deepEqual([h.state.consent.operationId, h.state.consent.ownerGeneration], [inspect.operationId, inspect.ownerGeneration]);
+  for (const key of ['connectionGeneration', 'selectionGeneration', 'contextGeneration', 'requestGeneration'])
+    assert.equal(h.state.consent.binding[key], h.state[key], key);
+  for (const key of ['historical', 'integrityFailed', 'nativeBlocked', 'originalUnconfirmed', 'generationLost', 'selectionPending'])
+    assert.equal(h.state[key], false, key);
+  assert.equal(h.state.observationIssue, null);
+  await h.controller.start(inspect.operationId, inspect.ownerGeneration); assert.equal(h.calls.length, 1);
+  const first = start(h, inspect);
+  assert.equal(h.state.originalUnconfirmed, true); // Pending reply cannot supply displayed current native details.
+  const pending = recoveryCompleted(inspect);
+  h.reply(first.call, status(2, pending)); await first.done;
+  assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.historical, false);
+  assert.deepEqual(clone(h.state.status.operation.report.account), { status: 'pending', session: ACCOUNT_SESSION, next: 'ordinary' });
+  assert.equal(h.state.status.operation.phase, 'terminal'); assert.equal(h.state.status.operation.outcome, 'complete');
+  assert.equal(h.state.status.operation.reason, 'none');
+  const recover = await reviewedRecovery(h, 'account', pending, { operationId: OTHER, ownerGeneration: '7'.repeat(32) });
+  assert.notEqual(recover.operationId, inspect.operationId); assert.notEqual(recover.ownerGeneration, inspect.ownerGeneration);
+  assert.equal(h.state.consent.acknowledged, false); assert.equal(recover.context.recovery.session, ACCOUNT_SESSION);
+  await h.controller.start(recover.operationId, recover.ownerGeneration);
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 1);
+  const second = start(h, recover);
+  assert.equal(h.state.originalUnconfirmed, true);
+  h.reply(second.call, status(4, recoveryCompleted(recover))); await second.done;
+  assert.equal(h.state.originalUnconfirmed, false); assert.equal(h.state.historical, false);
+  assert.equal(h.state.consent, null);
+  assert.deepEqual(clone(h.state.status.operation.report.account), { status: 'recovered', session: ACCOUNT_SESSION, next: 'none' });
+  assert.equal(h.calls.filter((call) => call.kind === 'start').length, 2);
+
+  const old = harness(t, { initial: status(4, recoveryCompleted(recover)), savedSnapshot: null, completeVersion: false });
+  await old.ready; assert.equal(old.state.historical, true); assert.equal(old.state.consent, null); assert.equal(old.calls.length, 0);
+  for (const field of ['operationId', 'ownerGeneration']) {
+    const foreign = harness(t, { savedSnapshot: null, completeVersion: false }), original = await reviewedRecovery(foreign);
+    foreign.emit(status(2, { ...clone(original), [field]: OTHER }));
+    assert.equal(foreign.state.integrityFailed, true, field); assert.equal(foreign.state.consent, null, field);
+    assert.equal(foreign.calls.filter((call) => call.kind === 'start').length, 0);
+  }
+});
+
 test('native bridge sends only Raw requests; preview never provides fabricated execution', async () => {
   const calls = [], listeners = [];
   const api = createNativeApi('native', async (command, body) => { calls.push({ command, body }); return status(); },

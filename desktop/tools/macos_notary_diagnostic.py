@@ -26,11 +26,15 @@ CHECKOUT = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
 PARENT = Path('/Users/runner/work/_temp')
 PUBLIC = 'mrk-notary-diagnostic-public.json'
 SECRET = 'MRK_MACOS_NOTARY_API_KEY_BASE64'
-SOURCE = 'f75fd232402c60beb8e2fffa58158d8616426c8a'
-SUBMISSION = 'fdfc7aea-370b-42a3-b1a2-6a08a9abf37e'
+# Frozen from the independently reviewed public receipt, not proved by Apple log metadata.
+SOURCE = 'cae803e30d29d81fd1415f62f155840a7a644fb9'
+SOURCE_TREE = 'de20e6d491a4d5046d71e30bf775bc3236468332'
+ORIGINAL_RECEIPT = '76f07c5e1c2055fdbfdd2331277b97476607aa5eeb375bb9a1aeb54974e14d64'
+ORIGINAL_ARCHIVE = 'e293eff6629882c4bfe8684595762aab2b524a51154a63c06f9d44a8f1527413'
+SUBMISSION = 'b422bfff-99a9-4d97-8826-a3129af981f9'
 STATUS = 'Accepted'
 ARCHIVE = 'MobileReleaseKit-notary-payload.zip'
-ORIGINAL_LOG = '1eaed3ece12e56977bfd9d260428ab5d8521d25dd08d0ca120794732ce49c969'
+ORIGINAL_LOG = '2f893f9ae58316b06d7edbb84e6e0da11f8348c090db4dd13a38a43dc5402499'
 TEAM = '7CGZ2343AA'
 CERTIFICATE = '5effa7d19bbe005b19c1617833cbe22186c2af96'
 KEY_ID = '59VQCHM463'
@@ -39,7 +43,7 @@ XCODE = Path('/Applications/Xcode.app/Contents/Developer')
 FIXED_TOOL = XCODE / 'usr/bin/notarytool'
 READ = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 LIMIT = 1024 * 1024
-PINS = {'desktop/tools/macos_android_helper_package.py': 'ed98bccb01102c21ee2a34f6ec322bcd98a2c806dedec4ba6cf60a88f35030b0', 'desktop/tools/macos_aqua_qualification.py': 'acbb2389845ce8e9f48d9b4bf1d83df0ebe30cde36fff366fb5d5706ec772a75', 'desktop/packaging/macos-android-service-signing.profile': '7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663', 'desktop/packaging/macos-notary-service.json': 'aef87ad93100be46f171523a830a5f6b67188c33748049aa843ea253c65e29b5'}
+PINS = {'desktop/tools/macos_android_helper_package.py': 'deb5ac1eeec7dadbfe0dde89eaf80f9d2baabd32c4477e2dc8c8b5a7b1617b1d', 'desktop/tools/macos_aqua_qualification.py': '0c6b5665cc74f21bc1fdf1c9f0d05a283d12a3dd1084d120cde96fc59fb1fe7b', 'desktop/packaging/macos-android-service-signing.profile': '7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663', 'desktop/packaging/macos-notary-service.json': 'aef87ad93100be46f171523a830a5f6b67188c33748049aa843ea253c65e29b5'}
 MESSAGES = {
     'The binary is not signed.': 'unsigned',
     'The signature of the binary is invalid.': 'invalid-signature',
@@ -135,7 +139,7 @@ def ticket_census(value, helper):
         key = (architecture, is_row and set(row) == {'path', 'digestAlgorithm', 'cdhash', 'arch'},
                helper.notary_text(row.get('path'), 4096), row.get('digestAlgorithm') in ('SHA-1', 'SHA-256'),
                type(cdhash) is str and re.fullmatch(r'[0-9a-fA-F]{40}', cdhash) is not None,
-               architecture in ('arm64', 'x86_64'))  # Exact existing ZIP rule, not expanded eligibility.
+               architecture in ('arm64', 'x86_64', 'i386'))  # Existing ZIP metadata syntax, never execution eligibility.
         groups[key] = groups.get(key, 0) + 1
     names = ('architecture', 'exactFourKeys', 'pathTextValid', 'digestAlgorithmAllowed',
              'cdhash40HexValid', 'strictArchitectureAllowed')
@@ -146,15 +150,17 @@ def ticket_census(value, helper):
 
 
 def log_projection(body, helper):
+    # No parser, census or issue projection may observe a different historical log.
+    need(type(body) is bytes and len(body) <= LIMIT and sha(body) == ORIGINAL_LOG)
     value = helper.notary_json(body, LIMIT)
     need(type(value.get('logFormatVersion')) is int and value['logFormatVersion'] == 1
          and value.get('jobId') == SUBMISSION and value.get('status') == STATUS
          and value.get('archiveFilename') == ARCHIVE)
     current_sha = value.get('sha256')
-    need('sha256' not in value or type(current_sha) is str and re.fullmatch('[0-9a-f]{64}', current_sha))
+    need(type(current_sha) is str and current_sha == ORIGINAL_ARCHIVE)
     checked, refusal = None, None
     try:
-        checked = helper.notary_log_data(body, {'id': SUBMISSION, 'status': STATUS}, current_sha,
+        checked = helper.notary_log_data(body, {'id': SUBMISSION, 'status': STATUS}, ORIGINAL_ARCHIVE,
                                          archive_name=ARCHIVE)
     except helper.Refused as error:
         literal = str(error)
@@ -183,7 +189,8 @@ def log_projection(body, helper):
             'statusCode': code if type(code) is int and 0 <= code <= 999999 else None,
             'statusSummaryClass': SUMMARIES.get(summary, 'unclassified') if summary_valid else 'not-supplied' if summary is None else 'unclassified',
             'statusSummarySha256': sha(summary.encode()) if summary_valid else None,
-            'archiveShaIndependentlyCompared': False,
+            # Compared to the receipt's pin; this read-only job does not reopen the archive.
+            'archiveShaIndependentlyCompared': True,
             'errorCount': checked['errorCount'] if checked is not None else None,
             'warningCount': checked['warningCount'] if checked is not None else None,
             'ticketRowCount': checked['ticketRowCount'] if checked is not None else None,
@@ -391,8 +398,10 @@ class KeyDirectory:
 
 
 def query(owner, helper, key, profile, tool, clock):
-    report = {'historicalSubmission': {'source': SOURCE, 'runId': '38114679901', 'attempt': '1',
-        'jobId': '114397113135', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': STATUS},
+    report = {'historicalSubmission': {'source': SOURCE, 'sourceTree': SOURCE_TREE, 'publicReceiptSha256': ORIGINAL_RECEIPT,
+        'archiveFilename': ARCHIVE, 'archiveSha256': ORIGINAL_ARCHIVE, 'logSha256': ORIGINAL_LOG,
+        'runId': '38270269218', 'attempt': '1',
+        'jobId': '114882515667', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': STATUS},
         'currentObservedStatus': None, 'diagnosticPassed': False, 'qualification': 'read-only-existing-submission-diagnostic',
         'failureStage': None, 'cleanupErrors': [], 'entered': False, 'returned': False,
         'knownExit': False, 'returncode': None, 'toolClosed': False}

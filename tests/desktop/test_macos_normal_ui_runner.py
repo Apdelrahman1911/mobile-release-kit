@@ -14,7 +14,7 @@ import stat
 import subprocess
 import tempfile
 import sys
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -268,7 +268,431 @@ ARTIFACT_WAIT_DIAGNOSTIC_BEGIN = '        // Fixed pre-wait diagnostic only: sev
 ARTIFACT_WAIT_DIAGNOSTIC_END = '        // End fixed artifact pre-wait diagnostic; original wait remains authoritative.\n'
 ARTIFACT_WAIT_DIAGNOSTIC_SHA256 = '8f6eb5e3fd9beab058345e951d81998496d2c0f8fd538cfebc018e948c001b2b'
 
+NORMAL_IOS_PENDING_SWIFT_INVERSE = (('init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             engineeringDiagnostic: Bool = false) throws {',
+  'init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,\n'
+  '             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {'),
+ ('guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? '
+  'seconds == 900 : (seconds == 60 || seconds == 300)),',
+  'guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,\n'
+  '                  (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : '
+  '(seconds == 60 || seconds == 300))),'),
+ ('@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws '
+  '{',
+  '@MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool '
+  '= false,\n'
+  '                                      iosRecovery: Bool = false, removal: Bool = false, '
+  'engineeringDiagnostic: Bool = false) throws {'),
+ ('&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))',
+  '&& (!removal || (seconds == 300 && !androidPositive && !iosUnsigned && !iosRecovery))'),
+ ('let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  engineeringDiagnostic: engineeringDiagnostic)',
+  'let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,\n'
+  '                                  iosRecovery: iosRecovery, engineeringDiagnostic: '
+  'engineeringDiagnostic)'),
+ ('    private final class LocalFixture {',
+  '    // Read-only directory custody for the existing parent-produced fixture.\n'
+  '    // Account/native contents and their restoration are checked by the parent;\n'
+  '    // this observation never creates state, recovers by CLI or deletes anything.\n'
+  '    @MainActor private final class IOSRecoveryFixture {\n'
+  '        enum Profile: String { case pending = "ios-recovery-pending" }\n'
+  '        private struct Directory {\n'
+  '            let fd: Int32\n'
+  '            let parent: Int32?\n'
+  '            let name: String\n'
+  '            let identity: StatFacts\n'
+  '        }\n'
+  '        private let clock: CaseClock\n'
+  '        private var descriptors: [Int32] = []\n'
+  '        private var directories: [Directory] = []\n'
+  '        private var entered = false, closed = false, closeFailed = false\n'
+  '        private(set) var source = "", run = "", attempt = "", projectPath = ""\n'
+  '        init(clock: CaseClock) { self.clock = clock }\n'
+  '        private func need(_ yes: Bool, _ reason: String) throws {\n'
+  '            guard yes else { throw clock.fail(reason) }\n'
+  '            _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '        }\n'
+  '        private func info(_ fd: Int32) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstat(fd, &value) == 0 && fcntl(fd, F_GETFD) == FD_CLOEXEC,\n'
+  '                     "recovery fixture original descriptor unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        private func named(_ parent: Int32, _ name: String) throws -> StatFacts {\n'
+  '            var value = stat()\n'
+  '            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,\n'
+  '                     "recovery fixture original name unavailable")\n'
+  '            return StatFacts(value)\n'
+  '        }\n'
+  '        func open(_ profile: Profile) throws {\n'
+  '            try need(!entered && !closed && descriptors.isEmpty && getuid() != 0\n'
+  '                     && getuid() == geteuid() && getgid() == getegid(), "recovery fixture admission '
+  'reused")\n'
+  '            entered = true\n'
+  '            let context = ProcessInfo.processInfo.environment\n'
+  '            source = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""\n'
+  '            run = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"] ?? ""\n'
+  '            attempt = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"] ?? ""\n'
+  '            let decimal: (String) -> Bool = { value in\n'
+  '                let bytes = Array(value.utf8)\n'
+  '                return (1...20).contains(bytes.count) && bytes[0] >= 49 && bytes[0] <= 57\n'
+  '                    && bytes.allSatisfy { (48...57).contains($0) }\n'
+  '            }\n'
+  '            try need(source.utf8.count == 40 && source.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) }\n'
+  '                && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source && decimal(run) && '
+  'decimal(attempt),\n'
+  '                "recovery fixture exact same-build context unavailable")\n'
+  '            let task = "mrk-macos-aqua-\\(source)-\\(run)-\\(attempt)"\n'
+  '            projectPath = "/private/tmp/" + task + "/" + profile.rawValue\n'
+  '            let parts = ["/", "private", "tmp", task, profile.rawValue]\n'
+  '            for (index, name) in parts.enumerated() {\n'
+  '                _ = try clock.remaining(1, before: clock.deadline - 10)\n'
+  '                let parent = directories.last?.fd\n'
+  '                let fd = parent.map { openat($0, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) '
+  '}\n'
+  '                    ?? Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)\n'
+  '                if fd >= 0 { descriptors.append(fd) } // Custody before any fallible observation.\n'
+  '                try need(fd >= 0, "recovery fixture original directory open failed")\n'
+  '                let identity = try info(fd)\n'
+  '                try need(identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "recovery fixture is not a '
+  'directory")\n'
+  '                if let parent { try need(identity == named(parent, name), "recovery fixture entry changed '
+  'at admission") }\n'
+  '                if index < 3 {\n'
+  '                    try need(identity.uid == 0 && (index == 2 ? identity.mode & 0o7777 == 0o1777 : '
+  'identity.mode & 0o022 == 0),\n'
+  '                             "recovery fixture fixed anchor ownership differs")\n'
+  '                } else {\n'
+  '                    try need(identity.uid == getuid() && identity.gid == getgid() && identity.mode & '
+  '0o7777 == 0o700\n'
+  '                             && identity.flags == 0 && identity.device == directories[index - '
+  '1].identity.device,\n'
+  '                             "recovery fixture private original differs")\n'
+  '                }\n'
+  '                directories.append(Directory(fd: fd, parent: parent, name: name, identity: identity))\n'
+  '            }\n'
+  '            try post()\n'
+  '        }\n'
+  '        func post() throws {\n'
+  '            try need(entered && !closed && directories.count == 5 && descriptors.count == 5,\n'
+  '                     "recovery fixture original census unavailable")\n'
+  '            for directory in directories {\n'
+  '                let actual = try info(directory.fd)\n'
+  '                try need(directory.identity.sameDirectory(actual), "recovery fixture held identity '
+  'changed")\n'
+  '                if let parent = directory.parent {\n'
+  '                    try need(actual.sameDirectory(named(parent, directory.name)), "recovery fixture name '
+  'binding changed")\n'
+  '                } else {\n'
+  '                    var root = stat()\n'
+  '                    try need(lstat("/", &root) == 0 && actual.sameDirectory(StatFacts(root)), "recovery '
+  'fixture root binding changed")\n'
+  '                }\n'
+  '            }\n'
+  '        }\n'
+  '        func closeOriginals() throws {\n'
+  '            if closed {\n'
+  '                if closeFailed { throw Refusal.condition("recovery fixture prior close remains '
+  'unconfirmed") }\n'
+  '                return\n'
+  '            }\n'
+  '            var failure: Error?\n'
+  '            do { try post() } catch { failure = error }\n'
+  '            closed = true // Consuming closes, even after partial admission/Unknown; no retry.\n'
+  '            while let fd = descriptors.popLast() {\n'
+  '                if Darwin.close(fd) != 0 && failure == nil { failure = Refusal.condition("recovery '
+  'fixture consuming close failed") }\n'
+  '            }\n'
+  '            directories.removeAll()\n'
+  '            closeFailed = failure != nil\n'
+  '            if let failure { throw failure }\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    private final class LocalFixture {'),
+ ('    @MainActor private var ownedFixture: LocalFixture?',
+  '    @MainActor private var ownedIOSRecoveryFixture: IOSRecoveryFixture?\n'
+  '    @MainActor private var ownedFixture: LocalFixture?'),
+ ('    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {',
+  '    private struct IOSRecoveryObservation: Equatable {\n'
+  '        let operationID: String, ownerGeneration: String, phase: String, outcome: String, reason: String\n'
+  '        var fields: [String: String] { ["operationId": operationID, "ownerGeneration": ownerGeneration,\n'
+  '                                      "phase": phase, "outcome": outcome, "reason": reason] }\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryObservation(_ renderer: XCUIElement, phase: String) throws -> '
+  'IOSRecoveryObservation {\n'
+  '        let details = try unique(named(renderer, "Recovery details"), "current recovery details missing '
+  'or repeated")\n'
+  '        try reveal(details, in: renderer)\n'
+  '        var values: [String] = []\n'
+  '        for prefix in ["Recovery operation ID: ", "Recovery owner generation: ", "Recovery phase: ",\n'
+  '                       "Recovery outcome: ", "Recovery reason: "] {\n'
+  '            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH '
+  '%@", prefix)),\n'
+  '                                   "current recovery field missing or repeated")\n'
+  '            try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not '
+  'visible")\n'
+  '            let value = String(field.label.dropFirst(prefix.count))\n'
+  '            try require(value.utf8.count <= 64, "current recovery field exceeds its bound")\n'
+  '            values.append(value)\n'
+  '        }\n'
+  '        for value in values.prefix(2) {\n'
+  '            try require(value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || '
+  '(97...102).contains($0) },\n'
+  '                        "current recovery identity shape differs")\n'
+  '        }\n'
+  '        try require((phase == "awaiting-consent" || phase == "terminal") && values[2] == phase\n'
+  '            && values[3] == (phase == "terminal" ? "complete" : "not-observed") && values[4] == "none",\n'
+  '            "current recovery phase/outcome/reason differs")\n'
+  '        return IOSRecoveryObservation(operationID: values[0], ownerGeneration: values[1], phase: '
+  'values[2],\n'
+  '                                      outcome: values[3], reason: values[4])\n'
+  '    }\n'
+  '    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> '
+  'String {\n'
+  '        let text = try iosPublicText(container)\n'
+  '        let pattern = review ? #"(?:^| )Inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '                             : #"(?:^| )Exact inspected session: ([0-9a-f]{32})\\s*\\."#\n'
+  '        let expression = try NSRegularExpression(pattern: pattern)\n'
+  '        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))\n'
+  '        guard matches.count == 1, let range = Range(matches[0].range(at: 1), in: text) else {\n'
+  '            throw Refusal.condition("current account session absent or ambiguous")\n'
+  '        }\n'
+  '        return String(text[range]) // Retained in memory only; only its digest may be printed.\n'
+  '    }\n'
+  '    @MainActor private func iosRecoveryAccount(_ renderer: XCUIElement, status: String) throws -> '
+  '(String, String) {\n'
+  '        let group = try unique(named(renderer, "Account signing recovery state"), "current account report '
+  'missing or repeated")\n'
+  '        try reveal(group, in: renderer)\n'
+  '        let prefix = "Account signing state · "\n'
+  '        let heading = try unique(group.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", '
+  'prefix)),\n'
+  '                                 "current account state missing or repeated")\n'
+  '        try require(heading.isHittable && heading.label == prefix + status && (status == "pending" || '
+  'status == "recovered"),\n'
+  '                    "current account state differs")\n'
+  '        return (String(heading.label.dropFirst(prefix.count)), try iosRecoverySession(group))\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {\n'
+  '        continueAfterFailure = false\n'
+  '        executionTimeAllowance = 525\n'
+  '        try beginCase(seconds: 525, iosRecovery: true)\n'
+  '        guard let clock = caseClock else { throw Refusal.condition("recovery original case clock '
+  'missing") }\n'
+  '        journeyDeadline = clock.deadline - 10 // 515s work including Quit, then only original reporting '
+  'reserve.\n'
+  '        let fixture = IOSRecoveryFixture(clock: clock)\n'
+  '        ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.\n'
+  '        do {\n'
+  '            try stage("ios-recovery-admission") {\n'
+  '                _ = try admitHostedAccount()\n'
+  '                try fixture.open(.pending)\n'
+  '            }\n'
+  '            let (app, window, renderer) = try launchForJourney()\n'
+  '            try stage("ios-recovery-project") {\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Open project folder", renderer: renderer)\n'
+  '                let sheet = try nativeSheet(window, title: "Choose a mobile project folder")\n'
+  '                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", '
+  '"Let’s get ios-recovery-pending ready.")),\n'
+  '                                    in: renderer, failures: ["Static observation unavailable", "Only a '
+  'partial static observation is available"])\n'
+  '                _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery '
+  'selected project differs")\n'
+  '                try fixture.post()\n'
+  '                try press(renderer, "Recovery", renderer: renderer)\n'
+  '            }\n'
+  '            let failures = ["No new local recovery outcome was confirmed", "Recovery phase: unknown", '
+  '"Cleanup needs attention"]\n'
+  '            var inspect: IOSRecoveryObservation?, recover: IOSRecoveryObservation?\n'
+  '            var session = "", inspectStatus = "", recoverStatus = ""\n'
+  '            var inspectUnchecked = false, recoverUnchecked = false\n'
+  '            try stage("ios-recovery-inspect") {\n'
+  '                try fixture.post()\n'
+  '                try require(named(renderer, "Recovery details").count == 0, "prior recovery cannot supply '
+  'this journey")\n'
+  '                try press(renderer, "Review local recovery inspection", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I authorize one local inspection of the account signing and selected project '
+  'build-input recovery controls.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "inspection consent must begin unchecked")\n'
+  '                inspectUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "inspection explicit consent not observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, '
+  '"inspection review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Inspect local state once", renderer: renderer, failures: failures) // '
+  'One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 210, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "inspection terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "pending")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"inspection changed during account read")\n'
+  '                inspect = observed; inspectStatus = account.0; session = account.1\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let inspected = inspect else { throw Refusal.condition("inspection original absent") }\n'
+  '            try stage("ios-recovery-account") {\n'
+  '                try press(renderer, "Review ordinary account recovery", renderer: renderer, failures: '
+  'failures)\n'
+  '                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), '
+  'in: renderer, failures: failures)\n'
+  '                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")\n'
+  '                try require(pair.operationID != inspected.operationID && pair.ownerGeneration != '
+  'inspected.ownerGeneration,\n'
+  '                            "account recovery requires a fresh original pair")\n'
+  '                try require(try iosRecoverySession(review, review: true) == session, "account recovery '
+  'review session differs")\n'
+  '                let consent = try waitElement(controls(review, [.checkBox], label:\n'
+  '                    "I confirm this macOS account and signing services are idle and authorize ordinary '
+  'restoration of only this inspected account session’s owned state.", prefix: true),\n'
+  '                    in: review, enabled: true, failures: failures)\n'
+  '                try reveal(consent, in: renderer)\n'
+  '                try require(consent.value as? String == "0", "account recovery consent must begin '
+  'unchecked")\n'
+  '                recoverUnchecked = true\n'
+  '                consent.click()\n'
+  '                try require(consent.value as? String == "1", "account recovery explicit consent not '
+  'observed")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair\n'
+  '                            && iosRecoverySession(review, review: true) == session, "account recovery '
+  'review changed before Start")\n'
+  '                try fixture.post()\n'
+  '                try press(review, "Recover inspected account session", renderer: renderer, failures: '
+  'failures) // One actual Start.\n'
+  '                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: '
+  'terminal"), in: renderer,\n'
+  '                                    timeout: 240, failures: failures)\n'
+  '                let observed = try iosRecoveryObservation(renderer, phase: "terminal")\n'
+  '                try require(observed.operationID == pair.operationID && observed.ownerGeneration == '
+  'pair.ownerGeneration,\n'
+  '                            "account recovery terminal original differs")\n'
+  '                let account = try iosRecoveryAccount(renderer, status: "recovered")\n'
+  '                try require(account.1 == session, "recovered account session differs from original '
+  'inspection")\n'
+  '                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, '
+  '"recovery changed during account read")\n'
+  '                recover = observed; recoverStatus = account.0\n'
+  '                try fixture.post()\n'
+  '            }\n'
+  '            guard let recovered = recover else { throw Refusal.condition("account recovery original '
+  'absent") }\n'
+  '            try stage("ios-recovery-quit") {\n'
+  '                let sheet = try quitSheet(app, window)\n'
+  '                try click(sheet.buttons.matching(identifier: "Quit"), "recovery ordinary Quit '
+  'unavailable")\n'
+  '                try completeNormalQuit(app)\n'
+  '                ownedIOSRecoveryFixture = nil\n'
+  '                try fixture.closeOriginals() // Descriptor closes only, never account/fixture deletion.\n'
+  '                _ = try remaining(1)\n'
+  '            }\n'
+  '            journeyDeadline = clock.deadline // Same immutable end, only the reserved reporting window.\n'
+  '            try acceptFinalScenario()\n'
+  '            #if arch(arm64)\n'
+  '            let target = "aarch64-apple-darwin"\n'
+  '            #elseif arch(x86_64)\n'
+  '            let target = "x86_64-apple-darwin"\n'
+  '            #endif\n'
+  '            var inspectFields = inspected.fields, recoverFields = recovered.fields\n'
+  '            inspectFields["accountStatus"] = inspectStatus; recoverFields["accountStatus"] = '
+  'recoverStatus\n'
+  '            let facts: [String: Any] = ["schemaVersion": 1, "sourceCommit": fixture.source, "target": '
+  'target,\n'
+  '                "runId": fixture.run, "runAttempt": fixture.attempt,\n'
+  '                "fixtureSha256": SHA256.hash(data: Data(fixture.projectPath.utf8)).map { String(format: '
+  '"%02x", $0) }.joined(),\n'
+  '                "inspect": inspectFields, "recover": recoverFields,\n'
+  '                "sessionSha256": SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) '
+  '}.joined(),\n'
+  '                "inspectUnchecked": inspectUnchecked, "recoverUnchecked": recoverUnchecked, '
+  '"ordinaryQuit": normalQuitObserved]\n'
+  '            let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, '
+  '.withoutEscapingSlashes])\n'
+  '            try require(raw.count <= 4096 && inspectUnchecked && recoverUnchecked && normalQuitObserved,\n'
+  '                        "recovery bounded observation incomplete")\n'
+  '            _ = try remaining(1)\n'
+  '            print("MRK_MACOS_UI_IOS_PENDING_RECOVERY=" + String(decoding: raw, as: UTF8.self))\n'
+  '        } catch {\n'
+  '            let primary = error\n'
+  '            _ = clock.fail("pending account recovery observation failed")\n'
+  '            // No CLI recovery, subsequent observer, automatic new Start or state\n'
+  '            // deletion. Existing original-owner teardown retains unknown finality.\n'
+  '            throw primary\n'
+  '        }\n'
+  '    }\n'
+  '\n'
+  '    @MainActor func testSyntheticProjectAndroidSignedBuild() throws {'),
+ ('        // Never delete possibly live fixture/app state or seek a replacement owner.',
+  '        // Independent read-only fixture closes, even after failed/Unknown UI.\n'
+  '        do {\n'
+  '            try await MainActor.run {\n'
+  '                if let fixture = ownedIOSRecoveryFixture {\n'
+  '                    ownedIOSRecoveryFixture = nil\n'
+  '                    try fixture.closeOriginals()\n'
+  '                }\n'
+  '            }\n'
+  '        } catch { if cleanupFailure == nil { cleanupFailure = error } }\n'
+  '        // Never delete possibly live fixture/app state or seek a replacement owner.'))
+
+def without_normal_ios_pending_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("normal iOS pending Swift SOURCE bound differs")
+    markers = ("testInstalledIOSPendingAccountRecoveryThroughUI", "IOSRecoveryFixture", "iosRecovery:")
+    if not any(marker in source for marker in markers):
+        return source  # Earlier exact SOURCE layers retain their own guards.
+    for before, current in reversed(NORMAL_IOS_PENDING_SWIFT_INVERSE):
+        if source.count(current) != 1:
+            raise AssertionError("normal iOS pending Swift SOURCE region differs")
+        source = source.replace(current, before, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != "f1e19af70b5b8f85384aa2515d515bddb749ae043b4bf560d88a2d3c39281386":
+        raise AssertionError("normal iOS pending Swift SOURCE predecessor differs")
+    return source
+
+
+def without_signed_android_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("signed Android Swift SOURCE bound differs")
+    source = without_normal_ios_pending_source(source)
+    current = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    previous = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+    if current in source:
+        line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+        if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+            raise AssertionError("signed Android Swift runtime line differs")
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    pairs = (("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
+             ("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"))
+    if any(current in source for current, _ in pairs):
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+                raise AssertionError("signed Android Swift catalogue pair differs")
+        for current, previous in pairs:
+            line = '            private static let catalogue = "' + current + '"\n'
+            source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_artifact_wait_diagnostic_source(source):
+    source = without_signed_android_runtime_source(source)
     # Exact current-runtime handoff line only; historical SOURCE hashes stay fixed.
     saved_marker = 'raw["sourceInputsSha256"] as? String'
     saved_prior = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
@@ -418,7 +842,65 @@ def without_engineering_wait_status_source(source):
         source = source.replace(current, previous, 1)
     return source
 
+INTEL_ANDROID_SWIFT_INVERSE = (('            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '\n',
+  '            private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]\n'
+  '            #if arch(arm64)\n'
+  '            static let target = "aarch64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-arm64"\n'
+  '            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"\n'
+  '            #elseif arch(x86_64)\n'
+  '            static let target = "x86_64-apple-darwin"\n'
+  '            private static let hostedJob = "github-hosted-macos26-x86_64"\n'
+  '            private static let catalogue = "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"\n'
+  '            #endif\n'
+  '\n'),
+ ('                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == '
+  'run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n',
+  '                    && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] '
+  'as? String == source\n'
+  '                    && object["target"] as? String == Self.target && object["runId"] as? String == run\n'
+  '                    && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath\n'),
+ ('                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n',
+  '                      env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,\n'
+  '                      env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,\n'
+  '                      let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, '
+  '#"^[1-9][0-9]{0,19}$"#),\n'),
+ ('        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n',
+  '        let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",\n'
+  '            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": '
+  'LocalFixture.AndroidInputs.target,\n'
+  '            "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": '
+  'env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",\n'))
+
+
+def without_intel_android_source(source):
+    source = without_signed_android_runtime_source(source)
+    if type(source) is not str or len(source.encode()) > 1048576:
+        raise AssertionError("Intel Android source bound differs")
+    if 'LocalFixture.AndroidInputs.target' not in source:
+        return source
+    for previous, current in INTEL_ANDROID_SWIFT_INVERSE:
+        if source.count(current) != 1:
+            raise AssertionError("Intel Android exact source region differs")
+    for previous, current in reversed(INTEL_ANDROID_SWIFT_INVERSE):
+        source = source.replace(current, previous, 1)
+    if hashlib.sha256(source.encode()).hexdigest() != '6754fa2935ac1493f5b3f0da7c50e97dd8b5eeafed339b9d7e89fde3064b1164':
+        raise AssertionError("Intel Android source predecessor differs")
+    return source
+
 def without_release_evidence_source(source):
+    source = without_intel_android_source(source)
     source = without_engineering_wait_status_source(source)
     if 'static let releaseEvidenceDocuments:' not in source:
         if 'testSyntheticProjectSavedReleaseEvidence' in source: raise AssertionError("partial release_evidence_source source")
@@ -1280,7 +1762,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
         # Current recovery SOURCE is the genuine configured runtime nomination,
         # not an arbitrary replacement digest or a claim of native qualification.
-        expected_source = 'c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09'
+        expected_source = 'fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc'
         nomination = json.loads((ROOT / "desktop/macos-installed-inputs/python-signed-runtime-binding.json").read_bytes())
         self.assertEqual(set(nomination["targets"]), {MODULE.ARM_TARGET, MODULE.INTEL_TARGET})
         for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
@@ -1300,7 +1782,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
         self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
         swift = SWIFT.read_text(encoding="utf-8")
-        current_line = '                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",\n'
+        current_line = '                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",\n'
         prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
         self.assertEqual(swift.count(current_line), 1)
         self.assertNotIn(prior_line, swift)
@@ -2522,6 +3004,15 @@ class NormalPhaseDataTests(unittest.TestCase):
         def admit(item):
             return MODULE.android_input_document(MODULE.encoded(item)+b'\n', source=source, run=run, attempt=attempt, root=root)
         self.assertEqual(admit(value), value)
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            selected = dict(value, target=target_value, sourceCatalogueSha256=MODULE.android_catalogue(target_value))
+            self.assertEqual(MODULE.android_input_document(MODULE.encoded(selected)+b'\n', source=source,
+                run=run, attempt=attempt, root=root, target=target_value), selected)
+            other = MODULE.INTEL_TARGET if target_value == MODULE.ARM_TARGET else MODULE.ARM_TARGET
+            for bad in (dict(selected, target=other), dict(selected, sourceCatalogueSha256=MODULE.android_catalogue(other))):
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.android_input_document(MODULE.encoded(bad)+b'\n', source=source,
+                        run=run, attempt=attempt, root=root, target=target_value)
         for key, replacement in [('runId','41'),('runAttempt','2'),('sourceCommit','b'*40),('target',MODULE.INTEL_TARGET),
             ('root',str(root/'elsewhere')),('schemaVersion',True),('parentReturncodeRequired',False),
             ('sourceCatalogueSha256','0'*64),('unknown','private message')]:
@@ -2553,6 +3044,13 @@ class NormalPhaseDataTests(unittest.TestCase):
             publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
             outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
         self.assertEqual(MODULE.android_signed_facts(public,source=source,run=run,attempt=attempt),public)
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            selected_public = dict(public, target=target_value)
+            self.assertEqual(MODULE.android_signed_facts(selected_public, source=source, run=run,
+                attempt=attempt, target=target_value), selected_public)
+            with self.assertRaises(MODULE.Refused):
+                MODULE.android_signed_facts(dict(selected_public, target='unsupported'), source=source,
+                    run=run, attempt=attempt, target=target_value)
         for field, invalid in [('source','private/path'),('source',True),('run','0'),('run','secret'),('attempt','01'),('attempt',1)]:
             context=dict(source=source,run=run,attempt=attempt);context[field]=invalid
             bad=dict(public);bad[{'source':'sourceCommit','run':'runId','attempt':'runAttempt'}[field]]=invalid
@@ -2576,7 +3074,7 @@ class NormalPhaseDataTests(unittest.TestCase):
             ((MODULE.CLASS+MODULE.ANDROID_METHOD,),900,1020,1245))
         self.assertEqual(MODULE.normal_request(['--normal-android-signed-build-summary'],str(normal/'tmp')+'/')['phaseSeconds'],90)
         self.assertNotIn(MODULE.ANDROID_RESULT,MODULE.NORMAL_SELECTIONS)
-        for args in (['--target',MODULE.INTEL_TARGET,'--normal-android-signed-build-test'],
+        for args in (['--target','unsupported','--normal-android-signed-build-test'],
                      ['--normal-android-signed-build-test','--work','/tmp/private']):
             with self.assertRaises(MODULE.Refused): MODULE.normal_request(args,str(normal/'tmp')+'/')
 
@@ -2616,11 +3114,119 @@ class NormalPhaseDataTests(unittest.TestCase):
             self.assertEqual((forwarded[MODULE.ANDROID_RUN_ENV],forwarded[MODULE.ANDROID_ATTEMPT_ENV]),(run,attempt))
             self.assertNotIn('MRK_MACOS_TARGET',forwarded)
             self.assertNotIn('GITHUB_SHA',forwarded)
+            intel_request = MODULE.normal_request(['--target', MODULE.INTEL_TARGET,
+                '--normal-android-signed-build-test'], str(normal/'tmp')+'/')
+            intel_env = dict(env, RUNNER_ARCH='X64', TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-x86_64')
+            with patch.object(MODULE.platform, 'machine', return_value='x86_64'), patch.dict(MODULE.os.environ, intel_env, clear=True):
+                self.assertEqual(MODULE.normal_context(intel_request)[:2], (checkout, source))
+            for altered in (dict(intel_env, RUNNER_ARCH='ARM64'), dict(intel_env, TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB='github-hosted-macos26-arm64')):
+                with patch.object(MODULE.platform, 'machine', return_value='x86_64'), patch.dict(MODULE.os.environ, altered, clear=True), self.assertRaises(MODULE.Refused):
+                    MODULE.normal_context(intel_request)
             for key,badvalue in [('GITHUB_RUN_ID','0'),('GITHUB_RUN_ATTEMPT','secret'),('GITHUB_SHA','b'*40),
                 ('GITHUB_WORKFLOW_SHA','b'*40),('GITHUB_REF','refs/heads/other'),('RUNNER_ARCH','X64')]:
                 altered=dict(env);altered[key]=badvalue
                 with self.subTest(context=key),patch.dict(MODULE.os.environ,altered,clear=True),self.assertRaisesRegex(MODULE.Refused,'android-signed-fixed-installed-context'):
                     MODULE.normal_context(request)
+
+    def test_android_two_target_commands_and_private_receipt_correspondence(self):
+        # Complete synthetic receipts exercise the real fixed validators, not
+        # native signing, generated-runner admission or an installed UI claim.
+        import copy
+        source, run, attempt = 'a'*40, '42', '1'
+        normal = Path('/inert/normal-ui')
+        roster = 'b'*64
+        def clock(seconds):
+            return dict(startNs='1', deadlineNs=str(1+seconds*10**9), beforePublicationNs='2', postCloseDeadlineRequired=True)
+        def records(rows):
+            return [dict(role=role, returncode=0, timeoutSeconds=cap, roleCapSeconds=cap,
+                outputLimitBytes=limit, argvSha256=MODULE.sha(MODULE.encoded(argv)), stdoutBytes=0,
+                stderrBytes=0, stdoutSha256=MODULE.sha(b''), stderrSha256=MODULE.sha(b''))
+                for role,cap,limit,argv in rows]
+        source_row = ('normal-ui-source-roster',15,1048576,MODULE.output_data_source_argv(source))
+        for target_value in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            with self.subTest(target=target_value):
+                request = MODULE.normal_request(['--target',target_value,'--normal-android-signed-build-test'],str(normal/'tmp')+'/')
+                self.assertEqual((request['target'],request['timeout'],request['phaseSeconds']),(target_value,1020,1245))
+                manifest = normal/'DerivedData/Build/Products/MRKNormalAppUI_macosx26.xctestrun'
+                command = MODULE.xcode_test_arguments(manifest,normal/MODULE.ANDROID_RESULT,
+                    (MODULE.CLASS+MODULE.ANDROID_METHOD,),900,target=target_value,android_positive=True)
+                self.assertEqual(command[command.index('-destination')+1],
+                    'platform=macOS' if target_value==MODULE.INTEL_TARGET else 'platform=macOS,arch=arm64')
+                self.assertEqual([part for part in command if part.startswith('-only-testing:')],
+                    ['-only-testing:'+MODULE.CLASS+MODULE.ANDROID_METHOD])
+                events=[]
+                class Products:
+                    products=manifest.parent
+                    def __init__(self, derived): self.manifest=manifest.name; events.append(('open',derived))
+                    def __enter__(self): return self
+                    def admit(self, call): events.append('admit'); return {}
+                    def check(self): events.append('post')
+                    def __exit__(self, *args): events.append('close')
+                original=SimpleNamespace(returncode=0,stdout=b'',stderr=b'')
+                def call(role, argv, timeout):
+                    self.assertEqual((role,argv,timeout),('one-admitted-ui-test',command,1020))
+                    events.append('original'); return original
+                with patch.object(MODULE,'RunnerProducts',Products),patch.object(MODULE.os.path,'lexists',return_value=False):
+                    observed,admission=MODULE.run_admitted_test(call,normal/'DerivedData',normal/MODULE.ANDROID_RESULT,
+                        (MODULE.CLASS+MODULE.ANDROID_METHOD,),900,1020,target=target_value,android_positive=True)
+                self.assertIs(observed,original)
+                self.assertEqual(events,[('open',normal/'DerivedData'),'admit','post','original','post','close'])
+                self.assertEqual(admission,dict(originalProductsPrePostMatched=True,originalClosesCompleted=True))
+                build_argv = MODULE.normal_build_arguments(normal/'DerivedData',target=target_value)
+                self.assertEqual('ARCHS=x86_64' in build_argv,target_value==MODULE.INTEL_TARGET)
+                build = dict(schemaVersion=1,scope='normal-ui-original-command-admission-only',phase='build',
+                    resultBundle=None,originalCommandRole='normal-ui-build',originalReturncode=0,target=target_value,
+                    sourceCommit=source,sourceRosterSha256=roster,sourcePrePostMatched=True,originalCommandReturned=True,
+                    fileLimitBytes=[32*1024**3]*2,receiptPolicy='exclusive0600-readback-consuming-close',phaseClock=clock(450),
+                    commands=records([source_row,*[('normal-toolchain-'+key,15,4096,list(argv))
+                        for key,_,argv in MODULE.TOOLCHAIN_QUERIES],('normal-ui-build',240,1048576,build_argv),source_row]))
+                public=dict(schemaVersion=1,scope=MODULE.ANDROID_FACTS_SCOPE,sourceCommit=source,target=target_value,
+                    runId=run,runAttempt=attempt,sourceRegistrationObserved=False,nativeSigningVerified=True,
+                    privateOriginalsClosed=True,memorySessionDiscarded=True,outputPostMatched=True,normalQuitObserved=True,
+                    releaseQualified=False,parentReturncodeRequired=0,operationId='3'*32,ownerGeneration='4'*32,
+                    publicCertificateSha256='d'*64,artifactSha256='5'*64,artifactBytes=3,outputEntries=20,
+                    outputNameBytes=1000,outputLogicalBytes=12,moduleLogicalBytes=9,outputCensusSha256='6'*64)
+                row=['file',['1','2',str(0o100600),'501','20','1','100','3','4'],'c'*64]
+                runner=dict(schemaVersion=1,scope='actual-generated-xctrunner-admission-only',
+                    runnerPath=str(normal/'DerivedData/Build/Products'/MODULE.RUNNER),strictCodesignOriginalZero=True,
+                    reSignedOrRepaired=False,originalProductsPrePostMatched=True,originalClosesCompleted=True,
+                    xctestrunPath=str(manifest),runnerExecutable=copy.deepcopy(row),testExecutable=copy.deepcopy(row),
+                    xctestrun=copy.deepcopy(row),productEntryCount=5,productRosterSha256='e'*64,
+                    entitlementsSha256='f'*64,appSandboxEntitlement='absent')
+                common=dict(schemaVersion=1,scope='android-signed-private-original-admission',resultBundle=MODULE.ANDROID_RESULT,
+                    sourceCommit=source,target=target_value,runId=run,runAttempt=attempt,sourceRosterSha256=roster,
+                    sourcePrePostMatched=True,originalCommandReturned=True,originalReturncode=0,fileLimitBytes=[1024**3]*2,
+                    receiptPolicy='exclusive0600-readback-consuming-close')
+                test=dict(common,phase='test',originalCommandRole='one-admitted-ui-test',runnerAdmission=runner,
+                    parentPrivateOriginalsClosed=True,observation=public,phaseClock=clock(1245),commands=records([source_row,
+                    ('verify-generated-runner',30,1048576,['/usr/bin/codesign','--verify','--strict',runner['runnerPath']]),
+                    ('generated-runner-entitlements',30,1048576,['/usr/bin/codesign','-d','--entitlements',':-',runner['runnerPath']]),
+                    ('one-admitted-ui-test',1020,1048576,command),source_row]))
+                summary=dict(common,phase='summary',originalCommandRole='normal-ui-summary',phaseClock=clock(90),
+                    testCounts=dict(totalTestCount=1,passedTests=1,failedTests=0,skippedTests=0,expectedFailures=0),
+                    commands=records([source_row,('normal-ui-summary',30,262144,['/usr/bin/xcrun','xcresulttool','get',
+                    'test-results','summary','--path',str(normal/MODULE.ANDROID_RESULT),'--compact']),source_row]))
+                def admit(b=build,t=test,s=summary,f=public):
+                    return MODULE.android_signed_receipts(b,t,s,f,source=source,normal=normal,run=run,attempt=attempt,target=target_value)
+                self.assertIsNone(admit())
+                other=MODULE.INTEL_TARGET if target_value==MODULE.ARM_TARGET else MODULE.ARM_TARGET
+                for index in range(4):
+                    cases=copy.deepcopy([build,test,summary,public]);cases[index]['target']=other
+                    with self.assertRaises(MODULE.Refused): admit(*cases)
+                bad=copy.deepcopy(build)
+                bad['commands'][-2]['argvSha256']=MODULE.sha(MODULE.encoded(MODULE.normal_build_arguments(normal/'DerivedData',target=other)))
+                with self.assertRaises(MODULE.Refused): admit(b=bad)
+                bad=copy.deepcopy(test);bad['commands'][3]['returncode']=65
+                with self.assertRaises(MODULE.Refused): admit(t=bad)
+                bad=copy.deepcopy(test);bad['parentPrivateOriginalsClosed']=False
+                with self.assertRaises(MODULE.Refused): admit(t=bad)
+                bad=copy.deepcopy(summary);bad['testCounts']['skippedTests']=1
+                with self.assertRaises(MODULE.Refused): admit(s=bad)
+        # No non-Android target restriction is weakened by the new selector.
+        for flag in ('--normal-output-data-test',):
+            with self.assertRaises(MODULE.Refused): MODULE.normal_request(['--target',MODULE.INTEL_TARGET,flag],str(normal/'tmp')+'/')
+        with self.assertRaises(MODULE.Refused): MODULE.xcode_test_arguments(Path('m'),Path('r'),
+            (MODULE.ENGINEERING_METHOD,),60,target=MODULE.INTEL_TARGET,engineering=True)
 
     def test_android_private_reader_real_originals_post_and_consuming_close(self):
         # Real tiny files and FD bindings, with only the fixed Mac root mapped to
@@ -2708,9 +3314,46 @@ class NormalPhaseDataTests(unittest.TestCase):
     def test_android_positive_source_uses_closed_private_role_and_ordinary_ui(self):
         # Actual new Swift source, not an executable Python model of its reader.
         source=SWIFT.read_bytes().decode('utf-8')
+        self.assertEqual(hashlib.sha256(source.encode()).hexdigest(), '47a5459afa11e0391af294832fc87d387aa16b62bf31fef33da2f08ffb682610')
+        self.assertEqual(source.count('func testInstalledIOSPendingAccountRecoveryThroughUI()'), 1)
+        self.assertIn('MRK_MACOS_UI_IOS_PENDING_RECOVERY=', source)
+        previous = without_normal_ios_pending_source(source)
+        self.assertEqual(hashlib.sha256(previous.encode()).hexdigest(), 'f1e19af70b5b8f85384aa2515d515bddb749ae043b4bf560d88a2d3c39281386')
+        self.assertEqual(without_normal_ios_pending_source(previous), previous)
+        for before, current in NORMAL_IOS_PENDING_SWIFT_INVERSE:
+            with self.assertRaises(AssertionError):
+                without_normal_ios_pending_source(source.replace(current, before, 1))
+        for damaged in (source.replace('iosRecovery: true', 'iosRecovery: false', 1), source + '// changed\n'):
+            with self.assertRaises(AssertionError): without_normal_ios_pending_source(damaged)
+        source = previous  # The unchanged historical Swift layers below remain authoritative.
         restored=without_positive_android_source(source)
         self.assertEqual(hashlib.sha256(restored.encode()).hexdigest(), '32e2bd4223c6219eaeed0e9b9cfa78f3fd9b7c8fd05fb1e2cf903395038d78c4')
         private=source.split('        final class AndroidInputs {',1)[1].split('        // Fixed public XML prerequisite only.',1)[0]
+        self.assertIn('#if arch(arm64)', private)
+        self.assertIn('#elseif arch(x86_64)', private)
+        for target_value, catalogue in ((MODULE.ARM_TARGET, MODULE.ANDROID_CATALOGUE),
+                (MODULE.INTEL_TARGET, '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb')):
+            self.assertIn('static let target = "' + target_value + '"', private)
+            self.assertIn('private static let catalogue = "' + catalogue + '"', private)
+        self.assertIn('object["target"] as? String == Self.target', private)
+        self.assertIn('env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob', private)
+        self.assertIn('"target": LocalFixture.AndroidInputs.target', source)
+        current_runtime = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        prior_runtime = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"
+        self.assertEqual(source.count(current_runtime), 1)
+        signed_normalized = without_signed_android_runtime_source(source)
+        self.assertEqual(signed_normalized, source.replace(current_runtime, prior_runtime)
+                         .replace("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203").replace("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"))
+        self.assertEqual(without_signed_android_runtime_source(signed_normalized), signed_normalized)
+        for damaged in (source.replace("24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5", "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203", 1),
+                        source.replace("0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb", "0" * 64, 1),
+                        source + '            private static let catalogue = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"\n',
+                        source.replace(current_runtime, current_runtime + current_runtime, 1)):
+            with self.assertRaises(AssertionError): without_signed_android_runtime_source(damaged)
+        prior = without_intel_android_source(source)
+        self.assertEqual(hashlib.sha256(prior.encode()).hexdigest(), '6754fa2935ac1493f5b3f0da7c50e97dd8b5eeafed339b9d7e89fde3064b1164')
+        for previous, current in INTEL_ANDROID_SWIFT_INVERSE:
+            with self.assertRaises(AssertionError): without_intel_android_source(signed_normalized.replace(current, current + '// corrupt\n', 1))
         for token in ('O_NONBLOCK','descriptors.count == 18','held.count == 14','leaves.count == 4',
                       'try directoryPost(directory, full: true)','while let fd = descriptors.popLast()',
                       'scalars.removeAll()','do { try check() } catch { if primary == nil { primary = error } }'):
@@ -3887,7 +4530,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                 root = Path(temporary)
                 normal = root / "normal-ui"; normal.mkdir(mode=0o700)
                 relative_names = ("desktop/tools/macos_normal_ui_runner.py",
-                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift")
+                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift", "desktop/src/components/IOSArchive.tsx")
                 source_rows = []
                 for relative in relative_names:
                     path = root / relative; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -3974,7 +4617,7 @@ class NormalPhaseDataTests(unittest.TestCase):
                     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
                     path.write_bytes(body); path.chmod(mode)
                 relative_names = ("desktop/tools/macos_normal_ui_runner.py",
-                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift")
+                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift", "desktop/src/components/IOSArchive.tsx")
                 source_rows = []
                 for relative in relative_names:
                     body = b"synthetic SOURCE only, never imported or compiled\n"
@@ -5661,6 +6304,305 @@ class NormalPhaseDataTests(unittest.TestCase):
                             read_sources(str(root), str(inventory), "a" * 40, "a" * 40)
                     self.assertEqual(len(closed), 1)
                     native.write_bytes(b"x" * length)
+
+
+@contextmanager
+def pending_account_module():
+    """Real passive SOURCE module; no app, account or native invocation."""
+    name = "_mrk_normal_pending_regression_aqua"
+    if name in sys.modules:
+        raise AssertionError("pending regression module binding already exists")
+    spec = importlib.util.spec_from_file_location(name, ROOT / MODULE.LOADER)
+    loader = importlib.util.module_from_spec(spec)
+    with patch.dict(sys.modules, {name: loader, MODULE.LOADER_MODULE: loader}):
+        spec.loader.exec_module(loader)
+        yield loader
+
+
+def pending_account_data(loader, binding, uid, gid):
+    home = "/Users/runner"
+    identity = lambda inode: [7, inode, stat.S_IFDIR | 0o700, uid, gid]
+    private = dict(home=home, homeIdentity=identity(1), leaseIdentity=identity(2), sessionIdentity=identity(3),
+        nativeIdentity=identity(4), token="e" * 32,
+        baseline=dict(default=home + "/Library/Keychains/login.keychain-db", search=[home + "/Library/Keychains/login.keychain-db"]),
+        members=[dict(path=home + "/Library/Keychains/login.keychain-db", identity=[7, 5, stat.S_IFREG | 0o600, uid, gid, 1])],
+        controls={name: dict(bytes=2, sha256=loader.digest(b"{}")) for name in ("intent.json", "state.json")},
+        native={"signing.keychain-db": dict(device=7, inode=6)})
+    common = dict(schemaVersion=1, case=loader.IOS_ACCOUNT_CASE, profileCalls=0, commandFinalities=True,
+        leaseClosed=True, sessionClosed=True, handlersRestored=True, fixtureDescriptorsClosed=True,
+        originalDeadlineMet=True, keychainContentsRead=False)
+    producer = dict(common, scope="real-core-pending-account-fixture-v1", commands=17, pendingLeft=True, private=private)
+    observer = dict(common, scope="real-core-account-baseline-readback-v1", commands=2, pendingAbsent=True,
+        baselinePreferencesMatched=True, baselineMemberIdentitiesMatched=True)
+    marker = dict(schemaVersion=1, sourceCommit=binding.source, target=binding.target, runId=binding.run,
+        runAttempt=binding.attempt, fixtureSha256=loader.digest(str(binding.root() / loader.IOS_ACCOUNT_CASE).encode()),
+        sessionSha256=loader.digest(private["token"].encode()), inspectUnchecked=True, recoverUnchecked=True, ordinaryQuit=True,
+        inspect=dict(operationId="1" * 32, ownerGeneration="2" * 32, phase="terminal", outcome="complete", reason="none", accountStatus="pending"),
+        recover=dict(operationId="3" * 32, ownerGeneration="4" * 32, phase="terminal", outcome="complete", reason="none", accountStatus="recovered"))
+    case = b"-[MRKNormalAppUITests.NormalAppUITests " + MODULE.IOS_PENDING_METHOD.encode() + b"]"
+    output = b"\n".join((b"Test Case '" + case + b"' started.", MODULE.ORIGINAL_MARKER.encode(),
+        MODULE.IOS_PENDING_PREFIX + MODULE.encoded(marker), b"Test Case '" + case + b"' passed (1.0 seconds).")) + b"\n"
+    return private, producer, observer, marker, output
+
+
+class NormalIOSPendingRecoveryDataTests(unittest.TestCase):
+    def test_pending_fixed_requests_and_original_marker_are_bound_to_both_targets(self):
+        with pending_account_module() as loader:
+            for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+                binding = loader.Binding("a" * 40, "123", "1", target)
+                _, _, _, marker, output = pending_account_data(loader, binding, os.getuid(), os.getgid())
+                request = MODULE.normal_request(["--target", target, "--normal-ios-pending-recovery-test"], "/inert/normal-ui/tmp/")
+                self.assertEqual((request["allowance"], request["timeout"], request["phaseSeconds"]), (525, 645, 1080))
+                self.assertTrue(request["iosPending"])
+                self.assertEqual(request["methods"], (MODULE.CLASS + MODULE.IOS_PENDING_METHOD,))
+                argv = MODULE.xcode_test_arguments("/inert/runner.xctestrun", request["result"], request["methods"],
+                    request["allowance"], target=target, ios_pending=True)
+                self.assertIn("-only-testing:" + MODULE.CLASS + MODULE.IOS_PENDING_METHOD, argv)
+                self.assertEqual(argv[argv.index("-maximum-test-execution-time-allowance") + 1], "525")
+                for extra in (dict(android_positive=True), dict(ios_unsigned=True), dict(engineering=True), dict(output_data=True)):
+                    with self.assertRaises(MODULE.Refused):
+                        MODULE.xcode_test_arguments("/inert/runner.xctestrun", request["result"], request["methods"],
+                            request["allowance"], target=target, ios_pending=True, **extra)
+                summary = MODULE.normal_request(["--target", target, "--normal-ios-pending-recovery-summary"], "/inert/normal-ui/tmp/")
+                self.assertEqual((summary["phase"], summary["methods"], summary["timeout"], summary["phaseSeconds"]), ("summary", (), 30, 90))
+                self.assertEqual(MODULE.ios_pending_marker(output, binding=binding, loader=loader), marker)
+                lines = output.splitlines()
+                bad_outputs = (b"", output + output, output + lines[2] + b"\n", output.replace(lines[1], b"missing"),
+                    output.replace(lines[2], MODULE.IOS_PENDING_PREFIX + json.dumps(marker).encode()),
+                    b"\n".join((lines[0], lines[2], lines[1], lines[3])),
+                    output + b"MRK_MACOS_UI_FAILURE_CLEANUP=unexpected\n", output.replace(b" passed (", b" failed ("))
+                for bad in bad_outputs:
+                    with self.subTest(target=target, malformed=len(bad)), self.assertRaises((MODULE.Refused, loader.Refused)):
+                        MODULE.ios_pending_marker(bad, binding=binding, loader=loader)
+                wrong = dict(marker, runAttempt="2")
+                with self.assertRaises(loader.Refused):
+                    MODULE.ios_pending_marker(output.replace(MODULE.encoded(marker), MODULE.encoded(wrong)), binding=binding, loader=loader)
+                counts = dict(totalTestCount=1, passedTests=1, failedTests=0, skippedTests=0, expectedFailures=0)
+                self.assertEqual(MODULE.ios_pending_summary(MODULE.encoded(counts)), counts)
+                for key in counts:
+                    for value in (True, counts[key] + 1):
+                        with self.assertRaises(MODULE.Refused): MODULE.ios_pending_summary(MODULE.encoded(dict(counts, **{key: value})))
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.normal_request(["--target", target, "--normal-ios-pending-recovery-test", "--normal-ios-unsigned-archive-test"], "/inert/normal-ui/tmp/")
+
+    def test_pending_original_sequence_preserves_failure_and_requires_runner_finality_before_observer(self):
+        # Actual normal phase, child transport parser, account acceptance and
+        # readback orchestration. Only native owner and filesystem observations
+        # are inert ports; this is not Mac account/runtime qualification.
+        with pending_account_module() as loader:
+            for fault in (None, "producer-unknown", "producer-nonzero", "producer-late", "ui-unknown", "ui-nonzero",
+                          "ui-marker", "runner-post", "runner-close", "observer-unknown", "observer-nonzero", "project-post"):
+                with self.subTest(fault=fault), ExitStack() as stack:
+                    tick, calls = [0], []
+                    request = MODULE.normal_request(["--normal-ios-pending-recovery-test"], "/inert/normal-ui/tmp/")
+                    environment = {MODULE.IOS_PENDING_RUN: "123", MODULE.IOS_PENDING_ATTEMPT: "1", "HOME": "/Users/runner"}
+                    phase = MODULE.NormalPhase(None, environment, ROOT, MODULE.PhaseClock(1080, now=lambda: tick[0]), retain_nonzero=True)
+                    fixture = MODULE.NormalIOSRecoveryFixture(phase, "a" * 40, request)
+                    fixtures = fixture.fixtures
+                    private, producer, observer, marker, output = pending_account_data(loader, fixture.binding, fixtures.uid, fixtures.gid)
+                    fixture.prepared = True
+                    fixtures.account_home = private["home"]
+                    fixtures.recovery_runtime = ("/inert/python3", "/inert/core.zip")
+                    fixtures.account_baseline_files = [object()]
+                    stack.enter_context(patch.object(fixture, "check_sources"))
+                    stack.enter_context(patch.object(fixtures, "recovery_runtime_paths", return_value=fixtures.recovery_runtime))
+                    stack.enter_context(patch.object(fixtures, "_account_current"))
+                    post = stack.enter_context(patch.object(fixtures, "readback", side_effect=loader.Refused("inert project post") if fault == "project-post" else None))
+                    def adopt(value):
+                        self.assertIsNot(value, producer)
+                        self.assertEqual(value, producer)  # Genuine child JSON parser ran.
+                        self.assertFalse(fixtures.inflight); self.assertTrue(fixtures.last_returned)
+                        fixtures.account_private = value["private"]
+                        fixtures.account_private_sha = loader.digest(MODULE.encoded(value["private"]))
+                        fixtures.account_producer_attestation = {k: v for k, v in value.items() if k != "private"}
+                        fixtures.account_produced = True
+                    stack.enter_context(patch.object(fixtures, "accept_account_producer", side_effect=adopt))
+                    originals = {}
+                    def owned(argv, **kwargs):
+                        mode = argv[7] if len(argv) == 12 and argv[0] == "/inert/python3" else argv[0]
+                        calls.append((mode, argv, kwargs))
+                        prefix = "producer" if mode == "produce" else "observer" if mode == "observe" else "ui" if mode == "inert-ui" else mode
+                        if fault == prefix + "-unknown": raise OSError("inert unknown original")
+                        if mode in ("produce", "observe"):
+                            self.assertNotIn("HOME", kwargs["environ"])
+                            self.assertEqual(kwargs["environ"], loader._account_environment(fixtures.path / "state" / loader.IOS_ACCOUNT_CASE, fixtures.uid, "runner"))
+                            self.assertEqual((kwargs["timeout"], kwargs["output_limit"]), (180, 16384) if mode == "produce" else (90, 2048))
+                            self.assertEqual(int(argv[10]) - int(argv[9]), 25_000_000_000)
+                        if mode == "observe":
+                            self.assertTrue(fixtures.account_app_returned)
+                            self.assertEqual(argv[11], fixtures.account_private_sha)
+                        body = MODULE.encoded(producer if mode == "produce" else observer) + b"\n" if mode in ("produce", "observe") else output if mode == "inert-ui" else b""
+                        if fault == "ui-marker" and mode == "inert-ui": body = b"no marker\n"
+                        result = subprocess.CompletedProcess(argv, 67 if fault == prefix + "-nonzero" else 0, body, b"")
+                        originals[mode] = result
+                        if fault == "producer-late" and mode == "produce": tick[0] = 1080 * 1_000_000_000
+                        return result
+                    phase.owner = SimpleNamespace(run_owned=owned)
+                    proof = dict(originalProductsPrePostMatched=fault != "runner-post", originalClosesCompleted=fault != "runner-close",
+                        strictCodesignOriginalZero=True, reSignedOrRepaired=False)
+                    def execute():
+                        phase.call("normal-ui-source-roster", ["inert-source"], 15)
+                        fixture.ui_call("verify-generated-runner", ["inert-verify"], 30)
+                        fixture.ui_call("generated-runner-entitlements", ["inert-entitlements"], 30)
+                        original = fixture.ui_call("one-admitted-ui-test", ["inert-ui"], 645)
+                        self.assertIs(original, originals["inert-ui"])
+                        result = fixture.recovered(original, proof)
+                        phase.call("normal-ui-source-roster", ["inert-source"], 15)
+                        return result
+                    if fault is None:
+                        result = execute()
+                        self.assertEqual([row["role"] for row in phase.records], ["normal-ui-source-roster", "verify-generated-runner",
+                            "generated-runner-entitlements", "ios-account-produce", "one-admitted-ui-test", "ios-account-observe", "normal-ui-source-roster"])
+                        self.assertEqual([row["roleCapSeconds"] for row in phase.records], [15, 30, 30, 180, 645, 90, 15])
+                        self.assertEqual(result["observation"], marker)
+                        self.assertFalse(result["originalClosesCompleted"])
+                        self.assertTrue(result["account"]["exactPendingSessionRecovered"])
+                        self.assertFalse(result["account"]["signedExportQualified"])
+                        self.assertNotIn(private["token"], json.dumps(result))
+                        post.assert_called_once_with(loader.IOS_ACCOUNT_CASE)
+                        self.assertIsNone(fixture.close())
+                        with self.assertRaises(MODULE.Refused): fixture.ui_call("one-admitted-ui-test", ["inert-ui"], 645)
+                    else:
+                        with self.assertRaises((MODULE.Refused, loader.Refused, OSError)): execute()
+                        modes = [row[0] for row in calls]
+                        if fault.startswith("producer-"):
+                            self.assertNotIn("inert-ui", modes); self.assertNotIn("observe", modes)
+                        elif fault.startswith("ui-") or fault.startswith("runner-"):
+                            self.assertNotIn("observe", modes)
+                        self.assertEqual(modes.count("inert-source"), 1)
+                        if fault.endswith("-nonzero"):
+                            key = "produce" if fault.startswith("producer-") else "observe" if fault.startswith("observer-") else "inert-ui"
+                            self.assertIs(phase.first_nonzero, originals[key])
+                        if fault.endswith("-unknown") or fault == "producer-late":
+                            self.assertTrue(fixtures.inflight)
+                            self.assertIsNotNone(fixture.close())  # Unknown original never claimed closed.
+                        else:
+                            self.assertIsNone(fixture.close())
+
+    def test_pending_close_consumes_loader_original_preserves_foreign_registration_and_primary_error(self):
+        with pending_account_module() as loader, tempfile.TemporaryDirectory(prefix="mrk-pending-close-data-") as temporary:
+            root = Path(temporary)
+            path = root / "loader"; path.write_bytes(b"inert original")
+            for fault in (None, "fixture-close", "loader-close", "both", "inflight"):
+                with self.subTest(fault=fault), ExitStack() as stack:
+                    phase = MODULE.NormalPhase(None, {MODULE.IOS_PENDING_RUN: "123", MODULE.IOS_PENDING_ATTEMPT: "1"}, ROOT, MODULE.PhaseClock(1080, now=lambda: 0))
+                    fixture = MODULE.NormalIOSRecoveryFixture(phase, "a" * 40,
+                        MODULE.normal_request(["--normal-ios-pending-recovery-test"], "/inert/normal-ui/tmp/"))
+                    fixture.loader_fd = fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC)
+                    fixture.fixtures.inflight = fault == "inflight"
+                    own, foreign = object(), object()
+                    fixture.fixtures.normal_stager_registrations = [own]
+                    stack.enter_context(patch.dict(sys.modules, {"_mrk_shipping_gate_stager": foreign}))
+                    first = OSError("inert fixture close")
+                    if fault in ("fixture-close", "both"):
+                        stack.enter_context(patch.object(fixture.fixtures, "close", side_effect=first))
+                    real_close = os.close
+                    def consumed(number):
+                        real_close(number)
+                        if number == fd and fault in ("loader-close", "both"): raise OSError("inert loader consuming close")
+                    stack.enter_context(patch.object(MODULE.os, "close", side_effect=consumed))
+                    error = fixture.close()
+                    self.assertIsNone(fixture.loader_fd)
+                    with self.assertRaises(OSError): os.fstat(fd)
+                    self.assertIs(sys.modules["_mrk_shipping_gate_stager"], foreign)
+                    if fault is None: self.assertIsNone(error)
+                    else: self.assertIsInstance(error, (OSError, loader.Refused))
+                    if fault in ("fixture-close", "both"): self.assertIs(error, first)
+                    if fault == "both": self.assertEqual(fixture.cleanup_errors, ["OSError", "OSError"])
+            # Normal source POST uses the SAME genuine retained descriptor;
+            # named replacement, in-place bytes and module custody all veto it.
+            source_path = root / MODULE.LOADER
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(b"inert source original")
+            phase = MODULE.NormalPhase(None, {MODULE.IOS_PENDING_RUN: "123", MODULE.IOS_PENDING_ATTEMPT: "1"}, ROOT, MODULE.PhaseClock(1080, now=lambda: 0))
+            fixture = MODULE.NormalIOSRecoveryFixture(phase, "a" * 40,
+                MODULE.normal_request(["--normal-ios-pending-recovery-test"], "/inert/normal-ui/tmp/"))
+            phase.root = root
+            fixture.loader_fd = source_fd = os.open(source_path, os.O_RDONLY | os.O_CLOEXEC)
+            _, identity, digest = MODULE.original_body(source_fd, 1024*1024)
+            fixture.loader_original = (identity, digest)
+            try:
+                fixture.check_sources()
+                with patch.dict(sys.modules, {MODULE.LOADER_MODULE: object()}), self.assertRaises(MODULE.Refused):
+                    fixture.check_sources()
+                source_path.write_bytes(b"inert source changed!")
+                with self.assertRaises(MODULE.Refused): fixture.check_sources()
+            finally:
+                self.assertIsNone(fixture.close())
+            with self.assertRaises(OSError): os.fstat(source_fd)
+            # Consuming failure is added to an existing primary, not substituted.
+            primary = MODULE.Refused("inert primary")
+            with patch.object(fixture, "close", return_value=OSError("inert secondary")):
+                self.assertFalse(fixture.__exit__(type(primary), primary, None))
+            self.assertEqual(primary.__notes__, ["normal recovery fixture also had a consuming-close refusal"])
+
+
+    def test_pending_shared_source_query_matches_real_build_receipt_on_both_targets(self):
+        # Real current SOURCE and receipt files, inert seven-original port.
+        # The new IOSArchive.tsx selection must agree in producer and consumer.
+        source = "a" * 40
+        for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
+            with self.subTest(target=target), tempfile.TemporaryDirectory(prefix="mrk-pending-source-data-") as temporary:
+                root = Path(temporary); normal = root / "normal-ui"; normal.mkdir(mode=0o700)
+                names = ("desktop/tools/macos_normal_ui_runner.py",
+                    "desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift", "desktop/src/components/IOSArchive.tsx")
+                rows = []
+                for name in names:
+                    path = root / name; path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    body = b"inert SOURCE, never executed\n"; path.write_bytes(body)
+                    blob = hashlib.sha1(b"blob " + str(len(body)).encode() + b"\0" + body).hexdigest()
+                    rows.append(b"100644 blob " + blob.encode() + b"\t" + name.encode() + b"\0")
+                tool_values = (b"Xcode 26.0\nBuild version 17A324\n",
+                    b"/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk\n",
+                    b"26.0\n", b"25A352\n")
+                queries = {tuple(query[2]): body for query, body in zip(MODULE.TOOLCHAIN_QUERIES, tool_values)}
+                calls = []
+                expected = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                    "ls-tree", "-r", "-z", "--full-tree", source, "--", "desktop/native/macos-normal-ui",
+                    "desktop/tools/macos_normal_ui_runner.py", "desktop/src/components/IOSArchive.tsx"]
+                def original(argv, **kwargs):
+                    calls.append(argv)
+                    if argv[0] == "/usr/bin/git":
+                        self.assertEqual(argv, expected)
+                        body = b"".join(rows)
+                    elif tuple(argv) in queries: body = queries[tuple(argv)]
+                    else:
+                        self.assertEqual(argv, MODULE.normal_build_arguments(normal / "DerivedData", target=target))
+                        body = b"inert build original\n"
+                    return subprocess.CompletedProcess(argv, 0, body, b"")
+                request = MODULE.normal_request(["--target", target, "--normal-build"], str(normal / "tmp") + "/")
+                phase = MODULE.NormalPhase(SimpleNamespace(run_owned=original), {}, root, MODULE.PhaseClock(450, now=lambda: 0))
+                result = MODULE.execute_normal_phase(phase, request, source, (32 * 1024**3,) * 2)
+                self.assertEqual(result.returncode, 0)
+                # execute_normal_phase POST-checks the consumed receipt; the
+                # CLI caller still owns stream publication and final finish().
+                self.assertFalse(phase.clock.finalized); self.assertFalse(phase.clock.failed)
+                self.assertEqual(calls[0], expected); self.assertEqual(calls[-1], expected); self.assertEqual(len(calls), 7)
+                self.assertEqual(MODULE.output_data_source_argv(source), expected)
+                receipt_path = normal / "build.command-admission.json"
+                receipt = MODULE.document(receipt_path.read_bytes())
+                MODULE.output_data_build_receipt(receipt, source, normal, receipt["sourceRosterSha256"], target=target)
+                self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
+                # Honest old selector transcript is not a valid new receipt,
+                # even when its own digest is recomputed consistently.
+                old = json.loads(json.dumps(receipt))
+                for index in (0, -1): old["commands"][index]["argvSha256"] = MODULE.sha(MODULE.encoded(expected[:-1]))
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.output_data_build_receipt(old, source, normal, old["sourceRosterSha256"], target=target)
+                with self.assertRaises(MODULE.Refused):
+                    MODULE.output_data_build_receipt(receipt, source, normal, receipt["sourceRosterSha256"],
+                        target=MODULE.INTEL_TARGET if target == MODULE.ARM_TARGET else MODULE.ARM_TARGET)
+                # Missing required field SOURCE is refused before a build.
+                rows.pop()
+                missing = MODULE.NormalPhase(SimpleNamespace(run_owned=original), {}, root, MODULE.PhaseClock(450, now=lambda: 0))
+                before = len(calls)
+                with self.assertRaisesRegex(MODULE.Refused, "normal-ui-source-complete"):
+                    MODULE.normal_source_state(missing, source)
+                self.assertEqual(len(calls), before + 1)
+                phase.clock.finish()  # Explicit caller finality, not a receipt claim.
+                self.assertTrue(phase.clock.finalized)
+                with self.assertRaisesRegex(MODULE.Refused, "normal-phase-terminal"):
+                    phase.clock.allowance(15)
 
 
 if __name__ == "__main__":

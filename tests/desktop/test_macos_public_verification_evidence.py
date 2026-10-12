@@ -64,6 +64,54 @@ def same_package_receipt():
     return value
 
 
+
+def update_documents():
+    # Execute only the genuine closed current-receipt writer, not the adapter
+    # loader, owner, SOURCE nomination, sentinel or any native/I/O operation.
+    path = ROOT / "desktop/tools/macos_update_verification.py"
+    nodes = [node for node in ast.parse(path.read_text()).body if isinstance(node, ast.FunctionDef)
+             and node.name in ("need", "context", "current_complete")]
+    assert {node.name for node in nodes} == {"need", "context", "current_complete"}
+    namespace = {}
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
+    baseline = receipt("update-baseline"); current = receipt("package-install")
+    for row in (baseline, current):
+        del row["finalImage"], row["notarySubmission"]
+        row.update(productReady=False, notaryAuthentication={"created": False, "closed": False, "retired": False})
+    baseline["originalCalls"] = [{"role": role, "entered": True, "returned": True, "capturesSettled": True,
+        "returncode": 0, "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64}
+        for role in ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")]
+    current["originalCalls"] = [{"role": role, "entered": True, "returned": True, "capturesSettled": True,
+        "returncode": 0, "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64}
+        for role in ("producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
+            "distribution-verify-image", "observation-create", "observation-sign", "observation-verify-signature", "observation-verify-image",
+            "distribution-attach", "installer-log-cursor", "installer", "installer-log-capture", "distribution-detach")]
+    old_facts = {"previous": {"invocation": "a" * 32, "sha256": "a" * 64},
+                 "rootIdentity": {"private": SENTINEL}, "generation": {"instance": "a" * 32}}
+    old = {"schemaVersion": 1, **{key: CONTEXT[key] for key in ("source", "workflowSource", "runId", "runAttempt", "target")},
+        "predecessorSource": "2" * 40, "predecessorPackageSha256": "3" * 64, "qualificationEvidenceSha256": "4" * 64,
+        "expectedCurrentDescriptorSha256": "5" * 64, "readback": old_facts, "productReady": False,
+        "originalInstallerReturnedZero": True, "originalMountDetached": True, "freshCurrentBytesReadback": True,
+        "privatePath": SENTINEL}
+    baseline["updateBaseline"] = old
+    op = SimpleNamespace(image_source=CONTEXT["source"], target=CONTEXT["target"], receipt=current,
+        environment={"GITHUB_SHA": CONTEXT["source"], "GITHUB_RUN_ID": CONTEXT["runId"], "GITHUB_RUN_ATTEMPT": CONTEXT["runAttempt"]},
+        installer_zero=True, installation_readback=True, mount_detached=True, package_settled=lambda: True,
+        update={"baseline": old, "facts": {**old_facts, "previous": {"invocation": "b" * 32, "sha256": "b" * 64},
+            "generation": {"instance": "b" * 32}}, "nomination": {"source": "2" * 40,
+            "package": {"sha256": "3" * 64}, "qualificationEvidenceSha256": "4" * 64}})
+    namespace["current_complete"](op)
+    assert op.update["complete"] is True
+    return baseline, current
+
+
+def write_update_documents(root, documents):
+    baseline, current = documents
+    write(root, "android-helper-update-baseline.json", baseline)
+    write(root, "android-helper-package-install.json", current)
+    write(root, "update-baseline.status", b"0\n")
+    write(root, "package-install.status", b"0\n")
+
 def write(root, name, value):
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,7 +142,7 @@ def normal_diagnostic_data(*, removal=False, positive=False):
         "normal_build_settings_arguments", "normal_build_settings_data", "publish_normal_build_settings",
         "NORMAL_BUILD_SETTINGS", "NORMAL_BUILD_ARCHITECTURES", "NORMAL_BUILD_PLATFORMS", "DESTINATION_REJECTIONS"}
     if positive:
-        names.update(("android_signed_facts", "ios_unsigned_facts", "ANDROID_FACTS_SCOPE", "ARM_TARGET"))
+        names.update(("android_signed_facts", "ios_unsigned_facts", "ANDROID_FACTS_SCOPE", "ARM_TARGET", "normal_target_data"))
     if removal:
         names.update(("TARGET", "CLASS", "REMOVAL_METHODS", "removal_selection", "removal_ui_result"))
     nodes, found = [], set()
@@ -289,15 +337,15 @@ def positive_ui_data(context=None, *, ios=False):
         releaseQualified=False, parentReturncodeRequired=0, operationId="4" * 32, ownerGeneration="5" * 32,
         originalEntries=100, originalBytes=10000), source=context["source"])
     android_facts = normal["android_signed_facts"](dict(schemaVersion=1,
-        scope=normal["ANDROID_FACTS_SCOPE"], sourceCommit=context["source"], target=DATA.TARGETS[0],
+        scope=normal["ANDROID_FACTS_SCOPE"], sourceCommit=context["source"], target=context["target"],
         runId=context["runId"], runAttempt=context["runAttempt"], sourceRegistrationObserved=False,
         nativeSigningVerified=True, privateOriginalsClosed=True, memorySessionDiscarded=True, parentReturncodeRequired=0,
         outputPostMatched=True, normalQuitObserved=True, releaseQualified=False, operationId="4" * 32,
         ownerGeneration="5" * 32, publicCertificateSha256="6" * 64, artifactSha256="7" * 64,
         outputCensusSha256="8" * 64, artifactBytes=200, outputEntries=100, outputNameBytes=1000,
-        outputLogicalBytes=10000, moduleLogicalBytes=2000), source=context["source"], run=context["runId"], attempt=context["runAttempt"])
+        outputLogicalBytes=10000, moduleLogicalBytes=2000), source=context["source"], run=context["runId"], attempt=context["runAttempt"], target=context["target"])
     inventory = {"receiptState": "observed", "tree": "9" * 40}
-    android = dict(schemaVersion=1, scope="ordinary-installed-one-android-signed-build-ui", target=DATA.TARGETS[0],
+    android = dict(schemaVersion=1, scope="ordinary-installed-one-android-signed-build-ui", target=context["target"],
         applicationSourceCommit=context["source"], harnessSourceCommit=context["source"], sourceTree=inventory["tree"],
         workflow=".github/workflows/desktop-macos-installed.yml", runId=context["runId"], runAttempt=context["runAttempt"],
         testIdentifier="MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectAndroidSignedBuild",
@@ -334,6 +382,156 @@ def positive_ui_data(context=None, *, ios=False):
     phases = {"package-install": {"receiptState": "observed", "recordedPassed": True,
                                  "originalClosesKnown": True, "targetRetired": True}}
     return android, facts, test, summary, statuses, phases, inventory
+
+
+def ios_pending_recovery_data(context=CONTEXT):
+    """Synthetic completed originals for the DATA boundary, not native evidence.
+
+    Reuse only the private runner-admission shape. Recovery facts/roles are the
+    separate normal-account interface; unsigned success is never transformed
+    into a claim that account recovery actually ran.
+    """
+    _, _, test, summary, _, phases, inventory = positive_ui_data(context, ios=True)
+    fixture = f"/private/tmp/mrk-macos-aqua-{context['source']}-{context['runId']}-{context['runAttempt']}/ios-recovery-pending"
+    observation = dict(schemaVersion=1, sourceCommit=context["source"], target=context["target"],
+        runId=context["runId"], runAttempt=context["runAttempt"], fixtureSha256=hashlib.sha256(fixture.encode()).hexdigest(),
+        sessionSha256="f" * 64, inspectUnchecked=True, recoverUnchecked=True, ordinaryQuit=True,
+        inspect=dict(operationId="4" * 32, ownerGeneration="5" * 32, phase="terminal", outcome="complete",
+                     reason="none", accountStatus="pending"),
+        recover=dict(operationId="6" * 32, ownerGeneration="7" * 32, phase="terminal", outcome="complete",
+                     reason="none", accountStatus="recovered"))
+    common = dict(schemaVersion=1, case="ios-recovery-pending", profileCalls=0, commandFinalities=True,
+        leaseClosed=True, sessionClosed=True, handlersRestored=True, fixtureDescriptorsClosed=True,
+        originalDeadlineMet=True, keychainContentsRead=False)
+    account = dict(producer=dict(common, scope="real-core-pending-account-fixture-v1", commands=3, pendingLeft=True),
+        nativeReadback=dict(common, scope="real-core-account-baseline-readback-v1", commands=2, pendingAbsent=True,
+                           baselinePreferencesMatched=True, baselineMemberIdentitiesMatched=True),
+        exactPendingSessionRecovered=True, originalOwnedNativeAndControlsRemoved=True, persistentOriginalLeaseRetained=True,
+        nativeBaselineMembers=1, baselineIdentitiesMatched=True, baselinePreferencesMatched=True, projectMarkerUnchanged=True,
+        privateContentsExported=False, foreignPreferenceConflictInjected=False, appleSigningMaterialUsed=False,
+        signedExportQualified=False)
+    facts = dict(schemaVersion=1, scope="normal-ui-pending-account-recovery-v1", observation=observation,
+                 account=account, originalClosesCompleted=True)
+    test.pop("iosUnsignedObservation"); summary.pop("iosUnsignedTestCounts")
+    test.update(iosPendingRecovery=copy.deepcopy(facts), resultBundle="ios-pending-recovery-test.xcresult")
+    summary.update(iosPendingRecoveryTestCounts=dict(DATA.POSITIVE_UI_COUNTS), resultBundle="ios-pending-recovery-test.xcresult")
+    test["phaseClock"]["deadlineNs"] = str(1 + 1080 * 10**9)
+    test["commands"] = [dict(role=role, returncode=0, roleCapSeconds=cap, timeoutSeconds=cap, outputLimitBytes=limit,
+        argvSha256="1" * 64, stdoutSha256="2" * 64, stderrSha256="3" * 64, stdoutBytes=1, stderrBytes=0)
+        for role, cap, limit in (("normal-ui-source-roster", 15, 1048576), ("verify-generated-runner", 30, 1048576),
+            ("generated-runner-entitlements", 30, 1048576), ("ios-account-produce", 180, 16384),
+            ("one-admitted-ui-test", 645, 1048576), ("ios-account-observe", 90, 2048), ("normal-ui-source-roster", 15, 1048576))]
+    statuses = {name: {"receiptState": "observed", "returncode": 0} for name in
+        ("package-install.status", "normal-ui/build.status", "normal-ui/ios-pending-recovery-test.status",
+         "normal-ui/ios-pending-recovery-summary.status")}
+    return facts, test, summary, statuses, phases, inventory
+
+
+def app_absence_documents(context=CONTEXT):
+    """Genuine pure parser and three receipt assignments; no adapter execution.
+
+    The supplied observations stand in for completed native originals solely to
+    test the public DATA boundary. They do not establish native fixture success.
+    """
+    path = ROOT / "desktop/tools/macos_app_absence_fixture.py"
+    module = ast.parse(path.read_text())
+    names = {"MIB", "NATIVE_DATA_TESTS", "need", "digest", "native_data_tests_result"}
+    selected = [node for node in module.body if isinstance(node, (ast.FunctionDef, ast.Assign))
+                and (node.name if isinstance(node, ast.FunctionDef) else
+                     node.targets[0].id if isinstance(node.targets[0], ast.Name) else None) in names]
+    actual = {node.name if isinstance(node, ast.FunctionDef) else node.targets[0].id for node in selected}
+    if actual != names:
+        raise AssertionError("app-absence pure closure changed")
+    namespace = {"hashlib": hashlib, "re": re}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(path), "exec"), namespace)
+    assignments = {}
+    for function, field in (("prepare", "appAbsencePreparation"), ("package_complete", "appAbsenceBaseline"),
+                            ("restore", "appAbsenceRestore")):
+        functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == function]
+        if len(functions) != 1:
+            raise AssertionError("app-absence writer changed")
+        rows = [node for node in functions[0].body if isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Subscript)
+                and ast.dump(node.targets[0].value) == ast.dump(ast.parse("op.receipt", mode="eval").body)
+                and isinstance(node.targets[0].slice, ast.Constant) and node.targets[0].slice.value == field]
+        if len(rows) != 1:
+            raise AssertionError("app-absence exact receipt clause changed")
+        assignments[field] = compile(ast.Module(body=rows, type_ignores=[]), str(path), "exec")
+    def serialized(value):
+        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    def owner(phase, roles):
+        value = receipt(phase)
+        value.pop("finalImage"); value.pop("notarySubmission")
+        value.update(context, packageRole="ordinary-image", productReady=False, cleanupErrors=[], directStagerIOPending=None,
+                     workflow="Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-app-absence-fixture")
+        value["notaryAuthentication"] = {"created": False, "closed": False, "retired": False}
+        value["originalCalls"] = [{"role": role, "returned": True, "capturesSettled": True, "returncode": 0,
+                                  "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64} for role in roles]
+        return value
+    binding = {"fixtureSource": context["source"], "productSource": context["source"],
+               **{key: context[key] for key in ("runId", "runAttempt", "target")}}
+    hashes = dict(zip(("packageSha256", "producerDescriptorSha256", "producerSignatureSha256", "fixtureExecutableSha256",
+                       "inventorySha256", "runtimeManifestSha256", "protocolSha256"), (format(n, "064x") for n in range(1, 8))))
+    native_binding = {**binding, **hashes}
+    baseline_sha, fixture_sha, image_sha = "8" * 64, "9" * 64, "a" * 64
+    proofs = {
+        "baseline": ("rootAbsent", "privateDirectoryCreated", "parentCensusMatched", "recordReadback"),
+        "withdraw": ("initialFreshInstallRecorded", "createdRootMatchedPriorAbsence", "sameInstance", "reservationClosedUnderMaintenance",
+                     "renameKnownSuccess", "appAbsent", "runtimeUnchanged", "historyUnchanged", "withdrawnAppVerified", "recordReadback"),
+        "verify": ("restoreFixedAppRecorded", "initialHistoryPreserved", "sameInstance", "runtimeUnchanged", "newAppOriginal",
+                   "currentAppVerified", "withdrawnAppVerified", "reservationClosedUnderMaintenance", "recordReadback", "retainedPrivateEvidence"),
+    }
+    def observation(phase):
+        return {"schemaVersion": 1, "kind": "app-absence-phase-observation", "phase": phase, **native_binding,
+                "baselineSha256": baseline_sha, "recordSha256": baseline_sha if phase == "baseline" else "b" * 64,
+                "proof": dict.fromkeys(proofs[phase], True), "originalOuterExitRequired": True,
+                "systemServiceExitClaimed": False, "productReady": False}
+    data_output = ("running 6 tests\n" + "".join("test " + name + " ... ok\n" for name in namespace["NATIVE_DATA_TESTS"])
+                   + "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 999999 filtered out; finished in 1.00s\n").encode()
+    data_original = CompletedProcess([], 0, data_output, SENTINEL.encode())
+    pure_tests = namespace["native_data_tests_result"](data_original)
+    prepare = owner("prepare-app-absence", DATA.APP_ABSENCE_PREPARE_ROLES)
+    op = SimpleNamespace(receipt=prepare, app_absence={"binding": binding},
+                         environment={"MRK_MACOS_INSTALL_INVENTORY_SHA256": hashes["inventorySha256"],
+                                      "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256": hashes["runtimeManifestSha256"]},
+                         stager=SimpleNamespace(CURRENT_PROTOCOL=hashes["protocolSha256"]))
+    namespace.update(op=op, program_sha=hashes["fixtureExecutableSha256"], executable={"identity": [0]*6 + [64*1024*1024]},
+                     fixture_sha=fixture_sha, fixture={"identity": [0]*6 + [512*1024*1024]}, result=data_original, pure_tests=pure_tests)
+    exec(assignments["appAbsencePreparation"], namespace)
+    prepare["originalCalls"][1].update({key: pure_tests[key] for key in ("stdoutSha256", "stderrSha256")})
+    prepare_sha = hashlib.sha256(serialized(prepare)).hexdigest()
+    carrier_names = ("Install.pkg", "producer.json", "producer.sig", "MRK-AppAbsence-Baseline.pkg", "MRK-AppAbsence-Withdraw.pkg", "MRK-AppAbsence-Verify.pkg")
+    sizes = (512*1024*1024, 16384, 512, 512*1024*1024, 512*1024*1024, 512*1024*1024)
+    layout = {name: {"name": name, "bytes": size, "sha256": sha, "mode": 0o444, "links": 1}
+              for name, size, sha in zip(carrier_names, sizes,
+                  (hashes["packageSha256"], hashes["producerDescriptorSha256"], hashes["producerSignatureSha256"], fixture_sha, fixture_sha, fixture_sha))}
+    initial = {"requestId": "c"*32, "invocation": "d"*32, "stateSha256": "e"*64, "resultSha256": "f"*64, "instance": "a"*32}
+    baseline = owner("package-install", DATA.APP_ABSENCE_PACKAGE_ROLES)
+    op.receipt = baseline
+    op.app_absence = {"nativeBinding": native_binding, "preparationSha256": prepare_sha, "layout": layout,
+                      "image": {"bytes": 2560*1024*1024, "sha256": image_sha}, "baselineSha256": baseline_sha,
+                      "baselineOriginal": {"bytes": 65536, "sha256": baseline_sha, "identity": [123]*9},
+                      "baselineObservation": observation("baseline"), "initial": initial}
+    namespace["data"] = op.app_absence
+    exec(assignments["appAbsenceBaseline"], namespace)
+    body = serialized(baseline)
+    restore = owner("app-absence-restore", DATA.APP_ABSENCE_RESTORE_ROLES)
+    op.receipt = restore
+    namespace.update(previous=baseline["appAbsenceBaseline"], body=body, image_sha=image_sha, initial=initial,
+                     after={"request": {"sha256": "b"*64}}, args=SimpleNamespace(request_id="request"),
+                     withdraw=observation("withdraw"), verify=observation("verify"), restored={"nonrootReadbackFileCount": 4096})
+    exec(assignments["appAbsenceRestore"], namespace)
+    return prepare, baseline, restore
+
+
+def write_app_absence_documents(root, documents):
+    for phase, value in zip(("prepare-app-absence", "package-install", "app-absence-restore"), documents):
+        body = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        if len(body) > 16384:
+            raise AssertionError("app-absence actual receipt exceeds existing bound")
+        write(root, "android-helper-" + phase + ".json", body)
+    for name in ("app-absence-preparation.status", "package-install.status", "app-absence-restore.status"):
+        write(root, name, b"0\n")
 
 
 class PublicVerificationEvidenceData(unittest.TestCase):
@@ -378,6 +576,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                          {"stage": "unclassified", "type": "OSError", "reason": "unclassified", "errno": 13})
         self.assertNotIn(SENTINEL, json.dumps(DATA.project_failure({"reason": SENTINEL})))
     def test_android_positive_closed_result_matches_genuine_facts_and_statuses(self):
+        for target_value in DATA.TARGETS:
+            context = dict(CONTEXT, target=target_value)
+            selected, _, _, _, statuses, phases, inventory = positive_ui_data(context)
+            self.assertEqual(DATA.project_android_positive(selected, context, statuses, phases, inventory)['recordedResult'], selected)
+            other = next(target for target in DATA.TARGETS if target != target_value)
+            for bad in (dict(selected, target=other), dict(selected, observation=dict(selected['observation'], target=other))):
+                with self.assertRaises(DATA.Refused): DATA.project_android_positive(bad, context, statuses, phases, inventory)
         value, _, _, _, statuses, phases, inventory = positive_ui_data()
         result = DATA.project_android_positive(value, CONTEXT, statuses, phases, inventory)
         self.assertEqual(result["recordedResult"], value)
@@ -485,7 +690,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 if fault == "status-failure": statuses[DATA.POSITIVE_UI_STATUSES["ios"][0]]["returncode"] = 70
                 if fault == "wrong-source": summary["sourceCommit"] = "2" * 40
                 if fault == "closed-false": phases["package-install"]["originalClosesKnown"] = False
-                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS[1:]:
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS:
+                    if key not in ("iosFacts", "iosTest", "iosSummary"): continue
                     if fault == "missing-summary" and key == "iosSummary": continue
                     item = write(root, path, {"iosFacts": facts, "iosTest": test, "iosSummary": summary}[key])
                     if key == "iosFacts" and fault == "malformed-facts": item.write_bytes(b'{"source":NaN}')
@@ -516,10 +722,12 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         with self.assertRaises(DATA.Refused): DATA.decode(b"{}", budget(), inventory=True, ui_admission=True)
         for body in (b'{"a":1,"a":2}', b'{"a":NaN}', b'{"a":1.5}', b'{"a":Infinity}'):
             with self.assertRaises(DATA.Refused): DATA.decode(body, budget(), ui_admission=True)
-        self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 4)
-        self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768])
-        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 2 + len(DATA.POSITIVE_UI_INPUTS)
-        self.assertEqual(attempts, 98)
+        self.assertEqual(len(DATA.POSITIVE_UI_INPUTS), 7)
+        self.assertEqual([item[2] for item in DATA.POSITIVE_UI_INPUTS], [16384, 16384, 32768, 32768, 16384, 32768, 32768])
+        attempts = len(DATA.STATUS_FILES) + len(DATA.PHASES) + 3 + len(DATA.UI_DIAGNOSTICS) + 6 + len(DATA.POSITIVE_UI_INPUTS)
+        self.assertEqual((len(DATA.STATUS_FILES), len(DATA.PHASES), len(DATA.UI_DIAGNOSTICS), len(DATA.POSITIVE_UI_INPUTS)),
+                         (76, 20, 3, 7))
+        self.assertEqual(attempts, 115)
         self.assertLessEqual(attempts, 128)
         self.assertEqual((DATA.INPUT_LIMIT, DATA.OUTPUT_LIMIT), (3 * 1024 * 1024, 128 * 1024))
         # Each legal positive maximum remains finite without displacing old report facts.
@@ -530,7 +738,162 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         _, facts, test, summary, statuses, phases, inventory = positive_ui_data(ios=True)
         facts.update(originalEntries=100000, originalBytes=8 << 30); test["iosUnsignedObservation"] = copy.deepcopy(facts)
         ios = DATA.project_ios_positive(facts, test, summary, CONTEXT, statuses, phases, inventory)
-        self.assertLessEqual(len(json.dumps(android)) + len(json.dumps(ios)), 16384)
+        recovery_facts, recovery_test, recovery_summary, recovery_statuses, recovery_phases, recovery_inventory = ios_pending_recovery_data()
+        recovery_facts["account"].update(nativeBaselineMembers=8)
+        recovery_facts["account"]["producer"]["commands"] = 64
+        recovery_test["iosPendingRecovery"] = copy.deepcopy(recovery_facts)
+        recovery = DATA.project_ios_pending_recovery(recovery_facts, recovery_test, recovery_summary, CONTEXT,
+                                                    recovery_statuses, recovery_phases, recovery_inventory)
+        self.assertLessEqual(len(json.dumps(android)) + len(json.dumps(ios)) + len(json.dumps(recovery)), 16384)
+
+    def test_ios_pending_recovery_requires_distinct_ui_and_real_account_readback(self):
+        for target in DATA.TARGETS:
+            context = dict(CONTEXT, target=target)
+            facts, test, summary, statuses, phases, inventory = ios_pending_recovery_data(context)
+            result = DATA.project_ios_pending_recovery(facts, test, summary, context, statuses, phases, inventory)
+            self.assertEqual(result["observation"], facts["observation"])
+            self.assertEqual(result["account"], facts["account"])
+            self.assertEqual(result["testCounts"], DATA.POSITIVE_UI_COUNTS)
+            self.assertEqual(result["allWorkerFinality"], "not-established-by-XCTest-UI-state")
+            self.assertIsNone(result["cleanExitStatus"])
+            for name in ("nativeSuccessInferred", "appleSigningMaterialUsed", "signedExportQualified",
+                         "fullUIQualified", "distributionQualified", "productReady"):
+                self.assertIs(result[name], False)
+            self.assertNotIn(SENTINEL, json.dumps(result))
+            for section, key, value in (
+                ("observation", "sourceCommit", "9" * 40), ("observation", "target", "wrong"),
+                ("observation", "runId", "124"), ("observation", "runAttempt", "3"),
+                ("observation", "fixtureSha256", "9" * 64), ("observation", "sessionSha256", "not-hex"),
+                ("observation", "inspectUnchecked", False), ("observation", "recoverUnchecked", 1),
+                ("observation", "ordinaryQuit", False), ("observation", "session", SENTINEL),
+                ("account", "exactPendingSessionRecovered", False), ("account", "originalOwnedNativeAndControlsRemoved", False),
+                ("account", "persistentOriginalLeaseRetained", False), ("account", "baselineIdentitiesMatched", False),
+                ("account", "baselinePreferencesMatched", False), ("account", "projectMarkerUnchanged", False),
+                ("account", "nativeBaselineMembers", 0), ("account", "nativeBaselineMembers", 9),
+                ("account", "nativeBaselineMembers", True), ("account", "privateContentsExported", True),
+                ("account", "foreignPreferenceConflictInjected", True), ("account", "appleSigningMaterialUsed", True),
+                ("account", "signedExportQualified", True), ("account", "private", SENTINEL)):
+                bad = copy.deepcopy(facts); bad[section][key] = value
+                bad_test = copy.deepcopy(test); bad_test["iosPendingRecovery"] = copy.deepcopy(bad)
+                with self.subTest(target=target, section=section, field=key), self.assertRaises(DATA.Refused):
+                    DATA.project_ios_pending_recovery(bad, bad_test, summary, context, statuses, phases, inventory)
+            for side in ("inspect", "recover"):
+                for key, value in (("phase", "running"), ("outcome", "unknown"), ("reason", "failed"),
+                                   ("operationId", "x" * 32), ("ownerGeneration", "x" * 32),
+                                   ("accountStatus", "absent"), ("lifetime", {"allFinality": True})):
+                    bad = copy.deepcopy(facts); bad["observation"][side][key] = value
+                    with self.subTest(side=side, field=key), self.assertRaises(DATA.Refused):
+                        DATA.ios_pending_recovery_facts(bad, context)
+            for key in ("operationId", "ownerGeneration"):
+                bad = copy.deepcopy(facts); bad["observation"]["recover"][key] = bad["observation"]["inspect"][key]
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            for side in ("producer", "nativeReadback"):
+                for key, value in (("scope", "invented"), ("case", "ios-recovery-empty"), ("commands", True),
+                    ("profileCalls", 1), ("commandFinalities", False), ("leaseClosed", False), ("sessionClosed", False),
+                    ("handlersRestored", False), ("fixtureDescriptorsClosed", False), ("originalDeadlineMet", False),
+                    ("keychainContentsRead", True), ("private", SENTINEL)):
+                    bad = copy.deepcopy(facts); bad["account"][side][key] = value
+                    with self.subTest(side=side, field=key), self.assertRaises(DATA.Refused):
+                        DATA.ios_pending_recovery_facts(bad, context)
+            for side, key, value in (("producer", "commands", 2), ("producer", "commands", 65),
+                    ("producer", "pendingLeft", False), ("nativeReadback", "commands", 3),
+                    ("nativeReadback", "pendingAbsent", False), ("nativeReadback", "baselinePreferencesMatched", False),
+                    ("nativeReadback", "baselineMemberIdentitiesMatched", False)):
+                bad = copy.deepcopy(facts); bad["account"][side][key] = value
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            for side in ("producer", "nativeReadback"):
+                bad = copy.deepcopy(facts); del bad["account"][side]
+                with self.assertRaises(DATA.Refused): DATA.ios_pending_recovery_facts(bad, context)
+            maximum = copy.deepcopy(facts); maximum["account"]["nativeBaselineMembers"] = 8
+            maximum["account"]["producer"]["commands"] = 64
+            self.assertEqual(DATA.ios_pending_recovery_facts(maximum, context), maximum)
+
+    def test_ios_pending_recovery_requires_seven_originals_deadlines_and_summary(self):
+        facts, test, summary, statuses, phases, inventory = ios_pending_recovery_data()
+        def project(selected=test, summed=summary, status=statuses):
+            return DATA.project_ios_pending_recovery(facts, selected, summed, CONTEXT, status, phases, inventory)
+        result = project()
+        self.assertEqual([row["role"] for row in result["commands"]["test"]], [
+            "normal-ui-source-roster", "verify-generated-runner", "generated-runner-entitlements",
+            "ios-account-produce", "one-admitted-ui-test", "ios-account-observe", "normal-ui-source-roster"])
+        self.assertEqual(len(result["commands"]["summary"]), 3)
+        for slot in range(7):
+            for key, value in (("returncode", 1), ("returncode", -1), ("returncode", True), ("timeoutSeconds", 0),
+                    ("timeoutSeconds", test["commands"][slot]["roleCapSeconds"] + 1), ("role", "made-up"),
+                    ("outputLimitBytes", test["commands"][slot]["outputLimitBytes"] + 1),
+                    ("stdoutBytes", test["commands"][slot]["outputLimitBytes"] + 1), ("argvSha256", SENTINEL)):
+                bad = copy.deepcopy(test); bad["commands"][slot][key] = value
+                with self.subTest(slot=slot, field=key), self.assertRaises(DATA.Refused): project(bad)
+            bad = copy.deepcopy(test); del bad["commands"][slot]
+            with self.assertRaises(DATA.Refused): project(bad)
+        for fault in ("reordered", "duplicate", "legacy-ui-cap", "late", "phase-duration", "unknown-close", "facts-differ", "facts-close",
+                      "nonzero-test", "unsigned-result", "no-source-post", "no-runner-verification", "private-roster"):
+            bad = copy.deepcopy(test)
+            if fault == "reordered": bad["commands"][3], bad["commands"][5] = bad["commands"][5], bad["commands"][3]
+            if fault == "duplicate": bad["commands"].append(copy.deepcopy(bad["commands"][-1]))
+            if fault == "legacy-ui-cap": bad["commands"][4].update(roleCapSeconds=1020, timeoutSeconds=1020)
+            if fault == "late": bad["phaseClock"]["beforePublicationNs"] = bad["phaseClock"]["deadlineNs"]
+            if fault == "phase-duration": bad["phaseClock"]["deadlineNs"] = str(1 + 1245 * 10**9)
+            if fault == "unknown-close": bad["originalClosesCompleted"] = False
+            if fault == "facts-differ": bad["iosPendingRecovery"]["observation"]["sessionSha256"] = "e" * 64
+            if fault == "facts-close": bad["iosPendingRecovery"]["originalClosesCompleted"] = False
+            if fault == "nonzero-test": bad["originalTestReturncode"] = 1
+            if fault == "unsigned-result": bad["resultBundle"] = "ios-unsigned-archive-test.xcresult"
+            if fault == "no-source-post": bad["sourcePrePostMatched"] = False
+            if fault == "no-runner-verification": bad["strictCodesignOriginalZero"] = False
+            if fault == "private-roster": bad["runnerExecutable"][1][5] = "2"
+            with self.subTest(fault=fault), self.assertRaises(DATA.Refused): project(bad)
+        for slot in range(3):
+            bad = copy.deepcopy(summary); bad["commands"][slot]["returncode"] = 1
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for key, value in (("sourceRosterSha256", "e" * 64), ("sourceCommit", "e" * 40), ("originalReturncode", 1)):
+            bad = copy.deepcopy(summary); bad[key] = value
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for key in DATA.POSITIVE_UI_COUNTS:
+            bad = copy.deepcopy(summary); bad["iosPendingRecoveryTestCounts"][key] += 1
+            with self.assertRaises(DATA.Refused): project(summed=bad)
+        for names in DATA.POSITIVE_UI_STATUSES.values():
+            bad = copy.deepcopy(statuses)
+            if names == DATA.POSITIVE_UI_STATUSES["iosRecovery"]: bad[names[0]]["returncode"] = 1
+            else: bad[names[0]] = {"receiptState": "observed", "returncode": 0}
+            with self.assertRaises(DATA.Refused): project(status=bad)
+        _, old_facts, old_test, old_summary, old_status, _, _ = positive_ui_data(ios=True)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ios_pending_recovery(old_facts, old_test, old_summary, CONTEXT, statuses, phases, inventory)
+        with self.assertRaises(DATA.Refused):
+            DATA.project_ios_positive(facts, test, summary, CONTEXT, old_status, phases, inventory)
+
+    def test_ios_pending_recovery_fixed_reader_keeps_private_inputs_and_refuses_partial(self):
+        for fault in (None, "missing-observer", "partial", "linked", "private-field", "failed-status"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                facts, test, summary, statuses, _, inventory = ios_pending_recovery_data()
+                if fault == "missing-observer": del facts["account"]["nativeReadback"]
+                if fault == "private-field": facts["account"]["private"] = SENTINEL
+                if fault == "failed-status": statuses["normal-ui/ios-pending-recovery-test.status"]["returncode"] = 1
+                write(root, "source-inventory.json", {"source": CONTEXT["source"], "tree": inventory["tree"],
+                    "files": [{"path": "public.rs", "gitMode": "100644", "blob": "2" * 40, "size": 1, "sha256": "3" * 64}]})
+                write(root, "android-helper-package-install.json", receipt("package-install"))
+                for name, row in statuses.items(): write(root, name, (str(row["returncode"]) + "\n").encode())
+                supplied = {"iosRecoveryFacts": facts, "iosRecoveryTest": test, "iosRecoverySummary": summary}
+                originals = []
+                for key, path, _, _ in DATA.POSITIVE_UI_INPUTS:
+                    if key not in supplied or fault == "partial" and key == "iosRecoverySummary": continue
+                    item = write(root, path, supplied[key]); originals.append((item, item.read_bytes()))
+                    if fault == "linked" and key == "iosRecoveryFacts": os.link(item, root / "second-link")
+                raw = write(root, "normal-ui/ios-pending-recovery-summary.json", SENTINEL.encode())
+                private = write(root, "normal-ui/account-baseline.json", SENTINEL.encode())
+                value = project(root)["positiveUiObservations"]
+                if fault is None:
+                    self.assertEqual(value["iosPendingRecovery"]["receiptState"], "observed")
+                    self.assertTrue(value["iosPendingRecovery"]["account"]["baselinePreferencesMatched"])
+                else: self.assertEqual(value["iosPendingRecovery"], {"receiptState": "refused"})
+                self.assertEqual(value["iosUnsignedArchive"], {"receiptState": "absent"})
+                self.assertEqual(value["androidSignedBuild"], {"receiptState": "absent"})
+                self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+                self.assertEqual(private.read_bytes(), SENTINEL.encode()); self.assertEqual(raw.read_bytes(), SENTINEL.encode())
+                for item, body in originals: self.assertEqual(item.read_bytes(), body)
+                self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
 
     def test_genuine_removal_data_preserves_case_facts_and_expected_nonzero(self):
         stager, helper = removal_data(); normal = normal_diagnostic_data(removal=True)
@@ -1070,6 +1433,202 @@ class PublicVerificationEvidenceData(unittest.TestCase):
         del failed["samePackageObservation"]
         self.assertIsNone(DATA.project_receipt(failed, CONTEXT, "same-package-noop")["samePackageObservation"])
 
+    def test_app_absence_genuine_receipts_require_seven_twenty_five_originals(self):
+        self.assertEqual(DATA.APP_ABSENCE_PREPARE_ROLES, ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
+            "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
+        self.assertEqual(len(DATA.APP_ABSENCE_PACKAGE_ROLES), 20)
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[15], "app-absence-baseline")
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[-1], "app-absence-baseline-detach")
+        self.assertEqual(DATA.APP_ABSENCE_RESTORE_ROLES, ("app-absence-restore-attach", "app-absence-withdraw", "app-absence-install",
+            "app-absence-verify", "app-absence-restore-detach"))
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            context = {**CONTEXT, "target": target}
+            documents = app_absence_documents(context)
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_app_absence_documents(root, documents)
+                originals = {p.name: p.read_bytes() for p in root.iterdir()}
+                value = DATA.project(str(root), profile="installed", source=context["source"], workflow_source=context["workflowSource"],
+                                     run_id=context["runId"], run_attempt=context["runAttempt"], target=target)
+                row = value["appAbsence"]
+                self.assertEqual(row["receiptState"], "observed")
+                self.assertIs(row["proofComplete"], True)
+                self.assertEqual(row["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                self.assertEqual(row["prepare"]["pureDataTests"]["passed"], 6)
+                self.assertEqual(row["prepare"]["pureDataTests"]["filteredCount"], 999999)
+                self.assertIs(row["retainedPrivateEvidence"], True)
+                for key in ("systemServiceExitClaimed", "downloadedLaunchQualified", "guiQualified", "productReady"):
+                    self.assertIs(row[key], False)
+                self.assertEqual(row["restore"]["baselineOwnerReceiptSha256"], value["phases"]["package-install"]["receiptSha256"])
+                self.assertEqual(row["prepare"]["receiptSha256"], row["restore"]["preparationReceiptSha256"])
+                self.assertNotEqual(row["initialResultSha256"], row["restoreResultSha256"])
+                self.assertEqual(row["restore"]["verifiedCurrentFiles"], 4096)
+                encoded = (root / DATA.OUTPUT).read_bytes()
+                self.assertNotIn(SENTINEL.encode(), encoded)
+                for private_key in (b'"requestId"', b'"invocation"', b'"instance"', b'"identity"', b'"rootNonce"', b'"proof"'):
+                    self.assertNotIn(private_key, encoded)
+                for name, original in originals.items():
+                    self.assertEqual((root / name).read_bytes(), original)
+        # No fixture inputs is absence, never proof of a successful no-op.
+        with tempfile.TemporaryDirectory() as directory:
+            row = project(Path(directory))["appAbsence"]
+            self.assertEqual(row["receiptState"], "absent")
+            self.assertIs(row["proofComplete"], False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); write_app_absence_documents(root, documents)
+            value = DATA.project(str(root), profile="aqua", source=CONTEXT["source"], workflow_source=CONTEXT["workflowSource"],
+                                 run_id=CONTEXT["runId"], run_attempt=CONTEXT["runAttempt"], target=CONTEXT["target"])
+            self.assertIsNone(value["appAbsence"])
+
+    def test_app_absence_refuses_incomplete_owners_cross_run_and_private_proofs(self):
+        documents = app_absence_documents()
+        phases = ("prepare-app-absence", "package-install", "app-absence-restore")
+        fields = ("appAbsencePreparation", "appAbsenceBaseline", "appAbsenceRestore")
+        def reduce(index, value):
+            if index == 1:
+                return DATA.project_app_absence_baseline(value, CONTEXT)
+            return DATA.project_app_absence_receipt(value, CONTEXT, phases[index], "a" * 64)
+        def set_at(value, path, changed):
+            for key in path[:-1]:
+                value = value[key]
+            value[path[-1]] = changed
+        # Each mutation changes a real admitted field; do not count an already
+        # invalid fixture or an identical runAttempt as negative coverage.
+        for index, original in enumerate(documents):
+            reduce(index, original)
+            faults = [(('workflow',), 'unrelated'), (('source',), '2'*40), (('workflowSource',), '2'*40),
+                (('runId',), '124'), (('runAttempt',), '3'), (('target',), 'x86_64-apple-darwin'),
+                (('packageRole',), 'removal-image'), (('schemaVersion',), True),
+                (('passed',), False), (('targetRetired',), False), (('originalClosesKnown',), False),
+                (('outerFinalityRequired',), False), (('directStagerIOPending',), SENTINEL),
+                (('cleanupErrors',), [SENTINEL]), (('originalCalls', 0, 'returned'), False),
+                (('originalCalls', 0, 'capturesSettled'), False), (('originalCalls', 0, 'returncode'), True),
+                (('originalCalls', 0, 'returncode'), 70), (('originalCalls', 0, 'role'), 'unlisted')]
+            for path, bad in faults:
+                with self.subTest(phase=phases[index], path=path, bad=bad):
+                    value = copy.deepcopy(original)
+                    old = value
+                    for key in path:
+                        old = old[key]
+                    self.assertTrue(type(old) is not type(bad) or old != bad)
+                    set_at(value, path, bad)
+                    with self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+            for change in ('missing', 'extra', 'reordered'):
+                value = copy.deepcopy(original)
+                if change == 'missing': value['originalCalls'].pop()
+                elif change == 'extra': value['originalCalls'].append(copy.deepcopy(value['originalCalls'][0]))
+                else: value['originalCalls'][0], value['originalCalls'][1] = value['originalCalls'][1], value['originalCalls'][0]
+                with self.subTest(phase=phases[index], roster=change), self.assertRaises(DATA.Refused):
+                    reduce(index, value)
+            for key in original[fields[index]]:
+                value = copy.deepcopy(original); del value[fields[index]][key]
+                with self.subTest(phase=phases[index], missing=key), self.assertRaises(DATA.Refused):
+                    reduce(index, value)
+        # The genuine DATA parser's six names/counts are not arbitrary stdout.
+        for key, bad in (("passed", 5), ("failed", 1), ("ignored", 1), ("filteredCount", 1000000),
+                         ("schemaVersion", True), ("methodNames", [SENTINEL]*6), ("stdoutSha256", SENTINEL)):
+            value = copy.deepcopy(documents[0]); value[fields[0]]["pureDataTests"][key] = bad
+            with self.subTest(data=key), self.assertRaises(DATA.Refused):
+                reduce(0, value)
+        for index, phase_fields in ((1, ("baselineObservation",)), (2, ("withdraw", "verify"))):
+            for field in phase_fields:
+                observation = documents[index][fields[index]][field]
+                for proof_key in observation["proof"]:
+                    value = copy.deepcopy(documents[index]); value[fields[index]][field]["proof"][proof_key] = False
+                    with self.subTest(phase=field, proof=proof_key), self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+                for key, bad in (("productSource", "2"*40), ("runAttempt", "3"), ("baselineSha256", "c"*64),
+                                 ("originalOuterExitRequired", False), ("systemServiceExitClaimed", True), ("productReady", True)):
+                    value = copy.deepcopy(documents[index]); value[fields[index]][field][key] = bad
+                    with self.subTest(phase=field, key=key), self.assertRaises(DATA.Refused):
+                        reduce(index, value)
+                value = copy.deepcopy(documents[index]); value[fields[index]][field]["rootNonce"] = SENTINEL
+                with self.assertRaises(DATA.Refused): reduce(index, value)
+        for key, bad in (("initialFreshInstall", False), ("initialExportCount", True), ("originalBaselineZero", False),
+                         ("originalMountDetached", False), ("productReady", True)):
+            value = copy.deepcopy(documents[1]); value[fields[1]][key] = bad
+            with self.subTest(baseline=key), self.assertRaises(DATA.Refused): reduce(1, value)
+        for key in ("restoreFixedAppObserved", "immediatePredecessorMatched", "currentBytesVerified", "initialHistoryPreserved",
+                    "originalInstallerReturnedZero", "originalMountDetached", "retainedPrivateEvidence"):
+            value = copy.deepcopy(documents[2]); value[fields[2]][key] = False
+            with self.subTest(restore=key), self.assertRaises(DATA.Refused): reduce(2, value)
+        for key, bad in (("beforeExportCount", 0), ("afterExportCount", 3), ("newExportCount", True), ("verifiedCurrentFiles", 4097)):
+            value = copy.deepcopy(documents[2]); value[fields[2]][key] = bad
+            with self.subTest(restore=key), self.assertRaises(DATA.Refused): reduce(2, value)
+        # Cross-receipt joins and independent statuses are checked at the real
+        # fixed-file projector, not inferred from pre-exit proofs/counts alone.
+        cases = [("status", name, body) for name in ("app-absence-preparation.status", "package-install.status", "app-absence-restore.status")
+                 for body in (None, b"70\n", b"0 0 0\n")]
+        cases += [("join", key, "c"*64) for key in ("preparationReceiptSha256", "baselineOwnerReceiptSha256", "imageSha256", "initialResultSha256")]
+        for kind, key, bad in cases:
+            with self.subTest(kind=kind, key=key, bad=bad), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); values = copy.deepcopy(documents)
+                if kind == "join":
+                    self.assertNotEqual(values[2][fields[2]][key], bad)
+                    values[2][fields[2]][key] = bad
+                write_app_absence_documents(root, values)
+                if kind == "status":
+                    if bad is None: (root / key).unlink()
+                    else: write(root, key, bad)
+                row = project(root)["appAbsence"]
+                self.assertEqual(row["receiptState"], "incomplete")
+                self.assertIs(row["proofComplete"], False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); write_app_absence_documents(root, documents)
+            raw = write(root, "unpublished-private", SENTINEL.encode())
+            (root / "android-helper-app-absence-restore.json").unlink()
+            os.symlink(raw.name, root / "android-helper-app-absence-restore.json")
+            before = raw.read_bytes(); row = project(root)["appAbsence"]
+            self.assertEqual(row["restore"]["receiptState"], "refused")
+            self.assertIs(row["proofComplete"], False)
+            self.assertEqual(raw.read_bytes(), before)
+            self.assertNotIn(SENTINEL.encode(), (root / DATA.OUTPUT).read_bytes())
+
+    def test_positive_update_projects_genuine_current_writer_and_both_original_callers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_update_documents(root, update_documents())
+            result = project(root)
+            self.assertEqual(result["positiveUpdate"]["receiptState"], "observed")
+            self.assertFalse(result["positiveUpdate"]["productReady"])
+            old, new = result["positiveUpdate"]["baseline"], result["positiveUpdate"]["current"]
+            self.assertEqual(old["expectedCurrentDescriptorSha256"], new["currentDescriptorSha256"])
+            self.assertEqual(old["invocation"], new["baselineInvocation"])
+            self.assertNotEqual(new["baselineInvocation"], new["currentInvocation"])
+            self.assertTrue(new["rootIdentityPreserved"] and new["generationInstancesDistinct"] and new["testedAppDataOriginalPreserved"])
+            self.assertFalse(new["allUserDataCompatible"] or new["retainedPayloadRehashed"] or new["downloadedLaunchQualified"])
+            self.assertEqual(result["phases"]["update-baseline"]["originalCalls"]["recordedCount"], 3)
+            self.assertEqual(result["phases"]["package-install"]["originalCalls"]["recordedCount"], 15)
+            self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
+            self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
+
+    def test_positive_update_refuses_conflicting_originals_context_and_lineage(self):
+        for fault in ("status", "status-bool", "unknown", "close", "retired", "source", "baseline-invocation", "package", "descriptor",
+                      "qualification", "same-instance", "payload-claim", "missing-current", "missing-baseline", "role", "native-bool"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); old, new = update_documents()
+                if fault == "unknown": old["originalCalls"][1]["returned"] = False
+                elif fault == "close": old["originalClosesKnown"] = False
+                elif fault == "retired": new["targetRetired"] = False
+                elif fault == "source": old["updateBaseline"]["source"] = "f" * 40
+                elif fault == "baseline-invocation": new["positiveUpdate"]["baselineInvocation"] = "f" * 32
+                elif fault == "package": new["positiveUpdate"]["predecessorPackageSha256"] = "f" * 64
+                elif fault == "descriptor": new["positiveUpdate"]["currentDescriptorSha256"] = "f" * 64
+                elif fault == "qualification": new["positiveUpdate"]["predecessorQualificationEvidenceSha256"] = "f" * 64
+                elif fault == "same-instance": new["positiveUpdate"]["generationInstancesDistinct"] = False
+                elif fault == "payload-claim": new["positiveUpdate"]["retainedPayloadRehashed"] = True
+                elif fault == "missing-current": del new["positiveUpdate"]
+                elif fault == "missing-baseline": del old["updateBaseline"]
+                elif fault == "role": old["originalCalls"][1]["role"] = "installer"
+                elif fault == "native-bool": old["originalCalls"][1]["returncode"] = False
+                write_update_documents(root, (old, new))
+                if fault == "status": write(root, "update-baseline.status", b"1\n")
+                if fault == "status-bool": write(root, "update-baseline.status", b"false\n")
+                result = project(root)
+                self.assertNotEqual(result["positiveUpdate"]["receiptState"], "observed")
+                self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
+
     def test_full_preview_original_rosters_fit_fixed_public_output_bound(self):
         def literals(path, names):
             module = ast.parse(path.read_text())
@@ -1197,6 +1756,43 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             combined_budget_only["dataContractFailure"] = {**result["dataContractFailure"],
                 "rustPanicDiagnostic": {"parseState": "unmapped-source", "spellingSha256": "f" * 64,
                                         "line": 1000000, "column": 1000000}}
+            # The optional fixture route is exclusive with ordinary preview.
+            # Add its complete genuine-writer projection to the dense old report
+            # as a conservative byte-only union, not a claim of one valid run.
+            with tempfile.TemporaryDirectory() as fixture_directory:
+                fixture_root = Path(fixture_directory)
+                write_app_absence_documents(fixture_root, app_absence_documents())
+                fixture_report = project(fixture_root)
+                self.assertIs(fixture_report["appAbsence"]["proofComplete"], True)
+                self.assertEqual(fixture_report["appAbsence"]["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                combined_budget_only["appAbsence"] = fixture_report["appAbsence"]
+                # Retain all old package facts/calls AND reserve the complete
+                # additional twenty-call baseline; do not replace old coverage.
+                combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"] = fixture_report["phases"]["package-install"]
+                self.assertEqual(combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"]["originalCalls"]["recordedCount"], 20)
+            # Reserve the exclusive update route as another conservative byte
+            # union without deleting/replacing any dense prior facts or calls.
+            with tempfile.TemporaryDirectory() as update_directory:
+                update_root = Path(update_directory)
+                write_update_documents(update_root, update_documents())
+                update_report = project(update_root)
+                self.assertEqual(update_report["positiveUpdate"]["receiptState"], "observed")
+                combined_budget_only["positiveUpdate"] = update_report["positiveUpdate"]
+                combined_budget_only["additionalUpdateBaselineBudgetOnly"] = update_report["phases"]["update-baseline"]
+                # P1 reuses the existing package-install phase, not a second
+                # fifteen-call installation. Prove the old dense common-field
+                # quote covers the genuine current writer before reserving only
+                # its complete new observation. Every old fact remains below.
+                current = update_report["phases"]["package-install"]
+                dense = result["phases"]["package-install"]
+                self.assertEqual(set(current), set(dense))
+                self.assertEqual(current["originalCalls"], dense["originalCalls"])
+                self.assertEqual(current["originalCalls"]["recordedCount"], 15)
+                def common_bytes(row):
+                    return (json.dumps({key: value for key, value in row.items() if key != "updateObservation"},
+                        sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
+                self.assertLessEqual(len(common_bytes(current)), len(common_bytes(dense)))
+                combined_budget_only["additionalUpdateObservationBudgetOnly"] = current["updateObservation"]
             encoded = (json.dumps(combined_budget_only, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
             self.assertLessEqual(len(encoded), DATA.OUTPUT_LIMIT)
 

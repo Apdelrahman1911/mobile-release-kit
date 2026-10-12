@@ -30,9 +30,34 @@ class NotaryDiagnosticData(unittest.TestCase):
 
     def body(self, **changes):
         value = {'logFormatVersion': 1, 'jobId': self.module.SUBMISSION, 'status': self.module.STATUS,
-                 'archiveFilename': self.module.ARCHIVE, 'issues': [], 'ticketContents': None, 'statusCode': 0 if self.module.STATUS == 'Accepted' else 4000}
+                 'archiveFilename': self.module.ARCHIVE, 'sha256': self.module.ORIGINAL_ARCHIVE, 'issues': [], 'ticketContents': None, 'statusCode': 0 if self.module.STATUS == 'Accepted' else 4000}
         value.update(changes)
         return json.dumps(value).encode()
+
+    def project(self, body, helper):
+        # Each synthetic DATA fixture nominates its own bytes; production pins stay fixed.
+        with mock.patch.object(self.module, 'ORIGINAL_LOG', self.module.sha(body)):
+            return self.module.log_projection(body, helper)
+
+    def test_exact_historical_log_and_independent_archive_gates(self):
+        m = self.module
+        body = self.body()
+        with mock.patch.object(self.helper, 'notary_json', side_effect=AssertionError('parser entered')), \
+             mock.patch.object(m, 'ticket_census', side_effect=AssertionError('census entered')):
+            for raw in (body, body + b' ', b'x' * (m.LIMIT + 1), 'not bytes'):
+                with self.subTest(raw_type=type(raw).__name__), self.assertRaises(m.Refused):
+                    m.log_projection(raw, self.helper)
+        for archive in (None, True, '0' * 64, '../private'):
+            with self.subTest(archive=archive), self.assertRaises(m.Refused):
+                self.project(self.body(sha256=archive), self.helper)
+        value = json.loads(body); del value['sha256']
+        with self.assertRaises(m.Refused):
+            self.project(json.dumps(value).encode(), self.helper)
+        with mock.patch.object(self.helper, 'notary_log_data', wraps=self.helper.notary_log_data) as strict:
+            observed = self.project(body, self.helper)
+        self.assertEqual(strict.call_args.args[2], m.ORIGINAL_ARCHIVE)
+        self.assertTrue(observed['historicalBytesMatch'] and observed['archiveShaIndependentlyCompared'])
+        self.assertFalse(observed['payloadNotarizationQualified'] or observed['productReady'])
 
     def test_log_binding_privacy_classification_and_complete_group_accounting(self):
         m = self.module
@@ -42,11 +67,11 @@ class NotaryDiagnosticData(unittest.TestCase):
                       {'severity': 'warning', 'path': '/private/DO_NOT_PUBLISH_PRIVATE_PATH',
                        'message': 'DO_NOT_PUBLISH_PRIVATE_MESSAGE', 'docUrl': 'https://private.invalid/DO_NOT_PUBLISH_URL',
                        'architecture': 'DO_NOT_PUBLISH_ARCH', 'code': 731}]
-            projected = m.log_projection(self.body(issues=issues, sha256='c' * 64), self.helper)
+            projected = self.project(self.body(issues=issues), self.helper)
             public = json.dumps(projected)
             self.assertNotIn('DO_NOT_PUBLISH', public)
-            self.assertFalse(projected['archiveShaIndependentlyCompared'])
-            self.assertFalse(projected['historicalBytesMatch'])
+            self.assertTrue(projected['archiveShaIndependentlyCompared'])
+            self.assertTrue(projected['historicalBytesMatch'])
             self.assertEqual(projected['currentObservedStatus'], 'Invalid')
             self.assertEqual(projected['errorCount'], 1)
             self.assertEqual(projected['warningCount'], 1)
@@ -55,44 +80,44 @@ class NotaryDiagnosticData(unittest.TestCase):
             for changes in ({'jobId': 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'}, {'status': 'Accepted'},
                             {'archiveFilename': 'Other.zip'}, {'sha256': '../path'}, {'sha256': True}, {'sha256': None}):
                 with self.subTest(changes=changes), self.assertRaises(Exception):
-                    m.log_projection(self.body(**changes), self.helper)
+                    self.project(self.body(**changes), self.helper)
             for body in (b'{"logFormatVersion":1,"logFormatVersion":1}', b'x' * (m.LIMIT + 1)):
                 with self.assertRaises(Exception):
-                    m.log_projection(body, self.helper)
+                    self.project(body, self.helper)
             many = [{'severity': 'error', 'path': 'p/' + str(i), 'message': 'm', 'code': None} for i in range(65)]
-            value = m.log_projection(self.body(issues=many + [many[0]]), self.helper)
+            value = self.project(self.body(issues=many + [many[0]]), self.helper)
             self.assertEqual((value['errorCount'], value['issueGroupCount'], value['omittedGroupCount']), (66, 65, 1))
             self.assertEqual(len(value['issueGroups']), 64)
             self.assertEqual(len(value['allIssueGroupsSha256']), 64)
             self.assertEqual(projected['statusCode'], 4000)
             self.assertEqual(projected['statusSummaryClass'], 'not-supplied')
             self.assertIsNone(projected['statusSummarySha256'])
-            account = m.log_projection(self.body(issues=None, statusCode=7000,
+            account = self.project(self.body(issues=None, statusCode=7000,
                 statusSummary='DO_NOT_PUBLISH_ACCOUNT_PRIVATE_DETAIL'), self.helper)
             self.assertEqual((account['statusCode'], account['errorCount'], account['issueGroupCount']), (7000, 0, 0))
             self.assertEqual(account['statusSummaryClass'], 'unclassified')
             self.assertEqual(len(account['statusSummarySha256']), 64)
             self.assertNotIn('DO_NOT_PUBLISH', json.dumps(account))
-            summary = m.log_projection(self.body(issues=None,
+            summary = self.project(self.body(issues=None,
                 statusSummary='Team is not yet configured for notarization.'), self.helper)
             self.assertEqual(summary['statusSummaryClass'], 'team-not-configured')
             self.assertEqual(summary['currentObservedStatus'], 'Invalid')
         ticket = {'path': 'DO_NOT_PUBLISH_PRIVATE_TICKET', 'digestAlgorithm': 'SHA-256', 'cdhash': 'a' * 40, 'arch': 'arm64'}
-        good = m.log_projection(self.body(ticketContents=[ticket, dict(ticket, arch='x86_64')]), self.helper)
+        good = self.project(self.body(ticketContents=[ticket, dict(ticket, arch='x86_64')]), self.helper)
         self.assertTrue(good['strictLogAccepted'])
         self.assertIsNone(good['strictLogRefusal'])
         self.assertEqual((good['currentObservedStatus'], good['errorCount'], good['ticketRowCount']), ('Accepted', 0, 2))
         self.assertEqual(good['ticketCensus']['listCount'], 2)
         self.assertFalse(good['payloadNotarizationQualified'] or good['productReady'])
         with self.assertRaises(m.Refused):
-            m.log_projection(self.body(status='Invalid'), self.helper)
+            self.project(self.body(status='Invalid'), self.helper)
         missing = json.loads(self.body()); del missing['ticketContents']
-        absent = m.log_projection(json.dumps(missing).encode(), self.helper)
+        absent = self.project(json.dumps(missing).encode(), self.helper)
         self.assertEqual(absent['strictLogRefusal'], 'notary-log-binding')
         self.assertEqual((absent['ticketCensus']['kind'], absent['ticketCensus']['state']), ('missing', 'not-supplied'))
         self.assertIsNone(absent['ticketCensus']['groupCount'])
         for changed, reason in (
-                ({'ticketContents': [dict(ticket, arch='i386')]}, 'notary-log-ticket-shape'),
+                ({'ticketContents': [dict(ticket, arch='arm64e')]}, 'notary-log-ticket-shape'),
                 ({'ticketContents': [dict(ticket, arch=None)]}, 'notary-log-ticket-shape'),
                 ({'ticketContents': [dict(ticket, arch='DO_NOT_PUBLISH_ARCH')]}, 'notary-log-ticket-shape'),
                 ({'ticketContents': [{k: v for k, v in ticket.items() if k != 'arch'}]}, 'notary-log-ticket-shape'),
@@ -102,7 +127,7 @@ class NotaryDiagnosticData(unittest.TestCase):
                 ({'ticketContents': [dict(ticket, cdhash='PRIVATE_CDHASH')]}, 'notary-log-ticket-shape'),
                 ({'issues': [{'severity': 'error', 'path': 'p', 'message': 'bad\ntext'}]}, 'notary-log-issue-shape'),
                 ({'issues': [{'severity': 'error', 'path': 'p', 'message': 'm', 'code': True}]}, 'notary-log-issue-code')):
-            observed = m.log_projection(self.body(**changed), self.helper)
+            observed = self.project(self.body(**changed), self.helper)
             self.assertFalse(observed['strictLogAccepted'])
             self.assertEqual(observed['strictLogRefusal'], reason)
             self.assertIsNone(observed['errorCount'])
@@ -112,12 +137,14 @@ class NotaryDiagnosticData(unittest.TestCase):
             self.assertEqual(observed['issueGroups'], [])
             self.assertNotIn('PRIVATE', json.dumps(observed))
             self.assertNotIn('DO_NOT_PUBLISH', json.dumps(observed))
-        i386 = m.log_projection(self.body(ticketContents=[dict(ticket, arch='i386')]), self.helper)
+        i386 = self.project(self.body(ticketContents=[dict(ticket, arch='i386')]), self.helper)
         row = i386['ticketCensus']['groups'][0]
         self.assertEqual(row, dict(architecture='i386', exactFourKeys=True, pathTextValid=True,
-            digestAlgorithmAllowed=True, cdhash40HexValid=True, strictArchitectureAllowed=False, count=1))
+            digestAlgorithmAllowed=True, cdhash40HexValid=True, strictArchitectureAllowed=True, count=1))
+        self.assertTrue(i386['strictLogAccepted'])
+        self.assertFalse(i386['payloadNotarizationQualified'] or i386['productReady'])
         for tickets, kind, state in ((None, 'null', 'observed'), ({}, 'other', 'not-a-list'), ([ticket] * 2049, 'list', 'over-bound')):
-            census = m.log_projection(self.body(ticketContents=tickets), self.helper)['ticketCensus']
+            census = self.project(self.body(ticketContents=tickets), self.helper)['ticketCensus']
             self.assertEqual((census['kind'], census['state']), (kind, state))
             self.assertEqual(census['groups'], [])
         rows = []
@@ -129,7 +156,7 @@ class NotaryDiagnosticData(unittest.TestCase):
             if mask & 32: row['cdhash'] = 'PRIVATE_CDHASH'
             if mask & 64: row['extra'] = True
             rows.append(row)
-        dense = m.log_projection(self.body(ticketContents=rows), self.helper)
+        dense = self.project(self.body(ticketContents=rows), self.helper)
         self.assertFalse(dense['strictLogAccepted'])
         census = dense['ticketCensus']
         self.assertEqual(census['listCount'], 128)
@@ -140,11 +167,11 @@ class NotaryDiagnosticData(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(dense, sort_keys=True, separators=(',', ':')).encode()) + 1, 65536)
         self.assertNotIn('PRIVATE', json.dumps(dense))
         with mock.patch.object(self.helper, 'notary_log_data', side_effect=self.helper.Refused('DO_NOT_PUBLISH_EXCEPTION')):
-            unknown = m.log_projection(self.body(), self.helper)
+            unknown = self.project(self.body(), self.helper)
             self.assertEqual(unknown['strictLogRefusal'], 'unclassified')
             self.assertFalse(unknown['strictLogAccepted'])
         with mock.patch.object(self.helper, 'notary_log_data', side_effect=RuntimeError('DO_NOT_PUBLISH_EXCEPTION')):
-            with self.assertRaises(RuntimeError): m.log_projection(self.body(), self.helper)
+            with self.assertRaises(RuntimeError): self.project(self.body(), self.helper)
 
     def test_exact_key_custody_retirement_replacement_and_nonrecursive_cleanup(self):
         m = self.module
@@ -237,7 +264,8 @@ class NotaryDiagnosticData(unittest.TestCase):
                     if status == 'exception':
                         raise OSError('DO_NOT_PUBLISH_EXCEPTION_PRIVATE_DATA')
                     return types.SimpleNamespace(returncode=status, stdout=self.body(), stderr=b'')
-                report = m.query(types.SimpleNamespace(run_owned=invoke), self.helper, key, profile, Tool(), m.Clock(lambda: 0))
+                with mock.patch.object(m, 'ORIGINAL_LOG', m.sha(self.body())):
+                    report = m.query(types.SimpleNamespace(run_owned=invoke), self.helper, key, profile, Tool(), m.Clock(lambda: 0))
                 self.assertEqual(report['diagnosticPassed'], type(status) is int and status == 0)
                 known = type(status) is int and 0 <= status <= 255
                 self.assertEqual(report['knownExit'], known)
@@ -246,12 +274,28 @@ class NotaryDiagnosticData(unittest.TestCase):
                 if status != 0:
                     self.assertIsNone(report['currentObservedStatus'])
         self.assertEqual(len(calls), 6)
+        for changed in ('log', 'archive'):
+            with self.subTest(binding=changed), tempfile.TemporaryDirectory() as temporary:
+                key = m.KeyDirectory(Path(temporary)); key.create_key(b'SYNTHETIC BINDING REFUSAL')
+                raw = self.body(sha256='0' * 64) if changed == 'archive' else self.body()
+                owner = types.SimpleNamespace(run_owned=mock.Mock(return_value=
+                    types.SimpleNamespace(returncode=0, stdout=raw, stderr=b'')))
+                expected_log = m.sha(raw) if changed == 'archive' else '0' * 64
+                with mock.patch.object(m, 'ORIGINAL_LOG', expected_log):
+                    report = m.query(owner, self.helper, key, profile, Tool(), m.Clock(lambda: 0))
+                self.assertEqual(owner.run_owned.call_count, 1)
+                self.assertFalse(report['diagnosticPassed'])
+                self.assertEqual(report['failureStage'], 'log-validation')
+                self.assertIsNone(report['currentObservedStatus'])
+                self.assertNotIn('issueGroups', report)
+                self.assertTrue(report['knownExit'] and key.closed and key.retired and report['toolClosed'])
         with tempfile.TemporaryDirectory() as temporary:
             key = m.KeyDirectory(Path(temporary)); key.create_key(b'SYNTHETIC STRICT REFUSAL')
-            ticket = {'path': 'PRIVATE_PATH', 'digestAlgorithm': 'SHA-256', 'cdhash': 'a' * 40, 'arch': 'i386'}
+            ticket = {'path': 'PRIVATE_PATH', 'digestAlgorithm': 'SHA-256', 'cdhash': 'a' * 40, 'arch': 'arm64e'}
             owner = types.SimpleNamespace(run_owned=lambda *args, **kwargs:
                 types.SimpleNamespace(returncode=0, stdout=self.body(ticketContents=[ticket]), stderr=b''))
-            report = m.query(owner, self.helper, key, profile, Tool(), m.Clock(lambda: 0))
+            with mock.patch.object(m, 'ORIGINAL_LOG', m.sha(self.body(ticketContents=[ticket]))):
+                report = m.query(owner, self.helper, key, profile, Tool(), m.Clock(lambda: 0))
             self.assertTrue(report['diagnosticPassed'])
             self.assertFalse(report['strictLogAccepted'])
             self.assertEqual(report['strictLogRefusal'], 'notary-log-ticket-shape')
@@ -280,9 +324,18 @@ class NotaryDiagnosticData(unittest.TestCase):
     def test_source_workflow_is_fixed_read_only_and_public_output_exclusive(self):
         source = (ROOT / 'desktop/tools/macos_notary_diagnostic.py').read_text()
         m = self.module
-        self.assertEqual((m.SOURCE, m.SUBMISSION, m.STATUS, m.ORIGINAL_LOG),
-            ('f75fd232402c60beb8e2fffa58158d8616426c8a', 'fdfc7aea-370b-42a3-b1a2-6a08a9abf37e', 'Accepted',
-             '1eaed3ece12e56977bfd9d260428ab5d8521d25dd08d0ca120794732ce49c969'))
+        # Frozen SOURCE assertions, not a claim that Apple reports GitHub provenance.
+        self.assertEqual((m.SOURCE, m.SOURCE_TREE, m.ORIGINAL_RECEIPT, m.SUBMISSION, m.STATUS,
+                          m.ORIGINAL_ARCHIVE, m.ORIGINAL_LOG),
+            ('cae803e30d29d81fd1415f62f155840a7a644fb9', 'de20e6d491a4d5046d71e30bf775bc3236468332',
+             '76f07c5e1c2055fdbfdd2331277b97476607aa5eeb375bb9a1aeb54974e14d64',
+             'b422bfff-99a9-4d97-8826-a3129af981f9', 'Accepted',
+             'e293eff6629882c4bfe8684595762aab2b524a51154a63c06f9d44a8f1527413',
+             '2f893f9ae58316b06d7edbb84e6e0da11f8348c090db4dd13a38a43dc5402499'))
+        for path, expected in m.PINS.items():
+            self.assertEqual(m.sha((ROOT / path).read_bytes()), expected)
+        self.assertIn("'runId': '38270269218', 'attempt': '1'", source)
+        self.assertIn("'jobId': '114882515667'", source)
         syntax = ast.parse(source)
         query = next(n for n in syntax.body if isinstance(n, ast.FunctionDef) and n.name == 'query')
         calls = [n for n in ast.walk(query) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'run_owned']
@@ -296,7 +349,7 @@ class NotaryDiagnosticData(unittest.TestCase):
         self.assertIn('persist-credentials: false', workflow)
         self.assertIn('        with:\n          ref: ${{ github.sha }}\n          persist-credentials: false', workflow)
         self.assertIn('runs-on: macos-26', workflow)
-        self.assertIn('Read the existing Accepted submission after local log refusal', workflow)
+        self.assertIn('Classify the exact existing Accepted payload warning', workflow)
         self.assertIn('path: ${{ runner.temp }}/mrk-notary-diagnostic-public.json', workflow)
         self.assertIn('include-hidden-files: false', workflow)
         self.assertEqual(workflow.count('${{ secrets.'), 1)

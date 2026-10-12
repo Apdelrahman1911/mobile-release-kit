@@ -80,7 +80,136 @@ class InertAccountFixtures:
         self.events.append("after-readback" if after else "before-readback")
 
 
+def normal_observation(binding=BINDING):
+    return dict(schemaVersion=1, sourceCommit=binding.source, target=binding.target, runId=binding.run,
+        runAttempt=binding.attempt, fixtureSha256=M.digest(str(binding.root() / M.IOS_ACCOUNT_CASE).encode()),
+        sessionSha256=M.digest(private_data()["token"].encode()), inspectUnchecked=True, recoverUnchecked=True, ordinaryQuit=True,
+        inspect=dict(operationId="1" * 32, ownerGeneration="2" * 32, phase="terminal", outcome="complete", reason="none", accountStatus="pending"),
+        recover=dict(operationId="3" * 32, ownerGeneration="4" * 32, phase="terminal", outcome="complete", reason="none", accountStatus="recovered"))
+
+
 class PendingAccountRecoveryDataTests(unittest.TestCase):
+    def test_normal_observation_is_current_bound_and_distinct_from_debug_protocol(self):
+        for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            binding = M.Binding(BINDING.source, BINDING.run, BINDING.attempt, target)
+            value = normal_observation(binding)
+            self.assertIs(M.normal_account_observation(value, binding), value)
+            with self.assertRaises(M.Refused): M._ios_pending_report(value)
+            with self.assertRaises(M.Refused): M.normal_account_observation(M._expected_ios_pending_report(), binding)
+            for key, changed in (("schemaVersion", True), ("sourceCommit", "b" * 40), ("target", "other"),
+                    ("runId", "124"), ("runAttempt", "2"), ("fixtureSha256", "f" * 64),
+                    ("sessionSha256", "private-token"), ("inspectUnchecked", False), ("recoverUnchecked", 1),
+                    ("ordinaryQuit", False), ("allWorkerFinality", True)):
+                bad = deepcopy(value); bad[key] = changed
+                with self.subTest(field=key), self.assertRaises(M.Refused): M.normal_account_observation(bad, binding)
+            for side in ("inspect", "recover"):
+                for key, changed in (("operationId", "nothex"), ("ownerGeneration", "nothex"), ("phase", "unknown"),
+                                     ("outcome", "failed"), ("reason", "busy"), ("accountStatus", "absent"), ("lifetime", {})):
+                    bad = deepcopy(value); bad[side][key] = changed
+                    with self.subTest(side=side, field=key), self.assertRaises(M.Refused): M.normal_account_observation(bad, binding)
+            for key in ("operationId", "ownerGeneration"):
+                bad = deepcopy(value); bad["recover"][key] = bad["inspect"][key]
+                with self.assertRaises(M.Refused): M.normal_account_observation(bad, binding)
+
+    def test_normal_acceptance_requires_same_original_runner_post_and_native_readback(self):
+        def fixture():
+            f = M.Fixtures(BINDING, UID, GID, M.IOS_ACCOUNT_CASE)
+            f.last_returned = f.account_produced = True
+            f.account_private = private_data()
+            f.normal_account_original = CompletedProcess(["inert-original"], 0, b"observed", b"")
+            return f
+        observation = normal_observation(BINDING)
+        proof = dict(originalProductsPrePostMatched=True, originalClosesCompleted=True,
+                     strictCodesignOriginalZero=True, reSignedOrRepaired=False)
+        for fault in (None, "inflight", "not-returned", "no-producer", "already-accepted", "different-original", "nonzero",
+                      "bool-return", "token", "native-post", *proof):
+            f = fixture(); original = f.normal_account_original; receipt = dict(proof)
+            if fault == "inflight": f.inflight = True
+            if fault == "not-returned": f.last_returned = False
+            if fault == "no-producer": f.account_produced = False
+            if fault == "already-accepted": f.account_app_returned = True
+            if fault == "different-original": original = CompletedProcess(original.args, 0, original.stdout, b"")
+            if fault == "nonzero": original.returncode = 1
+            if fault == "bool-return": original.returncode = False
+            if fault == "token": f.account_private["token"] = "f" * 32
+            if fault in proof: receipt[fault] = not proof[fault]
+            with patch.object(f, "_account_current", side_effect=M.Refused("inert-native-post") if fault == "native-post" else None) as post:
+                if fault is not None:
+                    with self.subTest(fault=fault), self.assertRaises(M.Refused): f.accept_normal_account_app(observation, original, receipt)
+                    self.assertIsNone(f.normal_account_observation_sha)
+                    if fault != "already-accepted": self.assertFalse(f.account_app_returned)
+                    if fault != "native-post": post.assert_not_called()
+                else:
+                    f.accept_normal_account_app(observation, original, receipt)
+                    post.assert_called_once_with(after=True)
+                    self.assertTrue(f.account_app_returned); self.assertIsNotNone(f.normal_account_observation_sha)
+                    with self.assertRaises(M.Refused): f.accept_normal_account_app(observation, original, receipt)
+                    with self.assertRaises(M.Refused): f.readback_normal_account(observation)
+                    f.account_readback = True
+                    f.account_producer_attestation = {k: v for k, v in child_data("produce").items() if k != "private"}
+                    f.account_readback_attestation = child_data("observe")
+                    f.account_baseline_files = [object()]
+                    with patch.object(f, "readback", return_value={"syntheticProjectComparison": True}) as project:
+                        checked = f.readback_normal_account(deepcopy(observation))
+                        project.assert_called_once_with(M.IOS_ACCOUNT_CASE)
+                        self.assertEqual(checked["producer"], f.account_producer_attestation)
+                        self.assertEqual(checked["nativeReadback"], child_data("observe"))
+                        self.assertEqual(checked["nativeBaselineMembers"], 1)
+                        self.assertNotIn("private", checked["producer"])
+                        self.assertNotIn(private_data()["token"], json.dumps(checked))
+                        for changed in (dict(observation, sessionSha256="f" * 64), dict(observation, recoverUnchecked=False)):
+                            with self.assertRaises(M.Refused): f.readback_normal_account(changed)
+                    with patch.object(f, "readback", side_effect=M.Refused("inert-project-post")):
+                        with self.assertRaisesRegex(M.Refused, "inert-project-post"): f.readback_normal_account(observation)
+                    post.side_effect = M.Refused("inert-native-post")
+                    with self.assertRaisesRegex(M.Refused, "inert-native-post"): f.readback_normal_account(observation)
+
+    def test_runtime_retained_collect_reads_real_original_without_changing_digest_only_mode(self):
+        # Actual tiny filesystem/FD lifecycle, no native/account operation.
+        import os
+        import tempfile
+        body = b'{"manifest":"actual retained bytes"}\n'
+        for retain, collect in ((False, False), (True, False), (True, True)):
+            with self.subTest(retain=retain, collect=collect), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "manifest.json"; path.write_bytes(body); path.chmod(0o600)
+                f = M.Fixtures(BINDING, os.getuid(), os.getgid(), M.IOS_ACCOUNT_CASE)
+                try:
+                    before, digest, contents = f._recovery_read(None, str(path), os.getuid(), 1024, 0o600,
+                                                              retain=retain, collect=collect)
+                    self.assertEqual(digest, M.digest(body)); self.assertEqual(before[6], len(body))
+                    self.assertEqual(contents, body if collect or not retain else b"")
+                    self.assertEqual(len(f.recovery_runtime_originals), int(retain))
+                    if retain:
+                        parent, name, fd, identity = f.recovery_runtime_originals[0]
+                        self.assertIsNone(parent); self.assertEqual(name, str(path)); self.assertEqual(identity, before)
+                        self.assertEqual(M.signature(os.fstat(fd)), before); self.assertIn(fd, f.fds)
+                    else: self.assertFalse(f.fds)
+                finally: f.close()
+                self.assertFalse(f.fds)
+                if retain:
+                    with self.assertRaises(OSError): os.fstat(fd)
+                self.assertEqual(path.read_bytes(), body)
+        for options in ({"collect": True, "limit": 1024*1024+1}, {"collect": 1, "limit": 1024}, {"retain": 1, "limit": 1024}):
+            f = M.Fixtures(BINDING, os.getuid(), os.getgid(), M.IOS_ACCOUNT_CASE)
+            with patch.object(f, "_open", side_effect=AssertionError("must refuse before opening")) as opened:
+                with self.assertRaises(M.Refused): f._recovery_read(None, "/inert", os.getuid(), **options)
+                opened.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"; path.write_bytes(body); path.chmod(0o600)
+            f = M.Fixtures(BINDING, os.getuid(), os.getgid(), M.IOS_ACCOUNT_CASE)
+            read = os.read; changed = []
+            def original_read(fd, limit):
+                value = read(fd, limit)
+                if not changed:
+                    changed.append(fd); path.write_bytes(body + b"changed")
+                return value
+            try:
+                with patch.object(M.os, "read", side_effect=original_read), self.assertRaises(M.Refused):
+                    f._recovery_read(None, str(path), os.getuid(), 1024, 0o600, retain=True, collect=True)
+                self.assertFalse(f.recovery_runtime_originals); self.assertTrue(f.fds)
+            finally: f.close()
+            self.assertFalse(f.fds)
+
     def test_pair_matches_closed_dynamic_originals_and_every_finality_is_required(self):
         value = M._expected_ios_pending_report()
         for i, (operation, generation) in enumerate((("1" * 32, "2" * 32), ("3" * 32, "4" * 32))):

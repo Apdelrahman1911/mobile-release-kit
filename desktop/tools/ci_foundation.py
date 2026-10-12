@@ -342,7 +342,7 @@ CONVENTIONAL_CURRENT_SOURCE_FILES: list[dict] | None = [
     {'path': '/work/inputs/core-source/src/mobile_release/android_build_operation.py', 'size': 26622, 'sha256': 'e10f2e3738c40452da539078c3b266149f6b7bfa27be91b4edaa944d1b5cb317'},
     {'path': '/work/inputs/core-source/src/mobile_release/android_build_signing.py', 'size': 9158, 'sha256': '48505b448f0685b4ed49802a2ff2317564e1715cf19dde9863a85c4d0b1f786e'},
     {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools.py', 'size': 59387, 'sha256': '41b9e27a43ff240412007b3c0381d455cfee9266566ff44735a3131955d0e440'},
-    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools_macos.py', 'size': 24465, 'sha256': '08adbf065bf69b574c15dcf85221ca2cc3634b7bb4a562cd11b7cb5c963f98f1'},
+    {'path': '/work/inputs/core-source/src/mobile_release/android_build_tools_macos.py', 'size': 24710, 'sha256': '5c4685a16d36edccd68ab968612f954893160619f7d8278037f74713b02688a9'},
     {'path': '/work/inputs/core-source/src/mobile_release/android_manifest.py', 'size': 9267, 'sha256': '7fe056f442e239a8668a62d699f0b4c7f077de9b959d32fc4a2f8f770460bdd7'},
     {'path': '/work/inputs/core-source/src/mobile_release/android_upload_validation.py', 'size': 6295, 'sha256': '5be3d74272ade8a30938d48e25ffe42a661ff3e142872c17b014dee1641cfd72'},
     {'path': '/work/inputs/core-source/src/mobile_release/android_zip.py', 'size': 15103, 'sha256': '34391d082553f2b5168af71c275c743c00bd7982b719933183874ad8258ee15a'},

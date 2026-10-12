@@ -1104,11 +1104,16 @@ def mac_documents(*, profile="android-registered-macos-arm64-v1"):
     del data["osProfile"]
     data.update(profile=profile, target=target, instance="ab" * 16,
                 launchContract=launch, aliases=[])
+    # Independent enrolled Mac pins; the shared Linux fixture above stays original.
+    signed_digest = "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18"
+    data["bundletool"]["sha256"] = signed_digest
     data["versions"]["jdkVersion"] = "17.0-inert"
     data["roles"].update(java=f"{home}/bin/java", javac=f"{home}/bin/javac")
     for leaf in data["files"]:
         if leaf["path"].startswith("jdk/"):
             leaf["path"] = home + leaf["path"][3:]
+        if leaf["path"] == "bundletool/bundletool.jar":
+            leaf.update(size=32494771, sha256=signed_digest)
         leaf["mode"] = 0o555 if leaf["mode"] & 0o111 else 0o444
     data["files"].sort(key=lambda row: row["path"])
     provider = {"schemaVersion": 1, "profile": os_profile, "target": target,
@@ -1173,6 +1178,29 @@ class MacToolAdmissionDataTests(unittest.TestCase):
                 self.assertTrue({"/bin/bash", "/bin/ls", "/usr/bin/expr"}.issubset(mac.OS_FILES))
                 self.assertEqual(dict(profile.roles)["java"], f"{profile.java_home}/bin/java")
                 self.assertEqual(dict(selected.selection)["catalogGeneration"], 3)
+                jar = next(file for file in profile.files if file.path == "bundletool/bundletool.jar")
+                self.assertEqual((jar.size, jar.sha256, jar.mode), (
+                    32494771, "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18", 0o444))
+                # Every changed manifest is freshly re-anchored: these refusals
+                # prove the signed-derivative contract, not a raw-hash mismatch.
+                for fault in ("metadata", "member", "upstream", "short", "long", "mode"):
+                    data, os_data = mac_documents(profile=name)
+                    leaf = next(row for row in data["files"] if row["path"] == "bundletool/bundletool.jar")
+                    if fault == "metadata":
+                        data["bundletool"]["sha256"] = subject.BUNDLETOOL_SHA256
+                    elif fault == "member":
+                        leaf["sha256"] = subject.BUNDLETOOL_SHA256
+                    elif fault == "upstream":
+                        data["bundletool"]["sha256"] = subject.BUNDLETOOL_SHA256
+                        leaf.update(sha256=subject.BUNDLETOOL_SHA256, size=32520401)
+                    elif fault in ("short", "long"):
+                        leaf["size"] += -1 if fault == "short" else 1
+                    else:
+                        leaf["mode"] = 0o555
+                    changed_raw, changed_os, changed_record, changed_binding = mac_encoded(
+                        data, os_data, profile=name)
+                    with self.subTest(derivative_fault=fault), self.assertRaises(subject.AndroidToolError):
+                        mac.parse_profile(changed_raw, changed_os, changed_record, subject._binding(changed_binding))
                 for changed in ((raw + b"\n", provider, record), (raw, provider + b"\n", record),
                                 (raw, provider, record + b"\n")):
                     with self.subTest(header=changed), self.assertRaises(subject.AndroidToolError):
@@ -1187,6 +1215,8 @@ class MacToolAdmissionDataTests(unittest.TestCase):
         linux = subject._binding(encoded()[1])
         self.assertEqual((linux.profile, linux.selection), (subject.PROFILE, ()))
         self.assertEqual(profile_data().java_home, "jdk")
+        self.assertEqual(subject.BUNDLETOOL_SHA256,
+                         "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29")
 
     def test_profile_pairing_rejects_rehashed_opposite_and_unknown_documents(self):
         from mobile_release import android_build_tools_macos as mac
@@ -1286,7 +1316,7 @@ class MacToolAdmissionDataTests(unittest.TestCase):
                      ("spelling", "darwin", "aarch64", 2**63 - 1, True, True, False),
                      ("non-Darwin", "linux", expected_machine, 2**63 - 1, True, True, False),
                      ("missing-flags", "darwin", expected_machine, 2**63 - 1, False, True, False),
-                     ("missing-xattr", "darwin", expected_machine, 2**63 - 1, True, False, False)]
+                     ("Darwin-without-Linux-xattr-API", "darwin", expected_machine, 2**63 - 1, True, False, True)]
             if expected_machine == "x86_64":
                 cases.append(("non-LP64", "darwin", expected_machine, 2**31 - 1, True, True, False))
             for label, platform, machine, maxsize, flags, xattr, accepted in cases:
@@ -1332,6 +1362,8 @@ class MacToolAdmissionDataTests(unittest.TestCase):
                     checkpoint.assert_called_once_with()
                     self.assertEqual(events, ["checkpoint", "uname"] if platform == "darwin" else ["checkpoint"])
                     self.assertEqual(model_os.uname.call_count, int(platform == "darwin"))
+                    if xattr:
+                        model_os.listxattr.assert_not_called()
 
     def test_intel_commands_share_the_original_mac_private_jvm_environment(self):
         outputs = []

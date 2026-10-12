@@ -1171,5 +1171,112 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             M.render(intel, reject, profile="x86_64")
 
 
+    def test_signed_support_native_windows_keep_all_slices_and_zip_identity(self):
+        import binascii
+        import struct
+
+        def native(cpus):
+            body = bytearray(8192 + (36 if cpus[1][0] == 7 else 40))
+            struct.pack_into(">II", body, 0, 0xcafebabe, 2)
+            for index, (cpu, subtype) in enumerate(cpus):
+                offset, size = 4096 * (index + 1), (36 if cpu == 7 else 40)
+                struct.pack_into(">iiIII", body, 8 + 20 * index, cpu, subtype, offset, size, 12)
+                struct.pack_into("<IiiIII", body, offset, 0xfeedface if cpu == 7 else 0xfeedfacf,
+                                 cpu, subtype, 6 if cpu == 7 else 2, 1, 8)
+                struct.pack_into("<II", body, offset + size - 8, 0x19, 8)
+            return bytes(body)
+
+        cpus = ((7, 3), (0x01000007, 3))
+        raw = native(cpus)
+        prefix, slices = M._signed_native(raw, cpus)
+        self.assertEqual(prefix, raw[:4096])
+        self.assertEqual(tuple((r[0], r[1], r[2], r[3]) for r in slices),
+                         ((7, 3, 4096, 36), (0x01000007, 3, 8192, 40)))
+        self.assertEqual(tuple(len(r[4]) for r in slices), (36, 40))
+        arm = ((0x01000007, -2147483645), (0x0100000c, 0))
+        self.assertEqual(tuple(r[:2] for r in M._signed_native(native(arm), arm)[1]), arm)
+        for at, replacement in ((0, b"BAD!"), (4, struct.pack(">I", 1)),
+            (8, struct.pack(">i", 0x0100000c)), (36, struct.pack(">I", 4096)),
+            (44, struct.pack(">I", 21)), (4096 + 16, struct.pack("<I", 0)),
+            (4096 + 20, struct.pack("<I", 16385)), (4096 + 32, struct.pack("<I", 4))):
+            changed = raw[:at] + replacement + raw[at + len(replacement):]
+            with self.subTest(offset=at), self.assertRaises(M.Refused):
+                M._signed_native(changed, cpus)
+        for changed in (raw[:-1], raw + b"\0"):
+            with self.assertRaises(M.Refused): M._signed_native(changed, cpus)
+
+        # A real tiny ZIP decoder/CRC join, not a mocked archive or authority.
+        name, crc = b"macos/aapt2", binascii.crc32(raw) & 0xffffffff
+        local = struct.pack("<IHHHHHIIIHH", 0x04034b50, 20, 2048, 0, 0, 0, crc, len(raw), len(raw), len(name), 0)
+        central = struct.pack("<IHHHHHHIIIHHHHHII", 0x02014b50, 0x0314, 20, 2048, 0, 0, 0,
+                              crc, len(raw), len(raw), len(name), 0, 0, 0, 0, 0o100755 << 16, 0) + name
+        archive = local + name + raw + central + struct.pack("<IHHHHIIH", 0x06054b50, 0, 0, 1, 1,
+                                                           len(central), len(local) + len(name) + len(raw), 0)
+        member = SimpleNamespace(path=name.decode(), derived=SimpleNamespace(size=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest()), slices=cpus)
+        row = M._signed_member(archive, member)
+        self.assertEqual((row["local"], row["data"], row["compressed"], row["crc32"]), (0, 41, len(raw), crc))
+        self.assertEqual(row["slices"], slices)
+        with self.assertRaises(M.Refused):
+            M._signed_member(archive, SimpleNamespace(path=member.path,
+                derived=SimpleNamespace(size=len(raw), sha256="0" * 64), slices=cpus))
+        with self.assertRaises(M.Refused):
+            M._signed_member(archive[:6] + b"\0\0" + archive[8:], member)
+        with self.assertRaises(Exception) as failure:
+            M._signed_member(archive[:41] + bytes([archive[41] ^ 1]) + archive[42:], member)
+        self.assertIn(type(failure.exception).__name__, ("BadZipFile", "Refused"))
+
+    def test_signed_support_regions_preserve_official_source_and_refuse_confusion(self):
+        def pin(size, char):
+            return SimpleNamespace(size=size, sha256=char * 64)
+        archive = {key: SimpleNamespace(upstream=pin(20, "a"), derived=pin(22, "b"))
+                   for key in ("bundletool", "aapt2")}
+        rows = {}
+        for role, path in (("bundletool-jna", "com/sun/jna/darwin/libjnidispatch.jnilib"),
+                           ("bundletool-aapt2", "macos/aapt2"), ("agp-aapt2", "aapt2")):
+            member = SimpleNamespace(path=path, upstream=pin(10, "c"), derived=pin(12, "d"))
+            rows[role] = {"member": member, "prefix": b"prefix", "slices":
+                ((0x01000007, 3, 0, 12, b"intel"), (0x0100000c, 0, 12, 12, b"arm")),
+                "local": 0, "data": 35, "compressed": 10, "method": 8, "flags": 2048, "crc32": 123}
+        for profile, indexes in (("arm64", (0, 5)), ("x86_64", (0, 1, 7))):
+            source = b"// original vendor bytes remain here\nconst CAT_A4: &[u8] = &[1,2,3];\n"
+            for index in indexes:
+                for suffix in ("PREFIX", "COMMANDS"):
+                    source += M._signed_array(f"CAT_H{index}_{suffix}", b"original")
+            source += b"const CAT_N0: &[NestedNative] = &[\n"
+            for role in ("bundletool-jna", "bundletool-aapt2"):
+                source += ('    NestedNative { member: "' + rows[role]["member"].path + '", bytes: 10, sha256: "'
+                           + "c" * 64 + '", kind: Unchanged },\n').encode()
+            source += b"];\nconst CAT_SUPPORT: &[SupportOriginalSpec] = &[\n"
+            for asset in ("BundletoolJar", "Aapt2OsxJar"):
+                source += ('    SupportOriginalSpec { asset: SupportAsset::' + asset
+                    + ', archive: ArchivePin { bytes: 20, sha256: "' + "a" * 64 + '" } },\n').encode()
+            source += b"];\nconst CAT_PROJECTED: ZipMemberSpec = Old;\nconst CAT_PAYLOAD: &[PayloadSource] = &[\n"
+            source += ('    PayloadSource { installed: CanonicalFile { path: "bundletool/bundletool.jar", size: 20, sha256: "'
+                       + "a" * 64 + '" }, origin: Original },\n').encode()
+            source += ('    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2", size: 10, sha256: "'
+                       + "c" * 64 + '" }, archive: ArchivePin { bytes: 20, sha256: "' + "a" * 64 + '" } },\n').encode()
+            source += b"];\nconst REFERENCES: &[Reference] = &[Unchanged];\n"
+            changes = M._signed_regions(source, rows, archive, profile)
+            self.assertEqual(len(changes), 11 if profile == "arm64" else 13)
+            pieces, previous = [], 0
+            for start, end, body in changes:
+                pieces.extend((source[previous:start], body)); previous = end
+            pieces.append(source[previous:]); transformed = b"".join(pieces)
+            self.assertTrue(transformed.startswith(b"// original vendor bytes remain here\nconst CAT_A4: &[u8] = &[1,2,3];\n"))
+            self.assertTrue(transformed.endswith(b"const REFERENCES: &[Reference] = &[Unchanged];\n"))
+            self.assertIn(b"kind: Unchanged", transformed)
+            self.assertIn(b"105,110,116,101,108" if profile == "x86_64" else b"97,114,109", transformed)
+            for bad in (source + b"const CAT_N0:\n];\n", source.replace(b"const CAT_N0:", b"const NO_N0:"),
+                        source.replace(b"bytes: 10, sha256:", b"bytes: 11, sha256:", 1)):
+                with self.assertRaises(M.Refused): M._signed_regions(bad, rows, archive, profile)
+            # These tiny fixtures can never claim the complete source/capsule gate.
+            output = []
+            with self.assertRaises(M.Refused): M.derive_signed_support(source, {}, output.append, profile=profile)
+            self.assertEqual(output, [])
+        with self.assertRaises(M.Refused): M._signed_regions(b"", rows, archive, "amd64")
+
+
+
 if __name__ == "__main__":
     unittest.main()

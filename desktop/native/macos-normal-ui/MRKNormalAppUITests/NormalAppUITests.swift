@@ -81,9 +81,10 @@ final class NormalAppUITests: XCTestCase {
             if engineeringDiagnostic && firstFailure == nil { engineeringPhase = phase }
         }
         init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
-             engineeringDiagnostic: Bool = false) throws {
+             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
-            guard now.isFinite, now >= 0, !(androidPositive && iosUnsigned), ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300)),
+            guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,
+                  (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300))),
                   (now + seconds).isFinite, now + seconds > now else {
                 throw Refusal.condition("case clock unavailable")
             }
@@ -385,14 +386,14 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func beginCase(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
-                                      removal: Bool = false, engineeringDiagnostic: Bool = false) throws {
+                                      iosRecovery: Bool = false, removal: Bool = false, engineeringDiagnostic: Bool = false) throws {
         try require(caseClock == nil && journeyDeadline == nil && originalLaunch == nil, "case deadline cannot be reset")
         try require((ProcessInfo.processInfo.environment["MRK_NORMAL_UI_REMOVAL_CHANNEL"] != nil) == removal
-                    && (!removal || (seconds == 300 && !androidPositive && !iosUnsigned))
+                    && (!removal || (seconds == 300 && !androidPositive && !iosUnsigned && !iosRecovery))
                     && !removalQuitObserved && removalChannel == nil,
                     "removal harness channel is exclusive to its fixed case")
         let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,
-                                  engineeringDiagnostic: engineeringDiagnostic)
+                                  iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic)
         caseClock = clock
         journeyDeadline = clock.deadline
     }
@@ -1456,6 +1457,111 @@ final class NormalAppUITests: XCTestCase {
                 && uid == other.uid && gid == other.gid && flags == other.flags
         }
     }
+    // Read-only directory custody for the existing parent-produced fixture.
+    // Account/native contents and their restoration are checked by the parent;
+    // this observation never creates state, recovers by CLI or deletes anything.
+    @MainActor private final class IOSRecoveryFixture {
+        enum Profile: String { case pending = "ios-recovery-pending" }
+        private struct Directory {
+            let fd: Int32
+            let parent: Int32?
+            let name: String
+            let identity: StatFacts
+        }
+        private let clock: CaseClock
+        private var descriptors: [Int32] = []
+        private var directories: [Directory] = []
+        private var entered = false, closed = false, closeFailed = false
+        private(set) var source = "", run = "", attempt = "", projectPath = ""
+        init(clock: CaseClock) { self.clock = clock }
+        private func need(_ yes: Bool, _ reason: String) throws {
+            guard yes else { throw clock.fail(reason) }
+            _ = try clock.remaining(1, before: clock.deadline - 10)
+        }
+        private func info(_ fd: Int32) throws -> StatFacts {
+            var value = stat()
+            try need(fstat(fd, &value) == 0 && fcntl(fd, F_GETFD) == FD_CLOEXEC,
+                     "recovery fixture original descriptor unavailable")
+            return StatFacts(value)
+        }
+        private func named(_ parent: Int32, _ name: String) throws -> StatFacts {
+            var value = stat()
+            try need(fstatat(parent, name, &value, AT_SYMLINK_NOFOLLOW) == 0,
+                     "recovery fixture original name unavailable")
+            return StatFacts(value)
+        }
+        func open(_ profile: Profile) throws {
+            try need(!entered && !closed && descriptors.isEmpty && getuid() != 0
+                     && getuid() == geteuid() && getgid() == getegid(), "recovery fixture admission reused")
+            entered = true
+            let context = ProcessInfo.processInfo.environment
+            source = context["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? ""
+            run = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ID"] ?? ""
+            attempt = context["MRK_NORMAL_UI_IOS_RECOVERY_RUN_ATTEMPT"] ?? ""
+            let decimal: (String) -> Bool = { value in
+                let bytes = Array(value.utf8)
+                return (1...20).contains(bytes.count) && bytes[0] >= 49 && bytes[0] <= 57
+                    && bytes.allSatisfy { (48...57).contains($0) }
+            }
+            try need(source.utf8.count == 40 && source.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+                && context["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source && decimal(run) && decimal(attempt),
+                "recovery fixture exact same-build context unavailable")
+            let task = "mrk-macos-aqua-\(source)-\(run)-\(attempt)"
+            projectPath = "/private/tmp/" + task + "/" + profile.rawValue
+            let parts = ["/", "private", "tmp", task, profile.rawValue]
+            for (index, name) in parts.enumerated() {
+                _ = try clock.remaining(1, before: clock.deadline - 10)
+                let parent = directories.last?.fd
+                let fd = parent.map { openat($0, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+                    ?? Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                if fd >= 0 { descriptors.append(fd) } // Custody before any fallible observation.
+                try need(fd >= 0, "recovery fixture original directory open failed")
+                let identity = try info(fd)
+                try need(identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR), "recovery fixture is not a directory")
+                if let parent { try need(identity == named(parent, name), "recovery fixture entry changed at admission") }
+                if index < 3 {
+                    try need(identity.uid == 0 && (index == 2 ? identity.mode & 0o7777 == 0o1777 : identity.mode & 0o022 == 0),
+                             "recovery fixture fixed anchor ownership differs")
+                } else {
+                    try need(identity.uid == getuid() && identity.gid == getgid() && identity.mode & 0o7777 == 0o700
+                             && identity.flags == 0 && identity.device == directories[index - 1].identity.device,
+                             "recovery fixture private original differs")
+                }
+                directories.append(Directory(fd: fd, parent: parent, name: name, identity: identity))
+            }
+            try post()
+        }
+        func post() throws {
+            try need(entered && !closed && directories.count == 5 && descriptors.count == 5,
+                     "recovery fixture original census unavailable")
+            for directory in directories {
+                let actual = try info(directory.fd)
+                try need(directory.identity.sameDirectory(actual), "recovery fixture held identity changed")
+                if let parent = directory.parent {
+                    try need(actual.sameDirectory(named(parent, directory.name)), "recovery fixture name binding changed")
+                } else {
+                    var root = stat()
+                    try need(lstat("/", &root) == 0 && actual.sameDirectory(StatFacts(root)), "recovery fixture root binding changed")
+                }
+            }
+        }
+        func closeOriginals() throws {
+            if closed {
+                if closeFailed { throw Refusal.condition("recovery fixture prior close remains unconfirmed") }
+                return
+            }
+            var failure: Error?
+            do { try post() } catch { failure = error }
+            closed = true // Consuming closes, even after partial admission/Unknown; no retry.
+            while let fd = descriptors.popLast() {
+                if Darwin.close(fd) != 0 && failure == nil { failure = Refusal.condition("recovery fixture consuming close failed") }
+            }
+            directories.removeAll()
+            closeFailed = failure != nil
+            if let failure { throw failure }
+        }
+    }
+
     private final class LocalFixture {
         enum Profile: Equatable { case projectEdits, projectFields, persistentCredentials, workflowRefusal, savedVersionRecovery, releaseEvidence, androidSignedBuild, iosUnsignedArchive }
         enum StoreChange { case initialize, saveP12, saveProfile, replaceP12, deleteProfile }
@@ -1705,7 +1811,15 @@ final class NormalAppUITests: XCTestCase {
             private(set) var terminalClose = false
             private static let roles = ["jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"]
             private static let fileNames: Set<String> = ["upload.jks", "upload.der", "scalars.json"]
-            private static let catalogue = "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"
+            #if arch(arm64)
+            static let target = "aarch64-apple-darwin"
+            private static let hostedJob = "github-hosted-macos26-arm64"
+            private static let catalogue = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
+            #elseif arch(x86_64)
+            static let target = "x86_64-apple-darwin"
+            private static let hostedJob = "github-hosted-macos26-x86_64"
+            private static let catalogue = "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb"
+            #endif
 
             private static func matches(_ value: String, _ pattern: String) -> Bool {
                 value.range(of: pattern, options: .regularExpression) != nil
@@ -1838,7 +1952,7 @@ final class NormalAppUITests: XCTestCase {
                     "publicCertificateSha256", "keyCommands", "parentReturncodeRequired", "phaseClock"])
                 try LocalFixture.need(object["schemaVersion"] as? Int == 1 && object["parentReturncodeRequired"] as? Int == 0
                     && object["scope"] as? String == "one-owned-android-ui-inputs" && object["sourceCommit"] as? String == source
-                    && object["target"] as? String == "aarch64-apple-darwin" && object["runId"] as? String == run
+                    && object["target"] as? String == Self.target && object["runId"] as? String == run
                     && object["runAttempt"] as? String == attempt && object["root"] as? String == rootPath
                     && object["workflow"] as? String == ".github/workflows/desktop-macos-installed.yml"
                     && object["ref"] as? String == "refs/heads/verify/desktop-macos-installed"
@@ -1937,7 +2051,7 @@ final class NormalAppUITests: XCTestCase {
                 let env = ProcessInfo.processInfo.environment
                 guard let source = env["MRK_NORMAL_UI_HARNESS_SOURCE"], Self.matches(source, #"^[0-9a-f]{40}$"#),
                       env["MRK_NORMAL_UI_APPLICATION_SOURCE"] == source,
-                      env["MRK_NORMAL_UI_HOSTED_JOB"] == "github-hosted-macos26-arm64",
+                      env["MRK_NORMAL_UI_HOSTED_JOB"] == Self.hostedJob,
                       let run = env["MRK_NORMAL_UI_ANDROID_RUN_ID"], Self.matches(run, #"^[1-9][0-9]{0,19}$"#),
                       let attempt = env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"], Self.matches(attempt, #"^[1-9][0-9]{0,19}$"#),
                       let handoff = env["MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"],
@@ -3013,7 +3127,7 @@ final class NormalAppUITests: XCTestCase {
                   let source = raw["sourceCommit"] as? String,
                   source == env["MRK_NORMAL_UI_HARNESS_SOURCE"], source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
                   raw["scope"] as? String == "one-owned-saved-version-recovery-fixture",
-                  raw["sourceInputsSha256"] as? String == "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09",
+                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",
                   let root = raw["root"] as? String,
                   root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
                   let transaction = raw["transactionId"] as? String,
@@ -3617,6 +3731,7 @@ final class NormalAppUITests: XCTestCase {
         try LocalFixture.exerciseAndroidOutputCustodyData()
     }
 
+    @MainActor private var ownedIOSRecoveryFixture: IOSRecoveryFixture?
     @MainActor private var ownedFixture: LocalFixture?
     @MainActor private var ownedAndroidInputs: LocalFixture.AndroidInputs?
     @MainActor private var journeyDeadline: TimeInterval?
@@ -5725,6 +5840,181 @@ final class NormalAppUITests: XCTestCase {
         }
     }
 
+    private struct IOSRecoveryObservation: Equatable {
+        let operationID: String, ownerGeneration: String, phase: String, outcome: String, reason: String
+        var fields: [String: String] { ["operationId": operationID, "ownerGeneration": ownerGeneration,
+                                      "phase": phase, "outcome": outcome, "reason": reason] }
+    }
+    @MainActor private func iosRecoveryObservation(_ renderer: XCUIElement, phase: String) throws -> IOSRecoveryObservation {
+        let details = try unique(named(renderer, "Recovery details"), "current recovery details missing or repeated")
+        try reveal(details, in: renderer)
+        var values: [String] = []
+        for prefix in ["Recovery operation ID: ", "Recovery owner generation: ", "Recovery phase: ",
+                       "Recovery outcome: ", "Recovery reason: "] {
+            let field = try unique(details.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+                                   "current recovery field missing or repeated")
+            try require(field.isHittable && field.label.hasPrefix(prefix), "current recovery field is not visible")
+            let value = String(field.label.dropFirst(prefix.count))
+            try require(value.utf8.count <= 64, "current recovery field exceeds its bound")
+            values.append(value)
+        }
+        for value in values.prefix(2) {
+            try require(value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) },
+                        "current recovery identity shape differs")
+        }
+        try require((phase == "awaiting-consent" || phase == "terminal") && values[2] == phase
+            && values[3] == (phase == "terminal" ? "complete" : "not-observed") && values[4] == "none",
+            "current recovery phase/outcome/reason differs")
+        return IOSRecoveryObservation(operationID: values[0], ownerGeneration: values[1], phase: values[2],
+                                      outcome: values[3], reason: values[4])
+    }
+    @MainActor private func iosRecoverySession(_ container: XCUIElement, review: Bool = false) throws -> String {
+        let text = try iosPublicText(container)
+        let pattern = review ? #"(?:^| )Inspected session: ([0-9a-f]{32})\s*\."#
+                             : #"(?:^| )Exact inspected session: ([0-9a-f]{32})\s*\."#
+        let expression = try NSRegularExpression(pattern: pattern)
+        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        guard matches.count == 1, let range = Range(matches[0].range(at: 1), in: text) else {
+            throw Refusal.condition("current account session absent or ambiguous")
+        }
+        return String(text[range]) // Retained in memory only; only its digest may be printed.
+    }
+    @MainActor private func iosRecoveryAccount(_ renderer: XCUIElement, status: String) throws -> (String, String) {
+        let group = try unique(named(renderer, "Account signing recovery state"), "current account report missing or repeated")
+        try reveal(group, in: renderer)
+        let prefix = "Account signing state · "
+        let heading = try unique(group.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", prefix)),
+                                 "current account state missing or repeated")
+        try require(heading.isHittable && heading.label == prefix + status && (status == "pending" || status == "recovered"),
+                    "current account state differs")
+        return (String(heading.label.dropFirst(prefix.count)), try iosRecoverySession(group))
+    }
+
+    @MainActor func testInstalledIOSPendingAccountRecoveryThroughUI() throws {
+        continueAfterFailure = false
+        executionTimeAllowance = 525
+        try beginCase(seconds: 525, iosRecovery: true)
+        guard let clock = caseClock else { throw Refusal.condition("recovery original case clock missing") }
+        journeyDeadline = clock.deadline - 10 // 515s work including Quit, then only original reporting reserve.
+        let fixture = IOSRecoveryFixture(clock: clock)
+        ownedIOSRecoveryFixture = fixture // Includes partial-admission consuming closes in teardown.
+        do {
+            try stage("ios-recovery-admission") {
+                _ = try admitHostedAccount()
+                try fixture.open(.pending)
+            }
+            let (app, window, renderer) = try launchForJourney()
+            try stage("ios-recovery-project") {
+                try fixture.post()
+                try press(renderer, "Open project folder", renderer: renderer)
+                let sheet = try nativeSheet(window, title: "Choose a mobile project folder")
+                try goToFolder(sheet, path: fixture.projectPath); try nativeOpen(sheet)
+                _ = try waitElement(renderer.staticTexts.matching(NSPredicate(format: "title == %@", "Let’s get ios-recovery-pending ready.")),
+                                    in: renderer, failures: ["Static observation unavailable", "Only a partial static observation is available"])
+                _ = try unique(renderer.staticTexts.matching(identifier: fixture.projectPath), "recovery selected project differs")
+                try fixture.post()
+                try press(renderer, "Recovery", renderer: renderer)
+            }
+            let failures = ["No new local recovery outcome was confirmed", "Recovery phase: unknown", "Cleanup needs attention"]
+            var inspect: IOSRecoveryObservation?, recover: IOSRecoveryObservation?
+            var session = "", inspectStatus = "", recoverStatus = ""
+            var inspectUnchecked = false, recoverUnchecked = false
+            try stage("ios-recovery-inspect") {
+                try fixture.post()
+                try require(named(renderer, "Recovery details").count == 0, "prior recovery cannot supply this journey")
+                try press(renderer, "Review local recovery inspection", renderer: renderer, failures: failures)
+                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), in: renderer, failures: failures)
+                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")
+                let consent = try waitElement(controls(review, [.checkBox], label:
+                    "I authorize one local inspection of the account signing and selected project build-input recovery controls.", prefix: true),
+                    in: review, enabled: true, failures: failures)
+                try reveal(consent, in: renderer)
+                try require(consent.value as? String == "0", "inspection consent must begin unchecked")
+                inspectUnchecked = true
+                consent.click()
+                try require(consent.value as? String == "1", "inspection explicit consent not observed")
+                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair, "inspection review changed before Start")
+                try fixture.post()
+                try press(review, "Inspect local state once", renderer: renderer, failures: failures) // One actual Start.
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: terminal"), in: renderer,
+                                    timeout: 210, failures: failures)
+                let observed = try iosRecoveryObservation(renderer, phase: "terminal")
+                try require(observed.operationID == pair.operationID && observed.ownerGeneration == pair.ownerGeneration,
+                            "inspection terminal original differs")
+                let account = try iosRecoveryAccount(renderer, status: "pending")
+                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, "inspection changed during account read")
+                inspect = observed; inspectStatus = account.0; session = account.1
+                try fixture.post()
+            }
+            guard let inspected = inspect else { throw Refusal.condition("inspection original absent") }
+            try stage("ios-recovery-account") {
+                try press(renderer, "Review ordinary account recovery", renderer: renderer, failures: failures)
+                let review = try waitElement(named(renderer, "Confirm this exact local recovery action"), in: renderer, failures: failures)
+                let pair = try iosRecoveryObservation(renderer, phase: "awaiting-consent")
+                try require(pair.operationID != inspected.operationID && pair.ownerGeneration != inspected.ownerGeneration,
+                            "account recovery requires a fresh original pair")
+                try require(try iosRecoverySession(review, review: true) == session, "account recovery review session differs")
+                let consent = try waitElement(controls(review, [.checkBox], label:
+                    "I confirm this macOS account and signing services are idle and authorize ordinary restoration of only this inspected account session’s owned state.", prefix: true),
+                    in: review, enabled: true, failures: failures)
+                try reveal(consent, in: renderer)
+                try require(consent.value as? String == "0", "account recovery consent must begin unchecked")
+                recoverUnchecked = true
+                consent.click()
+                try require(consent.value as? String == "1", "account recovery explicit consent not observed")
+                try require(try iosRecoveryObservation(renderer, phase: "awaiting-consent") == pair
+                            && iosRecoverySession(review, review: true) == session, "account recovery review changed before Start")
+                try fixture.post()
+                try press(review, "Recover inspected account session", renderer: renderer, failures: failures) // One actual Start.
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery phase: terminal"), in: renderer,
+                                    timeout: 240, failures: failures)
+                let observed = try iosRecoveryObservation(renderer, phase: "terminal")
+                try require(observed.operationID == pair.operationID && observed.ownerGeneration == pair.ownerGeneration,
+                            "account recovery terminal original differs")
+                let account = try iosRecoveryAccount(renderer, status: "recovered")
+                try require(account.1 == session, "recovered account session differs from original inspection")
+                try require(try iosRecoveryObservation(renderer, phase: "terminal") == observed, "recovery changed during account read")
+                recover = observed; recoverStatus = account.0
+                try fixture.post()
+            }
+            guard let recovered = recover else { throw Refusal.condition("account recovery original absent") }
+            try stage("ios-recovery-quit") {
+                let sheet = try quitSheet(app, window)
+                try click(sheet.buttons.matching(identifier: "Quit"), "recovery ordinary Quit unavailable")
+                try completeNormalQuit(app)
+                ownedIOSRecoveryFixture = nil
+                try fixture.closeOriginals() // Descriptor closes only, never account/fixture deletion.
+                _ = try remaining(1)
+            }
+            journeyDeadline = clock.deadline // Same immutable end, only the reserved reporting window.
+            try acceptFinalScenario()
+            #if arch(arm64)
+            let target = "aarch64-apple-darwin"
+            #elseif arch(x86_64)
+            let target = "x86_64-apple-darwin"
+            #endif
+            var inspectFields = inspected.fields, recoverFields = recovered.fields
+            inspectFields["accountStatus"] = inspectStatus; recoverFields["accountStatus"] = recoverStatus
+            let facts: [String: Any] = ["schemaVersion": 1, "sourceCommit": fixture.source, "target": target,
+                "runId": fixture.run, "runAttempt": fixture.attempt,
+                "fixtureSha256": SHA256.hash(data: Data(fixture.projectPath.utf8)).map { String(format: "%02x", $0) }.joined(),
+                "inspect": inspectFields, "recover": recoverFields,
+                "sessionSha256": SHA256.hash(data: Data(session.utf8)).map { String(format: "%02x", $0) }.joined(),
+                "inspectUnchecked": inspectUnchecked, "recoverUnchecked": recoverUnchecked, "ordinaryQuit": normalQuitObserved]
+            let raw = try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys, .withoutEscapingSlashes])
+            try require(raw.count <= 4096 && inspectUnchecked && recoverUnchecked && normalQuitObserved,
+                        "recovery bounded observation incomplete")
+            _ = try remaining(1)
+            print("MRK_MACOS_UI_IOS_PENDING_RECOVERY=" + String(decoding: raw, as: UTF8.self))
+        } catch {
+            let primary = error
+            _ = clock.fail("pending account recovery observation failed")
+            // No CLI recovery, subsequent observer, automatic new Start or state
+            // deletion. Existing original-owner teardown retains unknown finality.
+            throw primary
+        }
+    }
+
     @MainActor func testSyntheticProjectAndroidSignedBuild() throws {
         continueAfterFailure = false
         executionTimeAllowance = 900
@@ -5948,7 +6238,7 @@ final class NormalAppUITests: XCTestCase {
         try acceptFinalScenario()
         let env = ProcessInfo.processInfo.environment
         let facts: [String: Any] = ["schemaVersion": 1, "scope": "one-ordinary-local-signed-android-build",
-            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": "aarch64-apple-darwin",
+            "sourceCommit": env["MRK_NORMAL_UI_HARNESS_SOURCE"] ?? "", "target": LocalFixture.AndroidInputs.target,
             "runId": env["MRK_NORMAL_UI_ANDROID_RUN_ID"] ?? "", "runAttempt": env["MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"] ?? "",
             "sourceRegistrationObserved": false, "nativeSigningVerified": true, "privateOriginalsClosed": true,
             "memorySessionDiscarded": true, "outputPostMatched": true, "normalQuitObserved": true,
@@ -6004,6 +6294,15 @@ final class NormalAppUITests: XCTestCase {
                 if let inputs = ownedAndroidInputs {
                     ownedAndroidInputs = nil
                     try inputs.close { _ = try self.remaining(5) }
+                }
+            }
+        } catch { if cleanupFailure == nil { cleanupFailure = error } }
+        // Independent read-only fixture closes, even after failed/Unknown UI.
+        do {
+            try await MainActor.run {
+                if let fixture = ownedIOSRecoveryFixture {
+                    ownedIOSRecoveryFixture = nil
+                    try fixture.closeOriginals()
                 }
             }
         } catch { if cleanupFailure == nil { cleanupFailure = error } }

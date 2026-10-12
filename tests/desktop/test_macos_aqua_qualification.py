@@ -399,6 +399,15 @@ class AquaDataTests(unittest.TestCase):
             self.assertEqual(len(values), 1, name)
             return values[0]
 
+        # The update reader extends only the fixed stager. Bind its genuine
+        # final bytes and exact existing-loader bound; ordinary UI/result schema
+        # is not replaced by an update-specific shortcut or another owner.
+        stager_relative = "desktop/tools/stage_macos_installed.py"
+        stager_body = (root / stager_relative).read_bytes()
+        loader_body = (root / "desktop/tools/macos_aqua_qualification.py").read_bytes()
+        self.assertIn(('"' + stager_relative + '": "' + M.digest(stager_body) + '"').encode(), loader_body)
+        self.assertIn(('limit = ' + str(len(stager_body)) + ' if relative == "' + stager_relative + '"').encode(), loader_body)
+        self.assertIn(b"expected_update_previous=None, update_facts=None", stager_body)
         loader_relative = "desktop/tools/macos_aqua_qualification.py"
         runner_relative = "desktop/tools/macos_normal_ui_runner.py"
         runner_tree = ast.parse((root / runner_relative).read_bytes())
@@ -7183,6 +7192,7 @@ class XcodeInstalledClassificationWorkflowTests(unittest.TestCase):
             "Check current owner pins before native preparation",
             "Fail fast on native Scripts ownership and package format (never Installer)",
             "Acquire and verify the two fixed Android support archives as DATA",
+            "Download the fixed once-signed Android support capsule",
             "Admit only a fresh independently pinned Python transport destination",
             "Download the independently accepted fresh Python transport",
             "Project the pinned fresh Python transport without executing it",
@@ -10032,6 +10042,7 @@ class AndroidRegistrationLifecycleWorkflowTests(unittest.TestCase):
         for name in ("Select fixed frontend compiler", "Record exact source and actual tool bindings only after route admission",
                      "Check current owner pins before native preparation", "Fail fast on native Scripts ownership and package format (never Installer)",
                      "Acquire and verify the two fixed Android support archives as DATA",
+                     "Download the fixed once-signed Android support capsule",
                      "Select the fixed configured signed runtime before any payload download",
                      "Download only the configured signed Python capsule",
                      "Project the configured capsule as DATA without executing it",
@@ -10866,7 +10877,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                 def source_file(fixture, name, parent, limit):
                     relative = Path(name).relative_to(PATH.parents[2]).as_posix()
                     self.assertIsNone(parent)
-                    self.assertEqual(limit, 348751 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
+                    self.assertEqual(limit, 354170 if relative == 'desktop/tools/stage_macos_installed.py' else 256 * 1024)
                     raw = Path(name).read_bytes()
                     self.assertLessEqual(len(raw), limit)
                     row = {'name': name, 'sha256': M.digest(raw)}; held.append(row)
@@ -10889,7 +10900,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             held, posts = [], []
             def changed_source_file(fixture, name, parent, limit):
                 raw, row = source_file(fixture, name, parent, limit)
-                self.assertEqual(len(raw), 348751)
+                self.assertEqual(len(raw), 354170)
                 return bytes([raw[0] ^ 1]) + raw[1:], row
             with patch.dict(sys.modules), patch.object(M, '_gate_file', changed_source_file), \
                  patch.object(importlib.util, 'spec_from_file_location') as attempted_import:
@@ -10914,7 +10925,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
             # not 256KiB, and refuses one additional byte before capture/import.
             # These are private regular-file DATA originals, not native work.
             stager_body = PATH.with_name('stage_macos_installed.py').read_bytes()
-            self.assertEqual(len(stager_body), 348751)
+            self.assertEqual(len(stager_body), 354170)
             for extra in (b'', b'\n'):
                 with tempfile.TemporaryDirectory(prefix='mrk-gate-source-bound-') as temporary:
                     selected = Path(temporary) / 'stage_macos_installed.py'
@@ -10923,10 +10934,10 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     try:
                         if extra:
                             with self.assertRaisesRegex(M.Refused, '^gate-original-file$'):
-                                M._gate_file(fixture, str(selected), None, 348751)
+                                M._gate_file(fixture, str(selected), None, 354170)
                             self.assertEqual(fixture.gate_files, [])
                         else:
-                            body, original = M._gate_file(fixture, str(selected), None, 348751)
+                            body, original = M._gate_file(fixture, str(selected), None, 354170)
                             self.assertEqual(body, stager_body)
                             self.assertEqual(original['sha256'], M.SHIPPING_GATE_SOURCE_PINS['desktop/tools/stage_macos_installed.py'])
                             M._gate_recheck(fixture)
