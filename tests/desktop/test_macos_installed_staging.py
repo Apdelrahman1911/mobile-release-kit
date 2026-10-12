@@ -2595,6 +2595,45 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                            ('RUNNER_ARCH', 'ARM64'), ('GITHUB_WORKFLOW_SHA', 'b' * 40)):
             with self.assertRaises(probe.Refused):
                 probe.context({**environment, key: value}, script, host, 501, 501)
+        # Genuine bounded admission records only existing checked facts.
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); path = root / 'public'; path.write_bytes(b'public-fixture'); path.chmod(0o600)
+            alias = root / 'alias'; os.link(path, alias)
+            report = {}; probe.setup_stage(report, 'source-read', probe.SCRIPT)
+            held = probe.Held(probe.time.monotonic() + 10, root, diagnostics=report)
+            try:
+                with self.assertRaises(probe.Refused): held.add(path, 32, os.getuid(), role=probe.SCRIPT)
+                self.assertEqual(report['setupCheck'], 'file-shape')
+                self.assertIs(report['setupFacts']['singleLink'], False)
+                self.assertEqual(report['setupRole'], probe.SCRIPT)
+            finally:
+                self.assertTrue(held.close())
+            alias.unlink()
+            held = probe.Held(probe.time.monotonic() + 10, root, diagnostics=report)
+            try:
+                self.assertEqual(held.add(path, 32, os.getuid(), role=probe.SCRIPT), b'public-fixture')
+                held.post()
+                self.assertEqual(report['setupRole'], probe.SCRIPT)
+                self.assertEqual(report['setupCheck'], 'file-read')
+            finally:
+                self.assertTrue(held.close())
+            held = probe.Held(probe.time.monotonic() + 10, root, diagnostics=report)
+            try:
+                with mock.patch.object(probe.os, 'fstat', side_effect=PermissionError(13, 'PRIVATE_SENTINEL')):
+                    with self.assertRaises(PermissionError): held.add(path, 32, os.getuid(), role=probe.SCRIPT)
+                self.assertEqual(report['setupCheck'], 'file-shape')
+                self.assertIsNone(report['setupFacts'])  # No preceding ancestor facts on a failed fstat.
+            finally:
+                self.assertTrue(held.close())
+            probe.setup_stage(report, 'owner-load')
+            self.assertIsNone(report['setupFacts']); self.assertIsNone(report['setupRole'])
+            for error, kind, number in ((RuntimeError('PRIVATE_SENTINEL'), 'other', None),
+                    (PermissionError(13, 'PRIVATE_SENTINEL', 'PRIVATE_SENTINEL'), 'OSError', 13),
+                    (OSError(99999, 'PRIVATE_SENTINEL'), 'OSError', None)):
+                probe.setup_failure(report, error)
+                self.assertEqual(report['setupExceptionClass'], kind)
+                self.assertEqual(report['setupErrno'], number)
+                self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
         self.assertEqual(probe.FILE_LIMIT, 4 * 1024 * 1024)
         for scenario in ('pass', 'audit-refused', 'unknown-command', 'oversize'):
             # Exercise the exact boundary algorithm with small inert output,

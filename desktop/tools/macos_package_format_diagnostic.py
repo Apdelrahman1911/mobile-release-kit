@@ -70,13 +70,18 @@ def context(environment, script, host, uid, euid):
 
 class Held:
     """Small original-file ledger; closing never retries an uncertain descriptor."""
-    def __init__(self, deadline, anchor=None):
+    def __init__(self, deadline, anchor=None, diagnostics=None):
         self.deadline, self.files, self.parents, self.anchor = deadline, [], {}, anchor
+        self.diagnostics = diagnostics
+
+    def note(self, check, facts, role=None):
+        if self.diagnostics is not None:
+            self.diagnostics.update(setupCheck=check, setupFacts=facts, setupRole=role)
 
     def clock(self):
         need(time.monotonic() < self.deadline)
 
-    def add(self, path, limit, uid):
+    def add(self, path, limit, uid, *, role=None):
         self.clock()
         need(len(self.files) < 32)
         # Pin every named ancestor. No followed directory is silently adopted.
@@ -86,11 +91,20 @@ class Held:
             parents = parents[:parents.index(self.anchor) + 1]
         for parent in reversed(parents):
             if parent not in self.parents:
-                self.parents[parent] = directory(parent.lstat())
+                self.note('ancestor-shape', None, role)
+                info = parent.lstat()
+                self.note('ancestor-shape', {'directory': stat.S_ISDIR(info.st_mode),
+                    'notGroupOrWorldWritable': not bool(info.st_mode & 0o022)}, role)
+                self.parents[parent] = directory(info)
+        self.note('file-open', {}, role)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        row = {'path': path, 'fd': fd, 'limit': limit}
+        row = {'path': path, 'fd': fd, 'limit': limit, 'role': role}
         self.files.append(row)
+        self.note('file-shape', None, role)
         info = os.fstat(fd)
+        self.note('file-shape', {'regular': stat.S_ISREG(info.st_mode), 'ownerMatched': info.st_uid == uid,
+            'singleLink': info.st_nlink == 1, 'notGroupOrWorldWritable': not bool(info.st_mode & 0o022),
+            'boundedSize': 0 <= info.st_size <= limit}, role)
         need(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1
              and not info.st_mode & 0o022 and 0 <= info.st_size <= limit)
         row['identity'] = identity(info)
@@ -99,6 +113,7 @@ class Held:
         return body
 
     def read(self, row):
+        self.note('file-read', {}, row['role'])
         self.clock()
         need(identity(os.fstat(row['fd'])) == row['identity'] == identity(row['path'].lstat()))
         body = bytearray()
@@ -112,7 +127,12 @@ class Held:
 
     def post(self):
         for path, before in self.parents.items():
-            self.clock(); need(directory(path.lstat()) == before)
+            self.note('ancestor-post', None)
+            self.clock()
+            info = path.lstat()
+            self.note('ancestor-post', {'directory': stat.S_ISDIR(info.st_mode),
+                'notGroupOrWorldWritable': not bool(info.st_mode & 0o022)})
+            need(directory(info) == before)
         for row in self.files:
             need(hashlib.sha256(self.read(row)).hexdigest() == row['sha256'])
 
@@ -281,28 +301,56 @@ def run_probe(stager, owner, root, held, report, work_end, hard_end):
                 report['scratchRetired'] = False
 
 
+def setup_stage(report, stage, role=None):
+    report.update(setupStage=stage, setupRole=role, setupCheck=None, setupFacts=None)
+
+
+def setup_failure(report, error):
+    kinds = {Refused: 'Refused', ImportError: 'ImportError', ModuleNotFoundError: 'ImportError',
+             NameError: 'NameError', AttributeError: 'AttributeError', TypeError: 'TypeError'}
+    kind, number = kinds.get(type(error), 'other'), None
+    if isinstance(error, OSError):
+        kind = 'OSError'
+        candidate = OSError.errno.__get__(error)
+        if type(candidate) is int and candidate in (1, 2, 5, 9, 13, 20, 21, 22, 24, 28, 40, 60):
+            number = candidate
+    report.update(setupExceptionClass=kind, setupErrno=number)
+
+
 def main():
     start = time.monotonic(); work_end, hard_end = start + 180, start + 195
     report = {'diagnosticOnly': True, 'productReady': False, 'failed': True, 'calls': []}
-    held = Held(hard_end)
+    held = Held(hard_end, diagnostics=report)
     try:
+        setup_stage(report, 'context')
         checkout, binding = context(os.environ, __file__, os.uname(), os.getuid(), os.geteuid())
         report.update(binding); report['failed'] = False
-        sources = {name: held.add(checkout / name, 2 * 1024 * 1024, os.getuid()) for name in SOURCES}
+        sources = {}
+        for name in SOURCES:
+            setup_stage(report, 'source-read', name)
+            sources[name] = held.add(checkout / name, 2 * 1024 * 1024, os.getuid(), role=name)
         need(all(sources.values()))
+        setup_stage(report, 'stager-load')
         stager = load('mrk_format_stager', checkout / SOURCES[2], sources[SOURCES[2]])
+        setup_stage(report, 'qualification-load')
         qualification = load('mrk_format_qualification', checkout / SOURCES[3], sources[SOURCES[3]])
+        setup_stage(report, 'owner-load')
         owner = qualification.load_owner(checkout)
         for tool in TOOLS:
-            held.add(Path(tool), 16 * 1024 * 1024, 0)
+            setup_stage(report, 'tool-read', tool)
+            held.add(Path(tool), 16 * 1024 * 1024, 0, role=tool)
+        setup_stage(report, 'source-post')
         held.post()
         report['sourceSha256'] = {name: hashlib.sha256(body).hexdigest() for name, body in sources.items()}
         report['toolSha256'] = {str(row['path']): row['sha256'] for row in held.files if str(row['path']) in TOOLS}
+        setup_stage(report, 'scratch-create')
         root = Path(tempfile.mkdtemp(prefix='mrk-unsigned-format-', dir='/private/tmp'))
         need(stat.S_IMODE(root.lstat().st_mode) == 0o700)
+        setup_stage(report, 'probe')
         run_probe(stager, owner, root, held, report, work_end, hard_end)
-    except BaseException:
+    except BaseException as error:
         report['failed'] = True
+        setup_failure(report, error)
     finally:
         report['sourceClosesKnown'] = held.close()
     report['diagnosticComplete'] = (report.get('sourcePost') is True and report['sourceClosesKnown']
