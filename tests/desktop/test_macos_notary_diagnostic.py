@@ -102,6 +102,74 @@ class NotaryDiagnosticData(unittest.TestCase):
                 statusSummary='Team is not yet configured for notarization.'), self.helper)
             self.assertEqual(summary['statusSummaryClass'], 'team-not-configured')
             self.assertEqual(summary['currentObservedStatus'], 'Invalid')
+        # SOURCE-established component and exact public documentation topics;
+        # neither can classify an unknown message or qualify a warning as harmless.
+        guide = 'https://developer.apple.com/documentation/security/resolving-common-notarization-issues'
+        documented = {
+            guide: 'common-notarization-guidance',
+            guide + '#Ensure-a-valid-code-signature': 'code-signature-guidance',
+            guide + '#Use-a-valid-Developer-ID-certificate': 'developer-id-guidance',
+            guide + '#Include-a-secure-timestamp': 'timestamp-guidance',
+            guide + '#Avoid-the-get-task-allow-entitlement': 'get-task-allow-guidance',
+            guide + '#Use-the-macOS-109-SDK-or-later': 'sdk-version-guidance',
+            guide + '#Enable-the-hardened-runtime': 'hardened-runtime-guidance',
+            guide + '#Handle-stapler-issues': 'stapler-guidance',
+            guide + '#Ensure-properly-formatted-entitlements': 'entitlements-guidance',
+            guide + '#Notarize-macOS-apps-with-external-dependencies': 'external-dependencies-guidance',
+        }
+        self.assertEqual(m.DOCUMENTATION_URLS, documented)
+        landmark = 'runtime/python/lib/python314.zip'
+        issue = {'severity': 'warning', 'path': m.ARCHIVE + '/payload-input/' + landmark,
+                 'message': 'DO_NOT_PUBLISH_UNCLASSIFIED_MESSAGE', 'code': None}
+        for prefix in ('', m.ARCHIVE + '/', 'payload-input/', m.ARCHIVE + '/payload-input/'):
+            self.assertEqual(m.classify_path(prefix + landmark), 'runtime-python-zip-landmark')
+        for path in (landmark + '/', landmark + '.other', landmark.upper(),
+                     'payload-input/payload-input/' + landmark):
+            self.assertEqual(m.classify_path(path), 'unclassified')
+        for url, expected in documented.items():
+            with self.subTest(documentation=expected):
+                projected = self.project(self.body(issues=[dict(issue, docUrl=url)]), self.helper)
+                group, = projected['issueGroups']
+                self.assertEqual(group['documentationClass'], expected)
+                self.assertEqual(group['pathRole'], 'runtime-python-zip-landmark')
+                self.assertEqual(group['pathSha256'], '8d51701b2be46a0501410a98d7ed9ac68a8faa8d61382733f15d02fd83ae4b2a')
+                self.assertEqual(group['messageClass'], 'unclassified')
+                self.assertEqual((projected['currentObservedStatus'], projected['errorCount'], projected['warningCount']), ('Accepted', 0, 1))
+                self.assertFalse(projected['payloadNotarizationQualified'] or projected['productReady'])
+                public = json.dumps(projected)
+                self.assertNotIn(url, public)
+                self.assertNotIn(landmark, public)
+                self.assertNotIn('DO_NOT_PUBLISH', public)
+        known_url = guide + '#Ensure-a-valid-code-signature'
+        unknown_urls = ('https://private.invalid/DO_NOT_PUBLISH_URL', guide + '#DO_NOT_PUBLISH_FRAGMENT',
+                        guide + '?DO_NOT_PUBLISH_QUERY', known_url + '?DO_NOT_PUBLISH_QUERY',
+                        known_url + '#extra', guide + '/', known_url.lower(),
+                        known_url.replace('https:', 'http:'), known_url.replace('.com/', '.com:443/'),
+                        known_url.replace('#Ensure', '#%45nsure'))
+        for url in unknown_urls:
+            with self.subTest(unknown_documentation=url):
+                observed = self.project(self.body(issues=[dict(issue, docUrl=url)]), self.helper)
+                self.assertEqual(observed['issueGroups'][0]['documentationClass'], 'unclassified')
+                self.assertEqual(observed['issueGroups'][0]['messageClass'], 'unclassified')
+                self.assertNotIn(url, json.dumps(observed))
+                self.assertNotIn('DO_NOT_PUBLISH', json.dumps(observed))
+        for row in (issue, dict(issue, docUrl=None)):
+            observed = self.project(self.body(issues=[row]), self.helper)
+            self.assertEqual(observed['issueGroups'][0]['documentationClass'], 'not-supplied')
+        for url in (7, True, 'bad\nurl'):
+            observed = self.project(self.body(issues=[dict(issue, docUrl=url)]), self.helper)
+            self.assertEqual(observed['strictLogRefusal'], 'notary-log-issue-metadata')
+            self.assertEqual(observed['issueGroups'], [])
+        document_rows = [dict(issue, docUrl=url) for url in documented]
+        document_rows.extend((issue, dict(issue, docUrl=None), dict(issue, docUrl=unknown_urls[0])))
+        accounted = self.project(self.body(issues=document_rows), self.helper)
+        self.assertEqual((accounted['warningCount'], accounted['issueGroupCount'], accounted['omittedGroupCount']), (13, 12, 0))
+        self.assertEqual({row['documentationClass']: row['count'] for row in accounted['issueGroups']},
+                         {**dict.fromkeys(documented.values(), 1), 'not-supplied': 2, 'unclassified': 1})
+        self.assertEqual(accounted['allIssueGroupsSha256'], m.sha(json.dumps(accounted['issueGroups'], sort_keys=True, separators=(',', ':')).encode()))
+        self.assertFalse(accounted['payloadNotarizationQualified'] or accounted['productReady'])
+        self.assertNotIn('https://', json.dumps(accounted))
+        self.assertNotIn('DO_NOT_PUBLISH', json.dumps(accounted))
         ticket = {'path': 'DO_NOT_PUBLISH_PRIVATE_TICKET', 'digestAlgorithm': 'SHA-256', 'cdhash': 'a' * 40, 'arch': 'arm64'}
         good = self.project(self.body(ticketContents=[ticket, dict(ticket, arch='x86_64')]), self.helper)
         self.assertTrue(good['strictLogAccepted'])

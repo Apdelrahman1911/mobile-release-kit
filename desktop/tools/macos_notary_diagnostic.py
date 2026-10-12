@@ -55,6 +55,20 @@ MESSAGES = {
     'Embedded entitlements are invalid: syntax error near line 1': 'malformed-entitlements',
     'The signature could not be validated because AMFI could not load its entitlements for validation: entitlements cannot be parsed': 'unparseable-entitlements',
 }
+# Exact topics from Apple's public guide, not message or defect classifications.
+# Unknown URLs never leave memory and are not normalized into a recognized topic.
+DOCUMENTATION_URLS = {
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues': 'common-notarization-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Ensure-a-valid-code-signature': 'code-signature-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Use-a-valid-Developer-ID-certificate': 'developer-id-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Include-a-secure-timestamp': 'timestamp-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Avoid-the-get-task-allow-entitlement': 'get-task-allow-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Use-the-macOS-109-SDK-or-later': 'sdk-version-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Enable-the-hardened-runtime': 'hardened-runtime-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Handle-stapler-issues': 'stapler-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Ensure-properly-formatted-entitlements': 'entitlements-guidance',
+    'https://developer.apple.com/documentation/security/resolving-common-notarization-issues#Notarize-macOS-apps-with-external-dependencies': 'external-dependencies-guidance',
+}
 SUMMARIES = {
     'Archive contains critical validation errors': 'archive-validation-errors',
     'Team is not yet configured for notarization': 'team-not-configured',
@@ -71,6 +85,7 @@ PATHS = {
     'MobileReleaseKit.app/' + PAYLOAD + 'Helpers/mrk-github-seal': 'github-seal',
     'MobileReleaseKit.app/' + PAYLOAD + 'Helpers/mrk-android-register': 'android-helper',
     'runtime/python/bin/python3': 'runtime-python',
+    'runtime/python/lib/python314.zip': 'runtime-python-zip-landmark',
     'runtime/tools/gh': 'runtime-github-provider',
 }
 
@@ -175,10 +190,12 @@ def log_projection(body, helper):
         for row in value['issues'] or ():
             architecture = row.get('architecture')
             architecture = architecture if architecture in ('arm64', 'x86_64') else ('not-supplied' if architecture is None else 'other')
+            doc_url = row.get('docUrl')
+            documentation = 'not-supplied' if doc_url is None else DOCUMENTATION_URLS.get(doc_url, 'unclassified')
             key = (row['severity'], row.get('code'), architecture, classify_path(row['path']),
-                   MESSAGES.get(row['message'], 'unclassified'), sha(row['path'].encode()), sha(row['message'].encode()))
+                   MESSAGES.get(row['message'], 'unclassified'), documentation, sha(row['path'].encode()), sha(row['message'].encode()))
             groups[key] = groups.get(key, 0) + 1
-    rows = [dict(zip(('severity', 'code', 'architecture', 'pathRole', 'messageClass', 'pathSha256', 'messageSha256'), key), count=count)
+    rows = [dict(zip(('severity', 'code', 'architecture', 'pathRole', 'messageClass', 'documentationClass', 'pathSha256', 'messageSha256'), key), count=count)
             for key, count in sorted(groups.items(), key=lambda item: repr(item[0]))]
     summary = value.get('statusSummary')
     summary_valid = helper.notary_text(summary, 4096)
