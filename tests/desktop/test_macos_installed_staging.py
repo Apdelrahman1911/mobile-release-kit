@@ -3087,6 +3087,42 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 TOOL.install_product_members(encoded(*counts))
         def node_of_kind(nodes, kind):
             return next(node for node in nodes if node.findtext("type") == kind)
+        # Only finite failure labels change. Metadata spelling/shape remains
+        # the same passive policy; no annotation becomes filesystem authority.
+        metadata_reasons = {
+            "tags": "install-product-xar-metadata-tags",
+            "finder-shape": "install-product-xar-finder-shape",
+            "finder-time": "install-product-xar-finder-time",
+            "finder-nanoseconds": "install-product-xar-finder-nanoseconds",
+            "scalar-shape": "install-product-xar-scalar-shape",
+            "inode-value": "install-product-xar-inode-value",
+            "deviceno-value": "install-product-xar-deviceno-value",
+        }
+        for case in ("valid", *metadata_reasons):
+            def annotated(nodes, case=case):
+                node = node_of_kind(nodes, "file")
+                finder = TOOL.ET.SubElement(node, "FinderCreateTime")
+                # Existing bounded spelling accepts this non-calendar value;
+                # the parser must neither normalize nor apply a birth time.
+                TOOL.ET.SubElement(finder, "time").text = "1900-01-00T22:06:56"
+                TOOL.ET.SubElement(finder, "nanoseconds").text = "999999999"
+                TOOL.ET.SubElement(node, "inode").text = "-9223372036854775808"
+                TOOL.ET.SubElement(node, "deviceno").text = "0"
+                TOOL.ET.SubElement(node, "mode").text = "0644"
+                if case == "tags": TOOL.ET.SubElement(node, "unreviewed-metadata")
+                elif case == "finder-shape": finder.set("unreviewed", "value")
+                elif case == "finder-time": finder.find("time").text += "Z"
+                elif case == "finder-nanoseconds": finder.find("nanoseconds").text = "-1"
+                elif case == "scalar-shape": node.find("mode").set("unreviewed", "value")
+                elif case == "inode-value": node.find("inode").text = "+1"
+                elif case == "deviceno-value": node.find("deviceno").text = "01"
+            with self.subTest(metadata_diagnostic=case):
+                if case == "valid":
+                    self.assertEqual(TOOL.install_product_members(encoded(mutation=annotated)), expected)
+                else:
+                    with self.assertRaises(TOOL.Refused) as caught:
+                        TOOL.install_product_members(encoded(mutation=annotated))
+                    self.assertEqual(caught.exception.args, (metadata_reasons[case],))
         # Every repeated position is checked, not only first/second XML names.
         for kind, count in (("file", 3), ("directory", 2)):
             for index in range(count):
@@ -3131,6 +3167,86 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                    + packed + hashlib.sha1(packed).digest() + original_heap[20:])
         self.assertEqual(TOOL.install_product_members(numeric), expected)
 
+    def test_final_package_append_diagnostics_preserve_original_checks_and_pending(self):
+        module = ANDROID_HELPER
+        prefix, ticket = b"ORIGINAL", b"TICKET"
+        body = prefix + ticket
+        before = (1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(prefix), 10, 11)
+        after = before[:6] + (len(body), 12, 13)
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+        def changed(row, index, value):
+            values = list(row); values[index] = value; return tuple(values)
+        complete = ["directory", "fstat", "stat", "xattrs", "clock", "read", "eof", "fstat", "stat", "directory"]
+        cases = (("success", None, 10),
+                 ("binding", "final-package-ticket-binding", 3),
+                 ("metadata", "final-package-ticket-metadata", 3),
+                 ("no-growth", "final-package-ticket-growth", 3),
+                 ("excess-growth", "final-package-ticket-growth", 3),
+                 ("max-bytes", "final-package-ticket-growth", 3),
+                 ("short-read", "final-package-ticket-short-read", 6),
+                 ("prefix", "final-package-signed-prefix-changed", 6),
+                 ("eof", "final-package-ticket-eof", 7),
+                 ("fd-post", "final-package-ticket-fd-post", 8),
+                 ("name-post", "final-package-ticket-name-post", 9),
+                 ("parent-post", "directory-post", 10))
+        for case, reason, observations in cases:
+            with self.subTest(case=case):
+                events = []; counts = {"fstat": 0, "stat": 0}
+                current = after
+                if case == "metadata": current = changed(after, 4, 502)
+                if case == "no-growth": current = changed(after, 6, len(prefix))
+                if case == "excess-growth": current = changed(after, 6, len(prefix) + 1024 * 1024 + 1)
+                operation = object.__new__(module.Operation)
+                parent = {"synthetic": True}
+                entry = {"parent_entry": parent, "parent": 90, "fd": 91, "name": "synthetic.pkg", "identity": before}
+                operation.final_package_output = entry
+                operation.final_package_sha = hashlib.sha256(prefix).hexdigest()
+                operation.notary_mutation_pending = True
+                operation.stager = SimpleNamespace(MAX_BYTES=len(body)-1 if case == "max-bytes" else 2*1024*1024,
+                    no_xattrs=lambda fd: (self.assertEqual(fd, 91), events.append("xattrs")))
+                def directory(value):
+                    self.assertIs(value, parent); events.append("directory")
+                    if case == "parent-post" and events.count("directory") == 2: raise module.Refused("directory-post")
+                operation.recheck_directory = directory
+                operation.notary_clock = lambda: events.append("clock")
+                def observed(kind):
+                    events.append(kind); counts[kind] += 1; row = current
+                    if case == "binding" and kind == "stat": row = changed(row, 1, 3)
+                    if case == "fd-post" and kind == "fstat" and counts[kind] == 2: row = changed(row, 7, 99)
+                    if case == "name-post" and kind == "stat" and counts[kind] == 2: row = changed(row, 8, 99)
+                    return SimpleNamespace(**dict(zip(fields, row)))
+                def fstat(fd):
+                    self.assertEqual(fd, 91); return observed("fstat")
+                def named(name, *, dir_fd, follow_symlinks):
+                    self.assertEqual((name, dir_fd, follow_symlinks), ("synthetic.pkg", 90, False))
+                    return observed("stat")
+                def pread(fd, size, offset):
+                    self.assertEqual(fd, 91)
+                    if offset == len(body):
+                        self.assertEqual(size, 1); events.append("eof")
+                        return b"x" if case == "eof" else b""
+                    self.assertEqual((size, offset), (len(body), 0)); events.append("read")
+                    return b"" if case == "short-read" else b"X" + body[1:] if case == "prefix" else body
+                with (mock.patch.object(module.os, "fstat", side_effect=fstat),
+                      mock.patch.object(module.os, "stat", side_effect=named),
+                      mock.patch.object(module.os, "pread", side_effect=pread)):
+                    if reason is None:
+                        operation.final_package_appended(before, hashlib.sha256(prefix).hexdigest())
+                    else:
+                        with self.assertRaises(module.Refused) as caught:
+                            operation.final_package_appended(before, hashlib.sha256(prefix).hexdigest())
+                        self.assertEqual(caught.exception.args, (reason,))
+                self.assertEqual(events, complete[:observations])
+                if reason is None:
+                    self.assertEqual(entry["identity"], after)
+                    self.assertEqual(operation.final_package_sha, hashlib.sha256(body).hexdigest())
+                    self.assertFalse(operation.notary_mutation_pending)
+                else:
+                    self.assertEqual(entry["identity"], before)
+                    self.assertEqual(operation.final_package_sha, hashlib.sha256(prefix).hexdigest())
+                    self.assertTrue(operation.notary_mutation_pending)
+                self.assertNotIn("receipt", operation.__dict__)
+
     def test_install_product_audit_failure_is_static_and_preserves_pending(self):
         module = ANDROID_HELPER
         root = Path(__file__).absolute().parents[2]
@@ -3139,7 +3255,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         public = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(public)
         self.assertEqual(public.INSTALL_PRODUCT_AUDIT_REASONS, TOOL.INSTALL_PRODUCT_AUDIT_REASONS)
-        self.assertEqual(len(TOOL.INSTALL_PRODUCT_AUDIT_REASONS), 25)
+        self.assertEqual(len(TOOL.INSTALL_PRODUCT_AUDIT_REASONS), 32)
+        # Literal-only diagnostics never publish arbitrary local values or success.
+        self.assertEqual(public.FINAL_PACKAGE_POST_REASONS, frozenset(('final-package-ticket-binding', 'final-package-ticket-metadata', 'final-package-ticket-growth', 'final-package-ticket-short-read', 'final-package-signed-prefix-changed', 'final-package-ticket-eof', 'final-package-ticket-fd-post', 'final-package-ticket-name-post', 'final-package-directory-census', 'final-package-input-changed', 'final-package-output-changed', 'final-package-target-census', 'final-package-original-settlement-reserve', 'final-package-fixed-role-order', 'final-package-private-role', 'final-package-original-bound')))
+        for reason in sorted(public.FINAL_PACKAGE_POST_REASONS):
+            projected = public.project_failure({"stage": "final-package-staple", "type": "Refused", "reason": reason})
+            self.assertEqual(projected, {"stage": "final-package-staple", "type": "Refused", "reason": reason, "errno": None})
+        for reason in ("final-package-private/local/path", "final-package-ticket-binding-extra", "final-package-unknown"):
+            projected = public.project_failure({"stage": "final-package-staple", "type": "Refused", "reason": reason})
+            self.assertEqual(projected["reason"], "final-package-refused")
+            self.assertNotIn(reason, json.dumps(projected))
         # Genuine boundary/IO functions, with no process, file or credential work.
         operation = object.__new__(module.Operation)
         operation.stager = TOOL; operation.install_product = True

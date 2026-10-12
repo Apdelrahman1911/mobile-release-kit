@@ -155,6 +155,13 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
     'install-product-xar-id',
     'install-product-xar-member-checksum',
     'install-product-xar-metadata',
+    'install-product-xar-metadata-tags',
+    'install-product-xar-finder-shape',
+    'install-product-xar-finder-time',
+    'install-product-xar-finder-nanoseconds',
+    'install-product-xar-scalar-shape',
+    'install-product-xar-inode-value',
+    'install-product-xar-deviceno-value',
     'install-product-xar-name',
     'install-product-xar-range',
     'install-product-xar-roster',
@@ -164,7 +171,27 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
 ))
 
 
-REASONS = frozenset((*INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
+FINAL_PACKAGE_POST_REASONS = frozenset((
+    'final-package-ticket-binding',
+    'final-package-ticket-metadata',
+    'final-package-ticket-growth',
+    'final-package-ticket-short-read',
+    'final-package-signed-prefix-changed',
+    'final-package-ticket-eof',
+    'final-package-ticket-fd-post',
+    'final-package-ticket-name-post',
+    'final-package-directory-census',
+    'final-package-input-changed',
+    'final-package-output-changed',
+    'final-package-target-census',
+    'final-package-original-settlement-reserve',
+    'final-package-fixed-role-order',
+    'final-package-private-role',
+    'final-package-original-bound',
+))
+
+
+REASONS = frozenset((*FINAL_PACKAGE_POST_REASONS, *INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
     *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",
     "original-operation-refused", "helper-package-incomplete", "package-finality-incomplete",

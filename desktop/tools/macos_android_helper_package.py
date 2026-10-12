@@ -4036,9 +4036,11 @@ class Operation:
         entry = self.final_package_output
         self.recheck_directory(entry["parent_entry"])
         after = signature(os.fstat(entry["fd"]))
-        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
-             and after[:6] == before[:6] and before[6] < after[6] <= before[6] + 1024 * 1024
-             and after[6] <= self.stager.MAX_BYTES, "final-package-ticket-original")
+        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+             "final-package-ticket-binding")
+        need(after[:6] == before[:6], "final-package-ticket-metadata")
+        need(before[6] < after[6] <= before[6] + 1024 * 1024 and after[6] <= self.stager.MAX_BYTES,
+             "final-package-ticket-growth")
         # Only size/mtime/ctime may change during stapling. Mode/owner/link/
         # identity and both original directories are unchanged throughout.
         whole, prefix, offset = hashlib.sha256(), hashlib.sha256(), 0
@@ -4051,10 +4053,11 @@ class Operation:
             if offset < before[6]:
                 prefix.update(block[:before[6] - offset])
             offset += len(block)
-        need(prefix.hexdigest() == before_sha and os.pread(entry["fd"], 1, offset) == b""
-             and signature(os.fstat(entry["fd"])) == after
-             == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
-             "final-package-signed-prefix-changed")
+        need(prefix.hexdigest() == before_sha, "final-package-signed-prefix-changed")
+        need(os.pread(entry["fd"], 1, offset) == b"", "final-package-ticket-eof")
+        need(signature(os.fstat(entry["fd"])) == after, "final-package-ticket-fd-post")
+        need(after == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+             "final-package-ticket-name-post")
         self.recheck_directory(entry["parent_entry"])
         entry["identity"], self.final_package_sha = after, whole.hexdigest()
         self.notary_mutation_pending = False  # Only after full same-original POST.

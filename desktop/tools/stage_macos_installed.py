@@ -3128,6 +3128,13 @@ INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
     'install-product-xar-id',
     'install-product-xar-member-checksum',
     'install-product-xar-metadata',
+    'install-product-xar-metadata-tags',
+    'install-product-xar-finder-shape',
+    'install-product-xar-finder-time',
+    'install-product-xar-finder-nanoseconds',
+    'install-product-xar-scalar-shape',
+    'install-product-xar-inode-value',
+    'install-product-xar-deviceno-value',
     'install-product-xar-name',
     'install-product-xar-range',
     'install-product-xar-roster',
@@ -3196,7 +3203,7 @@ def install_product_members(body):
         identifiers.add(file_id)
         metadata = {"name", "type", "data", "file", "mode", "uid", "gid", "user", "group",
                     "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime"}
-        need(all(child.tag in metadata for child in element), "install-product-xar-metadata")
+        need(all(child.tag in metadata for child in element), "install-product-xar-metadata-tags")
         names, types = element.findall("name"), element.findall("type")
         # xar_add_from_archive constructs a named node then copies all original
         # properties. One copy of the audited product (file names<=2, dirs=1)
@@ -3216,17 +3223,19 @@ def install_product_members(body):
             if child.tag == "FinderCreateTime":
                 need(not child.attrib and not (child.text or "").strip() and not (child.tail or "").strip()
                      and len(child) == 2 and {item.tag for item in child} == {"time", "nanoseconds"}
-                     and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child)
-                     and type(child.findtext("time")) is str
-                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time"))
-                     and type(child.findtext("nanoseconds")) is str
+                     and all(not item.attrib and not list(item) and not (item.tail or "").strip() for item in child),
+                     "install-product-xar-finder-shape")
+                need(type(child.findtext("time")) is str
+                     and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}", child.findtext("time")),
+                     "install-product-xar-finder-time")
+                need(type(child.findtext("nanoseconds")) is str
                      and re.fullmatch(r"0|[1-9][0-9]{0,8}", child.findtext("nanoseconds")),
-                     "install-product-xar-metadata")
+                     "install-product-xar-finder-nanoseconds")
             elif child.tag not in ("file", "data"):
-                need(not child.attrib and not list(child), "install-product-xar-metadata")
+                need(not child.attrib and not list(child), "install-product-xar-scalar-shape")
             if child.tag in ("inode", "deviceno"):
                 need(type(child.text) is str and re.fullmatch(r"0|-?[1-9][0-9]{0,19}", child.text),
-                     "install-product-xar-metadata")
+                     "install-product-xar-inode-value" if child.tag == "inode" else "install-product-xar-deviceno-value")
         name, kind = element.findtext("name"), element.findtext("type")
         need(type(name) is str and name and "/" not in name and "\\" not in name and name not in (".", ".."),
              "install-product-xar-name")
