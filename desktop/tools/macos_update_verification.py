@@ -22,6 +22,16 @@ LIMIT = 512 * 1024 * 1024
 RECORD_LIMIT = 16384
 SENTINEL = b"MobileReleaseKit public update preservation fixture v1\n"
 IDENTIFIER = "dev.mobile-release-kit.desktop"
+# Uploading both delivery directories preserves these exact relative paths.
+# This is a closed map, never a normalization or arbitrary nested-path grant.
+ARTIFACT_PATHS = {
+    "preview/MobileReleaseKit.dmg": ("preview", "MobileReleaseKit.dmg"),
+    "preview/README.md": ("preview", "README.md"),
+    "preview/PREVIEW.json": ("preview", "PREVIEW.json"),
+    "remove-preview/MobileReleaseKit-Remove.dmg": ("remove-preview", "MobileReleaseKit-Remove.dmg"),
+    "remove-preview/REMOVE.md": ("remove-preview", "REMOVE.md"),
+    "remove-preview/REMOVAL.json": ("remove-preview", "REMOVAL.json"),
+}
 
 
 def need(condition, reason):
@@ -54,6 +64,24 @@ def member_data(value):
     return dict(value)
 
 
+def artifact_member_data(value):
+    if type(value) is dict and type(value.get("name")) is str and value["name"] in ARTIFACT_PATHS:
+        member_data(dict(value, name=ARTIFACT_PATHS[value["name"]][1]))
+        return dict(value)
+    return member_data(value)  # Preserve the existing flat contract unchanged.
+
+
+def artifact_members_data(rows):
+    need(type(rows) is list and 1 <= len(rows) <= 8, "update-nomination-roster")
+    members = [artifact_member_data(value) for value in rows]
+    names = {value["name"] for value in members}
+    need(len(names) == len(members) and sum(value["bytes"] for value in members) <= LIMIT,
+         "update-nomination-roster")
+    nested = bool(names.intersection(ARTIFACT_PATHS))
+    need(not nested or names == set(ARTIFACT_PATHS), "update-artifact-nested-roster")
+    return members, nested
+
+
 def nomination_data(document, target, stager):
     need(target in TARGETS and type(document) is dict and type(document.get("schemaVersion")) is int
          and document["schemaVersion"] == 1, "update-nomination-schema")
@@ -68,13 +96,12 @@ def nomination_data(document, target, stager):
         need(hx(row["source"], 40) and all(positive(row[k]) for k in ("runId", "runAttempt", "jobId", "artifactId"))
              and scalar(row["artifactBytes"], LIMIT) and hx(row["artifactSha256"], 64)
              and hx(row["qualificationEvidenceSha256"], 64), "update-nomination-identity")
-        need(type(row["members"]) is list and 1 <= len(row["members"]) <= 8, "update-nomination-roster")
-        members = [member_data(v) for v in row["members"]]
-        need(len({v["name"] for v in members}) == len(members) and sum(v["bytes"] for v in members) <= LIMIT,
-             "update-nomination-roster")
-        for key in ("image", "package", "descriptor", "signature", "inventory"):
+        members, nested = artifact_members_data(row["members"])
+        artifact_member_data(row["image"])
+        for key in ("package", "descriptor", "signature", "inventory"):
             member_data(row[key])
         need(row["image"] in members and row["image"]["name"].endswith(".dmg")
+             and (not nested or row["image"]["name"] == "preview/MobileReleaseKit.dmg")
              and row["package"]["name"] == "Install.pkg" and row["descriptor"]["name"] == "producer.json"
              and row["signature"]["name"] == "producer.sig" and row["inventory"]["name"] == stager.INSTALLATION_INVENTORY_NAME
              and row["descriptor"]["bytes"] <= 16384 and row["signature"]["bytes"] <= 512
@@ -301,22 +328,40 @@ def status(op, code):
     op.publish("installer-output.status", (str(code) + "\n").encode("ascii"), parent=op.update["case"])
 
 
-def baseline(op):
-    api, stager, selected = op.update_api, op.stager, op.update["nomination"]
-    op.stage = PHASE
-    quote = resource_quote_data(selected)
-    reserve(op, selected["resources"]["additionalDiskBytes"])
+def artifact_inputs(op, selected):
+    members, nested = artifact_members_data(selected["members"])
+    need(selected["image"] in members
+         and (not nested or selected["image"]["name"] == "preview/MobileReleaseKit.dmg"), "update-image-original")
     download = op.directory(op.work_entry, "update-predecessor", "update-artifact-root")
-    # download-artifact --merge-multiple=true gives the exact named roster here.
-    need(set(os.listdir(download["fd"])) == {v["name"] for v in selected["members"]}, "update-artifact-exact-roster")
+    names = {"preview", "remove-preview"} if nested else {row["name"] for row in members}
+    need(set(os.listdir(download["fd"])) == names, "update-artifact-exact-roster")
+    op.package_roots.append((download, names))
+    parents = {}
+    if nested:
+        for name in ("preview", "remove-preview"):
+            entry = op.directory(download, name, "update-artifact-" + name)
+            leaves = {leaf for group, leaf in ARTIFACT_PATHS.values() if group == name}
+            need(set(os.listdir(entry["fd"])) == leaves, "update-artifact-exact-roster")
+            op.package_roots.append((entry, leaves))
+            parents[name] = entry
     image_entry = None
-    for row in selected["members"]:
-        entry, body = retain(op, download, row["name"], row["bytes"], (0o644, 0o444))
+    for row in members:
+        group, leaf = ARTIFACT_PATHS[row["name"]] if nested else (None, row["name"])
+        entry, body = retain(op, parents[group] if nested else download, leaf, row["bytes"], (0o644, 0o444))
         need((len(body), sha(body)) == (row["bytes"], row["sha256"]), "update-artifact-member-binding")
         if row == selected["image"]:
             image_entry = entry
         del body
     need(image_entry is not None, "update-image-original")
+    return image_entry
+
+
+def baseline(op):
+    api, stager, selected = op.update_api, op.stager, op.update["nomination"]
+    op.stage = PHASE
+    quote = resource_quote_data(selected)
+    reserve(op, selected["resources"]["additionalDiskBytes"])
+    artifact_inputs(op, selected)
     expected, current_inventory = source_expectation(op)
     before = io(op, "census", stager.same_package_result_census)
     need(not before and io(op, "absence", root_absent, stager), "update-initial-baseline-occupied")
@@ -325,6 +370,7 @@ def baseline(op):
     case_input = op.directory(op.update["case"], "input", "update-case-input")
     mount_path = op.work / "package-mount"
     op.mount_placeholder = op.package_directory("package-mount")
+    op.package_post()  # Same held complete artifact originals immediately before attach.
     attached = op.package_call(ROLES[0], ["/usr/bin/hdiutil", "attach", str(op.work / "update-predecessor" / selected["image"]["name"]),
         "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
     op.mount_device = stager.distribution_mount_data(attached.stdout, attached.stderr, attached.returncode, mount_path)

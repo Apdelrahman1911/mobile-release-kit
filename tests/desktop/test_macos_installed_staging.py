@@ -1809,7 +1809,32 @@ NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS jour
   '\n'))
 
 
+INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}"), ('Raw timed-step union577min (ARM) /615min (Intel)', 'Raw timed-step union577min (ARM) /617min (Intel)'), ('App-signature: ARM82 / Intel120 timed preparation', 'App-signature: ARM82 / Intel122 timed preparation')]), ('name: Desktop macOS genuine Aqua engineering verification', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}")]))
+
+INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
+INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
+
+def without_intel_fetch_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel fetch workflow SOURCE bound differs")
+    markers = ("Intel fetch120 is separate", "&& 26 || 10")
+    if not any(marker in source for marker in markers):
+        return source
+    selected = [rows for route, rows in INTEL_FETCH_WORKFLOW_INVERSE if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel fetch workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("Intel fetch workflow complete exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace(current, previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("Intel fetch workflow partial delta remains")
+    return source
+
+
 def without_normal_ios_pending_workflow(source):
+    source = without_intel_fetch_workflow(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("normal iOS pending workflow SOURCE bound differs")
     if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
@@ -3031,6 +3056,170 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         compressed = TOOL.zlib.compress(toc)
         return struct.pack('>IHHQQI', 0x78617221, 28, 1, len(compressed), len(toc), 0) + compressed + b''.join(heap)
 
+    def test_install_product_single_copy_names_preserve_exact_members(self):
+        # Published XAR copy semantics, not an assertion about a native run.
+        expected = {"Distribution": b"fixed distribution", "Resources/InstallerReadMe.html": b"fixed readme",
+                    TOOL.INSTALL_COMPONENT + "/PackageInfo": b"fixed package info",
+                    TOOL.INSTALL_COMPONENT + "/Scripts": b"fixed scripts"}
+        original = self.final_package_xar(expected, product=True, signed=True)
+        header = struct.unpack_from(">IHHQQI", original)
+        original_heap = original[28 + header[3]:]
+        original_toc = TOOL.zlib.decompress(original[28:28 + header[3]])
+        def encoded(file_count=3, directory_count=2, mutation=None):
+            tree = TOOL.ET.fromstring(original_toc)
+            nodes = tree.findall(".//file")
+            for node in nodes:
+                name = node.find("name")
+                count = file_count if node.findtext("type") == "file" else directory_count
+                for _ in range(count - 1):
+                    node.insert(1, copy.deepcopy(name))
+            if mutation is not None:
+                mutation(nodes)
+            body = TOOL.ET.tostring(tree, encoding="utf-8")
+            compressed = TOOL.zlib.compress(body)
+            return (struct.pack(">IHHQQI", *header[:3], len(compressed), len(body), header[5])
+                    + compressed + hashlib.sha1(compressed).digest() + original_heap[20:])
+        for counts in ((1, 1), (2, 1), (3, 2)):
+            with self.subTest(accepted_counts=counts):
+                self.assertEqual(TOOL.install_product_members(encoded(*counts)), expected)
+        for counts in ((4, 2), (3, 3)):
+            with self.subTest(rejected_counts=counts), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(*counts))
+        def node_of_kind(nodes, kind):
+            return next(node for node in nodes if node.findtext("type") == kind)
+        # Every repeated position is checked, not only first/second XML names.
+        for kind, count in (("file", 3), ("directory", 2)):
+            for index in range(count):
+                def mismatched(nodes, kind=kind, index=index):
+                    node_of_kind(nodes, kind).findall("name")[index].text = "different"
+                with self.subTest(kind=kind, alias_position=index), self.assertRaises(TOOL.Refused):
+                    TOOL.install_product_members(encoded(mutation=mismatched))
+            for marker in ("attribute", "child", "tail"):
+                def decorated(nodes, kind=kind, marker=marker):
+                    node = node_of_kind(nodes, kind).findall("name")[-1]
+                    if marker == "attribute": node.set("enctype", "base64")
+                    elif marker == "child": TOOL.ET.SubElement(node, "hidden")
+                    else: node.tail = "unexpected"
+                with self.subTest(kind=kind, decoration=marker), self.assertRaises(TOOL.Refused):
+                    TOOL.install_product_members(encoded(mutation=decorated))
+        for unsafe in ("../Distribution", "Resources/InstallerReadMe.html", "..", "\\", "other"):
+            def aliased(nodes, unsafe=unsafe):
+                for node in node_of_kind(nodes, "file").findall("name"): node.text = unsafe
+            with self.subTest(unsafe_alias=unsafe), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(mutation=aliased))
+        for tag in ("type", "data", "mode"):
+            def duplicated(nodes, tag=tag):
+                node = node_of_kind(nodes, "file")
+                child = node.find(tag)
+                if child is None:
+                    child = TOOL.ET.SubElement(node, tag); child.text = "0644"
+                node.append(copy.deepcopy(child))
+            with self.subTest(duplicate_metadata=tag), self.assertRaises(TOOL.Refused):
+                TOOL.install_product_members(encoded(mutation=duplicated))
+        def overlapping(nodes):
+            files = [node for node in nodes if node.findtext("type") == "file"]
+            files[1].find("data/offset").text = files[0].findtext("data/offset")
+        with self.assertRaises(TOOL.Refused):
+            TOOL.install_product_members(encoded(mutation=overlapping))
+        valid = encoded(); compressed_length = struct.unpack_from(">IHHQQI", valid)[3]
+        corrupted = bytearray(valid); corrupted[28 + compressed_length] ^= 1
+        with self.assertRaises(TOOL.Refused): TOOL.install_product_members(bytes(corrupted))
+        # An existing permitted numeric reference is decoded, not a new alias.
+        tree = original_toc.replace(b"<name>Distribution</name>", b"<name>&#68;istribution</name>")
+        packed = TOOL.zlib.compress(tree)
+        numeric = (struct.pack(">IHHQQI", *header[:3], len(packed), len(tree), header[5])
+                   + packed + hashlib.sha1(packed).digest() + original_heap[20:])
+        self.assertEqual(TOOL.install_product_members(numeric), expected)
+
+    def test_install_product_audit_failure_is_static_and_preserves_pending(self):
+        module = ANDROID_HELPER
+        root = Path(__file__).absolute().parents[2]
+        spec = importlib.util.spec_from_file_location("mrk_replicate_public_data",
+            root / "desktop/tools/macos_public_verification_evidence.py")
+        public = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(public)
+        self.assertEqual(public.INSTALL_PRODUCT_AUDIT_REASONS, TOOL.INSTALL_PRODUCT_AUDIT_REASONS)
+        self.assertEqual(len(TOOL.INSTALL_PRODUCT_AUDIT_REASONS), 25)
+        # Genuine boundary/IO functions, with no process, file or credential work.
+        operation = object.__new__(module.Operation)
+        operation.stager = TOOL; operation.install_product = True
+        operation.work = Path("/synthetic-fixed-product")
+        operation.target = "aarch64-apple-darwin"
+        operation.scripts_name = "scripts"; operation.packager_filename = "original.pkg"
+        operation.notary_retiring = False
+        operation.removal_final_active = lambda: True
+        operation.final_package_known = lambda: True
+        operation.notary_post = lambda: None
+        operation.notary_clock = lambda: None
+        operation.notary_stream = lambda _entry: "1" * 64
+        operation.removal_package_audit_arguments = lambda: {}
+        entry = {"identity": (0, 0, 0, 0, 0, 0, 17)}
+        path = operation.work / "fixed.pkg"
+        for reason in sorted(TOOL.INSTALL_PRODUCT_AUDIT_REASONS):
+            original = TOOL.Refused(reason)
+            operation.stager_io_pending = None
+            with self.subTest(reason=reason), mock.patch.object(TOOL, "audit_install_product_command", side_effect=original):
+                with self.assertRaises(module.Refused) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception.__cause__, original)
+                self.assertEqual(BaseException.args.__get__(caught.exception), (reason,))
+                self.assertEqual(operation.stager_io_pending, "final-package-original-audit")
+                self.assertEqual(public.project_failure({"stage": operation.stage, "type": "Refused", "reason": reason}),
+                    {"stage": "final-package-original-audit", "type": "Refused", "reason": reason, "errno": None})
+        class Unrenderable(TOOL.Refused):
+            def __str__(self): raise AssertionError("exception rendering forbidden")
+        class Lookalike(Exception):
+            def __str__(self): raise AssertionError("exception rendering forbidden")
+        class UnsafeString(str):
+            def __str__(self): raise AssertionError("value rendering forbidden")
+            def __eq__(self, other): raise AssertionError("value comparison forbidden")
+        unknowns = (TOOL.Refused("private-local-value"), TOOL.Refused("x" * 97), TOOL.Refused(b"private"),
+                    TOOL.Refused(), TOOL.Refused("install-product-xar-duplicate", "extra"),
+                    TOOL.Refused(UnsafeString("install-product-xar-duplicate")),
+                    Unrenderable("install-product-xar-duplicate"), Lookalike("install-product-xar-duplicate"))
+        for index, original in enumerate(unknowns):
+            operation.stager_io_pending = None
+            with self.subTest(unknown=index), mock.patch.object(TOOL, "audit_install_product_command", side_effect=original):
+                with self.assertRaises(type(original)) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception, original)
+                self.assertEqual(operation.stager_io_pending, "final-package-original-audit")
+        for value in (False, 1):
+            operation.install_product = value
+            original = TOOL.Refused("install-product-xar-duplicate")
+            audit_name = "audit_install_product_command" if value else "audit_command"
+            with self.subTest(nonexact_install=value), mock.patch.object(TOOL, audit_name, side_effect=original):
+                with self.assertRaises(TOOL.Refused) as caught:
+                    operation.final_package_audit(entry, path)
+                self.assertIs(caught.exception, original)
+        operation.install_product = True
+        result = {"packageSize": 17, "packageSha256": "1" * 64}
+        with mock.patch.object(TOOL, "audit_install_product_command", return_value=result):
+            self.assertIs(operation.final_package_audit(entry, path), result)
+        self.assertIsNone(operation.stager_io_pending)
+        self.assertNotIn("receipt", operation.__dict__)  # No invented pass/finality authority.
+        projected = public.project_failure({"stage": "final-package-original-audit", "type": "Refused",
+                                           "reason": "private-local-value"})
+        self.assertEqual(projected["reason"], "unclassified")
+        self.assertNotIn("private-local-value", json.dumps(projected))
+
+    def test_final_image_rejects_scripts_or_unknown_product_audit_qualification(self):
+        module = ANDROID_HELPER
+        for qualification in ("scripts-only-package-audited-not-installed-or-GUI-qualified", "not-a-product-audit"):
+            with self.subTest(qualification=qualification), tempfile.TemporaryDirectory() as directory:
+                state = self.final_image_fixture(Path(directory))
+                audit_path = state.work / "package-audit.json"
+                audit = json.loads(audit_path.read_bytes())
+                self.assertEqual(audit["qualification"], TOOL.INSTALL_PRODUCT_QUALIFICATION)
+                audit["qualification"] = qualification
+                audit_path.write_bytes(TOOL.canonical(audit) + b"\n")
+                with self.final_image_fixture_call(state), self.assertRaises(module.Refused):
+                    state.operation.execute()
+                self.assertEqual(state.operation.receipt["failure"]["reason"], "final-image-package-audit")
+                self.assertFalse(state.operation.receipt["passed"])
+                self.assertEqual(state.observations, [])
+                self.assertFalse((state.work / "distribution-final").exists())
+
     def final_package_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Real original files/audits/auth custody; only native returns are DATA."""
         module = ANDROID_HELPER
@@ -3307,8 +3496,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 for purpose in ("producer", "distribution-image", "observation-image")],
             "packageMount": {"attachEntered": True, "originalKnown": True, "detached": True, "retained": False,
                 "installerEntered": True, "installerOriginalZero": True, "sameRequestV2Readback": True, "systemServiceExitClaimed": False}}
-        audit = {"packageSha256": TOOL.digest(package), "packageSize": len(package), "packageIdentifier": TOOL.PACKAGE_ID,
-                 "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}
+        # Actual DATA producer result reaches the ordinary image consumer;
+        # never a hand-written scripts-only qualification for a product archive.
+        audit = TOOL.audit_install_product_command(SimpleNamespace(target=target, fixture=False,
+            scripts=state.work / "scripts", package=state.work / "package-final/MobileReleaseKit.pkg",
+            original_package=state.work / "MobileReleaseKit-original.pkg"))
+        self.assertEqual(audit["qualification"], TOOL.INSTALL_PRODUCT_QUALIFICATION)
         files = {"package-install.status": (b"0\n", 0o600), "installer-output.status": (b"0\n", 0o600),
             "package-finalization.status": (b"0\n", 0o600), "package-request-id.txt": ((request + "\n").encode(), 0o600),
             "android-helper-package-install.json": (TOOL.canonical(owner) + b"\n", 0o600),
@@ -3979,6 +4172,18 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             observations.append((tuple(argv), options))
             if argv[0] == module.direct_rust_tools(build_target)[0]:
                 self.assertEqual(argv[argv.index("--target") + 1], build_target)
+                if argv[1] == "fetch":
+                    self.assertEqual(build_target, module.INTEL_TARGET)
+                    self.assertEqual(argv, [module.direct_rust_tools(build_target)[0], "fetch", "--manifest-path",
+                        str(checkout / module.WORKSPACE / "Cargo.toml"), "--locked", "--target", build_target])
+                    self.assertEqual((options["timeout"], options["capture"], options["text"], options["output_limit"]),
+                                     (120, True, False, 4 * 1024 * 1024))
+                    if failure == "fetch-owner":
+                        raise RuntimeError("DATA fetch original result unavailable")
+                    return CompletedProcess(argv, 101 if failure == "fetch-nonzero" else 0,
+                        "malformed DATA" if failure == "fetch-malformed" else b"", b"synthetic fetch DATA\n")
+                self.assertEqual(argv[1], "build")
+                self.assertEqual("--offline" in argv, build_target == module.INTEL_TARGET)
                 target = work / "android-helper-target"
                 binary = target / build_target / "release" / module.RESIDENT_IMAGE
                 binary.parent.mkdir(parents=True)
@@ -4440,6 +4645,31 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             else: changed["remove-producer.sig"] = (signed + b"x", 0o444)
             with self.assertRaises(TOOL.Refused): TOOL.removal_distribution_layout_data(list(changed), expected, changed)
 
+    def test_intel_fetch_failure_never_reaches_compiler_or_signer(self):
+        module = ANDROID_HELPER
+        self.assertEqual(module.prepare_roles(module.ARM_TARGET), module.PREPARE_ROLES)
+        self.assertEqual(module.prepare_roles(module.INTEL_TARGET), ("resident-fetch",) + module.PREPARE_ROLES)
+        with self.assertRaises(module.Refused): module.prepare_roles("foreign-target")
+        for failure in ("fetch-nonzero", "fetch-owner", "fetch-malformed"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    failure=failure, build_target=module.INTEL_TARGET)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=module.INTEL_TARGET)
+                with self.assertRaises(module.Refused): operation.execute()
+                self.assertEqual(len(observations), 1)
+                self.assertEqual(observations[0][0][1], "fetch")
+                self.assertEqual(tuple(row["role"] for row in operation.calls), ("resident-fetch",))
+                call = operation.calls[0]
+                self.assertEqual(call["returned"], failure == "fetch-nonzero")
+                self.assertEqual(call["capturesSettled"], failure == "fetch-nonzero")
+                self.assertFalse(operation.receipt["passed"])
+                self.assertEqual(operation.receipt["failure"]["stage"], "resident-dependency-fetch")
+                self.assertFalse(operation.credential_calls or operation.credential_contexts)
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in operation.entries))
+                self.assertFalse((work / module.RESIDENT_IMAGE).exists())
+                self.assertFalse((work / "android-helper-target" / module.INTEL_TARGET).exists())
+
     def test_actual_copy_and_staged_checks_bind_final_bytes_and_retire_each_owned_target(self):
         module = ANDROID_HELPER
 
@@ -4526,7 +4756,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 self.assertTrue(receipt["passed"] and receipt["originalClosesKnown"] and receipt["targetRetired"])
                 self.assertEqual(receipt["target"], build_target)
                 self.assertEqual(receipt["residentImageCargoArtifact"]["target"], build_target)
-                build_argv, build_options = observations[0]
+                build_index = int(build_target == module.INTEL_TARGET)
+                build_argv, build_options = observations[build_index]
+                if build_index:
+                    fetch_argv, fetch_options = observations[0]
+                    self.assertEqual(fetch_argv[1], "fetch")
+                    self.assertEqual(fetch_options["environ"], build_options["environ"])
+                    self.assertFalse(set(fetch_options["environ"]) & set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                        + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
+                    self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
+                self.assertEqual("--offline" in build_argv, bool(build_index))
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
@@ -4534,12 +4773,12 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                                  (720 if build_target == module.INTEL_TARGET else 480, True, False, 4 * 1024 * 1024))
                 diagnostic = b"warning: synthetic helper build diagnostic\n"
                 self.assertEqual((work / "android-helper-build.stderr").read_bytes(), diagnostic)
-                self.assertEqual(receipt["originalCalls"][0]["stderrSha256"], module.digest(diagnostic))
+                self.assertEqual(receipt["originalCalls"][build_index]["stderrSha256"], module.digest(diagnostic))
                 self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
                                  self.encoded(self.cargo_rows(checkout, work / "android-helper-target", build_target=build_target)))
-                self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.PREPARE_ROLES)
-                self.assertEqual(len(receipt["originalCalls"]), 8)
-                self.assertEqual(receipt["originalCalls"][3]["role"], "entry-build")
+                self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.prepare_roles(build_target))
+                self.assertEqual(len(receipt["originalCalls"]), 8 + build_index)
+                self.assertEqual(receipt["originalCalls"][3 + build_index]["role"], "entry-build")
                 self.assertIn("--lib", build_argv)
                 self.assertNotIn("--bin", build_argv)
                 self.assertEqual(build_options["environ"]["MRK_IMAGE_RELEASE_ID"], release)
@@ -4576,7 +4815,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(verified["target"], build_target)
                     self.assertEqual([call["role"] for call in verified["originalCalls"]], [phase, phase + "-resident-image"])
                     self.assertEqual(verified["residentImageSha256"], operation.resident_image_sha256)
-                self.assertEqual([item[0][0] for item in observations], [module.direct_rust_tools(build_target)[0]] + ["/usr/bin/codesign"] * 2
+                self.assertEqual([item[0][0] for item in observations], [module.direct_rust_tools(build_target)[0]] * (1 + build_index) + ["/usr/bin/codesign"] * 2
                                  + ["/usr/bin/xcrun"] * 3 + ["/usr/bin/codesign"] * 6)
         # A plausible Cargo graph is insufficient: its actual copied image
         # must pass the same selected Intel Mach-O check before publication.
@@ -4590,7 +4829,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             self.assertFalse(receipt["passed"])
             self.assertEqual(receipt["failure"]["stage"], "compiler-original-copy")
             self.assertTrue(receipt["originalClosesKnown"] and receipt["targetRetired"])
-            self.assertEqual(len(observations), 1)
+            self.assertEqual(len(observations), 2)
+            self.assertEqual([row[0][1] for row in observations], ["fetch", "build"])
             self.assertFalse((work / module.RESIDENT_IMAGE).exists())
 
         # Same actual filesystem copy/POST/retirement path, with only original
@@ -13191,12 +13431,34 @@ class MacCurrentRuntimeData(unittest.TestCase):
                          "unchanged historical DATA\n")
 
     def test_current_intel_app_build_budget_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
+        for filename, pin in before_pins.items():
+            raw = (root / ".github/workflows" / filename).read_text()
+            self.assertEqual(raw.count("&& 26 || 10"), 1)
+            self.assertIn("cancel-in-progress: false", raw)
+            prior = without_intel_fetch_workflow(raw)
+            self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()), (pin["bytes"], pin["sha256"]))
+            self.assertEqual(without_intel_fetch_workflow(prior), prior)
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(raw),
+                             without_intel_resident_prepare_budget_workflow(prior))
+            self.assertEqual(raw.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in dict(INTEL_FETCH_WORKFLOW_INVERSE)[raw.splitlines()[0]]:
+                for damaged in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                    changed = raw.replace(current, damaged, 1)
+                    if changed == prior:
+                        self.assertEqual(without_intel_fetch_workflow(changed), prior)
+                        continue  # Complete exact predecessor is supported; partial mixtures are not.
+                    try: projected = without_intel_fetch_workflow(changed)
+                    except AssertionError: pass
+                    else: self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), pin["sha256"])
         # Current SOURCE only: a larger finite allocation is not native completion.
         root = Path(__file__).absolute().parents[2]
         with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
             body = stream.read(512 * 1024 + 1)
         self.assertLessEqual(len(body), 512 * 1024)
-        source = body.decode("utf-8", "strict")
+        source = without_intel_fetch_workflow(body.decode("utf-8", "strict"))
         # This independent Intel resident allowance is not measured completion.
         # Assert current raw callers, then retire exactly this delta before old tables.
         resident_pins = {'desktop-macos-installed.yml': {'bytes': 457018, 'sha256': '0af1bc78d9201ccd77fdde2d3969af36641f940e0cc89a4c0b6744d34f4b5f1a'}, 'desktop-macos-aqua.yml': {'bytes': 132632, 'sha256': '16829e57ec783d368c11763bf3d5a5415fdd729c876aa6eb36367eb2a16033b0'}}
@@ -13205,7 +13467,7 @@ class MacCurrentRuntimeData(unittest.TestCase):
             with (root / ".github/workflows" / resident_filename).open("rb") as resident_stream:
                 resident_body = resident_stream.read(512 * 1024 + 1)
             self.assertLessEqual(len(resident_body), 512 * 1024)
-            resident_source = resident_body.decode("utf-8", "strict")
+            resident_source = without_intel_fetch_workflow(resident_body.decode("utf-8", "strict"))
             resident_rows = dict(INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE)[resident_source.splitlines()[0]]
             for previous, current in resident_rows:
                 self.assertEqual(resident_source.count(current), 1)
@@ -13247,8 +13509,13 @@ class MacCurrentRuntimeData(unittest.TestCase):
                     self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
             with self.assertRaises(AssertionError):
                 without_intel_resident_prepare_budget_workflow(resident_source.replace(resident_source.splitlines()[0], "name: foreign", 1))
-            self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
-                             resident_prior + "# unrelated\n")
+            if resident_filename == "desktop-macos-installed.yml":
+                # Current normal-iOS source is a complete pinned predecessor, not a loose textual inverse.
+                with self.assertRaisesRegex(AssertionError, "normal iOS pending workflow whole predecessor differs"):
+                    without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n")
+            else:
+                self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
+                                 resident_prior + "# unrelated\n")
         for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
             with self.assertRaises(AssertionError):
                 without_intel_resident_prepare_budget_workflow(invalid)
@@ -13266,6 +13533,10 @@ class MacCurrentRuntimeData(unittest.TestCase):
         self.assertEqual(len(resident_timeout), 1)
         self.assertEqual(ast.dump(resident_timeout[0]), ast.dump(ast.parse("720 if self.target == INTEL_TARGET else 480", mode="eval").body))
         resident_text = ast.get_source_segment(resident_helper, resident_prepare)
+        self.assertEqual(resident_text.count(INTEL_FETCH_PREPARE_PREFIX), 1)
+        self.assertEqual(resident_text.count(INTEL_FETCH_OFFLINE_REGION[1]), 1)
+        resident_text = resident_text.replace(INTEL_FETCH_PREPARE_PREFIX, "", 1)
+        resident_text = resident_text.replace(INTEL_FETCH_OFFLINE_REGION[1], INTEL_FETCH_OFFLINE_REGION[0], 1)
         self.assertEqual(resident_text.count("timeout=720 if self.target == INTEL_TARGET else 480"), 1)
         resident_old = resident_text.replace("timeout=720 if self.target == INTEL_TARGET else 480", "timeout=480", 1)
         self.assertEqual(hashlib.sha256(resident_old.encode()).hexdigest(), '100f794aa060db73370a1ab8c789075f2ce03792a8ca270447b044b9632a9da3')
@@ -16207,7 +16478,7 @@ class MacNormalPreviewData(unittest.TestCase):
             "installation-observation.json": observed, "android-helper-package-install.json": owner,
             "package-audit.json": {"packageSha256": TOOL.digest(package), "packageSize": len(package),
                 "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
-                "qualification": "scripts-only-package-audited-not-installed-or-GUI-qualified"}}
+                "qualification": TOOL.INSTALL_PRODUCT_QUALIFICATION}}
         # Explicitly synthetic final-carrier correspondence, never a native
         # notary/Installer receipt. The real parser is called by preview below.
         final_package = b'{"syntheticFinalPackageReceipt":"not native evidence"}\n'
@@ -16309,6 +16580,8 @@ class MacNormalPreviewData(unittest.TestCase):
 
     def test_failed_original_status_changed_package_or_unsettled_readback_cannot_publish(self):
         failures = [
+            ("package-audit.json", "qualification", "scripts-only-package-audited-not-installed-or-GUI-qualified"),
+            ("package-audit.json", "qualification", "not-a-product-audit"),
             ("image-finalization.status", None, b"1\n"), ("package-finalization.status", None, b"1\n"),
             ("distribution-final/MobileReleaseKit.dmg", None, b"changed"),
             ("android-helper-finalize-package.json", None, b"changed raw S3 receipt"),

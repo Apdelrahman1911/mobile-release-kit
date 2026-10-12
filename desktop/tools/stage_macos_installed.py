@@ -2067,7 +2067,7 @@ def preview_command(args):
     need(type(audit) is dict and audit.get("packageSha256") == digest(package)
          and type(audit.get("packageSize")) is int and audit["packageSize"] == len(package)
          and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
-         and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified",
+         and audit.get("qualification") == INSTALL_PRODUCT_QUALIFICATION,
          "preview-original-audited-package")
     descriptor = read(work / "producer-root/producer.json", PRODUCER_DESCRIPTOR_BYTES)
     signed = read(work / "producer-root/producer.sig", PRODUCER_SIGNATURE_BYTES)
@@ -3104,6 +3104,39 @@ def install_product_distribution(body, expected):
     need(tree(actual) == tree(install_product_xml(expected)), "install-product-distribution")
 
 
+# Closed diagnostic vocabulary; no arbitrary exception text is public authority.
+INSTALL_PRODUCT_QUALIFICATION = 'fixed-install-product-and-scripts-audited-not-installed-or-GUI-qualified'
+
+
+INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
+    'complete-root-owned-scripts-correspondence',
+    'fixed-install-product-purpose',
+    'install-product-component',
+    'install-product-distribution',
+    'install-product-readme',
+    'install-product-source-bound',
+    'install-product-source-version',
+    'install-product-xar-bound',
+    'install-product-xar-checksum',
+    'install-product-xar-count',
+    'install-product-xar-data',
+    'install-product-xar-directory',
+    'install-product-xar-duplicate',
+    'install-product-xar-encoding',
+    'install-product-xar-file',
+    'install-product-xar-header',
+    'install-product-xar-id',
+    'install-product-xar-member-checksum',
+    'install-product-xar-metadata',
+    'install-product-xar-name',
+    'install-product-xar-range',
+    'install-product-xar-roster',
+    'install-product-xar-size',
+    'install-product-xar-toc',
+    'install-product-xml',
+))
+
+
 def install_product_members(body):
     """Closed outer Install XAR using the existing context's member syntax.
 
@@ -3165,10 +3198,16 @@ def install_product_members(body):
                     "atime", "ctime", "mtime", "inode", "deviceno", "FinderCreateTime"}
         need(all(child.tag in metadata for child in element), "install-product-xar-metadata")
         names, types = element.findall("name"), element.findall("type")
-        repeated = (len(names) == 2 and len(types) == 1 and types[0].text == "file"
-                    and len(element.findall("data")) == 1 and not element.findall("file")
+        # xar_add_from_archive constructs a named node then copies all original
+        # properties. One copy of the audited product (file names<=2, dirs=1)
+        # can therefore have file names<=3 and dirs=2, always identical/bare.
+        repeated = (len(types) == 1
+                    and ((types[0].text == "file" and 2 <= len(names) <= 3
+                          and len(element.findall("data")) == 1 and not element.findall("file"))
+                         or (types[0].text == "directory" and len(names) == 2
+                             and not element.findall("data")))
                     and all(not node.attrib and not list(node) and not (node.tail or "").strip() for node in names)
-                    and type(names[0].text) is str and names[0].text == names[1].text
+                    and type(names[0].text) is str and all(node.text == names[0].text for node in names)
                     and parent + names[0].text in allowed)
         need(len(types) == 1 and (len(names) == 1 or repeated)
              and all(len(element.findall(tag)) <= 1 for tag in metadata - ({"file", "name"} if repeated else {"file"})),
@@ -3274,7 +3313,7 @@ def audit_install_product_command(args):
             "originalPackageSha256": digest(original), "packageInfoSha256": digest(component["PackageInfo"]),
             "packageIdentifier": identifier, "scriptFileCount": len(scripts), "finalDestinationPayloadEntries": 0,
             "productDistributionSha256": digest(members["Distribution"]), "productReadMeSha256": digest(readme),
-            "qualification": "fixed-install-product-and-scripts-audited-not-installed-or-GUI-qualified"}
+            "qualification": INSTALL_PRODUCT_QUALIFICATION}
 
 
 def remove_scripts_command(args):

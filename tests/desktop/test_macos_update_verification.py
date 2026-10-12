@@ -53,6 +53,16 @@ def nomination():
     return result
 
 
+def nested_nomination():
+    source = nomination()
+    for row in source["targets"].values():
+        row["members"] = [{"name": name, "bytes": len(name.encode()), "sha256": DATA.sha(name.encode())}
+                          for name in DATA.ARTIFACT_PATHS]
+        row["image"] = row["members"][0]
+        row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
+    return source
+
+
 class UpdateDataTests(unittest.TestCase):
     def test_closed_nomination_requires_real_independent_qualified_source(self):
         source = nomination()
@@ -68,6 +78,78 @@ class UpdateDataTests(unittest.TestCase):
         bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]]["members"] *= 2
         with self.assertRaises(ValueError): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
         self.assertEqual(DATA.REPOSITORY, "Apdelrahman1911/mobile-release-kit")
+        source = nested_nomination()
+        for target in DATA.TARGETS:
+            self.assertEqual(DATA.nomination_data(source, target, STAGER), source["targets"][target])
+            for fault in ("missing", "extra", "duplicate", "flat", "prefix", "traversal", "case", "separator", "removal", "hash"):
+                bad = copy.deepcopy(source); row = bad["targets"][target]
+                if fault == "missing": row["members"].pop()
+                elif fault == "extra": row["members"].append(dict(row["members"][0], name="extra.txt"))
+                elif fault == "duplicate": row["members"][-1] = dict(row["members"][0])
+                elif fault in ("flat", "prefix", "traversal", "case", "separator"):
+                    row["members"][0]["name"] = {"flat": "MobileReleaseKit.dmg", "prefix": "other/MobileReleaseKit.dmg",
+                        "traversal": "preview/../MobileReleaseKit.dmg", "case": "Preview/MobileReleaseKit.dmg",
+                        "separator": "preview\\MobileReleaseKit.dmg"}[fault]
+                elif fault == "removal": row["image"] = row["members"][3]
+                else: row["members"][1]["sha256"] = "0" * 64
+                with self.subTest(target=target, artifact=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.nomination_data(bad, target, STAGER)
+        # The mounted package parser never acquires the new artifact path grant.
+        with self.assertRaises(ValueError): DATA.member_data(source["targets"][DATA.TARGETS[0]]["image"])
+
+    def test_complete_artifact_originals_keep_nested_namespaces_and_post(self):
+        # Real existing descriptor-bound owner IO, hashes, POST and consuming
+        # closes. No original process, mount, signing or Installer is started.
+        for fault in (None, "flat", "missing", "extra-root", "extra-child", "case", "hash-install", "hash-removal",
+                      "symlink-file", "symlink-directory", "hardlink", "post-replace", "post-extra", "post-directory"):
+            with self.subTest(artifact=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                selected = (nomination() if fault == "flat" else nested_nomination())["targets"][DATA.TARGETS[0]]
+                download = root / "update-predecessor"; download.mkdir(mode=0o700)
+                for row in selected["members"]:
+                    path = download / row["name"]; path.parent.mkdir(parents=True, exist_ok=True)
+                    body = row["name"].encode()
+                    path.write_bytes(body); path.chmod(0o644)
+                    row["bytes"], row["sha256"] = len(body), DATA.sha(body)
+                leaf = download / selected["image"]["name"]
+                if fault == "missing": (download / "remove-preview/REMOVE.md").unlink()
+                elif fault == "extra-root": (download / "extra").write_bytes(b"inert")
+                elif fault == "extra-child": (download / "preview/extra").write_bytes(b"inert")
+                elif fault == "case": (download / "Preview").mkdir()
+                elif fault in ("hash-install", "hash-removal"):
+                    altered = leaf if fault == "hash-install" else download / "remove-preview/REMOVE.md"
+                    altered.write_bytes(b"X" * altered.stat().st_size)
+                elif fault == "symlink-file":
+                    target = root / "other"; target.write_bytes(leaf.read_bytes()); leaf.unlink(); leaf.symlink_to(target)
+                elif fault == "symlink-directory":
+                    (download / "preview").rename(root / "other"); (download / "preview").symlink_to(root / "other")
+                elif fault == "hardlink": os.link(leaf, root / "other")
+                op = HELPER.Operation.__new__(HELPER.Operation)
+                op.entries = []; op.entry_registry = {}; op.errors = []; op.directories = {}
+                op.app_absence = None; op.update = {}; op.work = root; op.source_entry = None; op.phase = DATA.PHASE
+                op.package_sources = []; op.package_outputs = []; op.package_roots = []; op.package_clock = lambda: 1
+                try:
+                    op.work_entry = op.register(os.open(root, HELPER.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
+                    op.work_entry["identity"] = HELPER.directory_identity(os.fstat(op.work_entry["fd"]))
+                    if fault in (None, "flat", "post-replace", "post-extra", "post-directory"):
+                        image = DATA.artifact_inputs(op, selected)
+                        self.assertEqual(op.read(image), selected["image"]["name"].encode())
+                        self.assertEqual(len(op.package_outputs), 1 if fault == "flat" else 6)
+                        self.assertEqual(len(op.package_roots), 1 if fault == "flat" else 3)
+                        self.assertEqual(len(op.entries), 3 if fault == "flat" else 10)  # Includes the existing work FD.
+                        op.package_post()
+                        if fault == "post-replace":
+                            replacement = root / "new"; replacement.write_bytes(leaf.read_bytes()); replacement.chmod(0o644); replacement.replace(leaf)
+                        elif fault == "post-extra": (download / "remove-preview/new").write_bytes(b"inert")
+                        elif fault == "post-directory":
+                            (download / "preview").rename(root / "old"); (download / "preview").mkdir()
+                        if fault and fault.startswith("post-"):
+                            with self.assertRaises(HELPER.Refused): op.package_post()
+                    else:
+                        with self.assertRaises((ValueError, OSError)): DATA.artifact_inputs(op, selected)
+                finally:
+                    for entry in reversed(op.entries): op.close(entry)
+                self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])
 
     def test_two_generation_shared_bound_and_resource_quote_are_not_per_generation(self):
         limit = 512 * 1024 * 1024
@@ -136,6 +218,11 @@ class UpdateDataTests(unittest.TestCase):
                   "-noautoopen", "-mountpoint", "/inert/work/package-mount", "-plist"]
         DATA.dispatch(op, DATA.ROLES[0], attach); self.assertTrue(op.mount_entered)
         with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], attach + ["-owners", "off"])
+        op.update["nomination"] = nested_nomination()["targets"][DATA.TARGETS[0]]
+        nested_attach = list(attach); nested_attach[2] = "/inert/work/update-predecessor/preview/MobileReleaseKit.dmg"
+        DATA.dispatch(op, DATA.ROLES[0], nested_attach)
+        for bad in (attach, [*nested_attach[:2], "/inert/work/update-predecessor/remove-preview/MobileReleaseKit-Remove.dmg", *nested_attach[3:]]):
+            with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], bad)
         op.calls = rows[:1]
         with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[1], [])
         now = 100

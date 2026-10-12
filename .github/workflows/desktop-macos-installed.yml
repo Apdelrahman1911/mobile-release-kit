@@ -25,7 +25,7 @@ jobs:
     environment: macos-developer-id
     name: normal-installed-${{ matrix.target }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
     runs-on: ${{ matrix.runner }}
-    # Raw timed-step union577min (ARM) /615min (Intel) includes the retained42min alternative.
+    # Raw timed-step union577min (ARM) /617min (Intel) includes the retained42min alternative.
     # Remaining-three adds28 nominal minutes versus one singleton; no350min fit is claimed.
     # The unchanged350min job cap is containing authority, never renewed per case.
     # Historical pre-Remove baselines: preview345 / recovery339 / installed210, plus5 overhead.
@@ -34,7 +34,7 @@ jobs:
     # Fixed removal uses its own two fresh ARM rows, the same350min ceiling,
     # separate baseline Install/UI-build preparation, O3 work1740/hard1800,
     # then one removal owner990 (fixed segment sum963); no budget restart.
-    # App-signature: ARM82 / Intel120 timed preparation +14 bounded setup
+    # App-signature: ARM82 / Intel122 timed preparation +14 bounded setup
     # +7 summary/cleanup/upload;7 overhead. Independent110 hard cap takes precedence.
     timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-signature' && 110 || 350 }}
     strategy:
@@ -1146,9 +1146,10 @@ jobs:
               output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
               output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
           PY_PACKAGING_SELECTION
+      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.
       - name: Build and sign the fixed resident image and C facades
         id: android_helper
-        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}
+        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}

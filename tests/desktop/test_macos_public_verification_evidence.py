@@ -1639,10 +1639,18 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                          {"PREPARE_ROLES", "CREDENTIAL_ROLES", "SIGNING_PHASES", "NOTARY_ROLES",
                           "FINAL_PACKAGE_ROLES", "FINAL_IMAGE_ROLES", "INSTALLER_CREDENTIAL_ROSTER", "REMOVE_PACKAGE_ROLES"})
         package = literals(ROOT / "desktop/tools/stage_macos_installed.py", {"PACKAGING_CALL_ROLES"})["PACKAGING_CALL_ROLES"]
+        failed_fetch = DATA.project_calls([{"role": "resident-fetch", "entered": True, "returned": False,
+            "capturesSettled": False, "dispatched": True, "contained": True, "cleanup_complete": True,
+            "originalFailure": {"available": True, "ownerErrorType": "ProcessError", "classification": "deadline",
+                                "timeoutSeconds": 120, "outputLimitBytes": 4 * 1024 * 1024}, "raw": SENTINEL}])
+        self.assertEqual((failed_fetch["recordedCount"], failed_fetch["unclassifiedCount"]), (1, 0))
+        self.assertEqual(failed_fetch["calls"][0]["role"], "resident-fetch")
+        self.assertEqual(failed_fetch["calls"][0]["originalFailure"]["timeoutSeconds"], 120)
+        self.assertNotIn(SENTINEL, json.dumps(failed_fetch))
         application = fixed["CREDENTIAL_ROLES"][:17] + ("search-final", "default-after")
         ad_hoc = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
         roster = {
-            "prepare": (fixed["PREPARE_ROLES"], application * 2, 2),
+            "prepare": (("resident-fetch",) + fixed["PREPARE_ROLES"], application * 2, 2),
             "verify-before": (("verify-before", "verify-before-resident-image", "verify-before-history-provider", "verify-before-github-seal"), (), 0),
             "verify-after": (("verify-after", "verify-after-resident-image", "verify-after-history-provider", "verify-after-github-seal"), (), 0),
             **{phase: ((phase, phase + "-verify"), application, 1) for phase in fixed["SIGNING_PHASES"]},

@@ -999,6 +999,11 @@ def direct_rust_tools(target=ARM_TARGET):
     return directory + "/cargo", directory + "/rustc"
 
 
+def prepare_roles(target):
+    build_profile(target)
+    return (("resident-fetch",) if target == INTEL_TARGET else ()) + PREPARE_ROLES
+
+
 def rust_toolchain(target=ARM_TARGET):
     """Expected current hosted label only; the original tool query is separate."""
     build_profile(target)
@@ -1133,7 +1138,7 @@ _FAILURE_REASONS = frozenset((
     'image-segment-sections', 'image-source-release', 'macho-build-version',
     'macho-command', 'macho-command-bound', 'macho-header',
     'macho-minimum-macos26', 'macho-target', 'one-compiler-alias',
-    'one-resident-image', 'original-nonzero-build', 'original-nonzero-desktop-facade-build',
+    'one-resident-image', 'original-nonzero-resident-fetch', 'original-nonzero-build', 'original-nonzero-desktop-facade-build',
     'original-nonzero-entry-build', 'original-nonzero-resident-facade-build', 'original-nonzero-resident-image-sign',
     'original-nonzero-resident-image-verify-signed', 'original-nonzero-sign', 'original-nonzero-verify-signed',
     'original-operation-refused', 'original-return-contract', 'output-close-unknown',
@@ -1147,7 +1152,7 @@ _FAILURE_REASONS = frozenset((
 ))
 _FAILURE_STAGES = (
     "same-package-noop",
-    "owned-directory-admission", "source-image-binding", "separate-resident-image-compiler",
+    "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
     "compiler-original-copy", "resident-image-source-selected-signing", "resident-image-verify-signed",
     "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
     "helper-source-selected-signing", "verify-signed",
@@ -1439,7 +1444,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
-            "role": token(native.get("role"), PREPARE_ROLES),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
@@ -3667,7 +3672,7 @@ class Operation:
         audit = self.stager.maintenance_json(audit_body, 16384)
         need(type(audit) is dict and audit.get("packageSha256") == digest(package) and type(audit.get("packageSize")) is int
              and audit["packageSize"] == len(package) and audit.get("packageIdentifier") == "dev.mobile-release-kit.desktop.installed"
-             and audit.get("qualification") == "scripts-only-package-audited-not-installed-or-GUI-qualified", "final-image-package-audit")
+             and audit.get("qualification") == self.stager.INSTALL_PRODUCT_QUALIFICATION, "final-image-package-audit")
         root = self.directory(self.work_entry, "producer-root", "final-image-producer-root")
         names = {"Install.pkg", "producer.json", "producer.sig"}
         need(set(os.listdir(root["fd"])) == names, "final-image-producer-roster")
@@ -3992,10 +3997,18 @@ class Operation:
         self.notary_post()
         size, sha = entry["identity"][6], self.notary_stream(entry)
         audit = self.stager.audit_install_product_command if self.install_product else self.stager.audit_command
-        result = self.final_package_io("final-package-original-audit", audit,
-            argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
-                               original_package=self.work / self.packager_filename,
-                               **self.removal_package_audit_arguments()))
+        try:
+            result = self.final_package_io("final-package-original-audit", audit,
+                argparse.Namespace(target=self.target, fixture=False, scripts=self.work / self.scripts_name, package=path,
+                                   original_package=self.work / self.packager_filename,
+                                   **self.removal_package_audit_arguments()))
+        except self.stager.Refused as error:
+            values = BaseException.args.__get__(error)
+            if (self.install_product is True and type(error) is self.stager.Refused
+                    and type(values) is tuple and len(values) == 1 and type(values[0]) is str
+                    and len(values[0]) <= 96 and values[0] in self.stager.INSTALL_PRODUCT_AUDIT_REASONS):
+                raise Refused(values[0]) from error
+            raise  # Preserve unknown failures and the pending original-audit latch.
         need(type(result) is dict and result.get("packageSize") == size and type(result["packageSize"]) is int
              and result.get("packageSha256") == sha and self.notary_stream(entry) == sha,
              "final-package-audit-original")
@@ -4745,9 +4758,17 @@ class Operation:
         return body
 
     def prepare(self):
+        if self.target == INTEL_TARGET:
+            self.stage = "resident-dependency-fetch"
+            # Separate acquisition from the unchanged compiler deadline. The
+            # same original call must return0 with settled captures first.
+            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",
+                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],
+                      build_environment(self.environment, self.work, self.image_release, target=self.target),
+                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
-                           "--locked", "--release", "--jobs", "1", "--target", self.target,
+                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
                            cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 480, limit=4 * 1024 * 1024)
@@ -7061,7 +7082,7 @@ class Operation:
                  PYTHON_ROLES if self.phase in PYTHON_PHASES else
                  self.stager.PACKAGING_CALL_ROLES if self.phase == "package-install" else
                  REMOVE_PACKAGE_ROLES if self.phase == "package-remove" else
-                 PREPARE_ROLES if self.phase == "prepare" else
+                 prepare_roles(self.target) if self.phase == "prepare" else
                  (self.phase, self.phase + "-verify") if self.phase in SIGNING_PHASES + TOOL_SIGNING_PHASES else (self.phase, self.phase + "-resident-image") + self.tool_staged_roles)
         self.receipt["passed"] = ("failure" not in self.receipt and not self.errors and self.credential_known()
                                   and not self.credential_failed and self.credential_active is None
@@ -7294,7 +7315,7 @@ def app_signature_receipt(value, phase, target, environment, selected):
          and "failure" not in value and value.get("cleanupErrors") == []
          and value.get("directStagerIOPending", False) is None,
          "app-signature-phase-finality")
-    roles = (PREPARE_ROLES if phase == "prepare" else
+    roles = (prepare_roles(target) if phase == "prepare" else
              (phase, phase + "-verify") if phase in SIGNING_PHASES else
              (phase, phase + "-resident-image") + tuple(phase + "-" + p for p in TOOL_FIXED if selected[p] is not None))
     calls = value.get("originalCalls")

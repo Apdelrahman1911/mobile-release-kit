@@ -641,6 +641,31 @@ NORMAL_IOS_PENDING_SWIFT_INVERSE = (('init(seconds: TimeInterval, androidPositiv
   '        } catch { if cleanupFailure == nil { cleanupFailure = error } }\n'
   '        // Never delete possibly live fixture/app state or seek a replacement owner.'))
 
+INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited early preview (Aqua gate separate)', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}"), ('Raw timed-step union577min (ARM) /615min (Intel)', 'Raw timed-step union577min (ARM) /617min (Intel)'), ('App-signature: ARM82 / Intel120 timed preparation', 'App-signature: ARM82 / Intel122 timed preparation')]), ('name: Desktop macOS genuine Aqua engineering verification', [("      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 24 || 10 }}", "      # Intel fetch120 is separate; compile720 and containing job caps are unchanged.\n      - name: Build and sign the fixed resident image and C facades\n        id: android_helper\n        if: success() && (env.MRK_MACOS_AQUA_SCOPE == 'project-fields' || env.MRK_MACOS_AQUA_SCOPE == 'ios-current-synthetic' || env.MRK_MACOS_AQUA_SCOPE == 'android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'project-fields-android-inputs' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping' || env.MRK_MACOS_AQUA_SCOPE == 'installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'vault-helper-shipping-installation-inspection' || env.MRK_MACOS_AQUA_SCOPE == 'project-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'ios-recovery-pending' || env.MRK_MACOS_AQUA_SCOPE == 'doctor-preflight2' || env.MRK_MACOS_AQUA_SCOPE == 'local-edits3')\n        timeout-minutes: ${{ matrix.target == 'x86_64-apple-darwin' && 26 || 10 }}")]))
+
+INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
+
+INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
+
+def without_intel_fetch_workflow(source):
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("Intel fetch workflow SOURCE bound differs")
+    markers = ("Intel fetch120 is separate", "&& 26 || 10")
+    if not any(marker in source for marker in markers):
+        return source
+    selected = [rows for route, rows in INTEL_FETCH_WORKFLOW_INVERSE if source.startswith(route + "\n")]
+    if len(selected) != 1:
+        raise AssertionError("Intel fetch workflow route differs")
+    for previous, current in selected[0]:
+        if source.count(current) != 1 or source.count(previous) != current.count(previous):
+            raise AssertionError("Intel fetch workflow complete exact delta differs")
+    for previous, current in reversed(selected[0]):
+        source = source.replace(current, previous, 1)
+    if any(marker in source for marker in markers):
+        raise AssertionError("Intel fetch workflow partial delta remains")
+    return source
+
+
 def without_normal_ios_pending_source(source):
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("normal iOS pending Swift SOURCE bound differs")
@@ -2736,6 +2761,7 @@ NORMAL_IOS_PENDING_WORKFLOW_INVERSE = (('      # SOURCE-owned: unsigned iOS jour
 
 
 def without_normal_ios_pending_workflow(source):
+    source = without_intel_fetch_workflow(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("normal iOS pending workflow SOURCE bound differs")
     if "ios-pending-recovery" not in source and "normal_ios_pending_ui_" not in source:
@@ -4008,12 +4034,34 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                          "unchanged historical DATA\n")
 
     def test_current_intel_app_build_budget_precedes_historical_projection(self):
+        root = Path(__file__).absolute().parents[2]
+        before_pins = {'desktop-macos-installed.yml': {'bytes': 474760, 'sha256': '7ca1cb29075ca0f14bd829f59f826e6da9830d61bb27a2cae5dd32bdb018c8f2'}, 'desktop-macos-aqua.yml': {'bytes': 133491, 'sha256': '36b53942b31b13337875fdd47872a2f54f0a285d746e071b33a42c157f74f57d'}}
+        for filename, pin in before_pins.items():
+            raw = (root / ".github/workflows" / filename).read_text()
+            self.assertEqual(raw.count("&& 26 || 10"), 1)
+            self.assertIn("cancel-in-progress: false", raw)
+            prior = without_intel_fetch_workflow(raw)
+            self.assertEqual((len(prior.encode()), hashlib.sha256(prior.encode()).hexdigest()), (pin["bytes"], pin["sha256"]))
+            self.assertEqual(without_intel_fetch_workflow(prior), prior)
+            self.assertEqual(without_intel_resident_prepare_budget_workflow(raw),
+                             without_intel_resident_prepare_budget_workflow(prior))
+            self.assertEqual(raw.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0],
+                             prior.split("    strategy:\n", 1)[1].split("    env:\n", 1)[0])
+            for previous, current in dict(INTEL_FETCH_WORKFLOW_INVERSE)[raw.splitlines()[0]]:
+                for damaged in (previous, current + current, current[:-1], current.replace(" ", "  ", 1)):
+                    changed = raw.replace(current, damaged, 1)
+                    if changed == prior:
+                        self.assertEqual(without_intel_fetch_workflow(changed), prior)
+                        continue  # Complete exact predecessor is supported; partial mixtures are not.
+                    try: projected = without_intel_fetch_workflow(changed)
+                    except AssertionError: pass
+                    else: self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), pin["sha256"])
         # Current SOURCE only: a larger finite allocation is not native completion.
         root = Path(__file__).absolute().parents[2]
         with (root / ".github/workflows/desktop-macos-installed.yml").open("rb") as stream:
             body = stream.read(512 * 1024 + 1)
         self.assertLessEqual(len(body), 512 * 1024)
-        source = body.decode("utf-8", "strict")
+        source = without_intel_fetch_workflow(body.decode("utf-8", "strict"))
         # This independent Intel resident allowance is not measured completion.
         # Assert current raw callers, then retire exactly this delta before old tables.
         resident_pins = {'desktop-macos-installed.yml': {'bytes': 457018, 'sha256': '0af1bc78d9201ccd77fdde2d3969af36641f940e0cc89a4c0b6744d34f4b5f1a'}, 'desktop-macos-aqua.yml': {'bytes': 132632, 'sha256': '16829e57ec783d368c11763bf3d5a5415fdd729c876aa6eb36367eb2a16033b0'}}
@@ -4022,7 +4070,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
             with (root / ".github/workflows" / resident_filename).open("rb") as resident_stream:
                 resident_body = resident_stream.read(512 * 1024 + 1)
             self.assertLessEqual(len(resident_body), 512 * 1024)
-            resident_source = resident_body.decode("utf-8", "strict")
+            resident_source = without_intel_fetch_workflow(resident_body.decode("utf-8", "strict"))
             resident_rows = dict(INTEL_RESIDENT_PREPARE_BUDGET_WORKFLOW_INVERSE)[resident_source.splitlines()[0]]
             for previous, current in resident_rows:
                 self.assertEqual(resident_source.count(current), 1)
@@ -4064,8 +4112,13 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
                     self.assertNotEqual(hashlib.sha256(projected.encode()).hexdigest(), resident_pin["sha256"])
             with self.assertRaises(AssertionError):
                 without_intel_resident_prepare_budget_workflow(resident_source.replace(resident_source.splitlines()[0], "name: foreign", 1))
-            self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
-                             resident_prior + "# unrelated\n")
+            if resident_filename == "desktop-macos-installed.yml":
+                # Current normal-iOS source is a complete pinned predecessor, not a loose textual inverse.
+                with self.assertRaisesRegex(AssertionError, "normal iOS pending workflow whole predecessor differs"):
+                    without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n")
+            else:
+                self.assertEqual(without_intel_resident_prepare_budget_workflow(resident_source + "# unrelated\n"),
+                                 resident_prior + "# unrelated\n")
         for invalid in (None, b"DATA", "x" * (512 * 1024 + 1)):
             with self.assertRaises(AssertionError):
                 without_intel_resident_prepare_budget_workflow(invalid)
@@ -4083,6 +4136,10 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         self.assertEqual(len(resident_timeout), 1)
         self.assertEqual(ast.dump(resident_timeout[0]), ast.dump(ast.parse("720 if self.target == INTEL_TARGET else 480", mode="eval").body))
         resident_text = ast.get_source_segment(resident_helper, resident_prepare)
+        self.assertEqual(resident_text.count(INTEL_FETCH_PREPARE_PREFIX), 1)
+        self.assertEqual(resident_text.count(INTEL_FETCH_OFFLINE_REGION[1]), 1)
+        resident_text = resident_text.replace(INTEL_FETCH_PREPARE_PREFIX, "", 1)
+        resident_text = resident_text.replace(INTEL_FETCH_OFFLINE_REGION[1], INTEL_FETCH_OFFLINE_REGION[0], 1)
         self.assertEqual(resident_text.count("timeout=720 if self.target == INTEL_TARGET else 480"), 1)
         resident_old = resident_text.replace("timeout=720 if self.target == INTEL_TARGET else 480", "timeout=480", 1)
         self.assertEqual(hashlib.sha256(resident_old.encode()).hexdigest(), '100f794aa060db73370a1ab8c789075f2ce03792a8ca270447b044b9632a9da3')

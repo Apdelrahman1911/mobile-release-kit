@@ -65,7 +65,7 @@ REMOVAL_RELEASE = "macos26-arm64-desktop-01"
 NATIVE_ROLES = frozenset((
     "update-baseline-attach", "update-baseline-installer", "update-baseline-detach",
     *REMOVAL_ROLES["ordinary"], *REMOVAL_ROLES["abrupt"],
-    "build", "resident-image-sign", "resident-image-verify-signed", "entry-build", "desktop-facade-build",
+    "resident-fetch", "build", "resident-image-sign", "resident-image-verify-signed", "entry-build", "desktop-facade-build",
     "resident-facade-build", "sign", "verify-signed", "verify-before", "verify-after",
     "verify-before-resident-image", "verify-after-resident-image", "verify-before-history-provider", "verify-before-github-seal",
     "verify-after-history-provider", "verify-after-github-seal", "resolve-notarytool", "resolve-stapler",
@@ -96,10 +96,11 @@ FAILURE_TYPES = frozenset(("Refused", "OSError", "ValueError", "TypeError", "Run
     "MemoryError", "RecursionError", "UnicodeError", "JSONDecodeError", "KeyboardInterrupt", "SystemExit",
     "ProcessError", "ProcessCleanupError", "ProcessOutcomeUnknown", "Incomplete"))
 STAGES = frozenset((*PHASES, *NATIVE_ROLES, "owned-directory-admission", "source-image-binding",
-    "separate-resident-image-compiler", "compiler-original-copy", "resident-image-source-selected-signing",
+    "resident-dependency-fetch", "separate-resident-image-compiler", "compiler-original-copy", "resident-image-source-selected-signing",
     "fixed-installed-entry-compiler", "desktop-facade-compiler", "resident-facade-compiler",
     "helper-source-selected-signing", "notary-preflight-input", "notary-known-private-retirement", "final-image-owned-publication",
     "final-package-signed-output", "final-package-mode-and-publication", "install-product-original-adoption",
+    "final-package-original-audit",
     "package-final-audit", "package-explicit-producer-compiler", "package-producer-emission",
     "package-readonly-attach", "standard-original-installer", "package-nonroot-v2-readback"))
 # Fixed current pre-first-original notary guards; never a dynamic reason prefix.
@@ -134,7 +135,36 @@ NOTARY_ADMISSION_REASONS = frozenset((
     'notary-work-volume-reserve',
     'notary-zip-sha256-changed',
 ))
-REASONS = frozenset(("notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
+INSTALL_PRODUCT_AUDIT_REASONS = frozenset((
+    'complete-root-owned-scripts-correspondence',
+    'fixed-install-product-purpose',
+    'install-product-component',
+    'install-product-distribution',
+    'install-product-readme',
+    'install-product-source-bound',
+    'install-product-source-version',
+    'install-product-xar-bound',
+    'install-product-xar-checksum',
+    'install-product-xar-count',
+    'install-product-xar-data',
+    'install-product-xar-directory',
+    'install-product-xar-duplicate',
+    'install-product-xar-encoding',
+    'install-product-xar-file',
+    'install-product-xar-header',
+    'install-product-xar-id',
+    'install-product-xar-member-checksum',
+    'install-product-xar-metadata',
+    'install-product-xar-name',
+    'install-product-xar-range',
+    'install-product-xar-roster',
+    'install-product-xar-size',
+    'install-product-xar-toc',
+    'install-product-xml',
+))
+
+
+REASONS = frozenset((*INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
     *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",
     "original-operation-refused", "helper-package-incomplete", "package-finality-incomplete",
