@@ -2568,6 +2568,101 @@ def packaging_fixture(target="aarch64-apple-darwin", *, package=b"synthetic comp
 class MacAndroidHelperPackagingData(unittest.TestCase):
     """No compiler/codesign/helper/owner execution; every child is a DATA double."""
 
+    def test_unsigned_product_diagnostic_is_bounded_and_never_executes_its_payload(self):
+        path = Path(__file__).absolute().parents[2] / 'desktop/tools/macos_package_format_diagnostic.py'
+        spec = importlib.util.spec_from_file_location('mrk_unsigned_format_data', path)
+        probe = importlib.util.module_from_spec(spec); spec.loader.exec_module(probe)
+        name = 'mrk_unsigned_format_inert_dataclass'
+        self.assertNotIn(name, sys.modules)
+        try:
+            module = probe.load(name, Path('/public-synthetic/module.py'),
+                b'from __future__ import annotations\nfrom dataclasses import dataclass\n@dataclass\nclass Item:\n    value: int\n')
+            self.assertEqual(module.Item(3).value, 3)
+            self.assertIs(sys.modules[name], module)
+        finally:
+            sys.modules.pop(name, None)
+        environment = {'GITHUB_ACTIONS': 'true', 'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': probe.REF,
+            'GITHUB_REPOSITORY': 'Apdelrahman1911/mobile-release-kit',
+            'GITHUB_WORKSPACE': '/Users/runner/work/mobile-release-kit/mobile-release-kit',
+            'GITHUB_SHA': 'a' * 40, 'GITHUB_WORKFLOW_SHA': 'a' * 40,
+            'GITHUB_WORKFLOW_REF': 'Apdelrahman1911/mobile-release-kit/' + probe.WORKFLOW + '@' + probe.REF,
+            'RUNNER_ENVIRONMENT': 'github-hosted', 'RUNNER_OS': 'macOS', 'RUNNER_ARCH': 'X64',
+            'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1'}
+        script = Path(environment['GITHUB_WORKSPACE']) / probe.SCRIPT
+        host = SimpleNamespace(sysname='Darwin', machine='x86_64')
+        self.assertFalse(probe.context(environment, script, host, 501, 501)[1]['productReady'])
+        for key, value in (('GITHUB_REF', 'refs/heads/main'), ('RUNNER_ENVIRONMENT', 'self-hosted'),
+                           ('RUNNER_ARCH', 'ARM64'), ('GITHUB_WORKFLOW_SHA', 'b' * 40)):
+            with self.assertRaises(probe.Refused):
+                probe.context({**environment, key: value}, script, host, 501, 501)
+        self.assertEqual(probe.FILE_LIMIT, 4 * 1024 * 1024)
+        for scenario in ('pass', 'audit-refused', 'unknown-command', 'oversize'):
+            # Exercise the exact boundary algorithm with small inert output,
+            # without enlarging the focused execution owner's file-size cap.
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as folder, mock.patch.object(probe, 'FILE_LIMIT', 256):
+                root = Path(folder) / 'owned'; root.mkdir(mode=0o700)
+                def write(path, body=b'inert'):
+                    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    path.write_bytes(body); path.chmod(0o600)
+                class AuditRefused(Exception):
+                    pass
+                stages = []
+                def source_input(args):
+                    write(args.output / 'postinstall', b'never execute')
+                    write(args.output / 'input/readonly.txt')
+                    (args.output / 'input/readonly.txt').chmod(0o444)
+                    (args.output / 'input').chmod(0o555)
+                def prepare(args):
+                    self.assertIs(args.fixture, False); write(args.output / 'PackageInfo')
+                def presentation(args):
+                    write(args.output / 'Distribution'); write(args.output / 'resources/InstallerReadMe.html')
+                    (args.output / 'resources/InstallerReadMe.html').chmod(0o444)
+                    (args.output / 'resources').chmod(0o555)
+                def audit(args):
+                    self.assertIs(args.fixture, False); stages.append('audit')
+                def product_audit(args):
+                    self.assertIs(args.fixture, False); stages.append('product-audit')
+                    if scenario == 'audit-refused':
+                        raise AuditRefused('install-product-xar-metadata-tags')
+                stager = SimpleNamespace(Refused=AuditRefused,
+                    INSTALL_PRODUCT_AUDIT_REASONS={'install-product-xar-metadata-tags'},
+                    source_build_selection=lambda target: SimpleNamespace(package_version='0.3.0'),
+                    package_format_input_command=source_input, prepare_package_command=prepare,
+                    prepare_install_product_command=presentation, audit_command=audit,
+                    audit_install_product_command=product_audit)
+                expected = probe.recipe(stager, root); calls = []
+                def original(argv, **kwargs):
+                    number = len(calls); self.assertEqual(argv, expected[number]); calls.append(argv)
+                    self.assertGreaterEqual(kwargs['timeout'], 1); self.assertLessEqual(kwargs['timeout'], 30)
+                    self.assertEqual(kwargs['output_limit'], 65536); self.assertIs(kwargs['text'], False)
+                    self.assertEqual(set(kwargs['environ']), {'PATH', 'HOME', 'TMPDIR', 'LC_ALL', 'TZ',
+                                                              'COPYFILE_DISABLE', 'DEVELOPER_DIR', 'PYTHONDONTWRITEBYTECODE'})
+                    if scenario == 'unknown-command' and number == 3:
+                        raise RuntimeError('PRIVATE_SENTINEL_DO_NOT_SERIALIZE')
+                    destination = (root / 'original.pkg', root / 'parts/Scripts',
+                        root / 'component/MobileReleaseKit.pkg', root / 'product/MobileReleaseKit.pkg')[number]
+                    write(destination)
+                    if scenario == 'oversize' and number == 3:
+                        with destination.open('r+b') as output:
+                            output.truncate(probe.FILE_LIMIT + 1)
+                    return CompletedProcess(argv, 0, b'PRIVATE_SENTINEL_DO_NOT_SERIALIZE', b'')
+                report = {'calls': [], 'failed': False, 'productReady': False}
+                now = probe.time.monotonic()
+                probe.run_probe(stager, SimpleNamespace(run_owned=original), root,
+                    SimpleNamespace(post=lambda: None), report, now + 180, now + 195)
+                self.assertEqual(len(calls), 4)
+                self.assertNotIn('PRIVATE_SENTINEL', json.dumps(report))
+                self.assertFalse(report['productReady'])
+                if scenario == 'pass':
+                    self.assertTrue(report['auditPassed']); self.assertFalse(report['failed'])
+                else:
+                    self.assertFalse(report['auditPassed']); self.assertTrue(report['failed'])
+                self.assertEqual(report['auditReason'], 'install-product-xar-metadata-tags' if scenario == 'audit-refused' else None)
+                self.assertEqual(report['scratchRetired'], scenario in ('pass', 'audit-refused'))
+                self.assertEqual(root.exists(), not report['scratchRetired'])
+                self.assertEqual(report['originalsKnown'], scenario != 'unknown-command')
+                self.assertEqual(stages, ['audit', 'product-audit'] if scenario in ('pass', 'audit-refused') else ['audit'])
+
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
 

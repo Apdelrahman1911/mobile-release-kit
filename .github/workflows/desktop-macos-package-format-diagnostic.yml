@@ -1,0 +1,51 @@
+name: Desktop unsigned Intel package format diagnostic
+
+on:
+  push:
+    branches: [verify/desktop-macos-package-format-diagnostic]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-package-format-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  unsigned-format:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-package-format-diagnostic'
+    runs-on: macos-26-intel
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact source without retained credentials
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing reviewed interpreter version
+        timeout-minutes: 2
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Build and inspect only the tiny inert unsigned product
+        id: probe
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          python3 -I -S -B desktop/tools/macos_package_format_diagnostic.py > package-format-public.json
+      - name: Retain only finite public diagnosis
+        if: ${{ !cancelled() && (steps.probe.outcome == 'success' || steps.probe.outcome == 'failure') }}
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsigned-package-format-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: package-format-public.json
+          if-no-files-found: error
+          retention-days: 14
