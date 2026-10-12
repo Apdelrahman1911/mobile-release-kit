@@ -434,14 +434,15 @@ def notary_log_data(body, submission, archive_sha256, *, archive_name=NOTARY_ZIP
     need(tickets is None or type(tickets) is list and len(tickets) <= 2048, "notary-log-tickets-bound")
     # Finite Apple ticket annotations include nested signed i386 slices;
     # they never grant native execution, target or provenance authority.
-    # Carrier-null architecture is bounded diagnostic metadata only, not
-    # a native slice, certificate, ticket or current-package authority.
+    # An absent or null carrier architecture is diagnostic metadata only,
+    # not a native slice, certificate, ticket or current-package authority.
     for row in tickets or ():
-        need(type(row) is dict and set(row) == {"path", "digestAlgorithm", "cdhash", "arch"}
+        need(type(row) is dict and {"path", "digestAlgorithm", "cdhash"} <= set(row)
+             <= {"path", "digestAlgorithm", "cdhash", "arch"}
              and notary_text(row["path"], 4096) and row["digestAlgorithm"] in ("SHA-1", "SHA-256")
              and type(row["cdhash"]) is str and re.fullmatch(r"[0-9a-fA-F]{40}", row["cdhash"])
-             and (row["arch"] in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
-                  and row["path"] == archive_name and row["arch"] is None), "notary-log-ticket-shape")
+             and (row.get("arch") in ("arm64", "x86_64", "i386") or archive_name in ("MobileReleaseKit.pkg", "MobileReleaseKit.dmg", "Remove.pkg", "MobileReleaseKit-Remove.dmg")
+                  and row["path"] == archive_name and row.get("arch") is None), "notary-log-ticket-shape")
     need(submission["status"] != "Accepted" or errors == 0, "notary-log-success-with-errors")
     return {"sha256Compared": "sha256" in value, "errorCount": errors, "warningCount": warnings,
             "ticketRowCount": len(tickets or ()), "logSha256": digest(body)}
@@ -574,7 +575,8 @@ def package_signature_data(body, selection, certificates, path):
     need(0 < len(lines) <= 256 and all(len(line) <= 1024 for line in lines)
          and lines[0] in ('Package "' + path.name + '":', 'Package "' + str(path) + '":'),
          "package-signature-header")
-    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X")
+    trusted = ("Status: signed by a certificate trusted by macOS", "Status: signed by a certificate trusted by Mac OS X",
+               "Status: signed by a developer certificate issued by Apple for distribution")
     need(len(lines) > 4 and lines[1] in trusted
          and lines[2].startswith("Signed with a trusted timestamp on: ")
          and 0 < len(lines[2][len("Signed with a trusted timestamp on: "):]) <= 128
@@ -2499,12 +2501,15 @@ class Operation:
             need(not identities.stderr and not certs.stderr, "credential-private-query-stderr")
             if purpose == "installer":
                 installer_identity(identities.stdout, certs.stdout, self.installer_selection, certificates)
-                # This explicitly anchored local check does NOT establish system
-                # trust. Independent pkgutil trust/timestamp/chain and Accepted
-                # remain required after signing the actual package.
+                # Exact SOURCE-enrolled DER binds the reviewed Installer role;
+                # this is not a live semantic EKU parser. pkgSign requires a
+                # different CodeSigning EKU, so use basic for the local anchored
+                # crypto/time chain. It proves neither system trust nor revocation.
+                # Actual productsign, pkgutil trust/timestamp/chain and Accepted
+                # remain mandatory after signing the actual package.
                 paths = [str(self.checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der"))
                          for name in ("leaf", "issuer", "root")]
-                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L",
+                self.credential_call(context, "installer-chain", ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
                     "-c", paths[0], "-c", paths[1], "-r", paths[2]], timeout=30)
             else:
                 credential_identity(identities.stdout, certs.stdout, self.signing, certificates)

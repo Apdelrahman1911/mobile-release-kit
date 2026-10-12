@@ -2551,7 +2551,7 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             elif argv[1] == "verify-cert":
                 self.assertIsNotNone(installer)
                 paths_ = [str(checkout / "desktop/packaging/macos-installer-certificates" / (name + ".der")) for name in ("leaf", "issuer", "root")]
-                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "pkgSign", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
+                self.assertEqual(argv, ["/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L", "-c", paths_[0], "-c", paths_[1], "-r", paths_[2]])
                 if state.failure == "installer-chain":
                     return CompletedProcess(argv, 1, b"", b"INERT wrong Installer certificate purpose")
             elif argv[1] == "delete-keychain":
@@ -6738,15 +6738,29 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
                                      dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
             carrier = dict(ticket(None), path=archive)
-            current = dict(log, archiveFilename=archive, ticketContents=[carrier])
-            if archive == module.NOTARY_ZIP_NAME:
+            omitted = dict(carrier); del omitted["arch"]
+            # Signed containers may omit arch rather than explicitly use null.
+            # This is the same exact top-level carrier exception, never ZIP/code.
+            for annotation in (carrier, omitted):
+                current = dict(log, archiveFilename=archive, ticketContents=[annotation])
+                encoded = body(current)
+                if archive == module.NOTARY_ZIP_NAME:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive)
+                else:
+                    self.assertEqual(module.notary_log_data(encoded, submission, "d" * 64, archive_name=archive),
+                                     dict(expected, ticketRowCount=1, logSha256=module.digest(encoded)))
                 with self.assertRaises(module.Refused):
-                    module.notary_log_data(body(current), submission, "d" * 64, archive_name=archive)
-            else:
-                self.assertEqual(module.notary_log_data(body(current), submission, "d" * 64, archive_name=archive)["ticketRowCount"], 1)
-            with self.assertRaises(module.Refused):
-                module.notary_log_data(body(dict(current, ticketContents=[dict(carrier, path=archive + "/nested")])),
-                                       submission, "d" * 64, archive_name=archive)
+                    module.notary_log_data(body(dict(current, ticketContents=[dict(annotation, path=archive + "/nested")])),
+                                           submission, "d" * 64, archive_name=archive)
+                invalid_carriers = [dict(annotation, extra=True)]
+                for required_key in ("path", "digestAlgorithm", "cdhash"):
+                    missing_required = dict(annotation); del missing_required[required_key]
+                    invalid_carriers.append(missing_required)
+                for invalid_carrier in invalid_carriers:
+                    with self.assertRaises(module.Refused):
+                        module.notary_log_data(body(dict(current, ticketContents=[invalid_carrier])),
+                                               submission, "d" * 64, archive_name=archive)
         row = ticket("i386")
         missing = dict(row); del missing["arch"]
         bad_rows = [dict(row, arch=value) for value in ("arm64e", "x86_64h", "ppc", "", "null", True, 386, [], None)]
@@ -7227,6 +7241,16 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(module.package_signature_data(signature, selection, certificates, path),
                          {"trusted": True, "timestamp": True, "certificateSha256": [module.digest(value) for value in certificates]})
         self.assertEqual(module.package_signature_data(signature.replace(b'trusted by macOS', b'trusted by Mac OS X'), selection, certificates, path)["trusted"], True)
+        modern_signature = signature.replace(b'signed by a certificate trusted by macOS',
+            b'signed by a developer certificate issued by Apple for distribution')
+        self.assertEqual(module.package_signature_data(modern_signature, selection, certificates, path),
+                         module.package_signature_data(signature, selection, certificates, path))
+        for body in (modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                     modern_signature.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                     modern_signature.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                     modern_signature.replace(selection["identityCommonName"].encode(), b'Developer ID Installer: FOREIGN (TEST000001)')):
+            with self.assertRaises(module.Refused):
+                module.package_signature_data(body, selection, certificates, path)
         for body in (signature.replace(b'trusted by macOS', b'untrusted by macOS'),
                      signature.replace(b'Signed with a trusted timestamp on:', b'Signed without a trusted timestamp on:'),
                      signature.replace(b'1. Developer ID Installer:', b'2. Developer ID Installer:'),
@@ -7373,6 +7397,64 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
 
 
+
+    def test_installer_basic_chain_keeps_exact_public_originals_and_refuses_before_signing(self):
+        # Genuine current package/credential methods with inert native returns;
+        # this does not establish certificate validity or native signing.
+        module = ANDROID_HELPER
+        for failure in (None, "installer-chain"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                fixture = self.final_package_fixture(Path(directory))
+                legacy_signature = fixture.signature_text
+                fixture.signature_text = legacy_signature.replace(b'signed by a certificate trusted by macOS',
+                    b'signed by a developer certificate issued by Apple for distribution')
+                self.assertNotEqual(fixture.signature_text, legacy_signature)
+                fixture.credentials.failure = failure
+                operation = fixture.operation
+                with self.final_package_fixture_call(fixture):
+                    if failure is None:
+                        operation.execute()
+                    else:
+                        with self.assertRaises(module.Refused):
+                            operation.execute()
+                originals = [row for row in operation.credential_calls if row["role"] == "installer-chain"]
+                self.assertEqual(len(originals), 1)
+                self.assertEqual(originals[0]["status"], 0 if failure is None else 1)
+                self.assertTrue(originals[0]["entered"] and originals[0]["returned"] and originals[0]["settled"])
+                args = [argv for role, argv in fixture.credentials.events if role == "installer-chain"]
+                paths = [str(fixture.checkout / "desktop/packaging/macos-installer-certificates" / (role + ".der"))
+                         for role in ("leaf", "issuer", "root")]
+                self.assertEqual(args, [("/usr/bin/security", "verify-cert", "-p", "basic", "-N", "-L",
+                                         "-c", paths[0], "-c", paths[1], "-r", paths[2])])
+                self.assertEqual(fixture.credentials.search, fixture.credentials.initial)
+                self.assertFalse(Path(fixture.credentials.keychain).exists())
+                self.assertTrue(all(row["closed"] and row["retired"] and row["searchRestored"]
+                                    and row["defaultUnchanged"] for row in operation.credential_contexts))
+                callbacks = [row[0] for row in fixture.observations]
+                self.assertEqual(operation.receipt["passed"], failure is None)
+                if failure is None:
+                    selection, certificates = fixture.credentials.installer, fixture.credentials.certificates
+                    path = Path('/DATA-only/MobileReleaseKit.pkg')
+                    expected = {"trusted": True, "timestamp": True,
+                                "certificateSha256": [module.digest(value) for value in certificates]}
+                    for body in (legacy_signature, legacy_signature.replace(b'trusted by macOS', b'trusted by Mac OS X'),
+                                 fixture.signature_text):
+                        self.assertEqual(module.package_signature_data(body, selection, certificates, path), expected)
+                    fingerprint = ' '.join(module.digest(certificates[1])[i:i + 2].upper() for i in range(0, 64, 2)).encode()
+                    for body in (fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for Distribution'),
+                                 fixture.signature_text.replace(b'issued by Apple for distribution', b'issued by Apple for distribution untrusted'),
+                                 fixture.signature_text.replace(b'Signed with a trusted timestamp on: INERT DATA\n', b''),
+                                 fixture.signature_text.replace(fingerprint, b'00 ' * 31 + b'00')):
+                        with self.assertRaises(module.Refused):
+                            module.package_signature_data(body, selection, certificates, path)
+                    self.assertIn("final-package-sign", callbacks)
+                    self.assertIn("final-package-signature-before", callbacks)
+                    self.assertIn("final-package-submit", callbacks)
+                    self.assertIn("finalPackage", operation.receipt)
+                else:
+                    self.assertNotIn("final-package-sign", callbacks)
+                    self.assertNotIn("final-package-submit", callbacks)
+                    self.assertNotIn("finalPackage", operation.receipt)
 
     def test_ios_recovery_admission_keeps_the_full_package_scope_closed(self):
         module = ANDROID_HELPER
