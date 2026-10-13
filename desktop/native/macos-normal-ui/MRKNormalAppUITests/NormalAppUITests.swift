@@ -3127,7 +3127,7 @@ final class NormalAppUITests: XCTestCase {
                   let source = raw["sourceCommit"] as? String,
                   source == env["MRK_NORMAL_UI_HARNESS_SOURCE"], source == env["MRK_NORMAL_UI_APPLICATION_SOURCE"],
                   raw["scope"] as? String == "one-owned-saved-version-recovery-fixture",
-                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",
+                  raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",
                   let root = raw["root"] as? String,
                   root.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_-]{6,16}$"#, options: .regularExpression) != nil,
                   let transaction = raw["transactionId"] as? String,

@@ -652,7 +652,21 @@ NORMAL_IOS_PENDING_SWIFT_INVERSE = (('init(seconds: TimeInterval, androidPositiv
   '        } catch { if cleanupFailure == nil { cleanupFailure = error } }\n'
   '        // Never delete possibly live fixture/app state or seek a replacement owner.'))
 
+def without_primary_owner_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("primary owner Swift SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+    if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+        raise AssertionError("primary owner Swift runtime line differs")
+    return source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+
+
 def without_normal_ios_pending_source(source):
+    source = without_primary_owner_runtime_source(source)
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("normal iOS pending Swift SOURCE bound differs")
     markers = ("testInstalledIOSPendingAccountRecoveryThroughUI", "IOSRecoveryFixture", "iosRecovery:")
@@ -1762,7 +1776,7 @@ class RunnerAdmissionDataTests(unittest.TestCase):
 
         # Current recovery SOURCE is the genuine configured runtime nomination,
         # not an arbitrary replacement digest or a claim of native qualification.
-        expected_source = 'fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc'
+        expected_source = '10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2'
         nomination = json.loads((ROOT / "desktop/macos-installed-inputs/python-signed-runtime-binding.json").read_bytes())
         self.assertEqual(set(nomination["targets"]), {MODULE.ARM_TARGET, MODULE.INTEL_TARGET})
         for target in (MODULE.ARM_TARGET, MODULE.INTEL_TARGET):
@@ -1782,13 +1796,25 @@ class RunnerAdmissionDataTests(unittest.TestCase):
         self.assertEqual(len(MODULE.SAVED_VERSION_BOOTSTRAPS), 13)
         self.assertEqual(len(set(MODULE.SAVED_VERSION_BOOTSTRAPS)), 13)
         swift = SWIFT.read_text(encoding="utf-8")
-        current_line = '                  raw["sourceInputsSha256"] as? String == "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc",\n'
+        current_line = '                  raw["sourceInputsSha256"] as? String == "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2",\n'
         prior_line = '                  raw["sourceInputsSha256"] as? String == "fa624512af03437f075f2da10357b3808d1a58c8f36e1db6103bc2abe54150e0",\n'
         self.assertEqual(swift.count(current_line), 1)
+        owner_prior = without_primary_owner_runtime_source(swift)
+        self.assertEqual(owner_prior, swift.replace(expected_source, "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"))
+        self.assertEqual(without_primary_owner_runtime_source(owner_prior), owner_prior)
+        for damaged in (swift.replace(current_line, current_line + current_line, 1),
+                        swift.replace(current_line, current_line.replace(" == ", " != "), 1),
+                        swift + ' // ' + expected_source):
+            with self.assertRaises(AssertionError): without_primary_owner_runtime_source(damaged)
         self.assertNotIn(prior_line, swift)
         normalized = without_artifact_wait_diagnostic_source(swift)
         self.assertEqual(normalized.count(prior_line), 1)
-        self.assertEqual(without_artifact_wait_diagnostic_source(swift.replace(current_line, prior_line, 1)), normalized)
+        # A changed current whole source is not an accepted historical predecessor.
+        with self.assertRaises(AssertionError):
+            without_artifact_wait_diagnostic_source(swift.replace(current_line, prior_line, 1))
+        historical = without_normal_ios_pending_source(swift)
+        historical_line = current_line.replace(expected_source, "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc")
+        self.assertEqual(without_artifact_wait_diagnostic_source(historical.replace(historical_line, prior_line, 1)), normalized)
         self.assertEqual(without_artifact_wait_diagnostic_source(normalized), normalized)
         self.assertEqual(without_artifact_wait_diagnostic_source("historical pre-recovery source\n"),
                          "historical pre-recovery source\n")

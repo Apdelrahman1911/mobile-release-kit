@@ -647,7 +647,26 @@ INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n         
 
 INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
 
+def without_primary_owner_runtime_source_pin(source):
+    # Exact current SOURCE nomination only; all historical oracles stay fixed.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("primary owner runtime SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    configured = "      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: " + current + "\n"
+    guard = '          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == ' + current + ' ]] || exit 1\n'
+    if (source.count(current) != 2 or previous in source
+            or source.count("\n" + configured) != 1 or source.count("\n" + guard) != 1):
+        raise AssertionError("primary owner runtime SOURCE exact two-site delta differs")
+    for line in (configured, guard):
+        source = source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+    return source
+
+
 def without_intel_fetch_workflow(source):
+    source = without_primary_owner_runtime_source_pin(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("Intel fetch workflow SOURCE bound differs")
     markers = ("Intel fetch120 is separate", "&& 26 || 10")
@@ -666,7 +685,21 @@ def without_intel_fetch_workflow(source):
     return source
 
 
+def without_primary_owner_runtime_source(source):
+    if type(source) is not str or len(source.encode()) > 1024 * 1024:
+        raise AssertionError("primary owner Swift SOURCE bound differs")
+    current = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+    previous = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+    if current not in source:
+        return source
+    line = '                  raw["sourceInputsSha256"] as? String == "' + current + '",\n'
+    if source.count(current) != 1 or previous in source or source.count("\n" + line) != 1:
+        raise AssertionError("primary owner Swift runtime line differs")
+    return source.replace("\n" + line, "\n" + line.replace(current, previous), 1)
+
+
 def without_normal_ios_pending_source(source):
+    source = without_primary_owner_runtime_source(source)
     if type(source) is not str or len(source.encode()) > 1024 * 1024:
         raise AssertionError("normal iOS pending Swift SOURCE bound differs")
     markers = ("testInstalledIOSPendingAccountRecoveryThroughUI", "IOSRecoveryFixture", "iosRecovery:")
@@ -3760,7 +3793,7 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
         with self.assertRaises(AssertionError): without_positive_update_workflow(raw + POSITIVE_UPDATE_WORKFLOW_INVERSE[0][1])
         # Current SOURCE S assertions remain raw; only this exact newer route
         # is removed before the already-reviewed historical inverse chain.
-        self.assertEqual(raw.count("fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"), 2)
+        self.assertEqual(raw.count("10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"), 2)
         self.assertNotIn("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09", raw)
         self.assertEqual(previous.count("c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"), 2)
         self.assertEqual(without_app_absence_workflow(raw), without_app_absence_workflow(previous))
@@ -3892,6 +3925,19 @@ class NormalDiagnosticsSourceTests(unittest.TestCase):
     def test_same_package_noop_workflow_is_preview_scoped_and_exactly_reversible(self):
         root = Path(__file__).absolute().parents[2]
         source = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
+        owner_source = "10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2"
+        old_owner_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
+        self.assertEqual(source.count(owner_source), 2)
+        self.assertNotIn(old_owner_source, source)
+        owner_normalized = without_primary_owner_runtime_source_pin(source)
+        self.assertEqual(owner_normalized, source.replace(owner_source, old_owner_source))
+        self.assertEqual(without_primary_owner_runtime_source_pin(owner_normalized), owner_normalized)
+        for damaged in (source.replace(owner_source, old_owner_source, 1),
+                        source.replace(owner_source, owner_source + owner_source, 1),
+                        source.replace(owner_source, "0" * 64, 1)):
+            with self.assertRaisesRegex(AssertionError, "^primary owner runtime SOURCE exact two-site delta differs$"):
+                without_primary_owner_runtime_source_pin(damaged)
+        source = owner_normalized
         # The current signed-runtime composition must be proven before old inverses.
         signed_source = "fcc0953574d5e83bc5e8c5bc995263302862a38fa1063a9219157c1cf2d1e3dc"
         prior_source = "c3e48d2e3993bf92c87ce407eac029c67b2d0de30d43aceac143c28ed8893e09"

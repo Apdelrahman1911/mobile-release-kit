@@ -5198,7 +5198,7 @@ class Fixtures:
         stager, release = _gate_load_stager(self, source, target=self.binding.target, registrations=self.normal_stager_registrations)
         pins = (
             ("desktop/macos-installed-inputs/python-signed-runtime-binding.json", 1503,
-             "7771bd67083fb9a712be1888e9defff424af29f2f446a4bef6bfee2d43c83d84"),
+             "6793b36697e04264c6f627317906a6f143e47adb3443132beba05c6d14147e53"),
             ("desktop/packaging/macos-install-producer-signing.profile", 488,
              "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
             ("desktop/packaging/macos-android-service-signing.profile", 219,
