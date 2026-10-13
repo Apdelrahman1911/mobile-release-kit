@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import types
+from xml.parsers.expat import ExpatError
 
 ROOT = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
 PARENT = Path('/Users/runner/work/_temp')
@@ -139,6 +140,61 @@ def parser_reason(error, stager):
     return 'unclassified'
 
 
+def attach_shape_data(body, stderr, code, mountpoint):
+    """Finite diagnostic only; never mounted-object custody or parser authority."""
+    result = {'returnZero': type(code) is int and code == 0,
+        'stdoutBytes': min(len(body), CAPTURE + 1) if type(body) is bytes else None,
+        'stderrEmpty': type(stderr) is bytes and not stderr,
+        'stdoutBounded': type(body) is bytes and 0 < len(body) <= CAPTURE,
+        'parsed': False, 'rows': []}
+    if not result['stdoutBounded']:
+        return result
+    result.update(encoding='binary' if body.startswith(b'bplist00') else
+        'xml' if body.lstrip().startswith((b'<?xml', b'<plist')) else 'other',
+        containsNul=b'\x00' in body, containsEntity=b'<!ENTITY' in body.upper())
+    result.update(xmlDeclarationOffset=body.find(b'<?xml'), plistTagOffset=body.find(b'<plist'),
+        leadingXml=body.lstrip().startswith((b'<?xml', b'<plist')))
+    if result['containsEntity']:
+        return result
+    try:
+        value = plistlib.loads(body)
+    except (ValueError, TypeError, OverflowError, RecursionError, plistlib.InvalidFileException,
+            ExpatError) as error:
+        result['parseError'] = next((label for label, cls in
+            (('value', ValueError), ('type', TypeError), ('overflow', OverflowError),
+             ('recursion', RecursionError), ('invalid-plist', plistlib.InvalidFileException))
+            if type(error) is cls), 'other')
+        return result
+    result['parsed'] = True
+    result['rootMap'] = type(value) is dict
+    if type(value) is not dict:
+        return result
+    result.update(rootKeysCount=min(len(value), 33), rootKeysExact=set(value) == {'system-entities'})
+    rows = value.get('system-entities')
+    result['entitiesList'] = type(rows) is list
+    if type(rows) is not list:
+        return result
+    result['rowCount'] = min(len(rows), 9)
+    result['rowsBounded'] = 0 < len(rows) <= 8
+    if not result['rowsBounded']:
+        return result
+    known = {'content-hint', 'dev-entry', 'potentially-mountable', 'mount-point', 'unmapped-content-hint'}
+    kinds = (('string', str), ('boolean', bool), ('integer', int), ('array', list), ('map', dict), ('data', bytes))
+    for row in rows:
+        facts = {'map': type(row) is dict}
+        if type(row) is dict:
+            facts.update(keyCount=min(len(row), 33), keysBounded=len(row) <= 12,
+                plainKeys=all(type(key) is str for key in row),
+                unknownKeyCount=min(sum(key not in known for key in row), 33),
+                knownValueKinds={key: next((label for label, cls in kinds if type(row[key]) is cls), 'other')
+                    for key in sorted(known) if key in row},
+                hasMount='mount-point' in row, mountMatches=type(row.get('mount-point')) is str and row['mount-point'] == str(mountpoint),
+                deviceShape=type(row.get('dev-entry')) is str and re.fullmatch(r'/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?', row['dev-entry']) is not None,
+                potentiallyMountableTrue=row.get('potentially-mountable') is True)
+        result['rows'].append(facts)
+    return result
+
+
 def mount_observation(body, stderr, code, mountpoint):
     """Independent original mount observation for cleanup, NOT parser acceptance."""
     need(type(code) is int and code == 0 and type(body) is bytes and 0 < len(body) <= CAPTURE
@@ -259,6 +315,7 @@ def main():
         need(not os.listdir(placeholder['fd'])); book.check_one(placeholder); book.close(placeholder); need(placeholder['closed'])
         result = call('attach', ['/usr/bin/hdiutil', 'attach', str(image), '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', str(mountpoint), '-plist'], 30)
         # The production parser is not used as a fallback cleanup authority.
+        report['attachDiagnostic'] = attach_shape_data(result.stdout, result.stderr, result.returncode, mountpoint)
         device, report['attachShape'] = mount_observation(result.stdout, result.stderr, result.returncode, mountpoint)
         attach_observed = True
         fd = os.open('mount', READ | os.O_DIRECTORY, dir_fd=root['fd'])
