@@ -1,0 +1,57 @@
+name: Observe two tiny original directory creation transitions
+
+on:
+  push:
+    branches: [verify/desktop-macos-directory-identity]
+permissions:
+  contents: read
+concurrency:
+  group: desktop-macos-directory-identity-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  directory-identity:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-directory-identity'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Check out exact reviewed source without retained credentials
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Observe only fixed task-owned metadata and retire originals
+        id: probe
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_DIRECTORY_TARGET: ${{ matrix.target }}
+          MRK_PUSH_EVENT_AFTER: ${{ github.event.after }}
+          MRK_DIRECTORY_SOURCE_SHA256: 04d525de9ecc01314430a2a0b4cc62d4675880339a59d66f2c77f6332c1b0f76
+        run: |
+          set +x
+          set +a
+          set -euo pipefail
+          umask 077
+          /usr/bin/python3 -I -S -B desktop/tools/macos_directory_identity_probe.py
+      - name: Preserve only the closed finite metadata observation
+        if: steps.probe.outcome == 'success'
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: directory-identity-${{ matrix.target }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: directory-identity-public.json
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 14
