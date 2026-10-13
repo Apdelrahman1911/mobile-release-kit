@@ -29,6 +29,7 @@ import struct
 import sys
 import tarfile
 import xml.etree.ElementTree as ET
+from xml.parsers.expat import ExpatError
 import zipfile
 import zlib
 
@@ -4399,15 +4400,18 @@ def distribution_mount_data(stdout, stderr, returncode, mountpoint):
          and b"<!ENTITY" not in stdout.upper(), "distribution-attach-original")
     try:
         value = plistlib.loads(stdout)
-    except (ValueError, TypeError, OverflowError, RecursionError, ET.ParseError) as error:
+    except (ValueError, TypeError, OverflowError, RecursionError, ExpatError) as error:
         raise Refused("distribution-attach-plist") from error
     need(type(value) is dict and set(value) == {"system-entities"} and type(value["system-entities"]) is list
          and 0 < len(value["system-entities"]) <= 8, "distribution-attach-plist")
     found = []
     for row in value["system-entities"]:
-        need(type(row) is dict and set(row) <= {"content-hint", "dev-entry", "potentially-mountable", "mount-point", "unmapped-content-hint"}
+        need(type(row) is dict and set(row) <= {"content-hint", "dev-entry", "potentially-mountable", "mount-point", "unmapped-content-hint", "volume-kind"}
              and type(row.get("dev-entry")) is str and re.fullmatch(r"/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?", row["dev-entry"]),
              "distribution-attach-entity")
+        if "volume-kind" in row:
+            need("mount-point" in row and type(row["volume-kind"]) is str and row["volume-kind"] == "hfs",
+                 "distribution-attach-entity")
         if "mount-point" in row:
             need(row["mount-point"] == str(mountpoint) and row.get("potentially-mountable") is True,
                  "distribution-attach-mount")

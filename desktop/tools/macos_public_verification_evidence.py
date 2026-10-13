@@ -203,7 +203,9 @@ FINAL_PACKAGE_POST_REASONS = frozenset((
 ))
 
 
-REASONS = frozenset(("producer-tests-bound", "producer-tests-framing", "producer-tests-roster", "producer-tests-result",
+DISTRIBUTION_STAGER_REASONS = frozenset(('distribution-attach-original', 'distribution-attach-plist', 'distribution-attach-entity', 'distribution-attach-mount', 'distribution-attach-single-mount', 'distribution-package-name', 'distribution-three-file-roster', 'distribution-original-byte-mode'))
+
+REASONS = frozenset((*DISTRIBUTION_STAGER_REASONS,"producer-tests-bound", "producer-tests-framing", "producer-tests-roster", "producer-tests-result",
     "original-nonzero-producer-tests", *FINAL_PACKAGE_POST_REASONS, *INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
     *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",
