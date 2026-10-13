@@ -395,15 +395,15 @@ class NotaryDiagnosticData(unittest.TestCase):
         # Frozen SOURCE assertions, not a claim that Apple reports GitHub provenance.
         self.assertEqual((m.SOURCE, m.SOURCE_TREE, m.ORIGINAL_RECEIPT, m.SUBMISSION, m.STATUS,
                           m.ORIGINAL_ARCHIVE, m.ORIGINAL_LOG),
-            ('cae803e30d29d81fd1415f62f155840a7a644fb9', 'de20e6d491a4d5046d71e30bf775bc3236468332',
-             '76f07c5e1c2055fdbfdd2331277b97476607aa5eeb375bb9a1aeb54974e14d64',
-             'b422bfff-99a9-4d97-8826-a3129af981f9', 'Accepted',
-             'e293eff6629882c4bfe8684595762aab2b524a51154a63c06f9d44a8f1527413',
-             '2f893f9ae58316b06d7edbb84e6e0da11f8348c090db4dd13a38a43dc5402499'))
+            ('42861e30546937d221890e7d25e6c633978347ce', '8e79035c6b6e89c8c4d417cfd25f60a3fe921dba',
+             '232c3ffeb7be9c1a085417227dc440f9741ca781ce8d42b958a7782911ffc4ad',
+             '479ff35b-0731-4d22-8c5a-395aa8c409b4', 'Accepted',
+             'a62b6555342f70b907cc288eea5c782c11d12cc11de7b719fdf3c6f7acc88374',
+             '53737a949584ba02fa34fc7d2c6fb80f7628dc79b0afb617410c02413382ba01'))
         for path, expected in m.PINS.items():
             self.assertEqual(m.sha((ROOT / path).read_bytes()), expected)
-        self.assertIn("'runId': '38270269218', 'attempt': '1'", source)
-        self.assertIn("'jobId': '114882515667'", source)
+        self.assertIn("'runId': '38332288631', 'attempt': '1'", source)
+        self.assertIn("'jobId': '115084521846'", source)
         syntax = ast.parse(source)
         query = next(n for n in syntax.body if isinstance(n, ast.FunctionDef) and n.name == 'query')
         calls = [n for n in ast.walk(query) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'run_owned']

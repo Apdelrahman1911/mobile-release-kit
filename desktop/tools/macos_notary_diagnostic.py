@@ -27,14 +27,14 @@ PARENT = Path('/Users/runner/work/_temp')
 PUBLIC = 'mrk-notary-diagnostic-public.json'
 SECRET = 'MRK_MACOS_NOTARY_API_KEY_BASE64'
 # Frozen from the independently reviewed public receipt, not proved by Apple log metadata.
-SOURCE = 'cae803e30d29d81fd1415f62f155840a7a644fb9'
-SOURCE_TREE = 'de20e6d491a4d5046d71e30bf775bc3236468332'
-ORIGINAL_RECEIPT = '76f07c5e1c2055fdbfdd2331277b97476607aa5eeb375bb9a1aeb54974e14d64'
-ORIGINAL_ARCHIVE = 'e293eff6629882c4bfe8684595762aab2b524a51154a63c06f9d44a8f1527413'
-SUBMISSION = 'b422bfff-99a9-4d97-8826-a3129af981f9'
+SOURCE = '42861e30546937d221890e7d25e6c633978347ce'
+SOURCE_TREE = '8e79035c6b6e89c8c4d417cfd25f60a3fe921dba'
+ORIGINAL_RECEIPT = '232c3ffeb7be9c1a085417227dc440f9741ca781ce8d42b958a7782911ffc4ad'
+ORIGINAL_ARCHIVE = 'a62b6555342f70b907cc288eea5c782c11d12cc11de7b719fdf3c6f7acc88374'
+SUBMISSION = '479ff35b-0731-4d22-8c5a-395aa8c409b4'
 STATUS = 'Accepted'
 ARCHIVE = 'MobileReleaseKit-notary-payload.zip'
-ORIGINAL_LOG = '2f893f9ae58316b06d7edbb84e6e0da11f8348c090db4dd13a38a43dc5402499'
+ORIGINAL_LOG = '53737a949584ba02fa34fc7d2c6fb80f7628dc79b0afb617410c02413382ba01'
 TEAM = '7CGZ2343AA'
 CERTIFICATE = '5effa7d19bbe005b19c1617833cbe22186c2af96'
 KEY_ID = '59VQCHM463'
@@ -417,8 +417,8 @@ class KeyDirectory:
 def query(owner, helper, key, profile, tool, clock):
     report = {'historicalSubmission': {'source': SOURCE, 'sourceTree': SOURCE_TREE, 'publicReceiptSha256': ORIGINAL_RECEIPT,
         'archiveFilename': ARCHIVE, 'archiveSha256': ORIGINAL_ARCHIVE, 'logSha256': ORIGINAL_LOG,
-        'runId': '38270269218', 'attempt': '1',
-        'jobId': '114882515667', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': STATUS},
+        'runId': '38332288631', 'attempt': '1',
+        'jobId': '115084521846', 'target': 'aarch64-apple-darwin', 'id': SUBMISSION, 'status': STATUS},
         'currentObservedStatus': None, 'diagnosticPassed': False, 'qualification': 'read-only-existing-submission-diagnostic',
         'failureStage': None, 'cleanupErrors': [], 'entered': False, 'returned': False,
         'knownExit': False, 'returncode': None, 'toolClosed': False}
