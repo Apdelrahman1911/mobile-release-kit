@@ -120,7 +120,6 @@ def module(body, name, filename):
 
 
 def original_class(source):
-    # Exact SOURCE donor only, including complete original dependencies.
     tree = ast.parse(source)
     names = {'Originals', 'signature', 'need', 'Refused', 'READ_FLAGS'}
     nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in names
@@ -249,6 +248,19 @@ def ledger_post_data(book, signature):
     return result
 
 
+def readonly_image(book, entry, signature):
+    """One explicit pre-attach chmod on our same held newly-created image."""
+    body = book.read(entry); before = entry['identity']
+    os.fchmod(entry['fd'], 0o444); os.fsync(entry['fd'])
+    after = signature(os.fstat(entry['fd']))
+    named = signature(os.stat(entry['path'].name, dir_fd=entry['parent']['fd'], follow_symlinks=False))
+    need(after == named and after[:2] == before[:2] and after[3:8] == before[3:8]
+         and after[2] == stat.S_IFREG | 0o444 and os.pread(entry['fd'], len(body) + 1, 0) == body
+         and not os.pread(entry['fd'], 1, len(body)))
+    entry['identity'] = after
+    need(book.read(entry) == body)
+
+
 def main():
     os.umask(0o077)
     end = time.monotonic_ns() + 180_000_000_000
@@ -263,7 +275,6 @@ def main():
     donor_refused = None
     failure = None; stager = None; owner = None; mount_entries = []; root = None; private_files = []; source_entries = []; directories = []
     try:
-        # Bootstrap original donor through original held SOURCE before any call.
         fd = os.open(ROOT / 'desktop/tools/macos_e2_native_fixture.py', READ)
         try:
             info = os.fstat(fd); source = os.pread(fd, SOURCE_PINS['desktop/tools/macos_e2_native_fixture.py'][0] + 1, 0)
@@ -341,11 +352,11 @@ def main():
             '-volname', 'MRK Synthetic Parser Probe', str(image)], 60)
         need(result.returncode == 0)
         image_entry, imagebody = book.file(image, LIMIT, modes=(0o644, 0o600)); private_files.append(image_entry); image_digest = digest(imagebody); report['imageBytes'] = len(imagebody); del imagebody
+        readonly_image(book, image_entry, signature)
         mountpoint = scratch / 'mount'
         placeholder = book.directories[mountpoint]
         need(not os.listdir(placeholder['fd'])); book.check_one(placeholder); book.close(placeholder); need(placeholder['closed'])
         result = call('attach', ['/usr/bin/hdiutil', 'attach', str(image), '-readonly', '-nobrowse', '-noautoopen', '-mountpoint', str(mountpoint), '-plist'], 30)
-        # The production parser is not used as a fallback cleanup authority.
         report['probeStage'] = 'attach-shape'
         report['attachDiagnostic'] = attach_shape_data(result.stdout, result.stderr, result.returncode, mountpoint)
         report['probeStage'] = 'observation'
@@ -356,7 +367,6 @@ def main():
         info = os.fstat(fd); mount['identity'] = signature(info)[:5]
         need(stat.S_ISDIR(info.st_mode) and info.st_uid in (0, os.getuid()) and not stat.S_IMODE(info.st_mode) & 0o022
              and os.fstatvfs(fd).f_flag & os.ST_RDONLY); book.check_one(mount)
-        # The original empty placeholder was closed before the attach original.
         book.directories[mountpoint] = mount
         report['mountFacts'] = {'readonly': bool(os.fstatvfs(fd).f_flag & os.ST_RDONLY),
             'heldNamedIdentity': signature(os.fstat(fd))[:5] == signature(os.stat('mount', dir_fd=root['fd'], follow_symlinks=False))[:5],
@@ -383,7 +393,6 @@ def main():
         book.close(mount); need(all(item['closed'] for item in mount_entries + [mount]))
         result = call('detach', ['/usr/bin/hdiutil', 'detach', device], 30); need(result.returncode == 0)
         device = None; detached = True; report['originalDetached'] = True
-        # Discard retired mount entry from name checks; never revive its FD.
         book.directories.pop(mountpoint); mount = None
         book.check(); need(time.monotonic_ns() < end)
         report['diagnosisComplete'] = True
@@ -397,8 +406,6 @@ def main():
             try: report['ledgerPost'] = ledger_post_data(book, signature)
             except BaseException: report['ledgerPost'] = {'read': 'unavailable'}
     finally:
-        # Independent known mount custody permits cleanup after parser refusal,
-        # never across an unknown original process boundary or close.
         if device is not None and book is not None and owner is not None and calls and all(r['returned'] for r in calls):
             try:
                 for item in reversed(mount_entries): book.check_one(item); book.close(item)
@@ -412,13 +419,9 @@ def main():
                 and all(r['returned'] for r in calls)
                 and (not any(r['role'] == 'attach' for r in calls) or attach_observed and detached)):
             try:
-                # Retire only the same original task objects. No new directory
-                # adoption, broad recursive deletion, or native-owned cache wipe.
                 book.check(); need(root['identity'] == root_origin)
                 need(set(os.listdir(root['fd'])) == {'home', 'tmp', 'carrier', 'mount', 'synthetic.dmg'})
                 for leaf in ('home', 'tmp', 'mount'):
-                    # hdiutil may leave native task scratch. Any unknown output
-                    # is retained, not adopted/deleted to manufacture success.
                     info = os.stat(leaf, dir_fd=root['fd'], follow_symlinks=False)
                     known = next(item for item in directories if item['path'].name == leaf)
                     need(signature(info)[:5] == known['identity'])
