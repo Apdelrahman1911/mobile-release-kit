@@ -43,6 +43,11 @@ SOURCE_PINS = {
 }
 
 
+INTERPRETER_REFUSALS = ('selected-interpreter-shape',
+    'actual-interpreter-shape', 'supported-interpreter-version', 'interpreter-version-shape',
+    'interpreter-isolation', 'interpreter-no-site', 'interpreter-no-bytecode')
+
+
 class Refused(Exception):
     pass
 
@@ -50,6 +55,11 @@ class Refused(Exception):
 def need(value):
     if not value:
         raise Refused()
+
+
+def interpreter_need(value, reason):
+    if not value:
+        raise Refused(reason)
 
 
 def digest(body):
@@ -72,17 +82,23 @@ def context(environment):
     ids = [environment.get(k, '') for k in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')]
     need(all(re.fullmatch('[1-9][0-9]{0,19}', v) is not None for v in ids))
     interpreter = environment.get('MRK_HFS_PYTHON', '')
-    need(type(interpreter) is str and interpreter.startswith('/') and len(interpreter) <= 4096
-         and interpreter == sys.executable and sys.implementation.name == 'cpython' and sys.version_info >= (3, 11)
-         and all(type(value) is int and 0 <= value <= 255 for value in sys.version_info[:3])
-         and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode)
+    interpreter_need(type(interpreter) is str and interpreter.startswith('/') and len(interpreter) <= 4096,
+         'selected-interpreter-shape')
+    interpreter_need(type(sys.executable) is str and sys.executable.startswith('/') and len(sys.executable) <= 4096,
+         'actual-interpreter-shape')
+    interpreter_need(sys.implementation.name == 'cpython' and sys.version_info >= (3, 11), 'supported-interpreter-version')
+    interpreter_need(all(type(value) is int and 0 <= value <= 255 for value in sys.version_info[:3]), 'interpreter-version-shape')
+    interpreter_need(sys.flags.isolated, 'interpreter-isolation')
+    interpreter_need(sys.flags.no_site, 'interpreter-no-site')
+    interpreter_need(sys.dont_write_bytecode, 'interpreter-no-bytecode')
     expected_sha = environment.get('MRK_HFS_SOURCE_SHA256', '')
     need(re.fullmatch('[0-9a-f]{64}', expected_sha) is not None)
     return dict(source=source, workflowSource=source, runId=ids[0], runAttempt=ids[1], target=target,
                 observerSourceSha256=expected_sha,
                 python={'version': list(sys.version_info[:3]), 'cpython': True, 'supported': True,
                     'isolated': bool(sys.flags.isolated), 'noSite': bool(sys.flags.no_site),
-                    'noBytecode': bool(sys.dont_write_bytecode), 'cachePrefixNone': sys.pycache_prefix is None})
+                    'noBytecode': bool(sys.dont_write_bytecode), 'cachePrefixNone': sys.pycache_prefix is None,
+                    'selectedExecutableSameSpelling': interpreter == sys.executable})
 
 
 def failure_projection(source):
@@ -364,4 +380,11 @@ def main():
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Refused as error:
+        arguments = BaseException.args.__get__(error)
+        token = (arguments[0] if type(arguments) is tuple and len(arguments) == 1
+                 and type(arguments[0]) is str and arguments[0] in INTERPRETER_REFUSALS else 'probe-refused')
+        print('hfs-parser-admission:' + token, file=sys.stderr)
+        raise SystemExit(1) from None
