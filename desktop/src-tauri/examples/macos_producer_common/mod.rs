@@ -57,6 +57,13 @@ impl Identity {
     pub(super) fn object(self,other:Self)->bool {self.dev==other.dev&&self.ino==other.ino
         &&self.mode&0o170000==other.mode&0o170000&&self.uid==other.uid&&self.gid==other.gid}
     pub(super) fn ancestor(self,other:Self)->bool {self.object(other)&&self.mode==other.mode&&self.links==other.links&&self.flags==other.flags}
+    // Darwin counts a new ordinary entry in this exact private directory.
+    // This narrow own-create transition must not relax shared ancestors.
+    fn own_entry(self,other:Self,uid:u32)->bool {
+        self.mode==0o040700&&self.uid==uid&&self.flags==0
+            &&self.object(other)&&self.mode==other.mode&&self.flags==other.flags
+            &&self.links.checked_add(1)==Some(other.links)
+    }
 }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub(super) enum State {Reserved,Acquiring,Owned,Closing,Closed,Absent,Unknown}
@@ -65,6 +72,12 @@ pub(super) fn final_ready_data(unknown:bool,pending:bool,within:bool,states:&[St
 }
 struct Original {fd:Option<ManuallyDrop<OwnedFd>>,state:State,parent:Option<usize>,name:String,
     identity:Option<Identity>,exact:bool}
+impl Original {
+    fn handle(&self)->Result<&OwnedFd> {
+        need(self.state==State::Owned,"original-not-owned")?;
+        self.fd.as_deref().ok_or("original-no-handle")
+    }
+}
 pub(super) struct Book {originals:Vec<Original>,work:Instant,pub(super) final_end:Instant,pub(super) cleanup:Cell<bool>,
     pub(super) unknown:Cell<bool>,pub(super) pending:Cell<bool>,issued:u64,uid:u32}
 impl Book {
@@ -79,19 +92,17 @@ impl Book {
         need(Instant::now()<if self.cleanup.get() {self.final_end} else {self.work},"deadline")
     }
     pub(super) fn fd(&self,n:usize)->Result<&OwnedFd> {
-        let row=self.originals.get(n).ok_or("original-slot")?;
-        need(row.state==State::Owned,"original-not-owned")?;
-        row.fd.as_deref().ok_or("original-no-handle")
+        self.originals.get(n).ok_or("original-slot")?.handle()
     }
     pub(super) fn id(&self,n:usize)->Result<Identity> {self.originals.get(n).and_then(|r|r.identity).ok_or("original-unbound")}
     pub(super) fn observed(&self,n:usize)->Result<Identity> {
-        self.tick()?;self.pending.set(true);
-        let result=stat::fstat(self.fd(n)?);self.pending.set(false);
+        self.tick()?;let fd=self.fd(n)?;self.pending.set(true);
+        let result=stat::fstat(fd);self.pending.set(false);
         let value=Identity::of(&result.map_err(|_|"original-stat")?);self.tick()?;Ok(value)
     }
     pub(super) fn named(&self,parent:Option<usize>,name:&str)->Result<Identity> {
-        self.tick()?;self.pending.set(true);
-        let result=if let Some(parent)=parent {stat::fstatat(self.fd(parent)?,name,AtFlags::AT_SYMLINK_NOFOLLOW)}
+        self.tick()?;let parent_fd=parent.map(|parent|self.fd(parent)).transpose()?;self.pending.set(true);
+        let result=if let Some(fd)=parent_fd {stat::fstatat(fd,name,AtFlags::AT_SYMLINK_NOFOLLOW)}
             else {stat::lstat(Path::new("/"))};self.pending.set(false);
         let value=Identity::of(&result.map_err(|_|"original-name")?);self.tick()?;Ok(value)
     }
@@ -122,11 +133,19 @@ impl Book {
         let n=self.reserve(parent,name,exact)?;let before=self.named(parent,name)?;
         let kind=if directory {0o040000} else {0o100000};
         need(before.mode&0o170000==kind&&(directory||before.links==1),"original-type")?;
-        self.originals[n].identity=Some(before);self.tick()?;self.originals[n].state=State::Acquiring;
+        self.originals[n].identity=Some(before);self.tick()?;
         let flags=OFlag::O_RDONLY|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC|OFlag::O_NONBLOCK
             |if directory {OFlag::O_DIRECTORY} else {OFlag::empty()};
-        let result=if let Some(parent)=parent {fcntl::openat(self.fd(parent)?,name,flags,Mode::empty())}
-            else {fcntl::open(Path::new("/"),flags,Mode::empty())};
+        // Resolve every known parent lookup while this fresh row is Reserved.
+        // Whole-vector validation preserves current-row/invalid-index reasons.
+        if let Some(parent)=parent {self.fd(parent)?;}
+        let result={
+            let (earlier,fresh)=self.originals.split_at_mut(n);
+            let parent_fd=parent.map(|parent|earlier[parent].handle()).transpose()?;
+            fresh[0].state=State::Acquiring;
+            if let Some(fd)=parent_fd {fcntl::openat(fd,name,flags,Mode::empty())}
+            else {fcntl::open(Path::new("/"),flags,Mode::empty())}
+        };
         self.adopt(n,result)?;self.check(n)?;Ok(n)
     }
     pub(super) fn parents(&mut self,path:&Path,final_directory:bool)->Result<usize> {
@@ -150,13 +169,13 @@ impl Book {
         self.originals[n].identity=Some(id);self.originals[n].exact=true;self.attributes(n)?;self.check(n)
     }
     pub(super) fn attributes(&self,n:usize)->Result<()> {
-        self.tick()?;self.pending.set(true);
-        let acl=native::empty_acl_observed(self.fd(n)?.as_fd());self.pending.set(false);
+        self.tick()?;let fd=self.fd(n)?;self.pending.set(true);
+        let acl=native::empty_acl_observed(fd.as_fd());self.pending.set(false);
         if let Err(error)=acl {
             if error.free_result!=0||error.refusal_code.is_none() {self.unknown.set(true);}
             return Err("private-acl");
         }
-        self.tick()?;self.pending.set(true);let result=native::no_xattrs(self.fd(n)?.as_fd());self.pending.set(false);
+        self.tick()?;self.pending.set(true);let result=native::no_xattrs(fd.as_fd());self.pending.set(false);
         result.map_err(|_|"private-attributes")?;self.tick()
     }
     pub(super) fn file_policy(&mut self,n:usize,limit:u64)->Result<()> {
@@ -179,7 +198,7 @@ impl Book {
             self.tick()?;let wanted=usize::try_from((size-offset).min(buffer.len() as u64)).map_err(|_|"read-size")?;
             let wanted=if wanted==0 {1} else {wanted};
             self.issued=self.issued.checked_add(wanted as u64).ok_or("read-budget")?;need(self.issued<=READ_LIMIT,"read-budget")?;
-            self.pending.set(true);let result=pread(self.fd(n)?,&mut buffer[..wanted],offset as i64);self.pending.set(false);
+            let fd=self.fd(n)?;self.pending.set(true);let result=pread(fd,&mut buffer[..wanted],offset as i64);self.pending.set(false);
             let count=result.map_err(|_|"read-original")?;self.tick()?;
             if count==0 {need(offset==size,"read-short")?;break;}
             need(offset+count as u64<=size,"read-extent")?;
@@ -224,7 +243,7 @@ impl Book {
         let result=(||->Result<()> {
             let mut found=BTreeMap::new();let mut buffer=[0u8;65536];
             for turn in 0..2 {
-                self.tick()?;self.pending.set(true);let result=native::directory_block(self.fd(reader)?.as_fd(),&mut buffer);self.pending.set(false);
+                self.tick()?;let fd=self.fd(reader)?;self.pending.set(true);let result=native::directory_block(fd.as_fd(),&mut buffer);self.pending.set(false);
                 let used=result.map_err(|_|"root-roster")?;self.tick()?;
                 if used==0 {
                     need(found.len()==wanted.len()&&wanted.iter().all(|(name,ino)|found.get(*name)==Some(ino)),"root-roster")?;
@@ -252,32 +271,128 @@ impl Book {
             _=>return Err("sidecar-shape")};
         need(!bytes.is_empty()&&bytes.len() as u64<=role.policy().0,"sidecar-shape")?;
         self.all()?;let n=self.reserve(Some(root),name,true)?;let root_before=self.id(root)?;
-        self.originals[n].state=State::Acquiring;
         let flags=OFlag::O_RDWR|OFlag::O_CREAT|OFlag::O_EXCL|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC|OFlag::O_NONBLOCK;
-        let result=fcntl::openat(self.fd(root)?,name,flags,Mode::from_bits_truncate(0o600));self.adopt(n,result)?;
+        self.fd(root)?; // Known refusal leaves the fresh row Reserved.
+        let result={
+            let (earlier,fresh)=self.originals.split_at_mut(n);
+            let fd=earlier[root].handle()?;
+            fresh[0].state=State::Acquiring;
+            fcntl::openat(fd,name,flags,Mode::from_bits_truncate(0o600))
+        };
+        self.adopt(n,result)?;
         let initial=self.observed(n)?;need(initial.uid==self.uid&&initial.mode&0o177777==0o100600
             &&initial.links==1&&initial.size==0&&initial.flags==0,"sidecar-created")?;
-        self.originals[n].identity=Some(initial);
-        let now=self.observed(root)?;need(root_before.ancestor(now),"created-root-original")?;
+        self.originals[n].identity=Some(initial);self.check(n)?;
+        let now=self.observed(root)?;
+        let row=&self.originals[root];let(parent,root_name)=(row.parent,row.name.clone());
+        let named=self.named(parent,&root_name)?;
+        need(now==named&&root_before.own_entry(now,self.uid),"created-root-original")?;
         self.originals[root].identity=Some(now);self.check(root)?;self.check(n)?;
         let mut offset=0;
         while offset<bytes.len() {
-            self.check(n)?;self.tick()?;self.pending.set(true);let result=unistd::write(self.fd(n)?,&bytes[offset..]);self.pending.set(false);
+            self.check(n)?;self.tick()?;let fd=self.fd(n)?;self.pending.set(true);let result=unistd::write(fd,&bytes[offset..]);self.pending.set(false);
             let written=result.map_err(|_|"sidecar-write")?;need(written>0&&written<=bytes.len()-offset,"sidecar-write-bound")?;
             offset+=written;let observed=self.observed(n)?;
             need(initial.ancestor(observed)&&observed.size==offset as i64,"sidecar-written-original")?;
             self.originals[n].identity=Some(observed);self.check(n)?;
         }
-        self.tick()?;self.pending.set(true);let sealed=stat::fchmod(self.fd(n)?,Mode::from_bits_truncate(0o444));self.pending.set(false);
+        self.tick()?;let fd=self.fd(n)?;self.pending.set(true);let sealed=stat::fchmod(fd,Mode::from_bits_truncate(0o444));self.pending.set(false);
         sealed.map_err(|_|"sidecar-mode")?;
         let observed=self.observed(n)?;need(initial.object(observed)&&observed.mode&0o177777==0o100444
             &&observed.links==1&&observed.flags==0&&observed.size==bytes.len() as i64,"sidecar-sealed-original")?;
         self.originals[n].identity=Some(observed);self.check(n)?;self.attributes(n)?;
-        self.tick()?;self.pending.set(true);let persisted=native::sync(self.fd(n)?.as_fd(),true);self.pending.set(false);
+        self.tick()?;let fd=self.fd(n)?;self.pending.set(true);let persisted=native::sync(fd.as_fd(),true);self.pending.set(false);
         persisted.map_err(|_|"sidecar-persist")?;self.check(n)?;
         let (digest,readback)=self.read(n,role)?;need(digest==hash(bytes)&&readback==bytes,"sidecar-readback")?;
         Ok(n)
     }
+
+    #[cfg(test)]
+    pub(super) fn predispatch_refusal_regression() {
+        // Pure policy vectors for the native-observed private entry delta.
+        // Identity DATA never substitutes for any original held/name proof.
+        let before=Identity{dev:1,ino:2,mode:0o040700,uid:501,gid:20,links:2,
+            size:0,mtime:0,mtime_ns:0,ctime:0,ctime_ns:0,flags:0};
+        let after=Identity{links:3,size:64,mtime:1,mtime_ns:2,ctime:3,ctime_ns:4,..before};
+        assert!(before.own_entry(after,501));
+        assert!(after.own_entry(Identity{links:4,..after},501));
+        assert!(!before.own_entry(Identity{links:2,..after},501));
+        assert!(!before.own_entry(Identity{links:1,..after},501));
+        assert!(!before.own_entry(Identity{links:4,..after},501));
+        assert!(!before.own_entry(after,502));
+        for changed in [Identity{dev:2,..after},Identity{ino:3,..after},
+            Identity{mode:0o100700,..after},Identity{mode:0o040755,..after},
+            Identity{mode:0o044700,..after},Identity{uid:502,..after},
+            Identity{gid:21,..after},Identity{flags:1,..after}] {
+            assert!(!before.own_entry(changed,501));
+        }
+        for changed in [Identity{mode:0o040755,..before},Identity{mode:0o044700,..before},
+            Identity{flags:1,..before}] {
+            assert!(!changed.own_entry(Identity{links:3,..changed},501));
+        }
+        assert!(!Identity{links:u64::MAX,..before}.own_entry(Identity{links:0,..after},501));
+        assert!(!Identity{links:u64::MAX,..before}.own_entry(Identity{links:u64::MAX,..after},501));
+        // General ancestor protection retains its old strict link policy.
+        assert!(before.ancestor(Identity{links:2,..after}));
+        assert!(!before.ancestor(after));
+        for changed in [Identity{dev:2,..before},Identity{ino:3,..before},
+            Identity{mode:0o100700,..before},Identity{mode:0o040755,..before},
+            Identity{uid:502,..before},Identity{gid:21,..before},Identity{flags:1,..before}] {
+            assert!(!before.ancestor(changed));
+        }
+        // Genuine no-call routes: these states cannot supply a native FD.
+        for (state,reason) in [(State::Reserved,"original-not-owned"),
+                              (State::Closed,"original-not-owned"),
+                              (State::Owned,"original-no-handle")] {
+            let mut book=Self::new(Instant::now()).unwrap();
+            let n=book.reserve(None,"/",false).unwrap();book.originals[n].state=state;
+            assert_eq!(book.observed(n),Err(reason));assert!(!book.pending.get());
+            assert_eq!(book.named(Some(n),"never-opened"),Err(reason));assert!(!book.pending.get());
+            assert_eq!(book.attributes(n),Err(reason));assert!(!book.pending.get());
+            if state==State::Owned {
+                assert!(!book.finish());assert!(book.unknown.get());
+            } else {assert!(book.finish());}
+        }
+        let mut book=Self::new(Instant::now()).unwrap();
+        let root=book.reserve(None,"/",false).unwrap();
+        // id(root) is DATA only; no original is invented by this fixture.
+        book.originals[root].identity=Some(Identity{dev:0,ino:1,mode:0o040700,
+            uid:book.uid,gid:unistd::getgid().as_raw(),links:1,size:0,
+            mtime:0,mtime_ns:0,ctime:0,ctime_ns:0,flags:0});
+        assert_eq!(book.create(root,"producer.json",b"{}"),Err("original-not-owned"));
+        assert_eq!(book.originals.len(),2);
+        assert!(book.originals.iter().all(|row|row.state==State::Reserved&&row.fd.is_none()));
+        assert!(!book.pending.get());assert!(book.finish());
+        assert!(book.originals.iter().all(|row|row.state==State::Absent));
+        for parent in [0,1,99] {
+            let mut book=Self::new(Instant::now()).unwrap();
+            book.reserve(None,"/",false).unwrap();
+            assert_eq!(book.open(Some(parent),"never-opened",false,true),
+                Err(if parent>1 {"original-slot"} else {"original-not-owned"}));
+            assert_eq!(book.originals.len(),2);
+            assert!(book.originals.iter().all(|row|row.state==State::Reserved&&row.fd.is_none()));
+            assert!(!book.pending.get());assert!(book.finish());
+        }
+        // One genuine read-only original belongs to this test alone. A known
+        // no-call failure must not prevent its normal consuming close.
+        let mut book=Self::new(Instant::now()).unwrap();
+        let original=book.open(None,"/",true,false).unwrap();
+        let refused=book.reserve(None,"/",false).unwrap();
+        assert_eq!(book.observed(refused),Err("original-not-owned"));
+        assert!(!book.pending.get());assert!(book.finish());
+        assert_eq!(book.originals[original].state,State::Closed);
+        assert!(book.originals[original].fd.is_none());
+        assert_eq!(book.originals[refused].state,State::Absent);
+        // Entered uncertainty still cannot be reset into known finality.
+        let mut book=Self::new(Instant::now()).unwrap();book.pending.set(true);
+        assert_eq!(book.observed(0),Err("original-unknown"));
+        assert!(!book.finish());assert!(book.pending.get());
+        let mut book=Self::new(Instant::now()).unwrap();
+        let n=book.reserve(None,"/",false).unwrap();book.originals[n].state=State::Acquiring;
+        assert!(!book.finish());assert!(book.unknown.get());
+        assert_eq!(book.originals[n].state,State::Acquiring);
+    }
+
     pub(super) fn native_point(&self,point:ProducerCheckpoint)->Decision {
         let (phase,at,custody)=match point {ProducerCheckpoint::Before{phase,custody}=>(phase,None,custody),
             ProducerCheckpoint::Returned{phase,at,custody}=>(phase,Some(at),custody)};

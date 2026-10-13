@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       matrix:
         # Only this fixed ref selects two fresh ARM machines; no cross-product or Intel removal case.
-        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d","supplier_tar":"ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695","supplier_source":"158cdff422e3837f7ab5e6192af76a578faf6fab","supplier_run":"37467019389","supplier_attempt":"1","supplier_artifact":"11415902210"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b","supplier_tar":"739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd","supplier_source":"079ab2a2c8fef88f01bf909e7669c685f07e1375","supplier_run":"37476532238","supplier_attempt":"1","supplier_artifact":"11419502465"}]') }}
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809","supplier_tar":"2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5","supplier_source":"52485f9fd837f0dacb8dc9621e5a1bee30803506","supplier_run":"38343324660","supplier_attempt":"1","supplier_artifact":"11788410124"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -105,21 +105,21 @@ jobs:
           case "$MRK_MACOS_TARGET" in
             aarch64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26 && "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
-              expected_supplier_receipt=2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d
-              expected_supplier_tar=ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695
-              expected_supplier_source=158cdff422e3837f7ab5e6192af76a578faf6fab
-              expected_supplier_run=37467019389
+              expected_supplier_receipt=1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809
+              expected_supplier_tar=2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5
+              expected_supplier_source=52485f9fd837f0dacb8dc9621e5a1bee30803506
+              expected_supplier_run=38343324660
               expected_supplier_attempt=1
-              expected_supplier_artifact=11415902210
+              expected_supplier_artifact=11788410124
               ;;
             x86_64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
-              expected_supplier_receipt=a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b
-              expected_supplier_tar=739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd
-              expected_supplier_source=079ab2a2c8fef88f01bf909e7669c685f07e1375
-              expected_supplier_run=37476532238
+              expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
+              expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
+              expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
+              expected_supplier_run=38343340695
               expected_supplier_attempt=1
-              expected_supplier_artifact=11419502465
+              expected_supplier_artifact=11787588635
               ;;
             *) exit 1 ;;
           esac

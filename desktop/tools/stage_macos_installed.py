@@ -42,7 +42,7 @@ BuildSelection = namedtuple("BuildSelection", "target package_version release")
 ProducerSelection = namedtuple("ProducerSelection", "team leaf_sha1 leaf_sha256 rsa_bits producer_sha256 service_sha256")
 PRODUCER_PROFILE = DESKTOP / "packaging/macos-install-producer-signing.profile"
 SERVICE_PROFILE = DESKTOP / "packaging/macos-android-service-signing.profile"
-PACKAGING_CALL_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
+PACKAGING_CALL_ROLES = ("producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign",
     "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
     "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor",
     "installer", "installer-log-capture", "distribution-detach")
@@ -781,12 +781,8 @@ SIGNED_RUNTIME_BINDING_LIMIT = 4096
 
 
 SIGNED_ORIGINAL_SUPPLIERS = {
-    ARM_TARGET: {"receiptSha256": "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d",
-        "tarSha256": "ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695",
-        "sourceCommit": "158cdff422e3837f7ab5e6192af76a578faf6fab", "runId": "37467019389", "runAttempt": "1", "artifactId": "11415902210"},
-    INTEL_TARGET: {"receiptSha256": "a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b",
-        "tarSha256": "739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd",
-        "sourceCommit": "079ab2a2c8fef88f01bf909e7669c685f07e1375", "runId": "37476532238", "runAttempt": "1", "artifactId": "11419502465"},
+    ARM_TARGET: {'receiptSha256': '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 'tarSha256': '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 'sourceCommit': '52485f9fd837f0dacb8dc9621e5a1bee30803506', 'runId': '38343324660', 'runAttempt': '1', 'artifactId': '11788410124'},
+    INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
 def signed_python_options(args):

@@ -32,14 +32,14 @@ jobs:
             runner: macos-26-intel
             architecture: X64
             machine: x86_64
-            supplier_run: '37476532238'
-            supplier_artifact: '11419502465'
+            supplier_run: '38343340695'
+            supplier_artifact: '11787588635'
           - target: aarch64-apple-darwin
             runner: macos-26
             architecture: ARM64
             machine: arm64
-            supplier_run: '37467019389'
-            supplier_artifact: '11415902210'
+            supplier_run: '38343324660'
+            supplier_artifact: '11788410124'
     env:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}

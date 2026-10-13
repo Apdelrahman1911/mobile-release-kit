@@ -647,6 +647,20 @@ INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n         
 
 INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
 
+def without_fresh_g2_supplier_workflow(source):
+    # Current supplier DATA only; preserve unchanged historical SOURCE oracles.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("fresh G2 supplier workflow bound differs")
+    replacements = (('2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d', '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 4), ('ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695', '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 4), ('158cdff422e3837f7ab5e6192af76a578faf6fab', '52485f9fd837f0dacb8dc9621e5a1bee30803506', 4), ('37467019389', '38343324660', 4), ('11415902210', '11788410124', 4), ('a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b', 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 2), ('739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd', 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 2), ('079ab2a2c8fef88f01bf909e7669c685f07e1375', 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 2), ('37476532238', '38343340695', 2), ('11419502465', '11787588635', 2))
+    if not any(after in source for before, after, count in replacements):
+        return source
+    if any(source.count(after) != count or before in source for before, after, count in replacements):
+        raise AssertionError("fresh G2 supplier exact current nomination differs")
+    for before, after, count in replacements:
+        source = source.replace(after, before)
+    return source
+
+
 def without_primary_owner_runtime_source_pin(source):
     # Exact current SOURCE nomination only; all historical oracles stay fixed.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -666,6 +680,7 @@ def without_primary_owner_runtime_source_pin(source):
 
 
 def without_intel_fetch_workflow(source):
+    source = without_fresh_g2_supplier_workflow(source)
     source = without_primary_owner_runtime_source_pin(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("Intel fetch workflow SOURCE bound differs")

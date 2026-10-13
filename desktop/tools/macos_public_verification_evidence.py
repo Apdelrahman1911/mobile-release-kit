@@ -73,7 +73,7 @@ NATIVE_ROLES = frozenset((
     "verify-after-history-provider", "verify-after-github-seal", "resolve-notarytool", "resolve-stapler",
     "verify-inner-before", "verify-outer-before", "payload-zip", "payload-submit", "payload-log",
     "staple-inner", "validate-inner", "staple-outer", "validate-outer", "verify-inner-after", "verify-outer-after",
-    "producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
+    "producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
     "distribution-verify-image", "observation-create", "observation-sign", "observation-verify-signature",
     "observation-verify-image", "distribution-attach", "installer-log-cursor", "installer", "installer-log-capture",
     "distribution-detach", "final-package-productbuild",
@@ -103,7 +103,7 @@ STAGES = frozenset((*PHASES, *NATIVE_ROLES, "owned-directory-admission", "source
     "helper-source-selected-signing", "notary-preflight-input", "notary-known-private-retirement", "final-image-owned-publication",
     "final-package-signed-output", "final-package-mode-and-publication", "install-product-original-adoption",
     "final-package-original-audit",
-    "package-final-audit", "package-explicit-producer-compiler", "package-producer-emission",
+    "package-final-audit", "package-producer-tests", "package-explicit-producer-compiler", "package-producer-emission",
     "package-readonly-attach", "standard-original-installer", "package-nonroot-v2-readback"))
 # Fixed current pre-first-original notary guards; never a dynamic reason prefix.
 NOTARY_ADMISSION_REASONS = frozenset((
@@ -203,7 +203,8 @@ FINAL_PACKAGE_POST_REASONS = frozenset((
 ))
 
 
-REASONS = frozenset((*FINAL_PACKAGE_POST_REASONS, *INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
+REASONS = frozenset(("producer-tests-bound", "producer-tests-framing", "producer-tests-roster", "producer-tests-result",
+    "original-nonzero-producer-tests", *FINAL_PACKAGE_POST_REASONS, *INSTALL_PRODUCT_AUDIT_REASONS, "notary-key-purpose", "notary-key-input", "notary-key-base64", "notary-key-pem-shape",
     *NOTARY_ADMISSION_REASONS, "notary-submission-invalid", "notary-authentication-not-retired", "notary-group-deadline",
     "notary-group-hard-deadline", "notary-final-input-result", "notary-private-key-retained", "original-return-contract",
     "original-operation-refused", "helper-package-incomplete", "package-finality-incomplete",
@@ -1063,7 +1064,7 @@ def project_same_package(value, context):
 
 APP_ABSENCE_REF = "refs/heads/verify/desktop-macos-app-absence-fixture"
 APP_ABSENCE_PREPARE_ROLES = ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc", "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar")
-APP_ABSENCE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
+APP_ABSENCE_PACKAGE_ROLES = ("producer-tests", "producer-build", "producer-emitter", "app-absence-image-create", "app-absence-image-verify", "app-absence-baseline-attach",
     "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
     "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor", "app-absence-baseline", "installer",
     "installer-log-capture", "distribution-detach", "app-absence-baseline-detach")
@@ -1164,7 +1165,7 @@ def project_app_absence_baseline(value, context):
     return {"binding": binding, "preparationReceiptSha256": hex_value(row["preparationReceiptSha256"]),
         "baselineSha256": baseline, "initialResultSha256": hex_value(initial["resultSha256"]),
         "imageSha256": hex_value(image["sha256"]), "imageBytes": size, "initialFreshInstall": True,
-        "originalBaselineZero": True, "originalMountDetached": True, "nativeCalls": 20,
+        "originalBaselineZero": True, "originalMountDetached": True, "nativeCalls": len(APP_ABSENCE_PACKAGE_ROLES),
         "fixturePackageSha256": fixture["sha256"], "fixturePackageBytes": fixture["bytes"]}
 
 
@@ -1227,7 +1228,7 @@ def app_absence_join(prepare, restore, baseline, statuses):
          and all(type(row) is dict and row.get("receiptState") == "observed" and type(row.get("returncode")) is int
                  and row["returncode"] == 0 for row in statuses))
     prior = baseline.get("appAbsenceBaseline")
-    need(type(prior) is dict and prior["nativeCalls"] == 20 and prepare["nativeCalls"] == 7 and restore["nativeCalls"] == 5
+    need(type(prior) is dict and prior["nativeCalls"] == len(APP_ABSENCE_PACKAGE_ROLES) and prepare["nativeCalls"] == 7 and restore["nativeCalls"] == 5
          and prior["preparationReceiptSha256"] == restore["preparationReceiptSha256"] == prepare["receiptSha256"]
          and restore["baselineOwnerReceiptSha256"] == baseline["receiptSha256"]
          and restore["binding"] == prior["binding"]
@@ -1235,7 +1236,7 @@ def app_absence_join(prepare, restore, baseline, statuses):
          and prepare["fixturePackageBytes"] == prior["fixturePackageBytes"]
          and all(restore[k] == prior[k] for k in ("baselineSha256", "imageSha256", "initialResultSha256"))
          and all(prepare[k] == prior["binding"][k] for k in ("fixtureExecutableSha256", "inventorySha256", "runtimeManifestSha256", "protocolSha256")))
-    return {"receiptState": "observed", "proofComplete": True, "nativeCalls": {"prepare": 7, "baseline": 20, "restore": 5},
+    return {"receiptState": "observed", "proofComplete": True, "nativeCalls": {"prepare": 7, "baseline": len(APP_ABSENCE_PACKAGE_ROLES), "restore": 5},
             **{k: prior["binding"][k] for k in ("packageSha256", "inventorySha256", "runtimeManifestSha256")},
             "initialResultSha256": prior["initialResultSha256"], "restoreResultSha256": restore["restoreResultSha256"],
             "retainedPrivateEvidence": True, "systemServiceExitClaimed": False, "downloadedLaunchQualified": False,
@@ -1284,7 +1285,7 @@ def project_update(value, context, phase):
     required_false = ("retainedPayloadRehashed", "downloadedLaunchQualified", "allUserDataCompatible", "productReady")
     need(all(row.get(k) is True for k in required_true) and all(row.get(k) is False for k in required_false)
          and type(row.get("exportCount")) is int and row["exportCount"] == 2
-         and tuple(v.get("role") for v in calls) == ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
+         and tuple(v.get("role") for v in calls) == ("producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign",
              "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
              "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor",
              "installer", "installer-log-capture", "distribution-detach"))

@@ -243,9 +243,9 @@ def digest(body):
 
 
 def package_roles(old):
-    need(type(old) is tuple and len(old) == 15 and old[1] == "producer-emitter"
+    need(type(old) is tuple and len(old) == 16 and old[:3] == ("producer-tests", "producer-build", "producer-emitter")
          and old[-1] == "distribution-detach" and old.count("installer") == 1, "app-absence-old-roster")
-    return old[:2] + PACKAGE_INSERT + old[2:old.index("installer")] + ("app-absence-baseline",) + old[old.index("installer"):] + ("app-absence-baseline-detach",)
+    return old[:3] + PACKAGE_INSERT + old[3:old.index("installer")] + ("app-absence-baseline",) + old[old.index("installer"):] + ("app-absence-baseline-detach",)
 
 
 def source_binding(environment, target):

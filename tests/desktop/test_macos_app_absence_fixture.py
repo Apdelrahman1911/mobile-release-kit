@@ -114,6 +114,19 @@ class MacAppAbsenceFixtureData(unittest.TestCase):
     def test_fixed_bindings_layout_and_stricter_script_quote(self):
         FIXTURE.fixed_binding_and_layout_data_checks()
         FIXTURE.ownership_and_finality_data_checks()
+        current = ("producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign",
+            "distribution-verify-signature", "distribution-verify-image", "observation-create", "observation-sign",
+            "observation-verify-signature", "observation-verify-image", "distribution-attach", "installer-log-cursor",
+            "installer", "installer-log-capture", "distribution-detach")
+        expected = ("producer-tests", "producer-build", "producer-emitter", "app-absence-image-create", "app-absence-image-verify",
+            "app-absence-baseline-attach", "distribution-create", "distribution-sign", "distribution-verify-signature",
+            "distribution-verify-image", "observation-create", "observation-sign", "observation-verify-signature",
+            "observation-verify-image", "distribution-attach", "installer-log-cursor", "app-absence-baseline", "installer",
+            "installer-log-capture", "distribution-detach", "app-absence-baseline-detach")
+        self.assertEqual(FIXTURE.package_roles(current), expected)
+        for bad in (current[1:], ("producer-build",) + current[1:], (current[1], current[0]) + current[2:],
+                    current[:2] + ("foreign",) + current[3:], current[:-1], current + (current[0],)):
+            with self.subTest(roster=bad), self.assertRaises(ValueError): FIXTURE.package_roles(bad)
         quote = FIXTURE.script_quote({"core.zip": {"size": 1024}}, 1024)
         self.assertLess(quote, FIXTURE.PRODUCT_LIMIT)
         # The abstract six-file DATA ceiling does not widen the actual route's

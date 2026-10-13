@@ -83,7 +83,7 @@ def update_documents():
         for role in ("update-baseline-attach", "update-baseline-installer", "update-baseline-detach")]
     current["originalCalls"] = [{"role": role, "entered": True, "returned": True, "capturesSettled": True,
         "returncode": 0, "stdoutSha256": "a" * 64, "stderrSha256": "b" * 64}
-        for role in ("producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
+        for role in ("producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
             "distribution-verify-image", "observation-create", "observation-sign", "observation-verify-signature", "observation-verify-image",
             "distribution-attach", "installer-log-cursor", "installer", "installer-log-capture", "distribution-detach")]
     old_facts = {"previous": {"invocation": "a" * 32, "sha256": "a" * 64},
@@ -1569,8 +1569,9 @@ class PublicVerificationEvidenceData(unittest.TestCase):
     def test_app_absence_genuine_receipts_require_seven_twenty_five_originals(self):
         self.assertEqual(DATA.APP_ABSENCE_PREPARE_ROLES, ("app-absence-build", "app-absence-data-tests", "app-absence-adhoc",
             "app-absence-verify-code", "app-absence-pkgbuild", "app-absence-tar", "app-absence-xar"))
-        self.assertEqual(len(DATA.APP_ABSENCE_PACKAGE_ROLES), 20)
-        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[15], "app-absence-baseline")
+        self.assertEqual(len(DATA.APP_ABSENCE_PACKAGE_ROLES), 21)
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[:3], ("producer-tests", "producer-build", "producer-emitter"))
+        self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[16], "app-absence-baseline")
         self.assertEqual(DATA.APP_ABSENCE_PACKAGE_ROLES[-1], "app-absence-baseline-detach")
         self.assertEqual(DATA.APP_ABSENCE_RESTORE_ROLES, ("app-absence-restore-attach", "app-absence-withdraw", "app-absence-install",
             "app-absence-verify", "app-absence-restore-detach"))
@@ -1586,7 +1587,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 row = value["appAbsence"]
                 self.assertEqual(row["receiptState"], "observed")
                 self.assertIs(row["proofComplete"], True)
-                self.assertEqual(row["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                self.assertEqual(row["nativeCalls"], {"prepare": 7, "baseline": 21, "restore": 5})
                 self.assertEqual(row["prepare"]["pureDataTests"]["passed"], 6)
                 self.assertEqual(row["prepare"]["pureDataTests"]["filteredCount"], 999999)
                 self.assertIs(row["retainedPrivateEvidence"], True)
@@ -1658,6 +1659,15 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 value = copy.deepcopy(original); del value[fields[index]][key]
                 with self.subTest(phase=phases[index], missing=key), self.assertRaises(DATA.Refused):
                     reduce(index, value)
+        # The current extra native test original cannot be dropped, duplicated,
+        # nonzero or unsettled and counted as a current package proof.
+        for fault in ("missing-tests", "duplicate-tests", "nonzero-tests", "unsettled-tests"):
+            value = copy.deepcopy(documents[1])
+            if fault == "missing-tests": value["originalCalls"].pop(0)
+            elif fault == "duplicate-tests": value["originalCalls"][1] = copy.deepcopy(value["originalCalls"][0])
+            elif fault == "nonzero-tests": value["originalCalls"][0]["returncode"] = 1
+            else: value["originalCalls"][0]["capturesSettled"] = False
+            with self.subTest(testOriginal=fault), self.assertRaises(DATA.Refused): reduce(1, value)
         # The genuine DATA parser's six names/counts are not arbitrary stdout.
         for key, bad in (("passed", 5), ("failed", 1), ("ignored", 1), ("filteredCount", 1000000),
                          ("schemaVersion", True), ("methodNames", [SENTINEL]*6), ("stdoutSha256", SENTINEL)):
@@ -1732,7 +1742,7 @@ class PublicVerificationEvidenceData(unittest.TestCase):
             self.assertTrue(new["rootIdentityPreserved"] and new["generationInstancesDistinct"] and new["testedAppDataOriginalPreserved"])
             self.assertFalse(new["allUserDataCompatible"] or new["retainedPayloadRehashed"] or new["downloadedLaunchQualified"])
             self.assertEqual(result["phases"]["update-baseline"]["originalCalls"]["recordedCount"], 3)
-            self.assertEqual(result["phases"]["package-install"]["originalCalls"]["recordedCount"], 15)
+            self.assertEqual(result["phases"]["package-install"]["originalCalls"]["recordedCount"], 16)
             self.assertNotIn(SENTINEL, (root / DATA.OUTPUT).read_text())
             self.assertLessEqual((root / DATA.OUTPUT).stat().st_size, DATA.OUTPUT_LIMIT)
 
@@ -1772,6 +1782,8 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                          {"PREPARE_ROLES", "CREDENTIAL_ROLES", "SIGNING_PHASES", "NOTARY_ROLES",
                           "FINAL_PACKAGE_ROLES", "FINAL_IMAGE_ROLES", "INSTALLER_CREDENTIAL_ROSTER", "REMOVE_PACKAGE_ROLES"})
         package = literals(ROOT / "desktop/tools/stage_macos_installed.py", {"PACKAGING_CALL_ROLES"})["PACKAGING_CALL_ROLES"]
+        self.assertEqual(len(package), 16)
+        self.assertEqual(package[:3], ("producer-tests", "producer-build", "producer-emitter"))
         failed_fetch = DATA.project_calls([{"role": "resident-fetch", "entered": True, "returned": False,
             "capturesSettled": False, "dispatched": True, "contained": True, "cleanup_complete": True,
             "originalFailure": {"available": True, "ownerErrorType": "ProcessError", "classification": "deadline",
@@ -1905,12 +1917,12 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 write_app_absence_documents(fixture_root, app_absence_documents())
                 fixture_report = project(fixture_root)
                 self.assertIs(fixture_report["appAbsence"]["proofComplete"], True)
-                self.assertEqual(fixture_report["appAbsence"]["nativeCalls"], {"prepare": 7, "baseline": 20, "restore": 5})
+                self.assertEqual(fixture_report["appAbsence"]["nativeCalls"], {"prepare": 7, "baseline": 21, "restore": 5})
                 combined_budget_only["appAbsence"] = fixture_report["appAbsence"]
                 # Retain all old package facts/calls AND reserve the complete
-                # additional twenty-call baseline; do not replace old coverage.
+                # additional twenty-one-call baseline; do not replace old coverage.
                 combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"] = fixture_report["phases"]["package-install"]
-                self.assertEqual(combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"]["originalCalls"]["recordedCount"], 20)
+                self.assertEqual(combined_budget_only["additionalAppAbsenceBaselineBudgetOnly"]["originalCalls"]["recordedCount"], 21)
             # Reserve the exclusive update route as another conservative byte
             # union without deleting/replacing any dense prior facts or calls.
             with tempfile.TemporaryDirectory() as update_directory:
@@ -1921,14 +1933,14 @@ class PublicVerificationEvidenceData(unittest.TestCase):
                 combined_budget_only["positiveUpdate"] = update_report["positiveUpdate"]
                 combined_budget_only["additionalUpdateBaselineBudgetOnly"] = update_report["phases"]["update-baseline"]
                 # P1 reuses the existing package-install phase, not a second
-                # fifteen-call installation. Prove the old dense common-field
+                # sixteen-call installation. Prove the old dense common-field
                 # quote covers the genuine current writer before reserving only
                 # its complete new observation. Every old fact remains below.
                 current = update_report["phases"]["package-install"]
                 dense = result["phases"]["package-install"]
                 self.assertEqual(set(current), set(dense))
                 self.assertEqual(current["originalCalls"], dense["originalCalls"])
-                self.assertEqual(current["originalCalls"]["recordedCount"], 15)
+                self.assertEqual(current["originalCalls"]["recordedCount"], 16)
                 def common_bytes(row):
                     return (json.dumps({key: value for key, value in row.items() if key != "updateObservation"},
                         sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")

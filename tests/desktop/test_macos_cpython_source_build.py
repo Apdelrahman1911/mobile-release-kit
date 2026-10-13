@@ -8501,6 +8501,126 @@ class MacPythonSourceBuildTests(unittest.TestCase):
             self.assertEqual(BUILD.digest((root / "supplier.tar").read_bytes()), result["sha256"])
             self.assertEqual(list(BUILD.tree_rows(supplier, maximum=1024, max_files=3).values()), rows)
 
+        # A real tiny projection reaches the first native sign boundary, then
+        # deliberately refuses it. It is not a sealed or native supplier.
+        original_data, original_fields = BUILD.DATA, dict(vars(BUILD.DATA))
+        self.assertTrue(original_data.known)
+        self.assertEqual(original_data._pending, 0)
+        with scratch() as root:
+            work = root / "projection"
+            work.mkdir(mode=0o700)
+            private = work / "private"
+            private.mkdir(mode=0o700)
+            source = root / "source"
+            (source / "Lib").mkdir(mode=0o700, parents=True)
+            stdlib = b"# inert os.py SOURCE fixture; never imported\n"
+            BUILD.write(source / "Lib/os.py", stdlib, 0o444)
+            build = root / "build"
+            generated = build / "build/generated-data"
+            generated.mkdir(mode=0o700, parents=True)
+            binary = b"inert interpreter DATA; never executed\n"
+            BUILD.write(build / "python", binary, 0o444)
+            BUILD.write(build / "pybuilddir.txt", b"build/generated-data", 0o444)
+            generated_bodies = {
+                "_sysconfigdata__darwin_darwin.py": b"# inert generated configuration\n",
+                "_sysconfig_vars__darwin_darwin.json": b"{\"fixture\":true}\n",
+                "build-details.json": b"{\"fixture\":true,\"schemaVersion\":1}\n",
+            }
+            for name, body in generated_bodies.items():
+                BUILD.write(generated / name, body, 0o444)
+            notice_inputs = (("cpython", "LICENSE"), ("cpython", "Doc/license.rst"),
+                             ("openssl", "LICENSE.txt"), ("zlib", "README"),
+                             ("libffi", "LICENSE"), ("cpython", "Modules/expat/COPYING"))
+            source_trees = {"cpython": source}
+            notices, expected = [], {
+                "python/bin/python3": (binary, 0o700),
+                "python/lib/python3.14/os.py": (stdlib, 0o444),
+                "python/lib/python3.14/lib-dynload/README.mrk":
+                    (b"All selected extension modules are built in.\n", 0o444),
+            }
+            expected.update({"python/lib/python3.14/" + name: (body, 0o444)
+                             for name, body in generated_bodies.items()})
+            for component, name in notice_inputs:
+                component_root = source_trees.setdefault(component, root / ("source-" + component))
+                selected = component_root / name
+                selected.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                body = ("inert original notice " + component + "/" + name + "\n").encode("ascii")
+                BUILD.write(selected, body, 0o444)
+                notices.append({"component": component, "path": name, "bytes": len(body),
+                                "sha256": hashlib.sha256(body).hexdigest()})
+                expected["python/licenses/" + component + "-" + name.replace("/", "-")] = (body, 0o444)
+            hacl_name = "Modules/_hacl/Hacl_Hash_SHA2.c"
+            hacl = b"/* inert original HACL notice SOURCE; never compiled */\n"
+            selected = source / hacl_name
+            selected.parent.mkdir(mode=0o700, parents=True)
+            BUILD.write(selected, hacl, 0o444)
+            expected["python/licenses/hacl-source-Hacl_Hash_SHA2.c.txt"] = (hacl, 0o444)
+            operation = BUILD.Build.__new__(BUILD.Build)
+            operation.private, operation.python_build = private, build
+            operation.configuration = {"executable": "python", "generated": sorted(generated_bodies)}
+            operation.stdlib = [SimpleNamespace(source="Lib/os.py", destination="python/lib/python3.14/os.py",
+                size=len(stdlib), sha256=hashlib.sha256(stdlib).hexdigest())]
+            operation.source_trees = source_trees
+            operation.source_rows = {"cpython": {hacl_name: {"size": len(hacl),
+                "sha256": hashlib.sha256(hacl).hexdigest()}}}
+            operation.lock_body = BUILD.canonical({"requiredPublicNoticeInputs": notices})
+            operation.codesign = "/not-an-executable/test-owned-native-boundary"
+            operation.deadline = time.monotonic() + 10
+
+            class ProjectionGuard:
+                cancelled = False
+                checks = 0
+
+                def check(guard):
+                    guard.checks += 1
+                    self.assertIs(BUILD.DATA, original_data)
+                    self.assertTrue(original_data.known)
+                    self.assertEqual(original_data._pending, 0)
+                    if guard.cancelled:
+                        raise BUILD.BuildRefused("test-projection-cancelled")
+                    BUILD.remaining(operation.deadline, time.monotonic())
+
+            guard = ProjectionGuard()
+            operation.guard = guard
+            guard.cancelled = True
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^test-projection-cancelled$"):
+                operation.check()  # Actual Build.check, no output or native call.
+            self.assertFalse((private / "supplier").exists())
+            guard.cancelled = False
+            calls = []
+
+            def refuse_native(role, argv, **options):
+                self.assertEqual(role, "python-adhoc-sign")
+                self.assertEqual(argv, [operation.codesign, "--force", "--sign", "-", "--timestamp=none",
+                    "--identifier", "org.mobile-release-kit.python.source",
+                    str(operation.payload / "python/bin/python3")])
+                self.assertEqual(options, {"maximum": 60})
+                calls.append(role)
+                raise BUILD.BuildRefused("test-no-native-dispatch")
+
+            operation.run = refuse_native
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^test-no-native-dispatch$"):
+                operation.project()  # Genuine reads/writes; first native call refuses.
+            self.assertEqual(calls, ["python-adhoc-sign"])
+            self.assertGreater(guard.checks, len(expected))
+            optional_zip = operation.payload / "python/lib/python314.zip"
+            with self.assertRaises(FileNotFoundError):
+                optional_zip.lstat()  # Missing, not an accepted alias or empty ZIP.
+            actual = {}
+            for directory, _, names in BUILD.walk_tree(operation.payload):
+                for name in names:
+                    selected = Path(directory) / name
+                    info = selected.lstat()
+                    self.assertFalse(selected.is_symlink())
+                    self.assertEqual(info.st_nlink, 1)
+                    relative = selected.relative_to(operation.payload).as_posix()
+                    actual[relative] = (BUILD.read(selected, info.st_size), info.st_mode & 0o777)
+            self.assertEqual(actual, expected)
+            self.assertIs(BUILD.DATA, original_data)
+            self.assertEqual(vars(original_data), original_fields)
+        self.assertIs(BUILD.DATA, original_data)
+        self.assertEqual(vars(original_data), original_fields)
+
     def test_canonical_seal_generated_alias_is_exact_and_never_source_authority(self):
         # Only a tiny generated-work alias is exercised. No source archive,
         # compiler, crypto, native child or complete build owner is entered.

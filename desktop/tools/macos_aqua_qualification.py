@@ -5198,7 +5198,7 @@ class Fixtures:
         stager, release = _gate_load_stager(self, source, target=self.binding.target, registrations=self.normal_stager_registrations)
         pins = (
             ("desktop/macos-installed-inputs/python-signed-runtime-binding.json", 1503,
-             "6793b36697e04264c6f627317906a6f143e47adb3443132beba05c6d14147e53"),
+             "fefbf7789ac1d8bed71e42456073423399d45e7f70d701964fc3bd51c7e82b61"),
             ("desktop/packaging/macos-install-producer-signing.profile", 488,
              "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2"),
             ("desktop/packaging/macos-android-service-signing.profile", 219,
@@ -5731,7 +5731,7 @@ def shipping_gate_compiler_argv(target=ARM_TARGET):
 
 
 SHIPPING_GATE_SOURCE_PINS = {
-    "desktop/tools/stage_macos_installed.py": '800143d5fc3ddf9d7d373c1cf71a44434010098ed662c64d456bdeacf90a7673',
+    "desktop/tools/stage_macos_installed.py": 'ce3b83e861a04caf619d25823dd5dbbfc9a6c8e122d09128f6b6bd54e6c227a6',
     "desktop/macos-installed-inputs/build-release.json": "521cdb6880415e7f2ac7ef1ebb86d4e5ec9d341dabf7f77e70fc8dc2883c4512",
     "desktop/macos-installed-inputs/build-release-intel.json": "5864c0efb2a66219cf7efa41d3863721327148ef7b4c6d6f3252de3ce20596e7",
 }
@@ -6062,7 +6062,7 @@ def _gate_load_stager(fixtures, checkout, *, target=ARM_TARGET, registrations=No
     target_row = target_data(target)
     selected, bodies = [], {}
     for relative, expected in SHIPPING_GATE_SOURCE_PINS.items():
-        limit = 373689 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
+        limit = 373675 if relative == "desktop/tools/stage_macos_installed.py" else 256 * 1024
         body, original = _gate_file(fixtures, str(checkout / relative), None, limit)
         need(digest(body) == expected, "gate-stager-source-pin")
         selected.append(original)

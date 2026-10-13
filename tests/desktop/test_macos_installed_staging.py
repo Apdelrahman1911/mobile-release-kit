@@ -1814,6 +1814,20 @@ INTEL_FETCH_WORKFLOW_INVERSE = (('name: Desktop Mac normal package and limited e
 INTEL_FETCH_PREPARE_PREFIX = '        if self.target == INTEL_TARGET:\n            self.stage = "resident-dependency-fetch"\n            # Separate acquisition from the unchanged compiler deadline. The\n            # same original call must return0 with settled captures first.\n            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",\n                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],\n                      build_environment(self.environment, self.work, self.image_release, target=self.target),\n                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)\n'
 INTEL_FETCH_OFFLINE_REGION = ('                           "--locked", "--release", "--jobs", "1", "--target", self.target,', '                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--jobs", "1", "--target", self.target,')
 
+def without_fresh_g2_supplier_workflow(source):
+    # Current supplier DATA only; preserve unchanged historical SOURCE oracles.
+    if type(source) is not str or len(source.encode()) > 512 * 1024:
+        raise AssertionError("fresh G2 supplier workflow bound differs")
+    replacements = (('2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d', '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 4), ('ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695', '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 4), ('158cdff422e3837f7ab5e6192af76a578faf6fab', '52485f9fd837f0dacb8dc9621e5a1bee30803506', 4), ('37467019389', '38343324660', 4), ('11415902210', '11788410124', 4), ('a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b', 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 2), ('739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd', 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 2), ('079ab2a2c8fef88f01bf909e7669c685f07e1375', 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 2), ('37476532238', '38343340695', 2), ('11419502465', '11787588635', 2))
+    if not any(after in source for before, after, count in replacements):
+        return source
+    if any(source.count(after) != count or before in source for before, after, count in replacements):
+        raise AssertionError("fresh G2 supplier exact current nomination differs")
+    for before, after, count in replacements:
+        source = source.replace(after, before)
+    return source
+
+
 def without_primary_owner_runtime_source_pin(source):
     # Exact current SOURCE nomination only; all historical oracles stay fixed.
     if type(source) is not str or len(source.encode()) > 512 * 1024:
@@ -1833,6 +1847,7 @@ def without_primary_owner_runtime_source_pin(source):
 
 
 def without_intel_fetch_workflow(source):
+    source = without_fresh_g2_supplier_workflow(source)
     source = without_primary_owner_runtime_source_pin(source)
     if type(source) is not str or len(source.encode()) > 512 * 1024:
         raise AssertionError("Intel fetch workflow SOURCE bound differs")
@@ -2358,6 +2373,13 @@ def without_install_product_workflow(source):
 TOOL_SIGNING_WORKFLOW_INVERSE = ((224, 49, 'df1dc25bada9ecadb21ae42acc54f1affa4b204a875cd8db47388675d91b8682', ''), (8011, 5947, '05574396aa916dcaeebfe7fd5cbd2576a6d3e5b4ccde1b0317fda11b3a10e88e', ''))
 
 def without_tool_signing_workflow(source):
+    replacements = (('37476532238', '38343340695'), ('11419502465', '11787588635'), ('37467019389', '38343324660'), ('11415902210', '11788410124'))
+    current = any(after in source for before, after in replacements)
+    if current:
+        if any(source.count(after) != 1 or before in source for before, after in replacements):
+            raise AssertionError("fresh G2 signing exact current nomination differs")
+        for before, after in replacements:
+            source = source.replace(after, before)
     value = source.encode()
     for start, length, expected, prior in reversed(TOOL_SIGNING_WORKFLOW_INVERSE):
         if hashlib.sha256(value[start:start + length]).hexdigest() != expected:
@@ -2365,7 +2387,13 @@ def without_tool_signing_workflow(source):
         value = value[:start] + prior.encode() + value[start + length:]
     if hashlib.sha256(value).hexdigest() != 'f02a9f7ce848ac7c30c6926cd4c8d0cf03f04dd0662ffd32603921d53f5d8c68':
         raise AssertionError('tool signing inverse changed original')
-    return value.decode()
+    result = value.decode()
+    if current:
+        if any(result.count(before) != 1 or after in result for before, after in replacements):
+            raise AssertionError("fresh G2 signing historical matrix differs")
+        for before, after in replacements:
+            result = result.replace(before, after)
+    return result
 
 
 TOOL_ENROLLMENT_WORKFLOW_INVERSE = ((41577, 4155, 'e1ad3768ba7ed53f8217824d1348ca502b9bcf88b0562ce82ca66de2efd9cdfe', ''), (45965, 244, 'dec34c68710ed49677a78116d21f6c9a1eb3e13bc0c2bb83b26b78babeb76523', ''), (46419, 78, '251bd1dc99a992dba08e5aba35b0d7b67765f79b4da5679606da413e18ee08dd', '            --target "$MRK_MACOS_TARGET" \\\n'), (90916, 363, '4bec18b0387d401a0cb993bf2d1396cce3fe8ca432abcd966e1eef12317d3eab', ''), (91329, 163, '98ec04098231bc33c3a4fa0614ef46cbdd6057e9f58af89fa9e3bf332dd4258d', '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" "${removal_arguments[@]}" \\\n'), (95390, 368, '31da7f0d6c48b8dc93d41545e63747b4a170a208737daac4630c58b1e7cb105b', ''))
@@ -2641,8 +2669,44 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertEqual(len(result["frames"]), 8)
         self.assertEqual(result["ownerFinality"], [1, 1, 1048575, 15, 63])
         self.assertLessEqual(len(json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")), 2048)
-        self.assertLessEqual((Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").stat().st_size,
-                             524288)
+        helper_body = (Path(__file__).absolute().parents[2] / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        self.assertEqual(len(helper_body), module.HELPER_SOURCE_BYTES)
+        self.assertLessEqual(module.HELPER_SOURCE_BYTES, 528 * 1024)
+        helper_tree = ast.parse(helper_body)
+        operation = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        caps = []
+        for method in operation.body:
+            if not isinstance(method, ast.FunctionDef): continue
+            for call in ast.walk(method):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "source_original" and len(call.args) == 3:
+                    cap = call.args[2]
+                    if isinstance(cap, ast.IfExp) and isinstance(cap.body, ast.Name) and cap.body.id == "HELPER_SOURCE_BYTES":
+                        self.assertEqual(ast.dump(cap.test, include_attributes=False), ast.dump(ast.parse('filename == "macos_android_helper_package.py"', mode="eval").body, include_attributes=False))
+                        self.assertEqual(ast.dump(cap.orelse, include_attributes=False), ast.dump(ast.parse('512 * 1024', mode="eval").body, include_attributes=False))
+                        caps.append(method.name)
+        self.assertEqual(sorted(caps), ["finalize_image", "finalize_package", "notarize_payload"])
+        # Actual no-follow regular-file originals: complete read and consuming
+        # close at the exact SOURCE bound, +1 refuses before read.
+        with tempfile.TemporaryDirectory(prefix="mrk-producer-source-cap-") as temporary:
+            root = Path(temporary); root.chmod(0o700)
+            tools = root / "desktop/tools"; tools.mkdir(parents=True, mode=0o700)
+            for extra in (b"", b"\n"):
+                path = tools / "macos_android_helper_package.py"
+                path.write_bytes(helper_body + extra); path.chmod(0o644)
+                port = module.Operation(SimpleNamespace(), root, root, "package-install",
+                    {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_WORKFLOW_REF": "inert-source",
+                     "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image"}, TOOL)
+                try:
+                    if extra:
+                        with self.assertRaisesRegex(module.Refused, "^file-original-shape$"):
+                            port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
+                    else:
+                        entry = port.source_original("desktop/tools/macos_android_helper_package.py", "SOURCE-test", module.HELPER_SOURCE_BYTES)
+                        self.assertEqual(port.read(entry), helper_body)
+                finally:
+                    for entry in reversed(port.entries): port.close(entry)
+                self.assertFalse(port.errors)
+                self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in port.entries))
 
     def notary_fixture(self, root, *, target="aarch64-apple-darwin", role="ordinary-image", failure=None):
         """Actual copy/FD/parser code, inert app/runtime/key and native doubles.
@@ -4810,7 +4874,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                     "manifest_path": str(root / "Cargo.toml"), "features": features, "executable": executable,
                     "target": {"name": name, "src_path": str(root / source), "kind": kind, "crate_types": ["bin"] if kind == ["example"] else ["lib"], "edition": "2021"},
                     "filenames": [executable] if executable else [str(target / (name + ".rlib"))], "fresh": False,
-                    "profile": {"test": False, "debug_assertions": False, "opt_level": "3"}}
+                    "profile": {"test": False, "debug_assertions": False,
+                                "opt_level": "0" if package == "mobile-release-kit-desktop" else "3"}}
             producer_rows = [
                 artifact_row("desktop/src-tauri", "mobile-release-kit-desktop", "macos_package_producer", "examples/macos_package_producer.rs",
                              ["macos-package-producer"], ["example"], str(binary)),
@@ -4826,6 +4891,14 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             remove_rows[0].update(executable=str(remove_binary), filenames=[str(remove_binary)])
             for row in remove_rows[:2]: row["features"] = ["macos-remove-producer"]
             self.assertEqual(module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target, remove=True), remove_binary)
+            observer_rows = copy.deepcopy(remove_rows)
+            for row in observer_rows[:2]: row["features"] = ["macos-remove-observer-producer", "macos-remove-producer"]
+            self.assertEqual(module.producer_artifact(self.encoded(observer_rows), checkout, target, build_target,
+                                                     remove=True, observer=True), remove_binary)
+            for index, bad in ((0, "3"), (1, "3"), (2, "0"), (0, 0), (2, 3)):
+                changed = copy.deepcopy(producer_rows); changed[index]["profile"]["opt_level"] = bad
+                with self.subTest(profileRow=index, bad=bad), self.assertRaises(module.Refused):
+                    module.producer_artifact(self.encoded(changed), checkout, target, build_target)
             with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(remove_rows), checkout, target, build_target)
             with self.assertRaises(module.Refused): module.producer_artifact(self.encoded(producer_rows), checkout, target, build_target, remove=True)
             for wrong in (None, 1, "remove"):
@@ -4847,6 +4920,67 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 with self.subTest(target=build_target, mutation=mutation), self.assertRaises(module.Refused):
                     module.producer_artifact(self.encoded(changed), checkout, target, build_target)
 
+
+        # Genuine compiler sequence, not a replacement orchestration method.
+        # Ports return inert closed DATA; strict output/graph/clock still run.
+        test_name = b"emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes"
+        test_output = (b"\nrunning 1 test\ntest " + test_name + b" ... ok\n\n"
+                       b"test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n")
+        self.assertIsNone(module.producer_tests_result(test_output))
+        for bad in (b"", test_output[:-1], test_output + b"extra\n", test_output.replace(b"1 passed", b"0 passed"),
+                    test_output.replace(b"0 ignored", b"1 ignored"), test_output.replace(test_name, b"foreign::test"),
+                    test_output.replace(b"0.00s", b"480.01s"), test_output.replace(b"0 filtered", b"10000 filtered"),
+                    test_output.replace(b" ... ok", b" ... ignored")):
+            with self.subTest(libtest=bad), self.assertRaises(module.Refused): module.producer_tests_result(bad)
+        real_helper = (source / "desktop/tools/macos_android_helper_package.py").read_text()
+        helper_tree = ast.parse(real_helper)
+        operation_tree = next(node for node in helper_tree.body if isinstance(node, ast.ClassDef) and node.name == "Operation")
+        for node in operation_tree.body:
+            if not isinstance(node, ast.FunctionDef): continue
+            overrides = [call for call in ast.walk(node) if isinstance(call, ast.Name) and call.id == "PRODUCER_CARGO_OVERRIDE"]
+            if overrides:
+                self.assertIn(node.name, ("package_producer_compile", "package_remove", "removal_prepare_emitter"))
+        self.assertEqual(module.PRODUCER_CARGO_OVERRIDE, "profile.release.package.mobile-release-kit-desktop.opt-level=0")
+        install_tree = next(node for node in operation_tree.body if isinstance(node, ast.FunctionDef) and node.name == "package_install")
+        self.assertEqual(sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "package_producer_compile"
+                             for n in ast.walk(install_tree)), 1)
+        testcase = self
+        for selected_target in TOOL.MAC_TARGETS:
+            expected_binary = target / selected_target / "release/examples/macos_package_producer"
+            sequence_rows = json.loads(json.dumps(producer_rows).replace(TOOL.INTEL_TARGET, selected_target))
+            for fault in (None, "malformed", "original-unknown", "late-test", "late-build"):
+                class CompilerPorts(module.Operation):
+                    def __init__(self):
+                        self.target, self.checkout, self.work = selected_target, checkout, target.parent
+                        self.target_name = target.name
+                        self.package_endpoint, self.now, self.dispatched = 1_000_000_000_000, 10_000_000_000, []
+                    def package_clock(self): return self.now
+                    def package_call(self, role, argv, **options):
+                        testcase.assertEqual(role, ("producer-tests", "producer-build")[len(self.dispatched)])
+                        self.dispatched.append(role)
+                        testcase.assertEqual(argv[:2], [module.direct_rust_tools(selected_target)[0], "test" if role == "producer-tests" else "build"])
+                        testcase.assertEqual(argv[argv.index("--config") + 1], module.PRODUCER_CARGO_OVERRIDE)
+                        testcase.assertEqual(argv[argv.index("--target") + 1], selected_target)
+                        testcase.assertIs(options["environment"], environment)
+                        testcase.assertEqual(options["cwd"], checkout / "desktop/src-tauri")
+                        testcase.assertEqual(options["limit"], 4 * 1024 * 1024)
+                        testcase.assertEqual(options["timeout"], 477 if role == "producer-tests" else 476)
+                        if role == "producer-tests":
+                            testcase.assertEqual(argv[argv.index("--") + 1:], ["--exact", test_name.decode(), "--test-threads=1", "--format", "pretty", "--color", "never"])
+                            if fault == "original-unknown": raise RuntimeError("INERT original did not return")
+                            self.now += (480 if fault == "late-test" else 1) * 1_000_000_000
+                            return CompletedProcess(argv, 0, test_output + (b"extra" if fault == "malformed" else b""), b"")
+                        if fault == "late-build": self.now = 490_000_000_000
+                        return CompletedProcess(argv, 0, testcase.encoded(sequence_rows), b"")
+                environment = {"CARGO_TARGET_DIR": str(target), "TMPDIR": str(target / "tmp")}
+                port = CompilerPorts()
+                if fault is None:
+                    self.assertEqual(port.package_producer_compile(environment), expected_binary)
+                    self.assertEqual(port.dispatched, ["producer-tests", "producer-build"])
+                else:
+                    with self.subTest(target=selected_target, sequence=fault), self.assertRaises((module.Refused, RuntimeError)):
+                        port.package_producer_compile(environment)
+                    self.assertEqual(port.dispatched, ["producer-tests", "producer-build"] if fault == "late-build" else ["producer-tests"])
 
         # Exercise the NEW package_remove orchestration and execute finality,
         # not a replacement method that merely sets a success flag. Storage,
@@ -8741,6 +8875,13 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
         self.assertIn("steps.sign.outcome == 'success'", tool_job)
         self.assertNotIn("--deep", tool_job)
         self.assertNotIn("signed-github-tool", without_tool_signing_workflow(signing))
+        # Complete fresh matrix is preserved after the historical tool-job proof.
+        normalized_signing = without_tool_signing_workflow(signing)
+        for current in ("38343340695", "11787588635", "38343324660", "11788410124"):
+            self.assertEqual(normalized_signing.count(current), 1)
+            for damaged in (signing.replace(current, "0", 1), signing + " # " + current):
+                with self.assertRaisesRegex(AssertionError, "^fresh G2 signing exact current nomination differs$"):
+                    without_tool_signing_workflow(damaged)
         self.assertEqual(tool_job.count("purpose:"), 4)
         actual = without_shipping_compile_workflow((root / ".github/workflows/desktop-macos-installed.yml").read_text())
         names = ("Prepare the fixed two-file removal package without executing it",
@@ -8791,7 +8932,15 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             ("desktop-macos-aqua.yml", "Assemble the instrumented observation app with SOURCE-selected signing",
              "Bind this signed app and current-source runtime into fresh Installer DATA"),
         ):
-            workflow = without_remove_output_workflow((root / ".github/workflows" / filename).read_text())
+            current_workflow = (root / ".github/workflows" / filename).read_text()
+            # Current routes are separate from the authenticated historical
+            # projection; do not ask an old snapshot to implement newer phases.
+            historical_phases = ("prepare", "verify-before", "verify-after", "package-install")
+            current_phases = ANDROID_HELPER.PHASES if filename == "desktop-macos-installed.yml" else historical_phases
+            for phase in current_phases:
+                current_call = "macos_android_helper_package.py " + phase + ' --target "$MRK_MACOS_TARGET"'
+                self.assertEqual(current_workflow.count(current_call), 1, phase)
+            workflow = without_remove_output_workflow(current_workflow)
             build = workflow_step(workflow, "Build and sign the fixed resident image and C facades")
             app, inputs = workflow_step(workflow, assembly), workflow_step(workflow, binding)
             final_name = "Sign and notarize the completed scripts-only Installer package before final P"
@@ -8807,7 +8956,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
             for command_role in roles:
                 for suffix in (("jsonl", "stderr", "status") if command_role == "build" else ("stdout", "stderr", "status")):
                     self.assertEqual(workflow.count("/android-helper-" + command_role + "." + suffix), 1)
-            for phase in (phase for phase in ANDROID_HELPER.PHASES if phase not in ANDROID_HELPER.REMOVE_PHASES):
+            for phase in historical_phases:
+                self.assertEqual(workflow.count("macos_android_helper_package.py " + phase + ' --target "$MRK_MACOS_TARGET"'), 1, phase)
                 self.assertEqual(workflow.count("/android-helper-" + phase + ".json"), 1)
             self.assertIn("--package-role " + role, app)
             self.assertIn('--expected-resident-image "$MRK_MACOS_RESIDENT_IMAGE_SHA256"', app)
@@ -9180,7 +9330,8 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
 
         # Raw current source is checked before the exact predecessor projection.
         app_current = (root / ".github/workflows/desktop-macos-installed.yml").read_text()
-        app_job = app_current.split("  engineering-install:\n",1)[1].split("  shipping-image-compile:\n",1)[0]
+        app_predecessor = without_same_package_workflow(app_current)
+        app_job = app_predecessor.split("  engineering-install:\n",1)[1].split("  shipping-image-compile:\n",1)[0]
         app_blocks = re.split(r"(?=^      - name: )",app_job,flags=re.M)[1:]
         app_named = {block.splitlines()[0][14:]:block for block in app_blocks}
         retained = ('Admit only this exact disposable-hosted source route', 'Check out exact reviewed source without retained credentials', 'Select DATA stager Python, not the packaged interpreter', 'Select the fixed configured signed runtime before any payload download', 'Select fixed frontend compiler', 'Reserve fresh work and record exact source and actual tool bindings', 'Bind the complete reviewed first-party checkout before compilation', 'Admit the fixed image Rust tools without installing a distribution', 'Admit only a fresh independently pinned Python transport destination', 'Download the independently accepted fresh Python transport', 'Project the pinned fresh Python transport without executing it', 'Download only the configured signed Python capsule', 'Project the configured capsule as DATA without executing it', 'Select only SOURCE-enrolled current signed GitHub tools', 'Download exactly the nominated signed history provider', 'Download exactly the nominated signed seal helper', 'Project current signed tools without executing either program', 'Prepare the current payload from the independently accepted fresh Python supplier', 'Acquire and verify the two fixed Android support archives as DATA', 'Require the fixed SOURCE producer identity and release before ordinary signing', 'Build and sign the fixed resident image and C facades', 'Build and sign the separate fixed vault helper before binding the app', 'Build the ordinary selected-target desktop image and embedded frontend', 'Record the effective pinned compiler from the successful build context', 'Assemble the ordinary image app and sign code inside-out (never --deep)')
@@ -14924,6 +15075,27 @@ class MacCurrentRuntimeData(unittest.TestCase):
             anchors[variable] = configured[0]
             self.assertIn('"$' + variable + '" =~ ^[0-9a-f]{64}$', workflow)
             self.assertIn('"$' + variable + '" == ' + configured[0], workflow)
+        # New supplier references must be one complete known DATA successor.
+        previous_suppliers = without_fresh_g2_supplier_workflow(workflow)
+        self.assertNotEqual(previous_suppliers, workflow)
+        self.assertEqual(without_fresh_g2_supplier_workflow(previous_suppliers), previous_suppliers)
+        suppliers = TOOL.SIGNED_ORIGINAL_SUPPLIERS
+        for target in (TOOL.ARM_TARGET, TOOL.INTEL_TARGET):
+            current_supplier = suppliers[target]["receiptSha256"]
+            expected_count = 4 if target == TOOL.ARM_TARGET else 2
+            self.assertEqual(workflow.count(current_supplier), expected_count)
+            for damaged in (workflow.replace(current_supplier, "0" * 64, 1),
+                            workflow + " # " + current_supplier):
+                with self.assertRaisesRegex(AssertionError, "^fresh G2 supplier exact current nomination differs$"):
+                    without_fresh_g2_supplier_workflow(damaged)
+        # Actual helper/stager typed tables must be identical, not merely format-valid.
+        source_helper = (root / "desktop/tools/macos_android_helper_package.py").read_bytes()
+        table = next(node.value for node in ast.parse(source_helper).body
+                     if isinstance(node, ast.Assign) and any(isinstance(name, ast.Name)
+                        and name.id == "PYTHON_SUPPLIERS" for name in node.targets))
+        self.assertIsInstance(table, ast.Dict)
+        self.assertEqual({getattr(TOOL, name.id): ast.literal_eval(value)
+                          for name, value in zip(table.keys, table.values)}, suppliers)
         # Read the actual bounded source DATA used by the stager, not a copy of
         # its historical pin. No core import, supplier extraction or execution.
         self.assertEqual(anchors["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"], TOOL.current_source(history_provider=True)[2])
@@ -14990,10 +15162,19 @@ class MacCurrentRuntimeData(unittest.TestCase):
         # This exact helper is already in the readonly SOURCE closure. Inspect
         # its real caller without importing or invoking any operation owner.
         with (root / "desktop/tools/macos_android_helper_package.py").open("rb") as original:
-            helper_raw = original.read(512 * 1024 + 1)
-        self.assertLessEqual(len(helper_raw), 512 * 1024)
+            helper_raw = original.read(527051 + 1)
+            self.assertEqual(original.read(1), b"")
+        self.assertEqual(len(helper_raw), 527051)
         helper_source = helper_raw.decode("utf-8", "strict")
-        operations = [node for node in ast.parse(helper_source).body
+        helper_tree = ast.parse(helper_source)
+        helper_caps = [node.value for node in helper_tree.body
+                       if isinstance(node, ast.Assign) and len(node.targets) == 1
+                       and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "HELPER_SOURCE_BYTES"]
+        self.assertEqual(len(helper_caps), 1)
+        helper_cap = ast.literal_eval(helper_caps[0])
+        self.assertIs(type(helper_cap), int)
+        self.assertEqual(helper_cap, len(helper_raw))
+        operations = [node for node in helper_tree.body
                       if isinstance(node, ast.ClassDef) and node.name == "Operation"]
         self.assertEqual(len(operations), 1)
         payloads = [node for node in operations[0].body

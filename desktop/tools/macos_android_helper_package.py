@@ -62,6 +62,9 @@ PRODUCER_PROFILE = "desktop/packaging/macos-install-producer-signing.profile"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 MAX_HELPER = 32 * 1024 * 1024
+# Only nonshipping producer graphs; packaged programs keep release3.
+PRODUCER_CARGO_OVERRIDE = "profile.release.package.mobile-release-kit-desktop.opt-level=0"
+HELPER_SOURCE_BYTES = 527051
 READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -73,12 +76,8 @@ PYTHON_PHASES = ("python-engineering", "python-shipping")
 PYTHON_IDENTIFIER = "dev.mobile-release-kit.desktop.python"
 PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python-loader", "python-tls", "python-cancellation")
 PYTHON_SUPPLIERS = {
-    ARM_TARGET: {"receiptSha256": "2f9cf013c0598b08e89fd9b26d1d74d8ab08be2c22c152ae27cb3219139cd81d",
-        "tarSha256": "ff7883185cf8226e9366b1ee9a3dcb3eb8ee761dbc1f697f952510a6bd858695",
-        "sourceCommit": "158cdff422e3837f7ab5e6192af76a578faf6fab", "runId": "37467019389", "runAttempt": "1", "artifactId": "11415902210"},
-    INTEL_TARGET: {"receiptSha256": "a46f6838afdb7c20c3539e8f65891312aa8df10e2de67e9b9e3ddbf449883b4b",
-        "tarSha256": "739cc8b8b3c68daffba8d7b9cb7cb54ca730eef2c5842302ae8a2682bf64d5bd",
-        "sourceCommit": "079ab2a2c8fef88f01bf909e7669c685f07e1375", "runId": "37476532238", "runAttempt": "1", "artifactId": "11419502465"},
+    ARM_TARGET: {'receiptSha256': '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 'tarSha256': '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 'sourceCommit': '52485f9fd837f0dacb8dc9621e5a1bee30803506', 'runId': '38343324660', 'runAttempt': '1', 'artifactId': '11788410124'},
+    INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
 
@@ -1118,6 +1117,8 @@ def original_failure(error, owner, checkout, timeout, limit):
 # diagnostic grant of command/cleanup/signature authority. Unknown labels stay
 # unclassified; in particular exact Refused class alone is not a sanitizer.
 _FAILURE_REASONS = frozenset((
+    'producer-tests-bound', 'producer-tests-framing', 'producer-tests-roster', 'producer-tests-result',
+    'original-nonzero-producer-tests',
     'same-package-baseline-export', 'same-package-case', 'same-package-census', 'same-package-final-carrier', 'same-package-final-carrier-bytes', 'same-package-final-carrier-root', 'same-package-final-carrier-roster', 'same-package-finalizer-original', 'same-package-fixed-purpose', 'same-package-fresh-baseline', 'same-package-immediate-predecessor', 'same-package-input-', 'same-package-inventory', 'same-package-inventory-binding', 'same-package-inventory-input', 'same-package-live-readback', 'same-package-noop', 'same-package-notary-source', 'same-package-original-boundary', 'same-package-original-input', 'same-package-originals-unknown', 'same-package-parent-entry-bound', 'same-package-previous-shape', 'same-package-readback', 'same-package-readonly-mount', 'same-package-result-delta', 'same-package-result-namespace', 'same-package-result-post', 'same-package-source-scope', 'same-package-status-absence', 'same-package-status-post', 'same-package-status-purpose',
     'app-signature-fixed-native-phase', 'app-signature-summary-ref', 'application-no-installer-secret',
     'build-release-identity', 'build-release-shape', 'build-release-size',
@@ -1180,6 +1181,7 @@ _FAILURE_REASONS = frozenset((
     'strict-original-verification', 'work-original',
 ))
 _FAILURE_STAGES = (
+    "package-producer-tests",
     "same-package-noop",
     "owned-directory-admission", "source-image-binding", "resident-dependency-fetch", "separate-resident-image-compiler",
     "compiler-original-copy", "resident-image-source-selected-signing", "resident-image-verify-signed",
@@ -1544,6 +1546,19 @@ def signing_requirement(identity, identifier):
             ' and certificate leaf = H"' + identity[1] + '"')
 
 
+def producer_tests_result(stdout):
+    """Complete fixed libtest DATA after the original zero/capture closes."""
+    need(type(stdout) is bytes and 0 < len(stdout) <= 65536 and stdout.isascii(), "producer-tests-bound")
+    lines = stdout.split(b"\n")
+    need(len(lines) == 7 and lines[:2] == [b"", b"running 1 test"]
+         and lines[3] == b"" and lines[5:] == [b"", b""], "producer-tests-framing")
+    need(re.fullmatch(rb"test emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes +\.\.\. ok",
+                      lines[2]) is not None, "producer-tests-roster")
+    finish = re.fullmatch(rb"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; (0|[1-9][0-9]{0,3}) filtered out; "
+                          rb"finished in (0|[1-9][0-9]{0,2})\.([0-9]{2})s", lines[4])
+    need(finish is not None and int(finish[2]) * 100 + int(finish[3]) <= 48000, "producer-tests-result")
+
+
 def producer_artifact(messages, checkout, target_root, target, *, remove=False, observer=False):
     """One explicit nonshipping example graph; no packaged code is rebuilt."""
     need(type(remove) is bool and type(observer) is bool and (not observer or remove), "producer-compiler-purpose")
@@ -1594,7 +1609,8 @@ def producer_artifact(messages, checkout, target_root, target, *, remove=False, 
              and row["target"].get("kind") == kinds and row["target"].get("crate_types") == crates
              and row["target"].get("edition") == "2021" and "executable" in row and row["executable"] == executable
              and type(row.get("fresh")) is bool and type(profile) is dict and profile.get("test") is False
-             and profile.get("debug_assertions") is False and profile.get("opt_level") == "3", "producer-exact-feature-graph")
+             and profile.get("debug_assertions") is False
+             and profile.get("opt_level") == ("0" if package == "mobile-release-kit-desktop" else "3"), "producer-exact-feature-graph")
         if executable is not None:
             need(row["filenames"] == [executable], "producer-executable-path")
         chosen.append(row)
@@ -3338,7 +3354,8 @@ class Operation:
                               ("MRK_MACOS_SIGNING_RUN_ID", "signingRunId"), ("MRK_MACOS_SIGNING_RUN_ATTEMPT", "signingRunAttempt")):
             need(self.environment.get(variable) == selected[key], "notary-configured-runtime-binding")
         for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
-            entry = self.source_original("desktop/tools/" + filename, "source-notary-driver", 512 * 1024)
+            entry = self.source_original("desktop/tools/" + filename, "source-notary-driver",
+                HELPER_SOURCE_BYTES if filename == "macos_android_helper_package.py" else 512 * 1024)
             self.package_sources.append((entry, self.read(entry)))
         app_path = self.work / "app" / self.stager.APP_NAME
         for parts, path in ((("app", self.stager.APP_NAME), app_path), (("runtime",), self.work / "runtime")):
@@ -3877,7 +3894,8 @@ class Operation:
         self.notary_profile = notary_service(profile_body, self.signing)
         self.package_sources.append((profile, profile_body))
         for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
-            entry = self.source_original("desktop/tools/" + filename, "source-final-image-driver", 512 * 1024)
+            entry = self.source_original("desktop/tools/" + filename, "source-final-image-driver",
+                HELPER_SOURCE_BYTES if filename == "macos_android_helper_package.py" else 512 * 1024)
             self.package_sources.append((entry, self.read(entry)))
         expected, binding = self.final_removal_image_input() if self.removal else self.final_image_input()
         self.final_image_io("final-image-owned-copy", self.final_image_copy)
@@ -4265,7 +4283,8 @@ class Operation:
         self.notary_profile = notary_service(profile_body, self.signing)
         self.package_sources.append((profile, profile_body))
         for filename in ("stage_macos_installed.py", "macos_android_helper_package.py"):
-            source = self.source_original("desktop/tools/" + filename, "source-final-package-driver", 512 * 1024)
+            source = self.source_original("desktop/tools/" + filename, "source-final-package-driver",
+                HELPER_SOURCE_BYTES if filename == "macos_android_helper_package.py" else 512 * 1024)
             self.package_sources.append((source, self.read(source)))
         scripts = self.directory(self.work_entry, self.scripts_name, "final-package-scripts")
         self.notary_roots.append({"entry": scripts, "path": self.work / self.scripts_name,
@@ -5170,7 +5189,7 @@ class Operation:
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"])
         compiled = self.removal_prepare_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
-            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--jobs", "1",
+            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1",
             "--target", self.target, "--no-default-features", "--features", "macos-remove-observer-producer",
             "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             maximum=480, limit=4 * 1024 * 1024, cwd=self.checkout / "desktop/src-tauri", environment=environment)
@@ -6281,6 +6300,31 @@ class Operation:
         self.package_clock()  # Original return AND the existing capture/status closes.
         return result
 
+    def package_producer_compile(self, environment):
+        # One480s compiler envelope shared by tests and the normal example.
+        endpoint = min(self.package_endpoint, self.package_clock() + 480_000_000_000)
+        self.stage = "package-producer-tests"
+        tested = self.package_call("producer-tests", [direct_rust_tools(self.target)[0], "test", "--manifest-path",
+            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
+            PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
+            "macos-package-producer", "--example", "macos_package_producer", "--message-format=short", "--color", "never",
+            "--", "--exact", "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
+            "--test-threads=1", "--format", "pretty", "--color", "never"], environment=environment,
+            cwd=self.checkout / "desktop/src-tauri", timeout=package_timeout_data(self.package_clock(), endpoint, 480),
+            limit=4 * 1024 * 1024)
+        producer_tests_result(tested.stdout)
+        remaining = package_timeout_data(self.package_clock(), endpoint, 480)
+        del tested
+        self.stage = "package-explicit-producer-compiler"
+        compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
+            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
+            PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
+            "macos-package-producer", "--example", "macos_package_producer", "--message-format=json-render-diagnostics"],
+            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=remaining, limit=4 * 1024 * 1024)
+        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target)
+        package_timeout_data(self.package_clock(), endpoint, 480)
+        return binary
+
     def package_directory(self, name):
         self.package_clock()
         self.recheck_directory(self.work_entry)
@@ -6623,11 +6667,7 @@ class Operation:
         environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
             MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash, MRK_MACOS_INSTALL_INVENTORY_SHA256=inventory_hash)
-        compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / "desktop/src-tauri/Cargo.toml"),
-            "--locked", "--offline", "--release", "--jobs", "1", "--target", self.target, "--no-default-features",
-            "--features", "macos-package-producer", "--example", "macos_package_producer", "--message-format=json-render-diagnostics"],
-            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
-        binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target)
+        binary = self.package_producer_compile(environment)
         binary_dir = self.descend(self.target_entry, (self.target, "release", "examples"))
         executable = self.original(binary_dir, binary.name, "producer-compiled-example", 64 * 1024 * 1024, (0o700, 0o755), alias=True)
         executable_body = self.read(executable)
@@ -6818,7 +6858,7 @@ class Operation:
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash)
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / "desktop/src-tauri/Cargo.toml"),
-            "--locked", "--offline", "--release", "--jobs", "1", "--target", self.target, "--no-default-features",
+            "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features",
             "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
         binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target, remove=True)

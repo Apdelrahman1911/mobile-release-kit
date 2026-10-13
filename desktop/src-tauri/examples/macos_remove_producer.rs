@@ -165,7 +165,7 @@ mod emitter {
             book.roster(root,&[("Remove.pkg",book.id(package)?.ino),(DESCRIPTOR_FILENAME,book.id(json)?.ino)])?;
             let sig=book.create(root,SIGNATURE_FILENAME,signature.as_bytes())?;
             book.roster(root,&[("Remove.pkg",book.id(package)?.ino),(DESCRIPTOR_FILENAME,book.id(json)?.ino),(SIGNATURE_FILENAME,book.id(sig)?.ino)])?;
-            book.tick()?;book.pending.set(true);let persisted=native::sync(book.fd(root)?.as_fd(),false);book.pending.set(false);
+            book.tick()?;let root_fd=book.fd(root)?;book.pending.set(true);let persisted=native::sync(root_fd.as_fd(),false);book.pending.set(false);
             persisted.map_err(|_|"sidecar-root-persist")?;
             need(book.read(package,ReadRole::Package)?.0==package_hash,"final-package-post")?;
             for ((_,role),(n,expected_hash)) in INPUTS.iter().zip(originals.into_iter().zip(hashes)) {

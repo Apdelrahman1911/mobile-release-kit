@@ -62,7 +62,7 @@ mod emitter {
             book.roster(root,&[("Install.pkg",book.id(package)?.ino),(DESCRIPTOR_FILENAME,book.id(json)?.ino)])?;
             let sig=book.create(root,SIGNATURE_FILENAME,signature.as_bytes())?;
             book.roster(root,&[("Install.pkg",book.id(package)?.ino),(DESCRIPTOR_FILENAME,book.id(json)?.ino),(SIGNATURE_FILENAME,book.id(sig)?.ino)])?;
-            book.tick()?;book.pending.set(true);let persisted=native::sync(book.fd(root)?.as_fd(),false);book.pending.set(false);
+            book.tick()?;let root_fd=book.fd(root)?;book.pending.set(true);let persisted=native::sync(root_fd.as_fd(),false);book.pending.set(false);
             persisted.map_err(|_|"sidecar-root-persist")?;
             need(book.read(package,ReadRole::Package)?.0==package_hash&&book.read(input,ReadRole::InstallDescriptor)?==(descriptor_hash.clone(),descriptor.clone()),"final-input-post")?;
             book.all()?;
@@ -83,6 +83,7 @@ mod emitter {
         use super::*;
         #[test]
         fn fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes() {
+            Book::predispatch_refusal_regression();
             let good=["--package-root","/private/tmp/task/final","--descriptor-input","/private/tmp/task/descriptor-input.json"].map(OsString::from);
             assert!(arguments(&good).is_ok());
             for path in ["relative","/","/a/../b","/a//b","/a/./b","/a/","/a\0b"] {assert!(components(Path::new(path)).is_err());}
